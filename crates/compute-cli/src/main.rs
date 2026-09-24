@@ -7,13 +7,15 @@ use compute_core::{
     NetworkPolicy, PlatformIdentity, ResourceLimits, RuntimeKind, RuntimeSpec,
 };
 use compute_provider::{
-    ComputeProvider, LocalProvider, ProviderRequest, RemoteProvider, ServerConfig,
+    ComputeProvider, ProviderPolicy, ProviderRequest, RemoteProvider, ServerConfig,
 };
 use compute_runtime::Compute;
 
 mod certification;
 mod direct;
 mod distribution;
+mod placement_certification;
+mod pool;
 mod receipt;
 
 #[derive(Parser, Debug)]
@@ -49,8 +51,12 @@ enum Commands {
     Version(JsonFlag),
     /// Execute portable workloads through a remote Compute provider.
     Remote(RemoteCommand),
-    /// Inspect local or remote provider capabilities.
-    Provider(ProviderCommand),
+    /// Discover, inspect, and refresh providers in the caller-owned pool.
+    Provider(pool::ProviderCommand),
+    /// Evaluate which provider can satisfy a workload. Never executes.
+    Placement(pool::PlacementCommand),
+    /// Place a workload on a compatible provider and execute or submit it.
+    Pool(pool::PoolCommand),
     /// Serve compute.remote@1 with durable filesystem-backed jobs.
     Serve(ServeCommand),
 }
@@ -68,28 +74,22 @@ struct ServeCommand {
     job_retention: Duration,
     #[arg(long, default_value_t = 4)]
     max_concurrent_jobs: usize,
-}
-
-#[derive(Args, Debug)]
-struct ProviderCommand {
-    #[command(subcommand)]
-    command: ProviderCommands,
-}
-
-#[derive(Subcommand, Debug)]
-enum ProviderCommands {
-    Inspect {
-        #[arg(default_value = "local")]
-        provider: String,
-        #[arg(long)]
-        json: bool,
-    },
-    Capabilities {
-        #[arg(default_value = "local")]
-        provider: String,
-        #[arg(long)]
-        json: bool,
-    },
+    /// Offer only these runtimes (repeatable). Withheld runtimes are neither
+    /// advertised nor executed.
+    #[arg(long = "allow-runtime")]
+    allow_runtimes: Vec<String>,
+    /// Offer only these isolation profiles (repeatable).
+    #[arg(long = "allow-isolation", value_parser = parse_isolation)]
+    allow_isolation: Vec<IsolationProfile>,
+    /// Offer only these network policies (repeatable).
+    #[arg(long = "allow-network", value_parser = parse_network)]
+    allow_network: Vec<NetworkPolicy>,
+    /// Largest wall-time limit a workload may request.
+    #[arg(long, value_parser = parse_duration)]
+    max_timeout: Option<Duration>,
+    /// Largest memory limit a workload may request.
+    #[arg(long, value_parser = parse_memory)]
+    max_memory: Option<u64>,
 }
 
 #[derive(Args, Debug)]
@@ -1104,7 +1104,26 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 "Compute provider listening on {} ({})",
                 command.listen, endpoint
             );
-            let mut config = ServerConfig::local(endpoint);
+            let policy = ProviderPolicy {
+                runtimes: (!command.allow_runtimes.is_empty())
+                    .then(|| {
+                        command
+                            .allow_runtimes
+                            .iter()
+                            .map(|value| value.parse::<RuntimeKind>())
+                            .collect::<compute_core::Result<_>>()
+                    })
+                    .transpose()?,
+                isolation_profiles: (!command.allow_isolation.is_empty())
+                    .then(|| command.allow_isolation.iter().copied().collect()),
+                network_policies: (!command.allow_network.is_empty())
+                    .then(|| command.allow_network.iter().cloned().collect()),
+                max_timeout_ms: command
+                    .max_timeout
+                    .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX)),
+                max_memory_bytes: command.max_memory,
+            };
+            let mut config = ServerConfig::local_with_policy(endpoint, policy);
             config.job_store = command.job_store;
             config.job_retention = command.job_retention;
             config.max_concurrent_jobs = command.max_concurrent_jobs;
@@ -1112,17 +1131,9 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 .await
                 .map_err(provider_error)?;
         }
-        Commands::Provider(command) => {
-            let (provider, json) = match command.command {
-                ProviderCommands::Inspect { provider, json }
-                | ProviderCommands::Capabilities { provider, json } => (provider, json),
-            };
-            let capabilities = provider_for(&provider)
-                .capabilities()
-                .await
-                .map_err(provider_error)?;
-            print_provider_value(&capabilities, json);
-        }
+        Commands::Provider(command) => pool::provider(command).await?,
+        Commands::Placement(command) => pool::placement(command).await?,
+        Commands::Pool(command) => pool::pool(command).await?,
         Commands::Remote(command) => match command.command {
             RemoteCommands::Capabilities(command) => {
                 let value = RemoteProvider::new(command.provider)
@@ -1436,14 +1447,6 @@ async fn remote_wait(command: RemoteWaitCommand) -> compute_core::Result<()> {
         }
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(Duration::from_secs(2));
-    }
-}
-
-fn provider_for(value: &str) -> Box<dyn ComputeProvider> {
-    if value == "local" {
-        Box::new(LocalProvider::new())
-    } else {
-        Box::new(RemoteProvider::new(value))
     }
 }
 

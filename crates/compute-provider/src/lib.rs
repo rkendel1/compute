@@ -5,9 +5,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use std::collections::{BTreeMap, BTreeSet};
+
 use compute_core::{
     BundleInput, BundleWorkloadPlan, DependencyCapsule, ExecutionResult, IsolationProfile,
-    NetworkPolicy, ProviderIdentity, RuntimeInventory, WorkloadBundle, WorkloadSpec,
+    NetworkPolicy, ProviderIdentity, ReceiptPlacement, RuntimeInventory, RuntimeKind,
+    WorkloadBundle, WorkloadSpec,
 };
 use compute_runtime::Compute;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -128,6 +131,10 @@ pub struct ExecutionOptions {
     pub isolation: Option<IsolationProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_request_id: Option<String>,
+    /// Placement evidence the executing provider binds into the receipt.
+    /// Like the request ID, it is metadata and excluded from the request hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<ReceiptPlacement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,7 +219,102 @@ pub struct ProviderCapabilities {
     pub max_concurrent_jobs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_retention_seconds: Option<u64>,
+    /// Dependency capsules already resident at the provider and resolvable
+    /// by identity without transfer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_capsules: Vec<String>,
+    /// Content identity of each runtime artifact, as recorded in receipts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub runtime_artifacts: BTreeMap<RuntimeKind, String>,
+    /// Largest wall-time limit this provider accepts, when bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_timeout_ms: Option<u64>,
+    /// Largest memory limit this provider accepts, when bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_bytes: Option<u64>,
     pub inventory: RuntimeInventory,
+}
+
+/// Operator-configured restriction of what a provider offers. A restricted
+/// capability is both withheld from discovery and rejected at execution, so
+/// advertised capabilities never exceed enforced ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtimes: Option<BTreeSet<RuntimeKind>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation_profiles: Option<BTreeSet<IsolationProfile>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_policies: Option<BTreeSet<NetworkPolicy>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_bytes: Option<u64>,
+}
+
+impl ProviderPolicy {
+    fn allows_runtime(&self, runtime: RuntimeKind) -> bool {
+        self.runtimes
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(&runtime))
+    }
+
+    fn check(
+        &self,
+        bundle: &WorkloadBundle,
+        isolation: IsolationProfile,
+    ) -> Result<(), ProviderError> {
+        let workload = &bundle.workload;
+        let reject = |message: String| {
+            Err(ProviderError::new(
+                ProviderErrorKind::CapabilityMismatch,
+                message,
+            ))
+        };
+        if !self.allows_runtime(workload.runtime) {
+            return reject(format!(
+                "runtime {} is not offered by this provider",
+                workload.runtime
+            ));
+        }
+        if self
+            .isolation_profiles
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&isolation))
+        {
+            return reject(format!(
+                "isolation profile {isolation} is not offered by this provider"
+            ));
+        }
+        if self
+            .network_policies
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&workload.network))
+        {
+            return reject(format!(
+                "network policy {} is not offered by this provider",
+                workload.network
+            ));
+        }
+        if let (Some(limit), Some(requested)) = (self.max_timeout_ms, workload.resources.wall_time)
+            && requested.as_millis() > u128::from(limit)
+        {
+            return reject(format!(
+                "timeout {}ms exceeds this provider's limit of {limit}ms",
+                requested.as_millis()
+            ));
+        }
+        if let (Some(limit), Some(requested)) =
+            (self.max_memory_bytes, workload.resources.memory_bytes)
+            && requested > limit
+        {
+            return reject(format!(
+                "memory {requested} bytes exceeds this provider's limit of {limit} bytes"
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +336,7 @@ pub trait ComputeProvider: Send + Sync {
 pub struct LocalProvider {
     compute: Compute,
     identity: ProviderIdentity,
+    policy: ProviderPolicy,
 }
 
 impl Default for LocalProvider {
@@ -250,7 +353,13 @@ impl LocalProvider {
         Self {
             compute: Compute::new(),
             identity,
+            policy: ProviderPolicy::default(),
         }
+    }
+
+    pub fn with_policy(mut self, policy: ProviderPolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     fn prepare(&self, request: &ProviderRequest) -> Result<(NamedTempFile, String), ProviderError> {
@@ -278,6 +387,29 @@ impl LocalProvider {
                 return Err(ProviderError::new(
                     ProviderErrorKind::ArtifactInvalid,
                     format!("dependency identity mismatch: expected {expected}, found {actual}"),
+                ));
+            }
+        }
+        self.policy.check(
+            &bundle,
+            request
+                .execution
+                .isolation
+                .unwrap_or(bundle.workload.isolation.profile)
+                .max(bundle.workload.isolation.profile),
+        )?;
+        if let Some(placement) = &request.execution.placement {
+            compute_core::validate_sha256_identity(&placement.placement_id).map_err(|error| {
+                ProviderError::new(ProviderErrorKind::PolicyRejected, error.to_string())
+            })?;
+            if placement.provider_protocol != identity_protocol(&self.identity) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::PolicyRejected,
+                    format!(
+                        "placement names protocol {}, but this provider speaks {}",
+                        placement.provider_protocol,
+                        identity_protocol(&self.identity)
+                    ),
                 ));
             }
         }
@@ -370,6 +502,7 @@ impl ComputeProvider for LocalProvider {
                 ProviderIdentity::Local { .. } => "compute.local@1".into(),
                 ProviderIdentity::Remote { .. } => REMOTE_PROTOCOL.into(),
             });
+            receipt.placement = request.execution.placement.clone();
             receipt.seal().map_err(classify_compute_error)?;
         }
         debug_assert_eq!(request_hash, inspected.request_hash);
@@ -386,23 +519,54 @@ impl ComputeProvider for LocalProvider {
             .compute
             .installed_distribution_identity()
             .map_err(classify_compute_error)?;
+        let mut inventory = self.compute.inventory().await;
+        inventory
+            .runtimes
+            .retain(|runtime| self.policy.allows_runtime(runtime.id));
+        let runtime_artifacts = self
+            .compute
+            .runtime_artifact_identities()
+            .map_err(classify_compute_error)?
+            .into_iter()
+            .filter(|(runtime, _)| self.policy.allows_runtime(*runtime))
+            .collect();
         Ok(ProviderCapabilities {
             protocol: identity_protocol(&self.identity).into(),
             provider: self.identity(),
             artifact_modes: vec!["bundle".into(), "inline".into()],
-            isolation_profiles: IsolationProfile::ALL.to_vec(),
-            network_policies: vec![
+            isolation_profiles: IsolationProfile::ALL
+                .into_iter()
+                .filter(|profile| {
+                    self.policy
+                        .isolation_profiles
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.contains(profile))
+                })
+                .collect(),
+            network_policies: [
                 NetworkPolicy::None,
                 NetworkPolicy::Localhost,
                 NetworkPolicy::Network,
-            ],
+            ]
+            .into_iter()
+            .filter(|policy| {
+                self.policy
+                    .network_policies
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(policy))
+            })
+            .collect(),
             dependency_capsule_formats: vec![compute_core::DEPENDENCY_CAPSULE_FORMAT.into()],
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES as u64,
             max_output_bytes: 16 * 1024 * 1024,
             distribution_id: Some(distribution.id),
             max_concurrent_jobs: None,
             job_retention_seconds: None,
-            inventory: self.compute.inventory().await,
+            dependency_capsules: resident_dependency_capsules(),
+            runtime_artifacts,
+            max_timeout_ms: self.policy.max_timeout_ms,
+            max_memory_bytes: self.policy.max_memory_bytes,
+            inventory,
         })
     }
 
@@ -632,6 +796,30 @@ impl ComputeProvider for RemoteProvider {
     }
 }
 
+/// Capsules in `COMPUTE_DEPENDENCY_CACHE`, which execution resolves by
+/// identity. Presence is advertised; verification still happens at execution.
+fn resident_dependency_capsules() -> Vec<String> {
+    let Some(root) = std::env::var_os("COMPUTE_DEPENDENCY_CACHE") else {
+        return vec![];
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return vec![];
+    };
+    let mut capsules = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let digest = name.strip_suffix(".deps")?;
+            let identity = format!("sha256:{digest}");
+            compute_core::validate_sha256_identity(&identity).ok()?;
+            Some(identity)
+        })
+        .collect::<Vec<_>>();
+    capsules.sort();
+    capsules
+}
+
 fn identity_protocol(identity: &ProviderIdentity) -> &'static str {
     match identity {
         ProviderIdentity::Local { .. } => "compute.local@1",
@@ -689,13 +877,22 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     pub fn local(endpoint: impl Into<String>) -> Self {
+        Self::local_with_policy(endpoint, ProviderPolicy::default())
+    }
+
+    /// A server backed by the local engine, offering only what `policy`
+    /// permits.
+    pub fn local_with_policy(endpoint: impl Into<String>, policy: ProviderPolicy) -> Self {
         let endpoint = public_endpoint(&endpoint.into());
         let store_id = format!("{:x}", Sha256::digest(endpoint.as_bytes()));
         Self {
-            provider: Arc::new(LocalProvider::with_identity(ProviderIdentity::Remote {
-                id: endpoint.clone(),
-                endpoint,
-            })),
+            provider: Arc::new(
+                LocalProvider::with_identity(ProviderIdentity::Remote {
+                    id: endpoint.clone(),
+                    endpoint,
+                })
+                .with_policy(policy),
+            ),
             authorizer: Arc::new(AllowAllAuthorizer),
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             job_store: std::env::temp_dir().join(format!("compute-jobs-{store_id}")),

@@ -1,33 +1,24 @@
 [package]
-name = "compute-cli"
+name = "compute-placement"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-
-[[bin]]
-name = "compute"
-path = "src/main.rs"
+description = "Provider pools and capability-aware placement for Compute"
 
 [dependencies]
-async-trait.workspace = true
-compute-core = { path = "../compute-core" }
-compute-placement = { path = "../compute-placement" }
-compute-provider = { path = "../compute-provider" }
-compute-runtime = { path = "../compute-runtime" }
 chrono.workspace = true
-clap.workspace = true
+compute-core = { path = "../compute-core" }
+compute-provider = { path = "../compute-provider" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio.workspace = true
-tempfile.workspace = true
-tar.workspace = true
+thiserror.workspace = true
 toml.workspace = true
-walkdir.workspace = true
 
 [dev-dependencies]
-assert_cmd = "2.0"
-predicates = "3.1"
+async-trait.workspace = true
+compute-runtime = { path = "../compute-runtime" }
 tempfile.workspace = true
+tokio.workspace = true
 wat.workspace = true

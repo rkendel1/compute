@@ -96,8 +96,8 @@ impl Compute {
     /// Identity of the installed Compute distribution, independent of any
     /// particular runtime selection.
     pub fn installed_distribution_identity(&self) -> Result<DistributionIdentity> {
-        if let Ok(home) = std::env::var("COMPUTE_HOME") {
-            let manifest_path = Path::new(&home).join("runtime-manifest.json");
+        if let Some(home) = distribution_root() {
+            let manifest_path = home.join("runtime-manifest.json");
             if manifest_path.is_file() {
                 let manifest: serde_json::Value =
                     serde_json::from_slice(&std::fs::read(manifest_path)?)?;
@@ -138,6 +138,42 @@ impl Compute {
             platform,
             manifest_version: "development".into(),
         })
+    }
+
+    /// Content identity of each runtime artifact in the installed
+    /// distribution. These are the same values receipts record as
+    /// `runtime.distribution_runtime_id`.
+    pub fn runtime_artifact_identities(&self) -> Result<BTreeMap<RuntimeKind, String>> {
+        let mut identities = BTreeMap::new();
+        if let Some(root) = distribution_root() {
+            let manifest_path = root.join("runtime-manifest.json");
+            if manifest_path.is_file() {
+                let manifest: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(manifest_path)?)?;
+                for adapter in &self.adapters {
+                    if let Some(payload) = manifest
+                        .get("runtimes")
+                        .and_then(|value| value.get(adapter.kind().as_str()))
+                        .and_then(|value| value.get("payload_sha256"))
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        identities.insert(adapter.kind(), prefixed_digest(payload)?);
+                    }
+                }
+                return Ok(identities);
+            }
+        }
+        let lock: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../../../distribution/runtime-lock.json"))?;
+        for adapter in &self.adapters {
+            if let Some(entry) = lock
+                .get("runtimes")
+                .and_then(|value| value.get(adapter.kind().as_str()))
+            {
+                identities.insert(adapter.kind(), sha256_identity(&serde_json::to_vec(entry)?));
+            }
+        }
+        Ok(identities)
     }
 
     pub async fn doctor(&self) -> Vec<compute_core::RuntimeReport> {

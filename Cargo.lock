@@ -358,8 +358,11 @@ name = "compute-cli"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "async-trait",
+ "chrono",
  "clap",
  "compute-core",
+ "compute-placement",
  "compute-provider",
  "compute-runtime",
  "predicates",
@@ -387,6 +390,25 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "walkdir",
+]
+
+[[package]]
+name = "compute-placement"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "compute-core",
+ "compute-provider",
+ "compute-runtime",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml",
+ "wat",
 ]
 
 [[package]]
