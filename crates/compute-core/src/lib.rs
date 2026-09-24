@@ -157,6 +157,17 @@ pub enum ExecutionStatus {
     Killed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPhase {
+    Created,
+    Resolved,
+    Prepared,
+    Started,
+    Running,
+    Completed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Output {
     pub text: String,
@@ -221,7 +232,7 @@ pub enum ExecutionErrorKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionError {
-    pub phase: ExecutionStatus,
+    pub phase: ExecutionPhase,
     pub kind: ExecutionErrorKind,
     pub message: String,
 }
@@ -581,5 +592,34 @@ mod tests {
             fs::read_to_string(staged.entrypoint).unwrap(),
             "print('hello')"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_workload_rejects_symlinked_entrypoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.py");
+        let link = temp.path().join("link.py");
+        fs::write(&source, "print('hello')").unwrap();
+        std::os::unix::fs::symlink(&source, &link).unwrap();
+
+        let workload = Workload {
+            runtime: RuntimeSpec {
+                kind: RuntimeKind::Python,
+                version: None,
+            },
+            entrypoint: link,
+            args: vec![],
+            env: vec![],
+            inputs: vec![],
+            mounts: vec![],
+            network: NetworkPolicy::Network,
+            resources: ResourceLimits::default(),
+        };
+
+        assert!(matches!(
+            stage_workload(&workload),
+            Err(ComputeError::InvalidWorkload(_))
+        ));
     }
 }

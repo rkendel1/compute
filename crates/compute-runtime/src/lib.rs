@@ -35,7 +35,12 @@ impl Compute {
         for adapter in &self.adapters {
             items.push(adapter.availability(None).await);
         }
+
         items
+    }
+
+    pub fn capabilities(&self, kind: RuntimeKind) -> Result<compute_core::RuntimeCapabilities> {
+        Ok(self.adapter(kind)?.capabilities())
     }
 
     pub async fn runtime(

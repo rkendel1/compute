@@ -170,11 +170,7 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
             if let Some(exit) = error.downcast_ref::<I32Exit>() {
                 let code = exit.0;
                 return Ok(ExecutionResult {
-                    status: if code == 0 {
-                        ExecutionStatus::Completed
-                    } else {
-                        ExecutionStatus::Failed
-                    },
+                    status: ExecutionStatus::Completed,
                     exit_code: Some(code),
                     stdout: Output::from_bytes(stdout, workload.resources.stdout_bytes),
                     stderr: Output::from_bytes(stderr, workload.resources.stderr_bytes),

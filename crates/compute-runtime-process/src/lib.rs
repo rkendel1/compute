@@ -4,9 +4,10 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use compute_core::{
-    ComputeError, ExecutionResult, ExecutionStatus, NetworkPolicy, Output, ResolvedRuntime,
+    ComputeError, ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionResult,
+    ExecutionStatus, NetworkPolicy, Output, ResolvedRuntime,
     ResourceUsage, Result, RuntimeAdapter, RuntimeAvailability, RuntimeKind, Workload,
-    collect_artifacts, stage_workload, ExecutionError, ExecutionErrorKind, RuntimeCapabilities,
+    collect_artifacts, stage_workload, RuntimeCapabilities,
 };
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -82,9 +83,6 @@ impl RuntimeAdapter for ProcessRuntime {
             return Err(ComputeError::RuntimeUnavailable(self.kind));
         }
 
-        fn capabilities(&self) -> RuntimeCapabilities {
-            RuntimeCapabilities::process()
-        }
         if let (Some(requested), Some(found)) = (&workload.runtime.version, &runtime.version) {
             if !found.contains(requested) {
                 return Err(ComputeError::RuntimeVersionMismatch {
@@ -100,6 +98,10 @@ impl RuntimeAdapter for ProcessRuntime {
             resolved_version: runtime.version,
             executable: runtime.executable,
         })
+    }
+
+    fn capabilities(&self) -> RuntimeCapabilities {
+        RuntimeCapabilities::process()
     }
 
     async fn execute(
@@ -164,7 +166,7 @@ impl RuntimeAdapter for ProcessRuntime {
             match tokio::time::timeout(timeout, read_output).await {
                 Ok(result) => {
                     let (stdout, stderr, status) = result?;
-                    (stdout, stderr, status, false)
+                    (stdout, stderr, Some(status), false)
                 }
                 Err(_) => {
                     let _ = child.kill().await;
@@ -177,16 +179,15 @@ impl RuntimeAdapter for ProcessRuntime {
             }
         } else {
             let (stdout, stderr, status) = read_output.await?;
-            (stdout, stderr, status, false)
+            (stdout, stderr, Some(status), false)
         };
 
         let process_status = status;
         let execution_status = if timed_out {
             ExecutionStatus::TimedOut
-        } else if process_status.as_ref().is_some_and(std::process::ExitStatus::success) {
-            ExecutionStatus::Completed
         } else {
-            ExecutionStatus::Failed
+            // A workload's exit status is data, not a failure of Compute itself.
+            ExecutionStatus::Completed
         };
 
         Ok(ExecutionResult {
@@ -198,7 +199,7 @@ impl RuntimeAdapter for ProcessRuntime {
             resource_usage: ResourceUsage::default(),
             artifacts: collect_artifacts(&staged.output_dir)?,
             error: timed_out.then(|| ExecutionError {
-                phase: ExecutionStatus::Running,
+                phase: ExecutionPhase::Running,
                 kind: ExecutionErrorKind::Timeout,
                 message: "wall time limit exceeded".to_string(),
             }),

@@ -37,3 +37,13 @@ fn runtimes_json_lists_wasm() {
         .stdout(predicate::str::contains("\"kind\": "))
         .stdout(predicate::str::contains("wasm"));
 }
+
+#[test]
+fn exec_accepts_issue_description() {
+    let mut command = Command::cargo_bin("compute").unwrap();
+    command
+        .args(["exec", "harden", "execution", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\":\"accepted\""));
+}
