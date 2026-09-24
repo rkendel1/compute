@@ -183,6 +183,18 @@ pub struct ExecutionReceipt {
     pub provider: Option<crate::ProviderIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_protocol: Option<String>,
+    /// Placement decision that routed this execution to its provider. Absent
+    /// for executions that were not placed through a provider pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<ReceiptPlacement>,
+    /// Identity of the exact policy snapshot admission evaluated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_id: Option<String>,
+    /// Always `admitted` on an execution receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_status: Option<String>,
     pub distribution: DistributionIdentity,
     pub runtime: RuntimeIdentity,
     pub request: ExecutionRequestSummary,
@@ -197,6 +209,50 @@ pub struct ExecutionReceipt {
     pub finished_at: Option<DateTime<Utc>>,
     pub provenance: ExecutionProvenance,
     pub receipt_hash: ReceiptHash,
+}
+
+/// How the execution provider was chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionMode {
+    /// The caller named the provider; compatibility was validated, never
+    /// substituted.
+    Explicit,
+    /// The provider pool selected the provider by its documented ordering.
+    Pool,
+}
+
+impl std::fmt::Display for SelectionMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Explicit => "explicit",
+            Self::Pool => "pool",
+        })
+    }
+}
+
+/// Factual account of why a provider was selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectionReason {
+    /// Always `compatible`: selection only considers compatible providers.
+    pub compatibility_result: String,
+    pub selection_priority: i64,
+    /// Ordering rule applied among compatible candidates.
+    pub ordering: String,
+    pub compatible_candidates: u64,
+}
+
+/// Placement evidence bound into a receipt by the executing provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptPlacement {
+    pub placement_id: String,
+    /// Caller-configured pool identifier of the selected provider.
+    pub provider_id: String,
+    pub provider_protocol: String,
+    pub selection_mode: SelectionMode,
+    pub selection_reason: SelectionReason,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +272,14 @@ struct ReceiptBody<'a> {
     provider: &'a Option<crate::ProviderIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_protocol: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placement: &'a Option<ReceiptPlacement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_id: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    admission_id: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    admission_status: &'a Option<String>,
     distribution: &'a DistributionIdentity,
     runtime: &'a RuntimeIdentity,
     request: &'a ExecutionRequestSummary,
@@ -231,6 +295,13 @@ struct ReceiptBody<'a> {
 }
 
 impl ExecutionReceipt {
+    /// Bind admission evidence. The caller reseals the receipt.
+    pub fn bind_admission(&mut self, admission: &crate::ExecutionAdmission) {
+        self.policy_id = Some(admission.policy_id.clone());
+        self.admission_id = Some(admission.admission_id.clone());
+        self.admission_status = Some(admission.admission_status.clone());
+    }
+
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
         serde_json::to_vec(&self.body()).map_err(Into::into)
     }
@@ -283,6 +354,42 @@ impl ExecutionReceipt {
                 ));
             }
             None => {}
+        }
+        if let Some(placement) = &self.placement {
+            validate_sha256_identity(&placement.placement_id)?;
+            if self.provider.is_none() {
+                return Err(invalid("placement is present without provider identity"));
+            }
+            if self.provider_protocol.as_deref() != Some(placement.provider_protocol.as_str()) {
+                return Err(invalid("placement provider protocol differs from receipt"));
+            }
+            if placement.provider_id.is_empty()
+                || placement.provider_id.len() > 64
+                || !placement
+                    .provider_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                return Err(invalid("invalid placement provider identifier"));
+            }
+            if placement.selection_reason.compatibility_result != "compatible"
+                || placement.selection_reason.compatible_candidates == 0
+            {
+                return Err(invalid("placement selected an incompatible provider"));
+            }
+        }
+        match (&self.policy_id, &self.admission_id, &self.admission_status) {
+            (None, None, None) => {}
+            (Some(policy), Some(admission), Some(status)) => {
+                validate_sha256_identity(policy)?;
+                validate_sha256_identity(admission)?;
+                if status != "admitted" {
+                    return Err(invalid(
+                        "an execution receipt requires an admitted decision",
+                    ));
+                }
+            }
+            _ => return Err(invalid("incomplete admission evidence")),
         }
         validate_sha256_identity(&self.distribution.id)?;
         validate_sha256_identity(&self.runtime.distribution_runtime_id)?;
@@ -349,6 +456,10 @@ impl ExecutionReceipt {
             bundle: &self.bundle,
             provider: &self.provider,
             provider_protocol: &self.provider_protocol,
+            placement: &self.placement,
+            policy_id: &self.policy_id,
+            admission_id: &self.admission_id,
+            admission_status: &self.admission_status,
             distribution: &self.distribution,
             runtime: &self.runtime,
             request: &self.request,
@@ -466,6 +577,10 @@ pub fn create_execution_receipt(
         bundle,
         provider: None,
         provider_protocol: None,
+        placement: None,
+        policy_id: None,
+        admission_id: None,
+        admission_status: None,
         distribution: environment.distribution.clone(),
         runtime: RuntimeIdentity {
             declared: request.runtime.kind,
@@ -620,6 +735,7 @@ mod tests {
             }),
             dependencies: None,
             provider: None,
+            admission: None,
             receipt: None,
         };
         let environment = ReceiptEnvironment {

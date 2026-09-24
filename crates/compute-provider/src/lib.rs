@@ -5,9 +5,19 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+pub use compute_policy::{
+    AdmissionDecision, CapabilityStatus, EffectivePolicy, ExecutionContract, Policy,
+    PolicySourceKind, ProviderFacts,
+};
+
 use compute_core::{
     BundleInput, BundleWorkloadPlan, DependencyCapsule, ExecutionResult, IsolationProfile,
-    NetworkPolicy, ProviderIdentity, RuntimeInventory, WorkloadBundle, WorkloadSpec,
+    NetworkPolicy, ProviderIdentity, ReceiptPlacement, RuntimeInventory, RuntimeKind,
+    WorkloadBundle, WorkloadSpec,
 };
 use compute_runtime::Compute;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -41,6 +51,8 @@ pub enum ProviderErrorKind {
     IdempotencyConflict,
     EvidenceInvalid,
     ProviderInterrupted,
+    /// Policy admission denied the execution; nothing was executed.
+    AdmissionDenied,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +60,10 @@ pub enum ProviderErrorKind {
 pub struct ProviderError {
     pub kind: ProviderErrorKind,
     pub message: String,
+    /// Admission evidence for `admission_denied`: the complete decision,
+    /// including every reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<Box<AdmissionDecision>>,
 }
 
 impl ProviderError {
@@ -55,6 +71,41 @@ impl ProviderError {
         Self {
             kind,
             message: message.into(),
+            admission: None,
+        }
+    }
+
+    /// The rejection evidence record for a denied execution.
+    pub fn denied(decision: AdmissionDecision) -> Self {
+        let reasons = decision
+            .reasons
+            .iter()
+            .map(|reason| reason.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        Self {
+            kind: ProviderErrorKind::AdmissionDenied,
+            message: format!("admission denied ({}): {reasons}", decision.admission_id),
+            admission: Some(Box::new(decision)),
+        }
+    }
+}
+
+/// An admission decision together with the exact policy snapshot it was
+/// evaluated against. Execution uses this snapshot, never a later policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Admission {
+    pub decision: AdmissionDecision,
+    pub policy: EffectivePolicy,
+}
+
+impl Admission {
+    pub fn summary(&self) -> compute_core::ExecutionAdmission {
+        compute_core::ExecutionAdmission {
+            policy_id: self.decision.policy_id.clone(),
+            admission_id: self.decision.admission_id.clone(),
+            admission_status: self.decision.status.as_str().into(),
         }
     }
 }
@@ -128,6 +179,14 @@ pub struct ExecutionOptions {
     pub isolation: Option<IsolationProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_request_id: Option<String>,
+    /// Placement evidence the executing provider binds into the receipt.
+    /// Like the request ID, it is metadata and excluded from the request hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<ReceiptPlacement>,
+    /// Caller execution policy, intersected with the provider's own. It can
+    /// only restrict; it is part of the request hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<Policy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,12 +217,15 @@ impl ProviderRequest {
             artifact: &'a ArtifactTransport,
             expected: &'a ExpectedIdentities,
             isolation: &'a Option<IsolationProfile>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            policy: Option<String>,
         }
         let bytes = serde_json::to_vec(&SemanticRequest {
             protocol: &self.protocol,
             artifact: &self.artifact,
             expected: &self.expected,
             isolation: &self.execution.isolation,
+            policy: self.execution.policy.as_ref().map(Policy::policy_id),
         })
         .map_err(transport_error)?;
         Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
@@ -175,6 +237,11 @@ impl ProviderRequest {
                 ProviderErrorKind::ProtocolUnsupported,
                 format!("unsupported provider protocol: {}", self.protocol),
             ));
+        }
+        if let Some(policy) = &self.execution.policy {
+            policy.validate().map_err(|error| {
+                ProviderError::new(ProviderErrorKind::PolicyRejected, error.to_string())
+            })?;
         }
         Ok(())
     }
@@ -212,7 +279,106 @@ pub struct ProviderCapabilities {
     pub max_concurrent_jobs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_retention_seconds: Option<u64>,
+    /// Dependency capsules already resident at the provider and resolvable
+    /// by identity without transfer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_capsules: Vec<String>,
+    /// Content identity of each runtime artifact, as recorded in receipts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub runtime_artifacts: BTreeMap<RuntimeKind, String>,
+    /// Largest wall-time limit this provider accepts, when bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_timeout_ms: Option<u64>,
+    /// Largest memory limit this provider accepts, when bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_bytes: Option<u64>,
+    /// The provider's own execution policy, when one is configured. Callers
+    /// intersect it with theirs; the provider enforces it regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<Policy>,
     pub inventory: RuntimeInventory,
+}
+
+/// Operator-configured restriction of what a provider offers. A restricted
+/// capability is both withheld from discovery and rejected at execution, so
+/// advertised capabilities never exceed enforced ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtimes: Option<BTreeSet<RuntimeKind>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation_profiles: Option<BTreeSet<IsolationProfile>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_policies: Option<BTreeSet<NetworkPolicy>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_bytes: Option<u64>,
+}
+
+impl ProviderPolicy {
+    fn allows_runtime(&self, runtime: RuntimeKind) -> bool {
+        self.runtimes
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(&runtime))
+    }
+
+    fn check(
+        &self,
+        bundle: &WorkloadBundle,
+        isolation: IsolationProfile,
+    ) -> Result<(), ProviderError> {
+        let workload = &bundle.workload;
+        let reject = |message: String| {
+            Err(ProviderError::new(
+                ProviderErrorKind::CapabilityMismatch,
+                message,
+            ))
+        };
+        if !self.allows_runtime(workload.runtime) {
+            return reject(format!(
+                "runtime {} is not offered by this provider",
+                workload.runtime
+            ));
+        }
+        if self
+            .isolation_profiles
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&isolation))
+        {
+            return reject(format!(
+                "isolation profile {isolation} is not offered by this provider"
+            ));
+        }
+        if self
+            .network_policies
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&workload.network))
+        {
+            return reject(format!(
+                "network policy {} is not offered by this provider",
+                workload.network
+            ));
+        }
+        if let (Some(limit), Some(requested)) = (self.max_timeout_ms, workload.resources.wall_time)
+            && requested.as_millis() > u128::from(limit)
+        {
+            return reject(format!(
+                "timeout {}ms exceeds this provider's limit of {limit}ms",
+                requested.as_millis()
+            ));
+        }
+        if let (Some(limit), Some(requested)) =
+            (self.max_memory_bytes, workload.resources.memory_bytes)
+            && requested > limit
+        {
+            return reject(format!(
+                "memory {requested} bytes exceeds this provider's limit of {limit} bytes"
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +386,10 @@ pub struct ProviderHealth {
     pub protocol: String,
     pub provider: ProviderIdentity,
     pub healthy: bool,
+    /// Workloads this provider has handed to a runtime since it started.
+    /// Denied requests never increase it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executions_started: Option<u64>,
 }
 
 #[async_trait]
@@ -229,11 +399,35 @@ pub trait ComputeProvider: Send + Sync {
     async fn execute(&self, request: ProviderRequest) -> Result<ExecuteResponse, ProviderError>;
     async fn capabilities(&self) -> Result<ProviderCapabilities, ProviderError>;
     async fn health(&self) -> Result<ProviderHealth, ProviderError>;
+
+    /// Decide admission without executing. The decision carries every
+    /// reason; a denial is an `Ok` decision, not an error.
+    async fn admit(&self, request: ProviderRequest) -> Result<Admission, ProviderError> {
+        let _ = request;
+        Err(ProviderError::new(
+            ProviderErrorKind::CapabilityMismatch,
+            "this provider does not perform admission",
+        ))
+    }
+
+    /// Execute under an admission obtained earlier, using its exact policy
+    /// snapshot. Providers must refuse a decision they cannot reproduce.
+    async fn execute_admitted(
+        &self,
+        request: ProviderRequest,
+        admission: Admission,
+    ) -> Result<ExecuteResponse, ProviderError> {
+        let _ = admission;
+        self.execute(request).await
+    }
 }
 
 pub struct LocalProvider {
     compute: Compute,
     identity: ProviderIdentity,
+    policy: ProviderPolicy,
+    execution_policy: RwLock<Option<Policy>>,
+    executions_started: AtomicU64,
 }
 
 impl Default for LocalProvider {
@@ -250,7 +444,159 @@ impl LocalProvider {
         Self {
             compute: Compute::new(),
             identity,
+            policy: ProviderPolicy::default(),
+            execution_policy: RwLock::new(None),
+            executions_started: AtomicU64::new(0),
         }
+    }
+
+    pub fn with_policy(mut self, policy: ProviderPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Enforce this execution policy (composed with the baseline and any
+    /// caller policy) for every admission.
+    pub fn with_execution_policy(self, policy: Option<Policy>) -> Self {
+        self.set_execution_policy(policy);
+        self
+    }
+
+    /// Replace the execution policy. New admissions use it; executions
+    /// already admitted keep the snapshot they were admitted under.
+    pub fn set_execution_policy(&self, policy: Option<Policy>) {
+        *self
+            .execution_policy
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = policy;
+    }
+
+    pub fn execution_policy(&self) -> Option<Policy> {
+        self.execution_policy
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Workloads handed to a runtime so far.
+    pub fn executions_started(&self) -> u64 {
+        self.executions_started.load(Ordering::SeqCst)
+    }
+
+    fn effective_policy(&self, request: &ProviderRequest) -> EffectivePolicy {
+        let mut sources = vec![];
+        if let Some(policy) = self.execution_policy() {
+            sources.push((PolicySourceKind::Server, policy));
+        }
+        if let Some(policy) = &request.execution.policy {
+            sources.push((PolicySourceKind::Explicit, policy.clone()));
+        }
+        EffectivePolicy::compose(&sources)
+    }
+
+    /// Capability check, reported as a status rather than an error so that
+    /// admission can carry it beside the policy evaluation.
+    async fn capability_status(
+        &self,
+        request: &ProviderRequest,
+        bundle: &WorkloadBundle,
+        isolation: IsolationProfile,
+    ) -> CapabilityStatus {
+        let mut codes = vec![];
+        if let Err(error) = self.policy.check(bundle, isolation) {
+            codes.push(format!("provider_restricted: {}", error.message));
+        }
+        match self.inspect(request.clone()).await {
+            Ok(response) => {
+                let plan = &response.plan.plan;
+                if !plan.capability_compatible {
+                    codes.push(format!(
+                        "capability_unavailable: {}",
+                        plan.capability_error.clone().unwrap_or_default()
+                    ));
+                }
+                if let Some(reason) = &plan.isolation.reason {
+                    codes.push(reason.code.clone());
+                }
+                if plan.dependencies.required
+                    && !plan.dependencies.available
+                    && !plan
+                        .dependencies
+                        .capsule_id
+                        .as_ref()
+                        .is_some_and(|id| resident_dependency_capsules().contains(id))
+                {
+                    codes.push("dependency_capsule_missing".into());
+                }
+            }
+            Err(error) => {
+                codes.push(format!("{}: {}", error_code(error.kind), error.message));
+            }
+        }
+        match self
+            .compute
+            .runtime(
+                bundle.workload.runtime,
+                bundle.workload.runtime_version.as_deref(),
+            )
+            .await
+        {
+            Ok(runtime) if runtime.available && runtime.compatible => {}
+            Ok(_) | Err(_) => {
+                codes.push(format!("runtime_unavailable: {}", bundle.workload.runtime))
+            }
+        }
+        codes.sort();
+        codes.dedup();
+        if codes.is_empty() {
+            CapabilityStatus::Compatible
+        } else {
+            CapabilityStatus::Incompatible { codes }
+        }
+    }
+
+    async fn facts(&self, bundle: &WorkloadBundle) -> ProviderFacts {
+        let distribution = self.compute.installed_distribution_identity().ok();
+        let runtime_version = self
+            .compute
+            .runtime(bundle.workload.runtime, None)
+            .await
+            .ok()
+            .and_then(|runtime| runtime.version);
+        ProviderFacts {
+            identity: self.identity(),
+            distribution_id: distribution.as_ref().map(|value| value.id.clone()),
+            platform: Some(compute_core::PlatformIdentity {
+                runtime_abi: None,
+                ..compute_core::PlatformIdentity::current()
+            }),
+            runtime_version,
+        }
+    }
+
+    async fn admit_with(
+        &self,
+        request: &ProviderRequest,
+        policy: EffectivePolicy,
+    ) -> Result<Admission, ProviderError> {
+        request.validate()?;
+        let bundle = request.artifact.bundle()?;
+        bundle
+            .require_ids(
+                request.expected.workload_id.as_deref(),
+                request.expected.bundle_id.as_deref(),
+            )
+            .map_err(artifact_error)?;
+        let contract = ExecutionContract::from_bundle(&bundle, request.execution.isolation)
+            .map_err(|error| {
+                ProviderError::new(ProviderErrorKind::PolicyRejected, error.to_string())
+            })?;
+        let capability = self
+            .capability_status(request, &bundle, contract.isolation)
+            .await;
+        let facts = self.facts(&bundle).await;
+        let decision = compute_policy::admit(&policy.policy, &contract, &facts, &capability);
+        Ok(Admission { decision, policy })
     }
 
     fn prepare(&self, request: &ProviderRequest) -> Result<(NamedTempFile, String), ProviderError> {
@@ -278,6 +624,29 @@ impl LocalProvider {
                 return Err(ProviderError::new(
                     ProviderErrorKind::ArtifactInvalid,
                     format!("dependency identity mismatch: expected {expected}, found {actual}"),
+                ));
+            }
+        }
+        self.policy.check(
+            &bundle,
+            request
+                .execution
+                .isolation
+                .unwrap_or(bundle.workload.isolation.profile)
+                .max(bundle.workload.isolation.profile),
+        )?;
+        if let Some(placement) = &request.execution.placement {
+            compute_core::validate_sha256_identity(&placement.placement_id).map_err(|error| {
+                ProviderError::new(ProviderErrorKind::PolicyRejected, error.to_string())
+            })?;
+            if placement.provider_protocol != identity_protocol(&self.identity) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::PolicyRejected,
+                    format!(
+                        "placement names protocol {}, but this provider speaks {}",
+                        placement.provider_protocol,
+                        identity_protocol(&self.identity)
+                    ),
                 ));
             }
         }
@@ -331,8 +700,44 @@ impl ComputeProvider for LocalProvider {
     }
 
     async fn execute(&self, request: ProviderRequest) -> Result<ExecuteResponse, ProviderError> {
+        let admission = self.admit(request.clone()).await?;
+        self.execute_admitted(request, admission).await
+    }
+
+    async fn admit(&self, request: ProviderRequest) -> Result<Admission, ProviderError> {
+        let policy = self.effective_policy(&request);
+        self.admit_with(&request, policy).await
+    }
+
+    async fn execute_admitted(
+        &self,
+        request: ProviderRequest,
+        admission: Admission,
+    ) -> Result<ExecuteResponse, ProviderError> {
+        // Re-evaluate under the admitted snapshot, not the current policy:
+        // the decision must reproduce exactly, and must be an admission.
+        if admission.policy.policy.policy_id() != admission.policy.policy_id
+            || admission.decision.policy_id != admission.policy.policy_id
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::PolicyRejected,
+                "admission policy snapshot is inconsistent",
+            ));
+        }
+        let snapshot = self.admit_with(&request, admission.policy.clone()).await?;
+        if snapshot.decision != admission.decision {
+            return Err(ProviderError::new(
+                ProviderErrorKind::PolicyRejected,
+                "admission decision does not reproduce for this request",
+            ));
+        }
+        if !snapshot.decision.admitted {
+            return Err(ProviderError::denied(snapshot.decision));
+        }
+        let summary = snapshot.summary();
         let (file, request_hash) = self.prepare(&request)?;
         let inspected = self.inspect(request.clone()).await?;
+        self.executions_started.fetch_add(1, Ordering::SeqCst);
         let mut result = self
             .compute
             .run_bundle_with_isolation(
@@ -364,12 +769,15 @@ impl ComputeProvider for LocalProvider {
         }
         let identity = self.identity();
         result.provider = Some(identity.clone());
+        result.admission = Some(summary.clone());
         if let Some(receipt) = &mut result.receipt {
             receipt.provider = Some(identity.clone());
             receipt.provider_protocol = Some(match &identity {
                 ProviderIdentity::Local { .. } => "compute.local@1".into(),
                 ProviderIdentity::Remote { .. } => REMOTE_PROTOCOL.into(),
             });
+            receipt.placement = request.execution.placement.clone();
+            receipt.bind_admission(&summary);
             receipt.seal().map_err(classify_compute_error)?;
         }
         debug_assert_eq!(request_hash, inspected.request_hash);
@@ -386,23 +794,55 @@ impl ComputeProvider for LocalProvider {
             .compute
             .installed_distribution_identity()
             .map_err(classify_compute_error)?;
+        let mut inventory = self.compute.inventory().await;
+        inventory
+            .runtimes
+            .retain(|runtime| self.policy.allows_runtime(runtime.id));
+        let runtime_artifacts = self
+            .compute
+            .runtime_artifact_identities()
+            .map_err(classify_compute_error)?
+            .into_iter()
+            .filter(|(runtime, _)| self.policy.allows_runtime(*runtime))
+            .collect();
         Ok(ProviderCapabilities {
             protocol: identity_protocol(&self.identity).into(),
             provider: self.identity(),
             artifact_modes: vec!["bundle".into(), "inline".into()],
-            isolation_profiles: IsolationProfile::ALL.to_vec(),
-            network_policies: vec![
+            isolation_profiles: IsolationProfile::ALL
+                .into_iter()
+                .filter(|profile| {
+                    self.policy
+                        .isolation_profiles
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.contains(profile))
+                })
+                .collect(),
+            network_policies: [
                 NetworkPolicy::None,
                 NetworkPolicy::Localhost,
                 NetworkPolicy::Network,
-            ],
+            ]
+            .into_iter()
+            .filter(|policy| {
+                self.policy
+                    .network_policies
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(policy))
+            })
+            .collect(),
             dependency_capsule_formats: vec![compute_core::DEPENDENCY_CAPSULE_FORMAT.into()],
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES as u64,
             max_output_bytes: 16 * 1024 * 1024,
             distribution_id: Some(distribution.id),
             max_concurrent_jobs: None,
             job_retention_seconds: None,
-            inventory: self.compute.inventory().await,
+            dependency_capsules: resident_dependency_capsules(),
+            runtime_artifacts,
+            max_timeout_ms: self.policy.max_timeout_ms,
+            max_memory_bytes: self.policy.max_memory_bytes,
+            policy: self.execution_policy(),
+            inventory,
         })
     }
 
@@ -411,6 +851,7 @@ impl ComputeProvider for LocalProvider {
             protocol: identity_protocol(&self.identity).into(),
             provider: self.identity(),
             healthy: true,
+            executions_started: Some(self.executions_started()),
         })
     }
 }
@@ -627,9 +1068,36 @@ impl ComputeProvider for RemoteProvider {
     async fn capabilities(&self) -> Result<ProviderCapabilities, ProviderError> {
         self.get("/compute/capabilities").await
     }
+    async fn admit(&self, request: ProviderRequest) -> Result<Admission, ProviderError> {
+        self.request("POST", "/compute/admission", &request).await
+    }
     async fn health(&self) -> Result<ProviderHealth, ProviderError> {
         self.get("/compute/health").await
     }
+}
+
+/// Capsules in `COMPUTE_DEPENDENCY_CACHE`, which execution resolves by
+/// identity. Presence is advertised; verification still happens at execution.
+fn resident_dependency_capsules() -> Vec<String> {
+    let Some(root) = std::env::var_os("COMPUTE_DEPENDENCY_CACHE") else {
+        return vec![];
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return vec![];
+    };
+    let mut capsules = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let digest = name.strip_suffix(".deps")?;
+            let identity = format!("sha256:{digest}");
+            compute_core::validate_sha256_identity(&identity).ok()?;
+            Some(identity)
+        })
+        .collect::<Vec<_>>();
+    capsules.sort();
+    capsules
 }
 
 fn identity_protocol(identity: &ProviderIdentity) -> &'static str {
@@ -642,6 +1110,8 @@ fn identity_protocol(identity: &ProviderIdentity) -> &'static str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderOperation {
     Inspect,
+    /// Admission without execution; authorized like inspection.
+    Admission,
     Execute,
     Capabilities,
     Health,
@@ -689,13 +1159,33 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     pub fn local(endpoint: impl Into<String>) -> Self {
+        Self::local_with_policy(endpoint, ProviderPolicy::default())
+    }
+
+    /// A server backed by the local engine, offering only what `policy`
+    /// permits.
+    pub fn local_with_policy(endpoint: impl Into<String>, policy: ProviderPolicy) -> Self {
+        Self::local_with_policies(endpoint, policy, None)
+    }
+
+    /// A local-engine server with capability restrictions and an execution
+    /// policy that every admission on this server enforces.
+    pub fn local_with_policies(
+        endpoint: impl Into<String>,
+        policy: ProviderPolicy,
+        execution_policy: Option<Policy>,
+    ) -> Self {
         let endpoint = public_endpoint(&endpoint.into());
         let store_id = format!("{:x}", Sha256::digest(endpoint.as_bytes()));
         Self {
-            provider: Arc::new(LocalProvider::with_identity(ProviderIdentity::Remote {
-                id: endpoint.clone(),
-                endpoint,
-            })),
+            provider: Arc::new(
+                LocalProvider::with_identity(ProviderIdentity::Remote {
+                    id: endpoint.clone(),
+                    endpoint,
+                })
+                .with_policy(policy)
+                .with_execution_policy(execution_policy),
+            ),
             authorizer: Arc::new(AllowAllAuthorizer),
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             job_store: std::env::temp_dir().join(format!("compute-jobs-{store_id}")),
@@ -808,6 +1298,10 @@ async fn handle_connection(
             Ok(value) => encode_result(state.config.provider.inspect(value).await),
             Err(error) => Err(error),
         },
+        ProviderOperation::Admission => match decode_provider_request(&request.body) {
+            Ok(value) => encode_result(state.config.provider.admit(value).await),
+            Err(error) => Err(error),
+        },
         ProviderOperation::Execute => match decode_provider_request(&request.body) {
             Ok(value) => encode_result(state.config.provider.execute(value).await),
             Err(error) => Err(error),
@@ -874,6 +1368,7 @@ fn parse_route(
         ("GET", "/compute/capabilities") => Some(ProviderOperation::Capabilities),
         ("GET", "/compute/inspect") => Some(ProviderOperation::Inspect),
         ("POST", "/compute/execute") => Some(ProviderOperation::Execute),
+        ("POST", "/compute/admission") => Some(ProviderOperation::Admission),
         ("POST", "/compute/jobs") => Some(ProviderOperation::Submit),
         _ => None,
     };
@@ -1109,6 +1604,13 @@ fn artifact_error(error: impl fmt::Display) -> ProviderError {
 fn transport_error(error: impl fmt::Display) -> ProviderError {
     ProviderError::new(ProviderErrorKind::TransportFailure, error.to_string())
 }
+fn error_code(kind: ProviderErrorKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
 fn classify_compute_error(error: compute_core::ComputeError) -> ProviderError {
     let message = error.to_string();
     let kind = if message.contains("isolation") || message.contains("capability") {
@@ -1127,6 +1629,7 @@ fn classify_compute_error(error: compute_core::ComputeError) -> ProviderError {
 fn error_status(kind: ProviderErrorKind) -> u16 {
     match kind {
         ProviderErrorKind::Unauthorized => 401,
+        ProviderErrorKind::AdmissionDenied => 403,
         ProviderErrorKind::UnknownJob => 404,
         ProviderErrorKind::JobExpired => 410,
         ProviderErrorKind::IdempotencyConflict => 409,

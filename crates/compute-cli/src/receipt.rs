@@ -22,6 +22,28 @@ pub fn inspect(path: &Path, json: bool) -> Result<()> {
             println!("Bundle");
             println!("  ID:          {bundle}");
         }
+        if let Some(provider) = &receipt.provider {
+            println!("Provider");
+            match provider {
+                compute_core::ProviderIdentity::Local { id } => println!("  Local:       {id}"),
+                compute_core::ProviderIdentity::Remote { id, .. } => {
+                    println!("  Remote:      {id}")
+                }
+            }
+            if let Some(protocol) = &receipt.provider_protocol {
+                println!("  Protocol:    {protocol}");
+            }
+        }
+        if let Some(placement) = &receipt.placement {
+            println!("Placement");
+            println!("  ID:          {}", placement.placement_id);
+            println!("  Provider:    {}", placement.provider_id);
+            println!("  Mode:        {}", placement.selection_mode);
+            println!(
+                "  Priority:    {}",
+                placement.selection_reason.selection_priority
+            );
+        }
         println!("Distribution");
         println!("  ID:          {}", receipt.distribution.id);
         println!("  Platform:    {}", receipt.distribution.platform);

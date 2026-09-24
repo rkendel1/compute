@@ -7,13 +7,18 @@ use compute_core::{
     NetworkPolicy, PlatformIdentity, ResourceLimits, RuntimeKind, RuntimeSpec,
 };
 use compute_provider::{
-    ComputeProvider, LocalProvider, ProviderRequest, RemoteProvider, ServerConfig,
+    ComputeProvider, ProviderPolicy, ProviderRequest, RemoteProvider, ServerConfig,
 };
 use compute_runtime::Compute;
 
+mod admission;
 mod certification;
 mod direct;
 mod distribution;
+mod placement_certification;
+mod policy_certification;
+mod policy_cmd;
+mod pool;
 mod receipt;
 
 #[derive(Parser, Debug)]
@@ -49,8 +54,17 @@ enum Commands {
     Version(JsonFlag),
     /// Execute portable workloads through a remote Compute provider.
     Remote(RemoteCommand),
-    /// Inspect local or remote provider capabilities.
-    Provider(ProviderCommand),
+    /// Discover, inspect, and refresh providers in the caller-owned pool.
+    Provider(pool::ProviderCommand),
+    /// Evaluate which provider can satisfy a workload. Never executes.
+    Placement(pool::PlacementCommand),
+    /// Place a workload on a compatible provider and execute or submit it.
+    Pool(pool::PoolCommand),
+    /// Inspect, validate, and check execution policy. Never executes.
+    Policy(policy_cmd::PolicyCommand),
+    /// Show the full decision chain for a workload: requirements,
+    /// capabilities, policy, admission, and placement. Never executes.
+    Explain(policy_cmd::ExplainCommand),
     /// Serve compute.remote@1 with durable filesystem-backed jobs.
     Serve(ServeCommand),
 }
@@ -68,28 +82,26 @@ struct ServeCommand {
     job_retention: Duration,
     #[arg(long, default_value_t = 4)]
     max_concurrent_jobs: usize,
-}
-
-#[derive(Args, Debug)]
-struct ProviderCommand {
-    #[command(subcommand)]
-    command: ProviderCommands,
-}
-
-#[derive(Subcommand, Debug)]
-enum ProviderCommands {
-    Inspect {
-        #[arg(default_value = "local")]
-        provider: String,
-        #[arg(long)]
-        json: bool,
-    },
-    Capabilities {
-        #[arg(default_value = "local")]
-        provider: String,
-        #[arg(long)]
-        json: bool,
-    },
+    /// Offer only these runtimes (repeatable). Withheld runtimes are neither
+    /// advertised nor executed.
+    #[arg(long = "allow-runtime")]
+    allow_runtimes: Vec<String>,
+    /// Offer only these isolation profiles (repeatable).
+    #[arg(long = "allow-isolation", value_parser = parse_isolation)]
+    allow_isolation: Vec<IsolationProfile>,
+    /// Offer only these network policies (repeatable).
+    #[arg(long = "allow-network", value_parser = parse_network)]
+    allow_network: Vec<NetworkPolicy>,
+    /// Largest wall-time limit a workload may request.
+    #[arg(long, value_parser = parse_duration)]
+    max_timeout: Option<Duration>,
+    /// Largest memory limit a workload may request.
+    #[arg(long, value_parser = parse_memory)]
+    max_memory: Option<u64>,
+    /// Execution policy this server enforces: `--policy FILE`, or
+    /// `[server.policy] path` in `--config`/compute.toml.
+    #[command(flatten)]
+    execution_policy: admission::PolicyLocation,
 }
 
 #[derive(Args, Debug)]
@@ -443,6 +455,8 @@ struct RunCommand {
     /// Refuse to execute a bundle whose deterministic identity differs.
     #[arg(long, requires = "bundle")]
     expected_bundle_id: Option<String>,
+    #[command(flatten)]
+    policy: admission::PolicyLocation,
     #[arg(last = true)]
     args: Vec<String>,
 }
@@ -496,6 +510,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 .map(DependencyCapsule::read)
                 .transpose()?;
             let _offline = command.offline;
+            let policy_sources = command.policy.sources()?;
             if let Some(bundle) = command.bundle {
                 if command.runtime.is_some()
                     || !command.env.is_empty()
@@ -526,7 +541,22 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     )?;
                     print_bundle_plan(&plan, command.json);
                 } else {
-                    let result = compute
+                    let loaded = compute.load_bundle(&bundle)?;
+                    loaded.require_ids(
+                        command.expected_workload_id.as_deref(),
+                        command.expected_bundle_id.as_deref(),
+                    )?;
+                    let admitted = admission::admit_locally(
+                        &loaded,
+                        dependency_capsule.as_ref(),
+                        command.isolation,
+                        &policy_sources,
+                    )
+                    .await?;
+                    if !admitted.decision.admitted {
+                        admission::deny(&admitted, command.json);
+                    }
+                    let mut result = compute
                         .run_bundle_with_dependencies(
                             &bundle,
                             command.expected_workload_id.as_deref(),
@@ -535,6 +565,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                             dependency_capsule,
                         )
                         .await?;
+                    admission::bind(&mut result, &admitted)?;
                     print_execution_result(result, command.json, command.receipt.as_deref())?;
                 }
                 return Ok(());
@@ -575,7 +606,21 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                         .await?;
                     print_workload_plan(&plan, command.json);
                 } else {
-                    let result = compute
+                    let loaded = compute_core::WorkloadBundle::create(&workload)?;
+                    if let Some(expected) = command.expected_workload_id.as_deref() {
+                        loaded.workload.require_id(expected)?;
+                    }
+                    let admitted = admission::admit_locally(
+                        &loaded,
+                        dependency_capsule.as_ref(),
+                        command.isolation,
+                        &policy_sources,
+                    )
+                    .await?;
+                    if !admitted.decision.admitted {
+                        admission::deny(&admitted, command.json);
+                    }
+                    let mut result = compute
                         .run_workload_with_dependencies(
                             &workload,
                             command.expected_workload_id.as_deref(),
@@ -583,6 +628,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                             dependency_capsule,
                         )
                         .await?;
+                    admission::bind(&mut result, &admitted)?;
                     print_execution_result(result, command.json, command.receipt.as_deref())?;
                 }
                 return Ok(());
@@ -613,6 +659,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 isolation: command.isolation,
                 memory: command.memory,
                 timeout: command.timeout,
+                defaults: command.policy.defaults()?,
             })?;
             if command.explain {
                 print_generated_workload(&resolved, command.json)?;
@@ -624,7 +671,17 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 )?;
                 print_workload_plan(&plan, command.json);
             } else {
-                let result = compute
+                let bundle = compute_core::WorkloadBundle::create_from_with_capsule(
+                    resolved.workload.clone(),
+                    &resolved.root,
+                    resolved.dependency_capsule.clone(),
+                )?;
+                let admitted =
+                    admission::admit_locally(&bundle, None, None, &policy_sources).await?;
+                if !admitted.decision.admitted {
+                    admission::deny(&admitted, command.json);
+                }
+                let mut result = compute
                     .run_generated_workload_with_dependencies(
                         &resolved.root,
                         resolved.workload,
@@ -632,6 +689,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                         resolved.dependency_capsule,
                     )
                     .await?;
+                admission::bind(&mut result, &admitted)?;
                 print_execution_result(result, command.json, command.receipt.as_deref())?;
             }
         }
@@ -678,6 +736,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                         isolation: None,
                         memory: None,
                         timeout: None,
+                        defaults: admission::PolicyLocation::default().defaults()?,
                     })?;
                     compute.create_generated_bundle_with_dependencies(
                         &resolved.root,
@@ -854,6 +913,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     isolation: None,
                     memory: None,
                     timeout: None,
+                    defaults: admission::PolicyLocation::default().defaults()?,
                 });
                 match resolved {
                     Ok(resolved) => print_generated_workload(&resolved, command.json)?,
@@ -1104,7 +1164,34 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 "Compute provider listening on {} ({})",
                 command.listen, endpoint
             );
-            let mut config = ServerConfig::local(endpoint);
+            let policy = ProviderPolicy {
+                runtimes: (!command.allow_runtimes.is_empty())
+                    .then(|| {
+                        command
+                            .allow_runtimes
+                            .iter()
+                            .map(|value| value.parse::<RuntimeKind>())
+                            .collect::<compute_core::Result<_>>()
+                    })
+                    .transpose()?,
+                isolation_profiles: (!command.allow_isolation.is_empty())
+                    .then(|| command.allow_isolation.iter().copied().collect()),
+                network_policies: (!command.allow_network.is_empty())
+                    .then(|| command.allow_network.iter().cloned().collect()),
+                max_timeout_ms: command
+                    .max_timeout
+                    .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX)),
+                max_memory_bytes: command.max_memory,
+            };
+            let execution_policy = command.execution_policy.server_policy()?;
+            if let Some(policy) = &execution_policy {
+                eprintln!(
+                    "Execution policy: {} ({})",
+                    policy.label(),
+                    policy.policy_id()
+                );
+            }
+            let mut config = ServerConfig::local_with_policies(endpoint, policy, execution_policy);
             config.job_store = command.job_store;
             config.job_retention = command.job_retention;
             config.max_concurrent_jobs = command.max_concurrent_jobs;
@@ -1112,17 +1199,11 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 .await
                 .map_err(provider_error)?;
         }
-        Commands::Provider(command) => {
-            let (provider, json) = match command.command {
-                ProviderCommands::Inspect { provider, json }
-                | ProviderCommands::Capabilities { provider, json } => (provider, json),
-            };
-            let capabilities = provider_for(&provider)
-                .capabilities()
-                .await
-                .map_err(provider_error)?;
-            print_provider_value(&capabilities, json);
-        }
+        Commands::Provider(command) => pool::provider(command).await?,
+        Commands::Placement(command) => pool::placement(command).await?,
+        Commands::Pool(command) => pool::pool(command).await?,
+        Commands::Policy(command) => policy_cmd::policy(command).await?,
+        Commands::Explain(command) => policy_cmd::explain(command).await?,
         Commands::Remote(command) => match command.command {
             RemoteCommands::Capabilities(command) => {
                 let value = RemoteProvider::new(command.provider)
@@ -1371,6 +1452,7 @@ fn remote_request(command: RemoteArtifactCommand) -> compute_core::Result<Remote
             isolation,
             memory,
             timeout,
+            defaults: admission::PolicyLocation::default().defaults()?,
         })?;
         let bundle = compute_core::WorkloadBundle::create_from_with_capsule(
             resolved.workload.clone(),
@@ -1436,14 +1518,6 @@ async fn remote_wait(command: RemoteWaitCommand) -> compute_core::Result<()> {
         }
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(Duration::from_secs(2));
-    }
-}
-
-fn provider_for(value: &str) -> Box<dyn ComputeProvider> {
-    if value == "local" {
-        Box::new(LocalProvider::new())
-    } else {
-        Box::new(RemoteProvider::new(value))
     }
 }
 

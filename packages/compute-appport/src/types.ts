@@ -132,6 +132,10 @@ export interface ExecutionReceipt {
   bundle: string | null;
   provider?: { kind: "local"; id: string } | { kind: "remote"; id: string; endpoint: string };
   provider_protocol?: string;
+  placement?: ReceiptPlacement;
+  policy_id?: string;
+  admission_id?: string;
+  admission_status?: "admitted";
   distribution: { id: string; platform: string; manifest_version: string };
   runtime: {
     declared: RuntimeKind;
@@ -178,7 +182,12 @@ export type ExecutionFailureKind =
   | "capability_denied"
   | "runtime_failure"
   | "input_materialization_failure"
-  | "output_contract";
+  | "output_contract"
+  | "placement_failed"
+  | "provider_unavailable"
+  | "provider_rejected"
+  | "evidence_invalid"
+  | "admission_denied";
 
 export interface OutputContractFailure {
   kind: "output_contract";
@@ -212,6 +221,7 @@ export interface ExecutionResult {
   isolation?: IsolationEvidence;
   dependencies?: { capsule_id: string; file_count: number; verified: boolean };
   provider?: { kind: "local"; id: string } | { kind: "remote"; id: string; endpoint: string };
+  admission?: { policy_id: string; admission_id: string; admission_status: "admitted" };
   receipt?: ExecutionReceipt;
 }
 
@@ -298,3 +308,80 @@ export type RunResult =
       receipt?: ExecutionReceipt;
       isolation?: IsolationEvidence;
     };
+
+export interface ReceiptPlacement {
+  placement_id: string;
+  provider_id: string;
+  provider_protocol: string;
+  selection_mode: "explicit" | "pool";
+  selection_reason: {
+    compatibility_result: "compatible";
+    selection_priority: number;
+    ordering: string;
+    compatible_candidates: number;
+  };
+}
+
+/** Deterministic placement decision produced by `compute placement inspect`. */
+export interface PlacementReport {
+  placement_version: "compute.placement@1";
+  placement_id: string;
+  outcome: "placed" | "placement_failed";
+  selection_mode: "explicit" | "pool";
+  requested_provider?: string;
+  requirements: Record<string, unknown>;
+  selection_policy: { ordering: string[]; require_healthy: boolean; allow_stale_capabilities: boolean };
+  policy_id: string;
+  admission: Record<string, unknown>;
+  providers: Array<Record<string, unknown>>;
+  compatible_providers: string[];
+  incompatible_providers: string[];
+  excluded_providers: string[];
+  selected?: Record<string, unknown> & { provider_id: string };
+  failure?: { code: string; message: string };
+  explanation: { requires: string[]; considered: string[]; selection: string };
+}
+
+export interface PlacementOptions {
+  provider?: string | undefined;
+  refresh?: boolean | undefined;
+  distribution_id?: string | undefined;
+  isolation?: IsolationProfile | undefined;
+}
+
+export type PoolRunResult =
+  | (Extract<RunResult, { kind: "execution" }> & { receipt: ExecutionReceipt; placement: PlacementReport })
+  | (Extract<RunResult, { kind: "failure" }> & { placement?: PlacementReport });
+
+export interface AdmissionReason {
+  code: string;
+  kind: "contract" | "capability" | "policy";
+  dimension: string;
+  requested: unknown;
+  allowed: unknown;
+  message: string;
+}
+
+/** compute.admission@1: whether an execution is permitted, and why. */
+export interface AdmissionDecision {
+  admission_version: "compute.admission@1";
+  admission_id: string;
+  status: "admitted" | "denied";
+  admitted: boolean;
+  policy_id: string;
+  provider: Record<string, unknown>;
+  capability: Record<string, unknown>;
+  reasons: AdmissionReason[];
+  contract: Record<string, unknown>;
+}
+
+export interface PolicyCheckResult {
+  policy: Array<Record<string, unknown>>;
+  policy_id: string;
+  requirements: Record<string, unknown>;
+  provider: Record<string, unknown>;
+  admission: { admission_id: string; status: "admitted" | "denied"; admitted: boolean; capability: Record<string, unknown> };
+  reasons: AdmissionReason[];
+  effective_policy: Record<string, unknown>;
+  decision: AdmissionDecision;
+}

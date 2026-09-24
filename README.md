@@ -45,6 +45,35 @@ compute remote wait --provider http://127.0.0.1:8080 job_... --timeout 60s
 
 Durable jobs are documented in [docs/jobs.md](docs/jobs.md).
 
+Providers can be grouped into a caller-owned pool. Placement selects the
+provider that can prove it satisfies the workload contract. Compatibility
+comes first, then priority, then provider ID. It never substitutes runtimes,
+distributions, dependencies, isolation, or network policy, and it never
+retries on another provider. See [docs/provider-pools.md](docs/provider-pools.md)
+and [docs/placement.md](docs/placement.md).
+
+```sh
+compute provider list
+compute placement explain ./script.py
+compute pool run ./script.py
+compute pool run --provider production ./script.py
+compute pool submit --bundle script.compute --json
+```
+
+Capability asks "can it run?"; policy asks "may it run?". Compute executes
+only when both answers are yes. Every execution is admitted by a
+deterministic, fail-closed `compute.policy@1` evaluation. With nothing
+configured, the evaluation uses the documented baseline policy. Receipts
+record `policy_id`, `admission_id`, and `admission_status`. See
+[docs/policy.md](docs/policy.md) and [docs/admission.md](docs/admission.md).
+
+```sh
+compute policy validate production.json
+compute policy check ./script.py --policy production.json
+compute explain ./script.py
+compute serve --policy production.json
+```
+
 ## Universal runtime distribution
 
 Compute has first-class adapters for WASM, Python, Node, Bun, Deno, Ruby,

@@ -14,6 +14,20 @@ import {
   jobAccessInputSchema,
   jobSubmissionInputSchema,
   jobValueSchema,
+  providerInspectResultSchema,
+  providerListInputSchema,
+  providerListResultSchema,
+  placementInspectInputSchema,
+  placementReportSchema,
+  poolRunInputSchema,
+  poolRunResultSchema,
+  poolSubmitInputSchema,
+  admissionDecisionSchema,
+  admissionInputSchema,
+  policyCheckResultSchema,
+  policyExplainResultSchema,
+  policyInspectInputSchema,
+  policyInspectResultSchema,
 } from "./schemas.js";
 import type {
   ExecutionFailureKind,
@@ -26,6 +40,11 @@ import type {
   BundleExecutionRequest,
   BundleWorkloadPlan,
   WorkloadExecutionRequest,
+  PlacementOptions,
+  PolicyCheckResult,
+  IsolationProfile,
+  PlacementReport,
+  PoolRunResult,
 } from "./types.js";
 
 export interface LocalComputeProviderOptions {
@@ -35,6 +54,10 @@ export interface LocalComputeProviderOptions {
   mode?: "development" | "production";
   provider?: ComputeProvider;
   remoteProvider?: string;
+  /** Caller-owned provider pool configuration (TOML) for pool capabilities. */
+  poolConfig?: string;
+  /** Capability cache used by pool discovery. */
+  capabilityCache?: string;
 }
 
 /** Transport-neutral provider selected by the AppPort application boundary. */
@@ -47,6 +70,22 @@ export interface ComputeProvider {
   cancel(jobId: string): Promise<unknown>;
   result(jobId: string): Promise<unknown>;
   receipt(jobId: string): Promise<unknown>;
+  /** Pool capabilities. Providers without a pool reject these operations. */
+  listProviders?(refresh?: boolean): Promise<unknown>;
+  inspectProvider?(provider?: string): Promise<unknown>;
+  providerCapabilities?(provider?: string): Promise<unknown>;
+  inspectPlacement?(request: ExecutionRequest, options: PlacementOptions & { submit?: boolean | undefined }): Promise<PlacementReport>;
+  poolRun?(request: ExecutionRequest, options: PlacementOptions): Promise<PoolRunResult>;
+  poolSubmit?(request: ExecutionRequest, options: PlacementOptions & { idempotency_key?: string | undefined }): Promise<unknown>;
+  /** Policy capabilities. Compute defines the policy semantics. */
+  inspectPolicy?(): Promise<unknown>;
+  checkPolicy?(request: ExecutionRequest, options: AdmissionOptions): Promise<PolicyCheckResult>;
+  explainPolicy?(request: ExecutionRequest, options: AdmissionOptions): Promise<unknown>;
+}
+
+export interface AdmissionOptions {
+  provider?: string | undefined;
+  isolation?: IsolationProfile | undefined;
 }
 
 interface CommandResult {
@@ -59,11 +98,215 @@ export class LocalComputeProvider implements ComputeProvider {
   readonly computeBinary: string;
   readonly cwd: string | undefined;
   readonly remoteProvider: string | undefined;
+  readonly poolConfig: string | undefined;
+  readonly capabilityCache: string | undefined;
 
-  constructor(options: Pick<LocalComputeProviderOptions, "computeBinary" | "cwd" | "remoteProvider"> = {}) {
+  constructor(
+    options: Pick<
+      LocalComputeProviderOptions,
+      "computeBinary" | "cwd" | "remoteProvider" | "poolConfig" | "capabilityCache"
+    > = {},
+  ) {
     this.computeBinary = options.computeBinary ?? "compute";
     this.cwd = options.cwd;
     this.remoteProvider = options.remoteProvider;
+    this.poolConfig = options.poolConfig;
+    this.capabilityCache = options.capabilityCache;
+  }
+
+  private poolArgs(): string[] {
+    return [
+      ...(this.poolConfig ? ["--pool-config", resolve(this.cwd ?? process.cwd(), this.poolConfig)] : []),
+      ...(this.capabilityCache
+        ? ["--capability-cache", resolve(this.cwd ?? process.cwd(), this.capabilityCache)]
+        : []),
+    ];
+  }
+
+  async listProviders(refresh = false): Promise<unknown> {
+    return this.invokeJson(
+      ["provider", "list", ...(refresh ? ["--refresh"] : []), ...this.poolArgs(), "--json"],
+      "provider listing failed",
+    );
+  }
+
+  async inspectProvider(provider = "local"): Promise<unknown> {
+    return this.invokeJson(
+      ["provider", "inspect", provider, ...this.poolArgs(), "--json"],
+      "provider inspection failed",
+    );
+  }
+
+  async providerCapabilities(provider = "local"): Promise<unknown> {
+    return this.invokeJson(
+      ["provider", "capabilities", provider, ...this.poolArgs(), "--json"],
+      "provider capability discovery failed",
+    );
+  }
+
+  async inspectPlacement(
+    request: ExecutionRequest,
+    options: PlacementOptions & { submit?: boolean | undefined },
+  ): Promise<PlacementReport> {
+    return this.withRequestBundle(request, async (path) => {
+      const command = await this.invoke([
+        "placement", "inspect", "--bundle", path,
+        ...placementArgs(options),
+        ...(options.submit ? ["--submit"] : []),
+        ...this.poolArgs(), "--json",
+      ]);
+      const report = parseJson<PlacementReport>(command.stdout);
+      // Exit status 2 is a completed placement that selected no provider.
+      if (!report || (command.status !== 0 && command.status !== 2)) {
+        throw new Error(command.stderr.trim() || "placement inspection failed");
+      }
+      return report;
+    });
+  }
+
+  async poolRun(request: ExecutionRequest, options: PlacementOptions): Promise<PoolRunResult> {
+    return this.withRequestBundle(request, async (path) => {
+      const command = await this.invoke([
+        "pool", "run", "--bundle", path, ...placementArgs(options), ...this.poolArgs(), "--json",
+      ]);
+      const value = parseJson<Record<string, unknown>>(command.stdout);
+      // Dispatch failures have no execution; results carry `error: null`.
+      if (value && !("execution_id" in value) && value.error) {
+        const error = value.error as { code: string; message: string };
+        return { kind: "failure", failure: { kind: dispatchFailureKind(error.code), message: error.message } };
+      }
+      if (value && !("execution_id" in value) && "placement" in value) {
+        const placement = value.placement as PlacementReport;
+        return {
+          kind: "failure",
+          failure: {
+            kind: "placement_failed",
+            message: placement.failure
+              ? `${placement.failure.code}: ${placement.failure.message}`
+              : "placement selected no provider",
+          },
+          placement,
+        };
+      }
+      if (!value) {
+        return {
+          kind: "failure",
+          failure: { kind: classifyBundleFailure(command.stderr), message: command.stderr.trim() || "pool execution failed" },
+        };
+      }
+      const { placement, ...rest } = value as unknown as ExecutionResult & { placement: PlacementReport };
+      const result = rest as ExecutionResult;
+      const receipt = result.receipt;
+      const identity = {
+        workload_id: receipt?.workload ?? "",
+        ...(receipt?.bundle ? { bundle_id: receipt.bundle } : {}),
+      };
+      if (receipt && result.status === "completed" && (result.exit_code === null || result.exit_code === 0)) {
+        return {
+          kind: "execution",
+          ...identity,
+          result,
+          receipt,
+          ...(result.isolation ? { isolation: result.isolation } : {}),
+          placement,
+        };
+      }
+      return {
+        kind: "failure",
+        ...identity,
+        failure: {
+          kind: classifyExecutionFailure(result),
+          message: result.error?.message ?? `execution ended with status ${result.status}`,
+        },
+        result,
+        ...(receipt ? { receipt } : {}),
+        ...(result.isolation ? { isolation: result.isolation } : {}),
+        placement,
+      };
+    });
+  }
+
+  async poolSubmit(
+    request: ExecutionRequest,
+    options: PlacementOptions & { idempotency_key?: string | undefined },
+  ): Promise<unknown> {
+    return this.withRequestBundle(request, async (path) => {
+      const command = await this.invoke([
+        "pool", "submit", "--bundle", path, ...placementArgs(options),
+        ...(options.idempotency_key ? ["--idempotency-key", options.idempotency_key] : []),
+        ...this.poolArgs(), "--json",
+      ]);
+      const value = parseJson<Record<string, unknown>>(command.stdout);
+      if (!value || (command.status !== 0 && !("placement" in value))) {
+        throw new Error(command.stderr.trim() || "pool submission failed");
+      }
+      return value;
+    });
+  }
+
+  async inspectPolicy(): Promise<unknown> {
+    return this.invokeJson(["policy", "inspect", ...this.poolArgs(), "--json"], "policy inspection failed");
+  }
+
+  async checkPolicy(request: ExecutionRequest, options: AdmissionOptions): Promise<PolicyCheckResult> {
+    return this.policyCommand("check", request, options) as Promise<PolicyCheckResult>;
+  }
+
+  async explainPolicy(request: ExecutionRequest, options: AdmissionOptions): Promise<unknown> {
+    return this.policyCommand("explain", request, options);
+  }
+
+  private async policyCommand(
+    operation: "check" | "explain",
+    request: ExecutionRequest,
+    options: AdmissionOptions,
+  ): Promise<unknown> {
+    return this.withRequestBundle(request, async (path) => {
+      const command = await this.invoke([
+        "policy", operation, "--bundle", path,
+        ...(options.provider ? ["--provider", options.provider] : []),
+        ...(options.isolation ? ["--isolation", options.isolation] : []),
+        ...this.poolArgs(), "--json",
+      ]);
+      const value = parseJson<unknown>(command.stdout);
+      // Exit status 2 is a completed decision that denied admission.
+      if (!value || (command.status !== 0 && command.status !== 2)) {
+        throw new Error(command.stderr.trim() || `policy ${operation} failed`);
+      }
+      return value;
+    });
+  }
+
+  private async invokeJson(args: string[], message: string): Promise<unknown> {
+    const command = await this.invoke(args);
+    const value = parseJson<unknown>(command.stdout);
+    if (command.status !== 0 || !value) throw new Error(command.stderr.trim() || message);
+    return value;
+  }
+
+  /** Run `operation` against a `.compute` bundle for either request form. */
+  private async withRequestBundle<T>(
+    request: ExecutionRequest,
+    operation: (path: string) => Promise<T>,
+  ): Promise<T> {
+    if ("bundle" in request) return this.withBundle(request, operation);
+    const invalid = validateExecutionRequest(request);
+    if (invalid) throw new Error(invalid);
+    const directory = await mkdtemp(join(tmpdir(), "compute-appport-pool-"));
+    const bundle = join(directory, "workload.compute");
+    try {
+      const create = await this.invoke([
+        "bundle", "create", "--workload",
+        resolve(this.cwd ?? process.cwd(), request.invocation.workload_path),
+        "--output", bundle, "--json",
+      ]);
+      if (create.status !== 0) throw new Error(create.stderr.trim() || "bundle creation failed");
+      const inspected = await this.inspect(request);
+      if (inspected.kind === "failure") throw new Error(inspected.failure.message);
+      return await operation(bundle);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 
   async inspect(request: ExecutionRequest, mode: "inspect" | "dry_run" = "inspect"): Promise<InspectResult> {
@@ -108,6 +351,8 @@ export class LocalComputeProvider implements ComputeProvider {
         : []),
       "--json",
     ]);
+    const denied = admissionDenial(command.stdout);
+    if (denied) return { kind: "failure", workload_id: plan.workload_id, failure: denied };
     const result = parseJson<ExecutionResult>(command.stdout);
     if (!result) {
       return {
@@ -140,10 +385,7 @@ export class LocalComputeProvider implements ComputeProvider {
   }
 
   async capabilities(): Promise<unknown> {
-    const command = await this.invoke(["provider", "capabilities", "local", "--json"]);
-    const value = parseJson<unknown>(command.stdout);
-    if (command.status !== 0 || !value) throw new Error(command.stderr.trim() || "provider capability discovery failed");
-    return value;
+    return this.providerCapabilities("local");
   }
 
   async submit(request: ExecutionRequest): Promise<unknown> {
@@ -242,11 +484,13 @@ export class LocalComputeProvider implements ComputeProvider {
         "--expected-bundle-id", plan.bundle_verification.bundle_id,
         "--json",
       ]);
-      const result = parseJson<ExecutionResult>(command.stdout);
       const identity = {
         workload_id: plan.bundle_verification.workload_id,
         bundle_id: plan.bundle_verification.bundle_id,
       };
+      const denied = admissionDenial(command.stdout);
+      if (denied) return { kind: "failure", ...identity, failure: denied };
+      const result = parseJson<ExecutionResult>(command.stdout);
       if (!result) {
         return {
           kind: "failure",
@@ -336,27 +580,90 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
     attributes: { "compute.contract": "1", "compute.executes": true },
     handler: ({ request }) => provider.run(request as ExecutionRequest),
   });
-  const providerInspect = defineCapability({
-    name: "compute.provider.inspect",
+  const pool = <K extends keyof ComputeProvider>(name: K): NonNullable<ComputeProvider[K]> => {
+    const operation = provider[name];
+    if (typeof operation !== "function") {
+      throw new Error(`the configured Compute provider does not support ${String(name)}`);
+    }
+    return (operation as (...args: never[]) => unknown).bind(provider) as NonNullable<ComputeProvider[K]>;
+  };
+  const providerList = defineCapability({
+    name: "compute.provider.list",
     version: 1,
-    description: "Inspect the selected Compute execution provider.",
-    input: providerSelectorSchema,
-    output: providerCapabilitiesSchema,
+    description: "List the caller-owned provider pool with discovery status and health.",
+    input: providerListInputSchema,
+    output: providerListResultSchema,
     effect: "observation",
     authorizationContract: { required: false, public: true },
     attributes: { "compute.contract": "1", "compute.executes": false },
-    handler: () => provider.capabilities(),
+    handler: async ({ refresh }) =>
+      (await pool("listProviders")(refresh ?? false)) as never,
+  });
+  const providerInspect = defineCapability({
+    name: "compute.provider.inspect",
+    version: 1,
+    description: "Inspect a provider: a pool member's validated descriptor, or local capabilities.",
+    input: providerSelectorSchema,
+    output: providerInspectResultSchema,
+    effect: "observation",
+    authorizationContract: { required: false, public: true },
+    attributes: { "compute.contract": "1", "compute.executes": false },
+    handler: async ({ provider: selected }) =>
+      (selected === undefined || typeof provider.inspectProvider !== "function"
+        ? await provider.capabilities()
+        : await pool("inspectProvider")(selected)) as never,
   });
   const providerCapabilities = defineCapability({
     name: "compute.provider.capabilities",
     version: 1,
-    description: "Describe local Compute provider capabilities.",
+    description: "Describe a provider's raw capability response.",
     input: providerSelectorSchema,
     output: providerCapabilitiesSchema,
     effect: "observation",
     authorizationContract: { required: false, public: true },
     attributes: { "compute.contract": "1", "compute.executes": false },
-    handler: () => provider.capabilities(),
+    handler: async ({ provider: selected }) =>
+      (selected === undefined || typeof provider.providerCapabilities !== "function"
+        ? await provider.capabilities()
+        : await pool("providerCapabilities")(selected)) as never,
+  });
+  const placementInspect = defineCapability({
+    name: "compute.placement.inspect",
+    version: 1,
+    description: "Evaluate which provider can satisfy a workload contract. Never executes.",
+    input: placementInspectInputSchema,
+    output: placementReportSchema,
+    effect: "observation",
+    authorizationContract: { required: false, public: true },
+    attributes: { "compute.contract": "1", "compute.executes": false },
+    handler: async ({ request, ...options }) =>
+      (await pool("inspectPlacement")(request as ExecutionRequest, options)) as never,
+  });
+  const poolRun = defineCapability({
+    name: "compute.pool.run",
+    version: 1,
+    description: "Place a workload on a compatible provider and execute it there, once.",
+    input: poolRunInputSchema,
+    output: poolRunResultSchema,
+    effect: "consequential",
+    authorization: ["compute.run"],
+    authorizationContract: { required: true, scopes: ["compute.run"] },
+    attributes: { "compute.contract": "1", "compute.executes": true },
+    handler: async ({ request, ...options }) =>
+      (await pool("poolRun")(request as ExecutionRequest, options)) as never,
+  });
+  const poolSubmit = defineCapability({
+    name: "compute.pool.submit",
+    version: 1,
+    description: "Place a workload on a compatible job-capable provider and submit a durable job.",
+    input: poolSubmitInputSchema,
+    output: jobValueSchema,
+    effect: "consequential",
+    authorization: ["compute.submit"],
+    authorizationContract: { required: true, scopes: ["compute.submit"] },
+    attributes: { "compute.contract": "1", "compute.executes": true },
+    handler: ({ request, ...options }) =>
+      pool("poolSubmit")(request as ExecutionRequest, options),
   });
   const providerRun = defineCapability({
     name: "compute.provider.run",
@@ -406,6 +713,53 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
     authorizationContract: { required: true, scopes: ["compute.receipt"] },
     handler: ({ job_id }) => provider.receipt(job_id),
   });
+  const policyInspect = defineCapability({
+    name: "compute.policy.inspect",
+    version: 1,
+    description: "Show the effective execution policy and its intersected sources.",
+    input: policyInspectInputSchema,
+    output: policyInspectResultSchema,
+    effect: "observation",
+    authorizationContract: { required: false, public: true },
+    attributes: { "compute.contract": "1", "compute.executes": false },
+    handler: async () => (await pool("inspectPolicy")()) as never,
+  });
+  const policyCheck = defineCapability({
+    name: "compute.policy.check",
+    version: 1,
+    description: "Decide whether policy admits a workload on a provider. Never executes.",
+    input: admissionInputSchema,
+    output: policyCheckResultSchema,
+    effect: "observation",
+    authorizationContract: { required: false, public: true },
+    attributes: { "compute.contract": "1", "compute.executes": false },
+    handler: async ({ request, ...options }) =>
+      (await pool("checkPolicy")(request as ExecutionRequest, options)) as never,
+  });
+  const policyExplain = defineCapability({
+    name: "compute.policy.explain",
+    version: 1,
+    description: "Explain every policy dimension of an admission decision. Never executes.",
+    input: admissionInputSchema,
+    output: policyExplainResultSchema,
+    effect: "observation",
+    authorizationContract: { required: false, public: true },
+    attributes: { "compute.contract": "1", "compute.executes": false },
+    handler: async ({ request, ...options }) =>
+      (await pool("explainPolicy")(request as ExecutionRequest, options)) as never,
+  });
+  const admission = defineCapability({
+    name: "compute.admission",
+    version: 1,
+    description: "Return the compute.admission@1 decision for a workload on a provider. Never executes.",
+    input: admissionInputSchema,
+    output: admissionDecisionSchema,
+    effect: "observation",
+    authorizationContract: { required: false, public: true },
+    attributes: { "compute.contract": "1", "compute.executes": false },
+    handler: async ({ request, ...options }) =>
+      (await pool("checkPolicy")(request as ExecutionRequest, options)).decision as never,
+  });
   return createApplication({
     application: {
       id: "dev.compute.provider.local",
@@ -414,7 +768,9 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
       description: "Local AppPort provider for portable Compute workloads",
     },
     capabilities: [
-      inspect, run, providerInspect, providerCapabilities, providerRun,
+      inspect, run, providerList, providerInspect, providerCapabilities, providerRun,
+      placementInspect, poolRun, poolSubmit,
+      policyInspect, policyCheck, policyExplain, admission,
       submit, status, cancel, result, jobReceipt,
     ],
     ...(options.authorizer ? { authorizer: options.authorizer } : {}),
@@ -444,6 +800,45 @@ function validateExecutionRequest(request: WorkloadExecutionRequest): string | u
     return "requested resources must match the workload requirements";
   }
   return undefined;
+}
+
+/** A denied admission printed by `compute run --json`: nothing executed. */
+function admissionDenial(stdout: string): { kind: ExecutionFailureKind; message: string } | undefined {
+  const value = parseJson<Record<string, unknown>>(stdout);
+  if (!value || "execution_id" in value || !value.admission) return undefined;
+  const decision = value.admission as {
+    admission_id?: string;
+    reasons?: Array<{ message: string; kind?: string }>;
+  };
+  const reasons = decision.reasons ?? [];
+  // Capability and policy stay distinct: a denial with only capability
+  // reasons is a capability failure, not a policy decision.
+  const capabilityOnly = reasons.length > 0 && reasons.every((reason) => reason.kind === "capability");
+  return {
+    kind: capabilityOnly ? "capability_denied" : "admission_denied",
+    message: `admission denied (${decision.admission_id ?? "unknown"}): ${
+      (decision.reasons ?? []).map((reason) => reason.message).join("; ")
+    }`,
+  };
+}
+
+function placementArgs(options: PlacementOptions): string[] {
+  return [
+    ...(options.provider ? ["--provider", options.provider] : []),
+    ...(options.refresh ? ["--refresh"] : []),
+    ...(options.distribution_id ? ["--distribution", options.distribution_id] : []),
+    ...(options.isolation ? ["--isolation", options.isolation] : []),
+  ];
+}
+
+function dispatchFailureKind(code: string): ExecutionFailureKind {
+  switch (code) {
+    case "placement_failed": return "placement_failed";
+    case "provider_unavailable": return "provider_unavailable";
+    case "evidence_invalid": return "evidence_invalid";
+    case "admission_denied": return "admission_denied";
+    default: return "provider_rejected";
+  }
 }
 
 function sameWorkload(left: WorkloadSpec, right: WorkloadSpec): boolean {

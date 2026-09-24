@@ -95,6 +95,11 @@ const failureKind = s.enum([
   "runtime_failure",
   "input_materialization_failure",
   "output_contract",
+  "placement_failed",
+  "provider_unavailable",
+  "provider_rejected",
+  "evidence_invalid",
+  "admission_denied",
 ] as const);
 
 const failure = s.object({ kind: failureKind, message: s.string() });
@@ -120,6 +125,19 @@ const providerIdentity = s.union([
   s.object({ kind: s.literal("local"), id: s.string() }),
   s.object({ kind: s.literal("remote"), id: s.string(), endpoint: s.string() }),
 ] as const);
+const selectionMode = s.enum(["explicit", "pool"] as const);
+const receiptPlacement = s.object({
+  placement_id: digest,
+  provider_id: s.string({ pattern: "^[A-Za-z0-9_-]{1,64}$" }),
+  provider_protocol: s.string(),
+  selection_mode: selectionMode,
+  selection_reason: s.object({
+    compatibility_result: s.literal("compatible"),
+    selection_priority: s.integer(),
+    ordering: s.string(),
+    compatible_candidates: s.integer({ minimum: 1 }),
+  }),
+});
 const receipt = s.object({
   receipt_version: s.literal("compute.receipt@1"),
   execution_id: s.string(),
@@ -127,6 +145,10 @@ const receipt = s.object({
   bundle: s.nullable(digest),
   provider: s.optional(providerIdentity),
   provider_protocol: s.optional(s.string()),
+  placement: s.optional(receiptPlacement),
+  policy_id: s.optional(digest),
+  admission_id: s.optional(digest),
+  admission_status: s.optional(s.literal("admitted")),
   distribution: s.object({ id: digest, platform: s.string(), manifest_version: s.string() }),
   runtime: s.object({
     declared: runtime, selected: runtime, observed: runtime, version: s.string(),
@@ -180,6 +202,11 @@ export const executionResultSchema = s.object({
     capsule_id: digest, file_count: s.integer({ minimum: 0 }), verified: s.boolean(),
   })),
   provider: s.optional(providerIdentity),
+  admission: s.optional(s.object({
+    policy_id: digest,
+    admission_id: digest,
+    admission_status: s.literal("admitted"),
+  })),
   receipt: s.optional(receipt),
 });
 
@@ -286,12 +313,121 @@ export const providerCapabilitiesSchema = s.object({
   distribution_id: s.optional(s.string()),
   max_concurrent_jobs: s.optional(s.integer({ minimum: 1 })),
   job_retention_seconds: s.optional(s.integer({ minimum: 0 })),
+  dependency_capsules: s.optional(s.array(digest)),
+  runtime_artifacts: s.optional(s.record(digest)),
+  max_timeout_ms: s.optional(s.integer({ minimum: 1 })),
+  max_memory_bytes: s.optional(s.integer({ minimum: 1 })),
+  policy: s.optional(s.object({}, { additionalProperties: true })),
   inventory: s.unknown(),
+});
+
+const providerId = s.string({ pattern: "^[A-Za-z0-9_-]{1,64}$" });
+const discoveryStatus = s.enum(["discovered", "cached", "stale", "invalid", "unavailable"] as const);
+const discoveryError = s.object({ code: s.string(), message: s.string() });
+
+/** A pool member's validated descriptor (or why it has none). */
+export const discoveryRecordSchema = s.object({
+  provider_id: providerId,
+  status: discoveryStatus,
+  descriptor: s.optional(s.object({}, { additionalProperties: true })),
+  error: s.optional(discoveryError),
+});
+
+export const providerInspectResultSchema = s.union([
+  providerCapabilitiesSchema,
+  discoveryRecordSchema,
+] as const);
+
+export const providerListInputSchema = s.object({ refresh: s.optional(s.boolean()) });
+
+export const providerListResultSchema = s.object({
+  providers: s.array(s.object({
+    provider_id: providerId,
+    kind: s.enum(["local", "remote"] as const),
+    endpoint: s.nullable(s.string()),
+    priority: s.integer(),
+    discovery: s.nullable(discoveryStatus),
+    health: s.nullable(s.enum(["healthy", "unhealthy", "unknown"] as const)),
+    capability_version: s.nullable(digest),
+    runtimes: s.nullable(s.record(s.string())),
+    error: s.nullable(discoveryError),
+  })),
+});
+
+/** Selection options shared by placement inspection and pool execution. */
+const placementOptions = {
+  provider: s.optional(providerId),
+  refresh: s.optional(s.boolean()),
+  distribution_id: s.optional(digest),
+  isolation: s.optional(isolationProfile),
+};
+
+export const placementInspectInputSchema = s.object({
+  request: executionRequestSchema,
+  submit: s.optional(s.boolean()),
+  ...placementOptions,
+});
+
+export const placementReportSchema = s.object({
+  placement_version: s.literal("compute.placement@1"),
+  placement_id: digest,
+  outcome: s.enum(["placed", "placement_failed"] as const),
+  selection_mode: selectionMode,
+  requested_provider: s.optional(providerId),
+  requirements: s.object({}, { additionalProperties: true }),
+  selection_policy: s.object({
+    ordering: s.array(s.string()),
+    require_healthy: s.boolean(),
+    allow_stale_capabilities: s.boolean(),
+  }),
+  policy_id: digest,
+  admission: s.object({}, { additionalProperties: true }),
+  providers: s.array(s.object({}, { additionalProperties: true })),
+  compatible_providers: s.array(providerId),
+  incompatible_providers: s.array(providerId),
+  excluded_providers: s.array(providerId),
+  selected: s.optional(s.object({}, { additionalProperties: true })),
+  failure: s.optional(s.object({ code: s.string(), message: s.string() })),
+  explanation: s.object({
+    requires: s.array(s.string()),
+    considered: s.array(s.string()),
+    selection: s.string(),
+  }),
+});
+
+export const poolRunInputSchema = s.object({ request: executionRequestSchema, ...placementOptions });
+export const poolSubmitInputSchema = s.object({
+  request: executionRequestSchema,
+  idempotency_key: s.optional(s.string({ minLength: 1, maxLength: 256 })),
+  ...placementOptions,
 });
 
 export const jobSubmissionInputSchema = s.object({ request: executionRequestSchema });
 export const jobAccessInputSchema = s.object({ job_id: s.string({ pattern: "^job_[0-9a-f]{64}$" }) });
 export const jobValueSchema = s.unknown();
+
+/** `compute.pool.run` adds the placement decision to every outcome. */
+export const poolRunResultSchema = s.union([
+  s.object({
+    kind: s.literal("execution"),
+    workload_id: s.string(),
+    bundle_id: s.optional(s.string()),
+    result: executionResultSchema,
+    receipt: receipt,
+    isolation: s.optional(isolationEvidence),
+    placement: placementReportSchema,
+  }),
+  s.object({
+    kind: s.literal("failure"),
+    workload_id: s.optional(s.string()),
+    bundle_id: s.optional(s.string()),
+    failure,
+    result: s.optional(executionResultSchema),
+    receipt: s.optional(receipt),
+    isolation: s.optional(isolationEvidence),
+    placement: s.optional(placementReportSchema),
+  }),
+] as const);
 
 export const runResultSchema = s.union([
   s.object({
@@ -312,3 +448,65 @@ export const runResultSchema = s.union([
     isolation: s.optional(isolationEvidence),
   }),
 ] as const);
+
+const admissionReason = s.object({
+  code: s.string(),
+  kind: s.enum(["contract", "capability", "policy"] as const),
+  dimension: s.string(),
+  requested: s.unknown(),
+  allowed: s.unknown(),
+  message: s.string(),
+});
+
+/** A compute.admission@1 decision. Compute defines its semantics. */
+export const admissionDecisionSchema = s.object({
+  admission_version: s.literal("compute.admission@1"),
+  admission_id: digest,
+  status: s.enum(["admitted", "denied"] as const),
+  admitted: s.boolean(),
+  policy_id: digest,
+  provider: s.object({}, { additionalProperties: true }),
+  capability: s.object({}, { additionalProperties: true }),
+  reasons: s.array(admissionReason),
+  contract: s.object({}, { additionalProperties: true }),
+});
+
+export const policyInspectInputSchema = s.object({});
+
+export const policyInspectResultSchema = s.object({
+  policy_id: digest,
+  policy: s.object({}, { additionalProperties: true }),
+  sources: s.array(s.object({
+    kind: s.enum(["baseline", "local", "server", "provider", "explicit"] as const),
+    policy_id: digest,
+    label: s.optional(s.string()),
+  })),
+  baseline: s.object({}, { additionalProperties: true }),
+});
+
+export const admissionInputSchema = s.object({
+  request: executionRequestSchema,
+  provider: s.optional(providerId),
+  isolation: s.optional(isolationProfile),
+});
+
+export const policyCheckResultSchema = s.object({
+  policy: s.array(s.object({}, { additionalProperties: true })),
+  policy_id: digest,
+  requirements: s.object({}, { additionalProperties: true }),
+  provider: s.object({}, { additionalProperties: true }),
+  admission: s.object({
+    admission_id: digest,
+    status: s.enum(["admitted", "denied"] as const),
+    admitted: s.boolean(),
+    capability: s.object({}, { additionalProperties: true }),
+  }),
+  reasons: s.array(admissionReason),
+  effective_policy: s.object({}, { additionalProperties: true }),
+  decision: admissionDecisionSchema,
+});
+
+export const policyExplainResultSchema = s.object({
+  evidence: policyCheckResultSchema,
+  explanation: s.array(s.string()),
+});

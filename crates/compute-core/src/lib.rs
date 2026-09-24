@@ -21,7 +21,7 @@ pub use dependencies::*;
 mod jobs;
 pub use jobs::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeKind {
     Wasm,
@@ -478,7 +478,10 @@ impl WorkloadSpec {
     /// Resolve declared files relative to the workload file, producing the
     /// existing adapter-facing execution request.
     pub fn materialize(&self, workload_file: &Path) -> Result<ExecutionRequest> {
-        let base = workload_file.parent().unwrap_or_else(|| Path::new("."));
+        let base = workload_file
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         self.materialize_from(base)
     }
 
@@ -667,7 +670,10 @@ pub struct BundleInspection {
 impl WorkloadBundle {
     pub fn create(workload_file: &Path) -> Result<Self> {
         let workload = WorkloadSpec::load(workload_file)?;
-        let base = workload_file.parent().unwrap_or_else(|| Path::new("."));
+        let base = workload_file
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         Self::create_from(workload, base)
     }
 
@@ -1322,11 +1328,25 @@ pub struct ExecutionResult {
     /// not set this; provider implementations bind it before returning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderIdentity>,
+    /// Admission under which this execution ran. Present whenever policy
+    /// admission preceded execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<ExecutionAdmission>,
     /// Verifiable evidence attached by the orchestration layer. Runtime
     /// adapters leave this empty because they do not own distribution or
     /// portable workload identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<ExecutionReceipt>,
+}
+
+/// The admission decision an execution ran under: the policy snapshot's
+/// identity, the decision's identity, and its status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionAdmission {
+    pub policy_id: String,
+    pub admission_id: String,
+    pub admission_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3053,6 +3073,7 @@ mod tests {
             isolation: None,
             dependencies: None,
             provider: None,
+            admission: None,
             receipt: None,
         }
     }

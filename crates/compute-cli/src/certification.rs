@@ -280,6 +280,17 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
         config.job_store = remote_job_store_path;
         let _ = compute_provider::serve_listener(remote_listener, config).await;
     });
+    let placement_harness = match compute.installed_distribution_identity() {
+        Ok(distribution) => {
+            crate::placement_certification::PlacementHarness::start(
+                &remote_endpoint,
+                distribution.id,
+            )
+            .await
+        }
+        Err(error) => Err(error.to_string()),
+    };
+    let mut placement_results: Vec<(RuntimeKind, Result<(), String>)> = vec![];
     let remote_provider = RemoteProvider::new(remote_endpoint);
     let mut certified_bundle: Option<CertifiedArtifact> = None;
     for kind in RuntimeKind::ALL {
@@ -303,6 +314,13 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
         };
         match result {
             Ok(artifact) => {
+                placement_results.push((
+                    kind,
+                    match &placement_harness {
+                        Ok(harness) => harness.certify_runtime(kind, &artifact.bundle).await,
+                        Err(error) => Err(error.clone()),
+                    },
+                ));
                 let resource_controls = artifact.resources.clone();
                 if certified_bundle.is_none() {
                     certified_bundle = Some(artifact);
@@ -354,7 +372,74 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
             }),
         }
     }
+    let placement_failures = match (&placement_harness, &certified_bundle) {
+        (Ok(harness), Some(artifact)) => harness.certify_failures(&artifact.bundle).await,
+        (Err(error), _) => Err(error.clone()),
+        (_, None) => Err("no certified bundle was available for placement".into()),
+    };
+    drop(placement_harness);
     remote_server.abort();
+    let placement_errors = placement_results
+        .iter()
+        .filter_map(|(kind, result)| {
+            result
+                .as_ref()
+                .err()
+                .map(|error| format!("{kind}: {error}"))
+        })
+        .collect::<Vec<_>>();
+    if placement_results.len() == RuntimeKind::ALL.len() && placement_errors.is_empty() {
+        pass_check(
+            &mut report,
+            "provider_pool",
+            "local and remote providers with different capabilities formed one pool; every runtime executed on its selected provider with placement bound into a verified receipt",
+        );
+        pass_check(
+            &mut report,
+            "placement",
+            "requirements, capability discovery, compatibility, deterministic selection, execution, and receipt agreed for every runtime; incompatible explicit providers failed closed",
+        );
+    } else {
+        let detail = if placement_errors.is_empty() {
+            "placement was not certified for every runtime".to_string()
+        } else {
+            placement_errors.join("; ")
+        };
+        fail_check(&mut report, "provider_pool", detail.clone());
+        fail_check(&mut report, "placement", detail);
+    }
+    match placement_failures {
+        Ok(detail) => pass_check(&mut report, "placement_failures", &detail),
+        Err(error) => fail_check(&mut report, "placement_failures", error),
+    }
+    match &certified_bundle {
+        Some(artifact) => {
+            for (name, result) in crate::policy_certification::certify(&artifact.bundle)
+                .await
+                .checks
+            {
+                match result {
+                    Ok(detail) => pass_check(&mut report, name, &detail),
+                    Err(error) => fail_check(&mut report, name, error),
+                }
+            }
+        }
+        None => {
+            for name in [
+                "policy",
+                "admission",
+                "placement_policy",
+                "remote_job_policy",
+                "receipt_policy",
+            ] {
+                fail_check(
+                    &mut report,
+                    name,
+                    "no certified bundle was available for policy certification".into(),
+                );
+            }
+        }
+    }
     if report
         .runtimes
         .iter()
