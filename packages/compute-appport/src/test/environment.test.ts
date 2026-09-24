@@ -23,6 +23,9 @@ const capabilities = [
   "compute.environment.list", "compute.environment.inspect", "compute.environment.status",
   "compute.environment.create", "compute.environment.start", "compute.environment.stop",
   "compute.environment.restart", "compute.environment.project.add", "compute.environment.project.remove",
+  "compute.project.list", "compute.project.inspect", "compute.project.start", "compute.project.stop",
+  "compute.project.restart", "compute.deployment.inspect", "compute.deployment.create",
+  "compute.deployment.promote",
 ];
 
 function session(permissions: string[]): Session {
@@ -115,7 +118,9 @@ test("environment capabilities drive the daemon through the Compute API", async 
   const app = createComputeApplication({
     computeBinary, daemon: endpoint, daemonToken: "secret", authorizer: permissionAuthorizer(),
   });
-  const all = session(["compute.environment.read", ...capabilities]);
+  const all = session([
+    "compute.environment.read", "compute.project.read", "compute.deployment.read", ...capabilities,
+  ]);
 
   // AppPort authorization comes first: no scope, no change.
   const unauthorized = await app.handleRequest(
@@ -150,6 +155,58 @@ test("environment capabilities drive the daemon through the Compute API", async 
   ));
   assert.equal(inspected.environment_id, status.environment_id);
   assert.deepEqual(inspected.projects.map((item: any) => item.name), ["app"]);
+
+  // Projects, deployments, and promotion through the same API.
+  output(await app.handleRequest(envelope("compute.environment.create", { name: "production" }), { session: all }));
+  const projects = output<any[]>(await app.handleRequest(envelope("compute.project.list", {}), { session: all }));
+  assert.deepEqual(projects.map((item) => item.name), ["app"]);
+  const inStaging = output<any>(await app.handleRequest(
+    envelope("compute.project.inspect", { project: "app", environment: "staging" }), { session: all },
+  ));
+  assert.equal(inStaging.environment, "staging");
+  assert.equal(inStaging.deployment.status, "healthy");
+  const redeployed = output<any>(await app.handleRequest(envelope("compute.deployment.create", {
+    project: "app", environment: "staging", revision: "rev-1",
+  }), { session: all }));
+  assert.equal(redeployed.previous, inStaging.deployment.deployment_id);
+  const deployment = output<any>(await app.handleRequest(
+    envelope("compute.deployment.inspect", { deployment: redeployed.deployment_id }), { session: all },
+  ));
+  assert.ok(deployment.workloads.every((workload: any) => workload.admitted && workload.admission_id));
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const current = output<any>(await app.handleRequest(
+      envelope("compute.deployment.inspect", { deployment: redeployed.deployment_id }), { session: all },
+    ));
+    if (current.status === "healthy") break;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+  }
+  const promoted = output<any>(await app.handleRequest(envelope("compute.deployment.promote", {
+    project: "app", from: "staging", to: "production",
+  }), { session: all }));
+  assert.equal(promoted.environment, "production");
+  assert.equal(promoted.revision_digest, deployment.revision_digest, "the exact revision");
+  assert.equal(promoted.promoted_from, redeployed.deployment_id);
+  const across = output<any>(await app.handleRequest(
+    envelope("compute.project.inspect", { project: "app" }), { session: all },
+  ));
+  assert.deepEqual(across.environments.map((item: any) => item.environment), ["production", "staging"]);
+  assert.equal(across.revisions.length, 1);
+  const stoppedProject = output<any>(await app.handleRequest(
+    envelope("compute.project.stop", { project: "app", environment: "production" }), { session: all },
+  ));
+  assert.equal(stoppedProject.desired_state, "stopped");
+  const inStagingAfter = output<any>(await app.handleRequest(
+    envelope("compute.project.inspect", { project: "app", environment: "staging" }), { session: all },
+  ));
+  assert.equal(inStagingAfter.desired_state, "running", "stopping production leaves staging");
+  output(await app.handleRequest(
+    envelope("compute.project.start", { project: "app", environment: "production" }), { session: all },
+  ));
+  const denied = await app.handleRequest(
+    envelope("compute.deployment.promote", { project: "app", from: "staging", to: "production" }),
+    { session: session(["compute.deployment.read"]) },
+  );
+  assert.equal(denied.ok, false, "promotion requires its scope");
 
   const stopped = output<any>(await app.handleRequest(
     envelope("compute.environment.stop", { environment: "staging" }), { session: all },

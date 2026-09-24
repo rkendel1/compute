@@ -1,5 +1,10 @@
 import { errors } from "@appport/protocol";
 import type {
+  DeploymentCreateInput,
+  DeploymentPromoteInput,
+  DeploymentView,
+  ProjectDetail,
+  ProjectSummary,
   EnvironmentCreateInput,
   EnvironmentSummary,
   EnvironmentView,
@@ -20,6 +25,13 @@ export interface EnvironmentApi {
   environmentLifecycle(environment: string, action: "start" | "stop" | "restart"): Promise<EnvironmentView>;
   addProject(environment: string, project: ProjectAddInput["project"]): Promise<ProjectView>;
   removeProject(environment: string, project: string): Promise<{ removed: string }>;
+  listProjects(): Promise<ProjectSummary[]>;
+  /** A project in one environment, or across every environment. */
+  inspectProject(project: string, environment?: string): Promise<ProjectView | ProjectDetail>;
+  projectLifecycle(environment: string, project: string, action: "start" | "stop" | "restart"): Promise<ProjectView>;
+  inspectDeployment(deployment: string): Promise<DeploymentView>;
+  createDeployment(request: DeploymentCreateInput): Promise<DeploymentView>;
+  promoteDeployment(request: DeploymentPromoteInput): Promise<DeploymentView>;
 }
 
 export const DEFAULT_DAEMON_ENDPOINT = "http://127.0.0.1:8787";
@@ -74,6 +86,32 @@ export class ComputeDaemonClient implements EnvironmentApi {
 
   removeProject(environment: string, project: string): Promise<{ removed: string }> {
     return this.request("DELETE", `/environments/${segment(environment)}/projects/${segment(project)}`);
+  }
+
+  listProjects(): Promise<ProjectSummary[]> {
+    return this.request("GET", "/projects");
+  }
+
+  inspectProject(project: string, environment?: string): Promise<ProjectView | ProjectDetail> {
+    return environment === undefined
+      ? this.request("GET", `/projects/${segment(project)}`)
+      : this.request("GET", `/environments/${segment(environment)}/projects/${segment(project)}`);
+  }
+
+  projectLifecycle(environment: string, project: string, action: "start" | "stop" | "restart"): Promise<ProjectView> {
+    return this.request("POST", `/environments/${segment(environment)}/projects/${segment(project)}/${action}`);
+  }
+
+  inspectDeployment(deployment: string): Promise<DeploymentView> {
+    return this.request("GET", `/deployments/${segment(deployment)}`);
+  }
+
+  createDeployment(request: DeploymentCreateInput): Promise<DeploymentView> {
+    return this.request("POST", "/deployments", request);
+  }
+
+  promoteDeployment(request: DeploymentPromoteInput): Promise<DeploymentView> {
+    return this.request("POST", "/deployments/promote", request);
   }
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {

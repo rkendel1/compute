@@ -37,6 +37,15 @@ import {
   projectRemoveInputSchema,
   projectRemoveResultSchema,
   projectViewSchema,
+  projectListInputSchema,
+  projectListResultSchema,
+  projectInspectInputSchema,
+  projectInspectResultSchema,
+  projectSelectorSchema,
+  deploymentViewSchema,
+  deploymentInspectInputSchema,
+  deploymentCreateInputSchema,
+  deploymentPromoteInputSchema,
 } from "./schemas.js";
 import { ComputeDaemonClient, toAppPortError, type EnvironmentApi } from "./environment.js";
 import type {
@@ -856,6 +865,62 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
     attributes: { ...environmentAttributes, "compute.executes": false },
     handler: ({ environment, project }) => api(() => environments.removeProject(environment, project)),
   });
+  const projectList = defineCapability({
+    name: "compute.project.list", version: 1,
+    description: "List projects and every environment each runs in.",
+    input: projectListInputSchema, output: projectListResultSchema, effect: "observation",
+    authorization: ["compute.project.read"],
+    authorizationContract: { required: true, scopes: ["compute.project.read"] },
+    attributes: { ...environmentAttributes, "compute.executes": false },
+    handler: () => api(() => environments.listProjects()),
+  });
+  const projectInspect = defineCapability({
+    name: "compute.project.inspect", version: 1,
+    description: "Inspect a project in one environment, or its revisions and deployments across all of them.",
+    input: projectInspectInputSchema, output: projectInspectResultSchema, effect: "observation",
+    authorization: ["compute.project.read"],
+    authorizationContract: { required: true, scopes: ["compute.project.read"] },
+    attributes: { ...environmentAttributes, "compute.executes": false },
+    handler: ({ project, environment }) => api(() => environments.inspectProject(project, environment)),
+  });
+  const projectLifecycle = (action: "start" | "stop" | "restart", description: string) => defineCapability({
+    name: `compute.project.${action}`, version: 1, description,
+    input: projectSelectorSchema, output: projectViewSchema, effect: "consequential",
+    authorization: [`compute.project.${action}`],
+    authorizationContract: { required: true, scopes: [`compute.project.${action}`] },
+    attributes: { ...environmentAttributes, "compute.executes": action !== "stop" },
+    handler: ({ environment, project }) => api(() => environments.projectLifecycle(environment, project, action)),
+  });
+  const projectStart = projectLifecycle("start", "Run a project in one environment. Its other environments are not affected.");
+  const projectStop = projectLifecycle("stop", "Stop a project in one environment. Sibling projects and its other environments are not affected.");
+  const projectRestart = projectLifecycle("restart", "Restart a project's services in one environment only.");
+  const deploymentInspect = defineCapability({
+    name: "compute.deployment.inspect", version: 1,
+    description: "Inspect a deployment: its revision, status, and admission and placement evidence.",
+    input: deploymentInspectInputSchema, output: deploymentViewSchema, effect: "observation",
+    authorization: ["compute.deployment.read"],
+    authorizationContract: { required: true, scopes: ["compute.deployment.read"] },
+    attributes: { ...environmentAttributes, "compute.executes": false },
+    handler: ({ deployment }) => api(() => environments.inspectDeployment(deployment)),
+  });
+  const deploymentCreate = defineCapability({
+    name: "compute.deployment.create", version: 1,
+    description: "Deploy a registered, immutable revision to an environment. Every workload is admitted and placed first; a failed deployment keeps the current one.",
+    input: deploymentCreateInputSchema, output: deploymentViewSchema, effect: "consequential",
+    authorization: ["compute.deployment.create"],
+    authorizationContract: { required: true, scopes: ["compute.deployment.create"] },
+    attributes: { ...environmentAttributes, "compute.executes": true },
+    handler: (request) => api(() => environments.createDeployment(request)),
+  });
+  const deploymentPromote = defineCapability({
+    name: "compute.deployment.promote", version: 1,
+    description: "Deploy the exact revision current in one environment to another. Nothing is rebuilt.",
+    input: deploymentPromoteInputSchema, output: deploymentViewSchema, effect: "consequential",
+    authorization: ["compute.deployment.promote"],
+    authorizationContract: { required: true, scopes: ["compute.deployment.promote"] },
+    attributes: { ...environmentAttributes, "compute.executes": true },
+    handler: (request) => api(() => environments.promoteDeployment(request)),
+  });
   return createApplication({
     application: {
       id: "dev.compute.provider.local",
@@ -870,6 +935,8 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
       submit, status, cancel, result, jobReceipt,
       environmentList, environmentInspect, environmentStatus, environmentCreate,
       environmentStart, environmentStop, environmentRestart, projectAdd, projectRemove,
+      projectList, projectInspect, projectStart, projectStop, projectRestart,
+      deploymentInspect, deploymentCreate, deploymentPromote,
     ],
     ...(options.authorizer ? { authorizer: options.authorizer } : {}),
     mode: options.mode ?? "development",

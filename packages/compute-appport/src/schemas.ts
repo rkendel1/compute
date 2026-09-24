@@ -530,8 +530,10 @@ const workloadView = s.object({
   desired_state: desiredState,
   actual_state: actualState,
   health,
+  restart: s.enum(["never", "on_failure"] as const),
   runtime,
   bundle_id: digest,
+  deployment_id: s.string({ pattern: "^dep_[0-9a-f]+$" }),
   execution_id: s.optional(s.string()),
   ports: s.array(s.object({ name: s.string(), logical: s.integer(), host: s.integer() })),
   restarts: s.integer({ minimum: 0 }),
@@ -559,16 +561,38 @@ const workloadView = s.object({
   log_directory: s.optional(s.string()),
 });
 
+const deploymentStatus = s.enum([
+  "queued", "admitted", "placed", "starting", "healthy", "failed", "stopped", "superseded",
+] as const);
+const deploymentId = s.string({ pattern: "^dep_[0-9a-f]+$" });
+const deploymentSummary = s.object({
+  deployment_id: deploymentId,
+  status: deploymentStatus,
+  revision: s.string(),
+  created_at: timestamp,
+  updated_at: timestamp,
+  promoted_from: s.optional(deploymentId),
+});
+
+/** A project as it is in one environment. */
 export const projectViewSchema = s.object({
   project_id: s.string({ pattern: "^prj_[0-9a-f]+$" }),
   name,
+  environment: name,
+  environment_id: s.string({ pattern: "^env_[0-9a-f]+$" }),
   revision: s.string(),
-  revision_digest: digest,
+  revision_id: s.string(),
+  revision_digest: s.string(),
   source: s.optional(s.string()),
   desired_state: desiredState,
   actual_state: actualState,
   health,
+  deployment: s.optional(deploymentSummary),
   deployed_at: timestamp,
+  config: configuration,
+  workload_count: s.integer({ minimum: 0 }),
+  service_count: s.integer({ minimum: 0 }),
+  provider: s.string(),
   workloads: s.array(workloadView),
   disk_bytes: s.integer({ minimum: 0 }),
 });
@@ -583,7 +607,10 @@ export const environmentViewSchema = s.object({
   created_at: timestamp,
   policy_id: digest,
   provider: s.optional(s.string()),
+  config: configuration,
   project_count: s.integer({ minimum: 0 }),
+  workload_count: s.integer({ minimum: 0 }),
+  service_count: s.integer({ minimum: 0 }),
   projects: s.array(projectViewSchema),
   disk_bytes: s.integer({ minimum: 0 }),
 });
@@ -596,6 +623,9 @@ export const environmentListResultSchema = s.array(s.object({
   actual_state: actualState,
   health,
   project_count: s.integer({ minimum: 0 }),
+  workload_count: s.integer({ minimum: 0 }),
+  service_count: s.integer({ minimum: 0 }),
+  provider: s.string(),
 }));
 
 /** An environment name or ID. */
@@ -638,3 +668,108 @@ export const projectRemoveInputSchema = s.object({
 });
 
 export const projectRemoveResultSchema = s.object({ removed: s.string() });
+
+// Projects across environments, and deployments.
+
+const projectPlacement = s.object({
+  environment: name,
+  revision: s.string(),
+  revision_id: s.string(),
+  desired_state: desiredState,
+  actual_state: actualState,
+  health,
+  deployment: s.optional(deploymentSummary),
+});
+
+const projectSummary = {
+  project_id: s.string({ pattern: "^prj_[0-9a-f]+$" }),
+  name,
+  source: s.optional(s.string()),
+  created_at: timestamp,
+  revision_count: s.integer({ minimum: 0 }),
+  latest_revision: s.optional(s.string()),
+  environments: s.array(projectPlacement),
+};
+
+export const projectListInputSchema = s.object({});
+export const projectListResultSchema = s.array(s.object(projectSummary));
+
+const revisionView = s.object({
+  revision_id: s.string({ pattern: "^rev_[0-9a-f]+$" }),
+  project: name,
+  revision: s.string(),
+  revision_digest: digest,
+  source: s.optional(s.string()),
+  workloads: s.array(s.object({}, { additionalProperties: true })),
+  created_at: timestamp,
+});
+
+const deploymentWorkload = s.object({
+  name,
+  kind: workloadKind,
+  bundle_id: digest,
+  admitted: s.boolean(),
+  policy_id: s.optional(digest),
+  admission_id: s.optional(digest),
+  placement_id: s.optional(digest),
+  provider: s.optional(s.string()),
+  reasons: s.optional(s.array(s.string())),
+});
+
+/** A compute.state@1 deployment, with its admission and placement evidence. */
+export const deploymentViewSchema = s.object({
+  deployment_id: deploymentId,
+  environment_id: s.string({ pattern: "^env_[0-9a-f]+$" }),
+  environment: name,
+  project_id: s.string({ pattern: "^prj_[0-9a-f]+$" }),
+  project: name,
+  revision_id: s.string({ pattern: "^rev_[0-9a-f]+$" }),
+  revision: s.string(),
+  revision_digest: digest,
+  status: deploymentStatus,
+  promoted_from: s.optional(deploymentId),
+  previous: s.optional(deploymentId),
+  workloads: s.array(deploymentWorkload),
+  failure: s.optional(s.string()),
+  receipt_ids: s.array(s.string()),
+  created_at: timestamp,
+  updated_at: timestamp,
+});
+
+/** A project in one environment, or across all of them. */
+export const projectInspectInputSchema = s.object({
+  project: name,
+  environment: s.optional(s.string({ minLength: 1 })),
+});
+export const projectInspectResultSchema = s.union([
+  projectViewSchema,
+  s.object({
+    ...projectSummary,
+    revisions: s.array(revisionView),
+    deployments: s.array(deploymentViewSchema),
+  }),
+] as const);
+
+export const projectSelectorSchema = s.object({
+  project: name,
+  environment: s.string({ minLength: 1 }),
+});
+
+export const deploymentInspectInputSchema = s.object({ deployment: deploymentId });
+
+export const deploymentCreateInputSchema = s.object({
+  project: name,
+  environment: s.string({ minLength: 1 }),
+  /** A registered revision label or rev_ ID; defaults to the latest. */
+  revision: s.optional(s.string({ minLength: 1 })),
+  config: s.optional(configuration),
+  desired_state: s.optional(desiredState),
+});
+
+export const deploymentPromoteInputSchema = s.object({
+  project: name,
+  from: s.string({ minLength: 1 }),
+  to: s.string({ minLength: 1 }),
+  allow_unhealthy: s.optional(s.boolean()),
+  config: s.optional(configuration),
+});

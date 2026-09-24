@@ -401,8 +401,10 @@ export interface EnvironmentWorkloadView {
   desired_state: DesiredState;
   actual_state: ActualState;
   health: Health;
+  restart: "never" | "on_failure";
   runtime: RuntimeKind;
   bundle_id: string;
+  deployment_id: string;
   execution_id?: string;
   /** Logical project ports and the host ports the environment bound them to. */
   ports: Array<{ name: string; logical: number; host: number }>;
@@ -418,18 +420,120 @@ export interface EnvironmentWorkloadView {
   log_directory?: string;
 }
 
+export type DeploymentStatus =
+  | "queued" | "admitted" | "placed" | "starting" | "healthy" | "failed" | "stopped" | "superseded";
+
+export interface DeploymentSummary {
+  deployment_id: string;
+  status: DeploymentStatus;
+  revision: string;
+  created_at: string;
+  updated_at: string;
+  promoted_from?: string;
+}
+
+/** A project as it is in one environment. */
 export interface ProjectView {
   project_id: string;
   name: string;
+  environment: string;
+  environment_id: string;
   revision: string;
+  revision_id: string;
   revision_digest: string;
   source?: string;
   desired_state: DesiredState;
   actual_state: ActualState;
   health: Health;
+  deployment?: DeploymentSummary;
   deployed_at: string;
+  config: Record<string, string>;
+  workload_count: number;
+  service_count: number;
+  provider: string;
   workloads: EnvironmentWorkloadView[];
   disk_bytes: number;
+}
+
+export interface ProjectPlacement {
+  environment: string;
+  revision: string;
+  revision_id: string;
+  desired_state: DesiredState;
+  actual_state: ActualState;
+  health: Health;
+  deployment?: DeploymentSummary;
+}
+
+/** A project across every environment it is in. */
+export interface ProjectSummary {
+  project_id: string;
+  name: string;
+  source?: string;
+  created_at: string;
+  revision_count: number;
+  latest_revision?: string;
+  environments: ProjectPlacement[];
+}
+
+export interface RevisionView {
+  revision_id: string;
+  project: string;
+  revision: string;
+  revision_digest: string;
+  source?: string;
+  workloads: Array<Record<string, unknown>>;
+  created_at: string;
+}
+
+export interface DeploymentView {
+  deployment_id: string;
+  environment_id: string;
+  environment: string;
+  project_id: string;
+  project: string;
+  revision_id: string;
+  revision: string;
+  revision_digest: string;
+  status: DeploymentStatus;
+  promoted_from?: string;
+  previous?: string;
+  workloads: Array<{
+    name: string;
+    kind: EnvironmentWorkloadKind;
+    bundle_id: string;
+    admitted: boolean;
+    policy_id?: string;
+    admission_id?: string;
+    placement_id?: string;
+    provider?: string;
+    reasons?: string[];
+  }>;
+  failure?: string;
+  receipt_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectDetail extends ProjectSummary {
+  revisions: RevisionView[];
+  deployments: DeploymentView[];
+}
+
+export interface DeploymentCreateInput {
+  project: string;
+  environment: string;
+  revision?: string | undefined;
+  config?: Record<string, string> | undefined;
+  desired_state?: DesiredState | undefined;
+}
+
+export interface DeploymentPromoteInput {
+  project: string;
+  from: string;
+  to: string;
+  allow_unhealthy?: boolean | undefined;
+  config?: Record<string, string> | undefined;
 }
 
 export interface EnvironmentView {
@@ -443,7 +547,10 @@ export interface EnvironmentView {
   /** The environment's effective policy: daemon ∩ environment ∩ baseline. */
   policy_id: string;
   provider?: string;
+  config: Record<string, string>;
   project_count: number;
+  workload_count: number;
+  service_count: number;
   projects: ProjectView[];
   disk_bytes: number;
 }
@@ -455,6 +562,9 @@ export interface EnvironmentSummary {
   actual_state: ActualState;
   health: Health;
   project_count: number;
+  workload_count: number;
+  service_count: number;
+  provider: string;
 }
 
 export interface EnvironmentCreateInput {
