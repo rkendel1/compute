@@ -122,6 +122,7 @@ app compute {
     deployment_id: text?
     policy_id: text?
     admission_id: text?
+    artifact_digest: text?
     created_at: datetime
     index execution_id using hash(execution_id)
     index receipt_id using hash(receipt_id)

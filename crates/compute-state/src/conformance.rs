@@ -302,6 +302,7 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
         name: "api".into(),
         kind: WorkloadKind::Service,
         bundle_id: "sha256:0".into(),
+        artifact: "sha256:3".into(),
         workload_identity: "sha256:1".into(),
         runtime: "python".into(),
         ports: vec![PortSpec {
@@ -436,6 +437,7 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             deployment_id: None,
             policy_id: Some("sha256:p".into()),
             admission_id: Some("sha256:a".into()),
+            artifact_digest: Some("sha256:d".into()),
             created_at: now,
         },
     )

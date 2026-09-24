@@ -3,26 +3,22 @@
 //! Project = software. Environment = a deployed instance of software.
 //! Workload = a service or task within a project in an environment.
 //! Execution = one invocation of a workload.
+//!
+//! Durable records live in `compute-state`; this module defines what
+//! clients submit and the live states the daemon observes.
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
 use compute_policy::Policy;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+
+pub use compute_state::{
+    DeploymentStatus, DesiredState, PortBinding, PortSpec, RestartPolicy, WorkloadKind,
+};
 
 use crate::EnvironmentError;
 
 pub const ENVIRONMENT_VERSION: &str = "compute.environment@1";
-
-/// What the operator wants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum DesiredState {
-    #[default]
-    Running,
-    Stopped,
-}
 
 /// What Compute observes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,44 +56,6 @@ impl ActualState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkloadKind {
-    /// Long-lived: an API, a worker, a web server. Runs until stopped.
-    Service,
-    /// Runs to completion on request: build, test, migration, lint.
-    Task,
-}
-
-impl WorkloadKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Service => "service",
-            Self::Task => "task",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum RestartPolicy {
-    /// A service that exits stays down until explicitly started.
-    #[default]
-    Never,
-    /// A service that exits unsuccessfully is started again after a delay.
-    OnFailure,
-}
-
-/// A logical port. The environment layer chooses the host binding and
-/// passes it to the workload as `COMPUTE_PORT_<NAME>` (and `PORT` when the
-/// workload declares exactly one port).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PortSpec {
-    pub name: String,
-    pub port: u16,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkloadDefinition {
@@ -116,6 +74,20 @@ pub struct WorkloadDefinition {
     pub desired_state: DesiredState,
 }
 
+/// Immutable project content: a revision label and its workloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevisionDefinition {
+    /// Operator-supplied label, such as a commit. A label always names the
+    /// same content.
+    pub revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub workloads: Vec<WorkloadDefinition>,
+}
+
+/// A revision plus how to run it in one environment: the shape
+/// `compute project add` and manifests submit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectDefinition {
@@ -131,6 +103,16 @@ pub struct ProjectDefinition {
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     pub workloads: Vec<WorkloadDefinition>,
+}
+
+impl ProjectDefinition {
+    pub fn revision_definition(&self) -> RevisionDefinition {
+        RevisionDefinition {
+            revision: self.revision.clone(),
+            source: self.source.clone(),
+            workloads: self.workloads.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,50 +134,59 @@ pub struct EnvironmentDefinition {
     pub provider: Option<String>,
 }
 
-/// Stored workload: definition without bundle bytes, plus identities.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Deploy a registered revision of a project to an environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub struct WorkloadRecord {
-    pub workload_id: String,
-    pub name: String,
-    pub kind: WorkloadKind,
-    pub bundle_id: String,
-    pub workload_identity: String,
-    pub ports: Vec<PortSpec>,
-    pub restart: RestartPolicy,
-    pub desired_state: DesiredState,
+pub struct DeployRequest {
+    pub project: String,
+    pub environment: String,
+    /// A revision label or `rev_` ID. Defaults to the latest revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Replace the project's configuration in this environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<BTreeMap<String, String>>,
+    /// The project's desired state after deploying. Defaults to its
+    /// current desired state, or running for a new membership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_state: Option<DesiredState>,
 }
 
+/// Deploy the exact revision current in one environment to another.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProjectRecord {
-    pub project_id: String,
-    pub name: String,
-    pub revision: String,
-    /// Digest of every workload bundle: the deployed content.
-    pub revision_digest: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    pub desired_state: DesiredState,
-    pub env: BTreeMap<String, String>,
-    pub workloads: Vec<WorkloadRecord>,
-    pub deployed_at: DateTime<Utc>,
+pub struct PromoteRequest {
+    pub project: String,
+    pub from: String,
+    pub to: String,
+    /// Promote even when the source deployment is not healthy.
+    #[serde(default)]
+    pub allow_unhealthy: bool,
 }
 
+/// Register a shared service other projects can consume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EnvironmentRecord {
-    pub version: String,
-    pub environment_id: String,
+pub struct ServiceDefinition {
     pub name: String,
-    pub desired_state: DesiredState,
-    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default = "local_provider")]
+    pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy: Option<Policy>,
+    pub environment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub projects: BTreeMap<String, ProjectRecord>,
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+fn local_provider() -> String {
+    "local".into()
 }
 
 /// Names are ordinary identifiers: `preprod`, `prod`, `review-123`,
@@ -238,19 +229,16 @@ pub fn validate_env(scope: &str, env: &BTreeMap<String, String>) -> Result<(), E
     Ok(())
 }
 
-pub(crate) fn short_digest(parts: &[&str]) -> String {
-    let mut hasher = Sha256::new();
-    for part in parts {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part.as_bytes());
+pub fn validate_revision_label(revision: &str) -> Result<(), EnvironmentError> {
+    if revision.is_empty()
+        || revision.len() > 128
+        || !revision
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:@".contains(&byte))
+    {
+        return Err(EnvironmentError::Invalid(
+            "revision must be 1-128 letters, digits, '-', '_', '.', ':', or '@'".into(),
+        ));
     }
-    format!("{:x}", hasher.finalize())[..24].to_string()
-}
-
-pub(crate) fn project_id(environment_id: &str, project: &str) -> String {
-    format!("prj_{}", short_digest(&[environment_id, project]))
-}
-
-pub(crate) fn workload_id(project_id: &str, workload: &str) -> String {
-    format!("wl_{}", short_digest(&[project_id, workload]))
+    Ok(())
 }

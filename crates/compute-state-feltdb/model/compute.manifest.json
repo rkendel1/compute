@@ -485,6 +485,11 @@
           "required": false
         },
         {
+          "name": "artifact_digest",
+          "type": "text",
+          "required": false
+        },
+        {
           "name": "created_at",
           "type": "datetime",
           "required": true

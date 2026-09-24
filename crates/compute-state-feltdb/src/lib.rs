@@ -24,7 +24,7 @@ use tokio::sync::RwLock;
 
 mod provision;
 
-pub use provision::{ProvisionRequest, Provisioned, provision};
+pub use provision::{ProvisionRequest, Provisioned, provision, provision_manifest};
 
 /// `compute.flow`, the Compute control model.
 pub const COMPUTE_FLOW: &str = include_str!("../model/compute.flow");

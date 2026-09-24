@@ -13,6 +13,8 @@ compute-core = { path = "../compute-core" }
 compute-placement = { path = "../compute-placement" }
 compute-policy = { path = "../compute-policy" }
 compute-provider = { path = "../compute-provider" }
+compute-state = { path = "../compute-state" }
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -22,6 +24,9 @@ toml.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+libc.workspace = true
+compute-state-memory = { path = "../compute-state-memory" }
+compute-state-file = { path = "../compute-state-file" }
 async-trait.workspace = true
 compute-runtime = { path = "../compute-runtime" }
 compute-core = { path = "../compute-core" }

@@ -13,6 +13,7 @@ use compute_runtime::Compute;
 
 mod admission;
 mod certification;
+mod control_state;
 mod direct;
 mod distribution;
 mod environment_cmd;
@@ -80,6 +81,18 @@ enum Commands {
     Workload(environment_cmd::WorkloadCommand),
     /// Inspect one execution recorded by the daemon.
     Execution(environment_cmd::ExecutionCommand),
+    /// Deploy a project revision to an environment
+    Deploy(environment_cmd::DeployCommand),
+    /// Deploy the exact revision current in one environment to another
+    Promote(environment_cmd::PromoteCommand),
+    /// Inspect deployments and their evidence
+    Deployment(environment_cmd::DeploymentCommand),
+    /// Show lifecycle events, or follow them
+    Events(environment_cmd::EventsCommand),
+    /// Register shared services and list the provider pool
+    Service(environment_cmd::ServiceCommand),
+    /// Provision or upgrade the control model in Managed FeltDB
+    ControlPlane(control_state::ControlPlaneCommand),
     /// Serve compute.remote@1 with durable filesystem-backed jobs.
     Serve(ServeCommand),
 }
@@ -1226,6 +1239,12 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Project(command) => environment_cmd::project(command).await?,
         Commands::Workload(command) => environment_cmd::workload(command).await?,
         Commands::Execution(command) => environment_cmd::execution(command).await?,
+        Commands::Deploy(command) => environment_cmd::deploy(command).await?,
+        Commands::Promote(command) => environment_cmd::promote(command).await?,
+        Commands::Deployment(command) => environment_cmd::deployment(command).await?,
+        Commands::Events(command) => environment_cmd::events(command).await?,
+        Commands::Service(command) => environment_cmd::service(command).await?,
+        Commands::ControlPlane(command) => control_state::control_plane(command).await?,
         Commands::Remote(command) => match command.command {
             RemoteCommands::Capabilities(command) => {
                 let value = RemoteProvider::new(command.provider)

@@ -724,6 +724,12 @@ impl ProcessRuntime {
             ExecutionStatus::Cancelled
         } else if timed_out {
             ExecutionStatus::TimedOut
+        } else if process_status
+            .as_ref()
+            .is_some_and(|status| status.code().is_none())
+        {
+            // Terminated by a signal from outside Compute: not a clean exit.
+            ExecutionStatus::Killed
         } else {
             // A workload's exit status is data, not a failure of Compute itself.
             ExecutionStatus::Completed

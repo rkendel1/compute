@@ -70,9 +70,9 @@ impl WorkloadKind {
 #[serde(rename_all = "snake_case")]
 pub enum RestartPolicy {
     /// A service that exits stays down until explicitly started.
-    #[default]
     Never,
-    /// A service that exits unsuccessfully is started again after a delay.
+    /// A service that fails or is killed is started again, with backoff.
+    #[default]
     OnFailure,
 }
 
@@ -112,6 +112,8 @@ pub struct RevisionWorkload {
     /// The content identity of the workload's bundle. The bundle itself is
     /// a content-addressed artifact, not control state.
     pub bundle_id: String,
+    /// The artifact digest of the bundle's canonical encoding.
+    pub artifact: String,
     pub workload_identity: String,
     pub runtime: String,
     #[serde(default)]
@@ -339,6 +341,9 @@ pub struct ReceiptRecord {
     pub policy_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_id: Option<String>,
+    /// The artifact holding the encoded receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_digest: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 document!(ReceiptRecord, Receipt);
@@ -523,6 +528,11 @@ pub mod ids {
 
     pub fn workload(environment_id: &str, project_id: &str, name: &str) -> String {
         format!("wl_{}", short_digest(&[environment_id, project_id, name]))
+    }
+
+    /// Executions keep the engine's execution ID.
+    pub fn execution(execution_id: &str) -> String {
+        execution_id.to_string()
     }
 
     pub fn receipt(receipt_hash: &str) -> String {

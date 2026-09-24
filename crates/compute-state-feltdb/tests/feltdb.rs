@@ -118,22 +118,27 @@ async fn feltdb_is_a_conforming_durable_authority() {
     .expect("provision the Compute model");
     assert!(provisioned.changed);
 
-    // Provisioning again is a no-op.
-    let again = provision(ProvisionRequest {
-        url: server.url.clone(),
-        token: token.clone(),
-        application_id: Some(provisioned.application_id.clone()),
-        tenant_id: None,
-        tenant_name: String::new(),
-        environment: "production".into(),
-    })
-    .await
-    .expect("provision again");
-    assert!(
-        !again.changed,
-        "an application on the current model is unchanged"
-    );
-    assert_eq!(again.revision_id, provisioned.revision_id);
+    // Provisioning again is a no-op: the same tenant, application, and
+    // revision, whether or not the application is named.
+    for application_id in [None, Some(provisioned.application_id.clone())] {
+        let again = provision(ProvisionRequest {
+            url: server.url.clone(),
+            token: token.clone(),
+            application_id,
+            tenant_id: None,
+            tenant_name: "compute-certification".into(),
+            environment: "production".into(),
+        })
+        .await
+        .expect("provision again");
+        assert!(
+            !again.changed,
+            "an application on the current model is unchanged"
+        );
+        assert_eq!(again.tenant_id, provisioned.tenant_id);
+        assert_eq!(again.application_id, provisioned.application_id);
+        assert_eq!(again.revision_id, provisioned.revision_id);
+    }
 
     let config = FeltDbConfig {
         url: server.url.clone(),
@@ -162,6 +167,108 @@ async fn feltdb_is_a_conforming_durable_authority() {
     let reopened = Arc::new(FeltDbState::connect(config.clone()).await.unwrap());
     compute_state::conformance::check(reopened, None).await;
 
+    let _ = std::fs::remove_dir_all(data);
+}
+
+#[tokio::test]
+#[ignore = "requires FELTDB_SERVER_BIN"]
+async fn an_older_compute_model_is_upgraded_in_place() {
+    use compute_state::{Batch, ControlState, EnvironmentRecord, WorkloadStatusRecord};
+
+    let data = tempfile_dir();
+    let token = create_key(&data);
+    let server = start(&data);
+    // The previous model: everything except WorkloadStatus.
+    let mut older: serde_json::Value =
+        serde_json::from_str(compute_state_feltdb::COMPUTE_MANIFEST).unwrap();
+    for key in ["collections", "policies"] {
+        older[key]
+            .as_array_mut()
+            .unwrap()
+            .retain(|item| item["name"] != "WorkloadStatus");
+    }
+    older["indexes"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|index| index["collection"] != "WorkloadStatus");
+    let request = || ProvisionRequest {
+        url: server.url.clone(),
+        token: token.clone(),
+        application_id: None,
+        tenant_id: None,
+        tenant_name: "compute-upgrade".into(),
+        environment: "production".into(),
+    };
+    let first = compute_state_feltdb::provision_manifest(request(), &older.to_string())
+        .await
+        .expect("provision the older model");
+    let config = FeltDbConfig {
+        url: server.url.clone(),
+        token: token.clone(),
+        application_id: first.application_id.clone(),
+        environment: "production".into(),
+    };
+    let state = ControlState::new(Arc::new(
+        FeltDbState::connect(config.clone()).await.unwrap(),
+    ));
+    let environment = EnvironmentRecord {
+        name: "production".into(),
+        desired_state: compute_state::DesiredState::Running,
+        config: Default::default(),
+        policy: None,
+        provider: None,
+        created_at: chrono::Utc::now(),
+    };
+    state
+        .transaction(Batch::new().create("env_upgrade", &environment))
+        .await
+        .unwrap();
+    let status = WorkloadStatusRecord {
+        workload_id: "wl_upgrade".into(),
+        environment: "production".into(),
+        project: "attn".into(),
+        workload: "api".into(),
+        actual_state: "running".into(),
+        health: "healthy".into(),
+        deployment_id: None,
+        execution_id: None,
+        restarts: 0,
+        error: None,
+        observed_by: "daemon_upgrade".into(),
+        observed_at: chrono::Utc::now(),
+    };
+    assert!(
+        state
+            .transaction(Batch::new().create("ws_upgrade", &status))
+            .await
+            .is_err(),
+        "the older model has no WorkloadStatus"
+    );
+
+    let upgraded = provision(request()).await.expect("upgrade");
+    assert!(upgraded.changed);
+    assert_eq!(
+        upgraded.application_id, first.application_id,
+        "upgraded in place"
+    );
+    assert_ne!(upgraded.revision_id, first.revision_id);
+    let state = ControlState::new(Arc::new(FeltDbState::connect(config).await.unwrap()));
+    assert_eq!(
+        state
+            .get::<EnvironmentRecord>("env_upgrade")
+            .await
+            .unwrap()
+            .unwrap()
+            .value,
+        environment,
+        "existing state survives the upgrade"
+    );
+    state
+        .transaction(Batch::new().create("ws_upgrade", &status))
+        .await
+        .expect("the new collection is usable");
+    assert!(!provision(request()).await.unwrap().changed);
+    drop(server);
     let _ = std::fs::remove_dir_all(data);
 }
 

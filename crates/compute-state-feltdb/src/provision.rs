@@ -46,9 +46,20 @@ fn failure(step: &str, refusal: Result<crate::Refusal, StateError>) -> StateErro
 }
 
 /// Install the Compute control model, or upgrade an existing Compute
-/// application to it. Idempotent: an application already on this model is
+/// application to it. Idempotent: an existing tenant and Compute
+/// application are reused, and an application already on this model is
 /// left unchanged.
 pub async fn provision(request: ProvisionRequest) -> Result<Provisioned, StateError> {
+    provision_manifest(request, COMPUTE_MANIFEST).await
+}
+
+/// [`provision`] with an explicit manifest; certification uses it to prove
+/// that an application on an older model is upgraded.
+#[doc(hidden)]
+pub async fn provision_manifest(
+    request: ProvisionRequest,
+    compiled: &str,
+) -> Result<Provisioned, StateError> {
     let client = FeltDbState::new(FeltDbConfig {
         url: request.url.clone(),
         token: request.token.clone(),
@@ -80,32 +91,65 @@ pub async fn provision(request: ProvisionRequest) -> Result<Provisioned, StateEr
             (tenant.to_string(), application_id.clone())
         }
         None => {
+            // Adopt what already exists, so provisioning twice never
+            // duplicates a tenant or an application.
             let tenant_id = match &request.tenant_id {
                 Some(tenant) => tenant.clone(),
-                None => post(
-                    "/api/tenants".into(),
-                    json!({ "name": request.tenant_name }),
+                None => {
+                    let tenants = client
+                        .send(reqwest::Method::GET, "/api/tenants", None)
+                        .await
+                        .map_err(|refusal| failure("list tenants", refusal))?;
+                    let existing = tenants.as_array().into_iter().flatten().find(|tenant| {
+                        tenant["name"].as_str() == Some(request.tenant_name.as_str())
+                    });
+                    match existing.and_then(|tenant| tenant["id"].as_str()) {
+                        Some(id) => id.to_string(),
+                        None => post(
+                            "/api/tenants".into(),
+                            json!({ "name": request.tenant_name }),
+                        )
+                        .await
+                        .map_err(|refusal| failure("create a tenant", refusal))?["id"]
+                            .as_str()
+                            .ok_or_else(|| {
+                                StateError::Invalid("FeltDB returned no tenant ID".into())
+                            })?
+                            .to_string(),
+                    }
+                }
+            };
+            let applications = client
+                .send(
+                    reqwest::Method::GET,
+                    &format!("/api/tenants/{}/applications", encode(&tenant_id)),
+                    None,
                 )
                 .await
-                .map_err(|refusal| failure("create a tenant", refusal))?["id"]
+                .map_err(|refusal| failure("list applications", refusal))?;
+            let existing = applications
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|application| application["name"].as_str() == Some("compute"))
+                .and_then(|application| application["id"].as_str())
+                .map(str::to_owned);
+            let application_id = match existing {
+                Some(id) => id,
+                None => post(
+                    format!("/api/tenants/{}/applications", encode(&tenant_id)),
+                    json!({ "name": "compute" }),
+                )
+                .await
+                .map_err(|refusal| failure("create the Compute application", refusal))?["id"]
                     .as_str()
-                    .ok_or_else(|| StateError::Invalid("FeltDB returned no tenant ID".into()))?
+                    .ok_or_else(|| StateError::Invalid("FeltDB returned no application ID".into()))?
                     .to_string(),
             };
-            let application = post(
-                format!("/api/tenants/{}/applications", encode(&tenant_id)),
-                json!({ "name": "compute" }),
-            )
-            .await
-            .map_err(|refusal| failure("create the Compute application", refusal))?;
-            let application_id = application["id"]
-                .as_str()
-                .ok_or_else(|| StateError::Invalid("FeltDB returned no application ID".into()))?
-                .to_string();
             (tenant_id, application_id)
         }
     };
-    let mut manifest: Value = serde_json::from_str(COMPUTE_MANIFEST)
+    let mut manifest: Value = serde_json::from_str(compiled)
         .map_err(|error| StateError::Invalid(format!("embedded manifest: {error}")))?;
     manifest["tenant_id"] = json!(tenant_id);
     manifest["application_id"] = json!(application_id);
@@ -123,9 +167,12 @@ pub async fn provision(request: ProvisionRequest) -> Result<Provisioned, StateEr
         )
         .await
         .ok();
-    if let Some(current) = &current
-        && let Some(revision_id) = current["revision_id"].as_str()
-        && let Ok(revision) = client
+    // The active revision, when there is one.
+    let active = match current
+        .as_ref()
+        .and_then(|current| current["revision_id"].as_str())
+    {
+        Some(revision_id) => client
             .send(
                 reqwest::Method::GET,
                 &format!(
@@ -136,15 +183,28 @@ pub async fn provision(request: ProvisionRequest) -> Result<Provisioned, StateEr
                 None,
             )
             .await
+            .ok()
+            .map(|revision| (revision_id.to_string(), revision)),
+        None => None,
+    };
+    if let Some((revision_id, revision)) = &active
         && same_model(&revision["manifest"], &manifest)
     {
         return Ok(Provisioned {
             tenant_id,
             application_id,
             environment: request.environment,
-            revision_id: revision_id.to_string(),
+            revision_id: revision_id.clone(),
             changed: false,
         });
+    }
+    // FeltDB requires the state schema version to increase with every
+    // schema change.
+    if let Some((_, revision)) = &active {
+        let version = revision["manifest"]["state_schema_version"]
+            .as_u64()
+            .unwrap_or(1);
+        manifest["state_schema_version"] = json!(version + 1);
     }
 
     let base = current

@@ -23,7 +23,7 @@ pub mod manifest;
 pub mod model;
 pub mod status;
 
-pub use daemon::{Daemon, DaemonConfig};
+pub use daemon::{Daemon, DaemonConfig, EventFilter};
 pub use model::*;
 pub use status::*;
 
@@ -33,12 +33,19 @@ pub enum EnvironmentError {
     Invalid(String),
     #[error("not found: {0}")]
     NotFound(String),
+    /// The Compute API has no such operation.
+    #[error("no such operation: {0}")]
+    NoRoute(String),
     #[error("conflict: {0}")]
     Conflict(String),
     #[error("admission denied: {0}")]
     Denied(String),
     #[error("unauthorized: {0}")]
     Unauthorized(String),
+    /// The durable control state cannot be reached. Compute fails closed:
+    /// nothing is changed until it can.
+    #[error("control state unavailable: {0}")]
+    Unavailable(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
@@ -47,14 +54,30 @@ pub enum EnvironmentError {
     Compute(#[from] compute_core::ComputeError),
 }
 
+impl From<compute_state::StateError> for EnvironmentError {
+    fn from(error: compute_state::StateError) -> Self {
+        use compute_state::StateError;
+        match error {
+            StateError::Conflict { .. } | StateError::Precondition { .. } => Self::Conflict(
+                format!("{error}; another change landed first, retry against the current state"),
+            ),
+            StateError::NotFound { .. } => Self::NotFound(error.to_string()),
+            StateError::Invalid(message) => Self::Invalid(message),
+            StateError::Unavailable(message) => Self::Unavailable(message),
+        }
+    }
+}
+
 impl EnvironmentError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Invalid(_) | Self::Json(_) | Self::Compute(_) => "invalid",
             Self::NotFound(_) => "not_found",
+            Self::NoRoute(_) => "no_route",
             Self::Conflict(_) => "conflict",
             Self::Denied(_) => "admission_denied",
             Self::Unauthorized(_) => "unauthorized",
+            Self::Unavailable(_) => "state_unavailable",
             Self::Io(_) => "io",
         }
     }
@@ -65,9 +88,11 @@ impl EnvironmentError {
         match self {
             Self::Invalid(message)
             | Self::NotFound(message)
+            | Self::NoRoute(message)
             | Self::Conflict(message)
             | Self::Denied(message)
-            | Self::Unauthorized(message) => message.clone(),
+            | Self::Unauthorized(message)
+            | Self::Unavailable(message) => message.clone(),
             other => other.to_string(),
         }
     }
@@ -77,9 +102,10 @@ impl EnvironmentError {
             Self::Invalid(_) | Self::Json(_) | Self::Compute(_) => 400,
             Self::Unauthorized(_) => 401,
             Self::Denied(_) => 403,
-            Self::NotFound(_) => 404,
+            Self::NotFound(_) | Self::NoRoute(_) => 404,
             Self::Conflict(_) => 409,
             Self::Io(_) => 500,
+            Self::Unavailable(_) => 503,
         }
     }
 }

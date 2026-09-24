@@ -88,10 +88,19 @@ struct Harness {
     _state: tempfile::TempDir,
 }
 
+/// A daemon on in-memory control state.
+fn memory_config(dir: &std::path::Path) -> DaemonConfig {
+    let store = Arc::new(compute_state_memory::MemoryState::new());
+    let artifacts = Arc::new(compute_state::StateArtifacts::new(
+        compute_state::ControlState::new(store.clone()),
+    ));
+    DaemonConfig::new(dir, store, artifacts)
+}
+
 async fn harness() -> Harness {
     let state = tempfile::tempdir().unwrap();
     let provider = Arc::new(LocalProvider::new());
-    let mut config = DaemonConfig::new(state.path());
+    let mut config = memory_config(state.path());
     config.provider = provider.clone();
     config.restart_delay = Duration::from_millis(100);
     Harness {
@@ -109,17 +118,19 @@ async fn state(daemon: &Daemon, environment: &str, project: &str, workload: &str
         .actual_state
 }
 
+/// The identity of a workload's current run: when it started. A running
+/// service has no execution ID until it ends.
 async fn execution(
     daemon: &Daemon,
     environment: &str,
     project: &str,
     workload: &str,
-) -> Option<String> {
+) -> Option<chrono::DateTime<chrono::Utc>> {
     daemon
         .workload(environment, project, workload)
         .await
         .unwrap()
-        .execution_id
+        .started_at
 }
 
 /// Wait until every listed service is running.
@@ -408,9 +419,9 @@ async fn environments_are_isolated_configuration_ports_and_state() {
             .is_err(),
         "duplicate"
     );
-    assert_eq!(daemon.environments().await.len(), 6);
+    assert_eq!(daemon.environments().await.unwrap().len(), 6);
     daemon.destroy_environment("review-123").await.unwrap();
-    assert_eq!(daemon.environments().await.len(), 5);
+    assert_eq!(daemon.environments().await.unwrap().len(), 5);
     daemon.shutdown().await;
 }
 
@@ -427,6 +438,7 @@ async fn services_survive_tasks_and_failures_stay_contained() {
     flaky.restart = RestartPolicy::OnFailure;
     let mut crash = service("crash");
     crash.bundle = bundle(RuntimeKind::Shell, "main.sh", "exit 4");
+    crash.restart = RestartPolicy::Never;
     daemon
         .add_project(
             "preprod",
@@ -450,7 +462,7 @@ async fn services_survive_tasks_and_failures_stay_contained() {
         .run_task("preprod", "factory", "migrate")
         .await
         .unwrap();
-    assert_eq!(migrated.exit_code, Some(0));
+    assert_eq!(migrated.record.exit_code, Some(0));
     assert_eq!(migrated.stdout, "migrated\n");
     assert_eq!(
         state(daemon, "preprod", "factory", "migrate").await,
@@ -460,7 +472,7 @@ async fn services_survive_tasks_and_failures_stay_contained() {
         .run_task("preprod", "factory", "broken")
         .await
         .unwrap();
-    assert_eq!(broken.exit_code, Some(9));
+    assert_eq!(broken.record.exit_code, Some(9));
     assert_eq!(
         state(daemon, "preprod", "factory", "broken").await,
         ActualState::Failed
@@ -519,7 +531,7 @@ async fn services_survive_tasks_and_failures_stay_contained() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn environment_policy_is_admitted_before_runtime_startup() {
+async fn environment_policy_is_admitted_before_anything_deploys() {
     let harness = harness().await;
     let daemon = &harness.daemon;
     let mut prod = environment("prod");
@@ -534,27 +546,56 @@ async fn environment_policy_is_admitted_before_runtime_startup() {
         .create_environment(environment("preprod"))
         .await
         .unwrap();
-    for name in ["preprod", "prod"] {
-        daemon
-            .add_project(
-                name,
-                project("attn", vec![service("api"), task("lint", "echo ok")]),
-            )
-            .await
-            .unwrap();
-    }
+    daemon
+        .add_project(
+            "preprod",
+            project("attn", vec![service("api"), task("lint", "echo ok")]),
+        )
+        .await
+        .unwrap();
     running(daemon, &[("preprod", "attn", "api")]).await;
-    wait_for(daemon, ("prod", "attn", "api"), ActualState::Denied).await;
+    // The daemon reports a service running just before the runtime counts
+    // its execution; wait for the count to settle.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while harness.provider.executions_started() < 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "preprod api never executed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let started = harness.provider.executions_started();
-    let denied = daemon.workload("prod", "attn", "api").await.unwrap();
-    let error = denied.error.unwrap();
-    assert!(error.contains("not allowed by policy"), "{error}");
-    assert!(denied.execution_id.is_none(), "nothing executed");
-    assert!(denied.evidence.admission_id.is_some());
-    assert!(matches!(
-        daemon.run_task("prod", "attn", "lint").await,
-        Err(EnvironmentError::Denied(_))
-    ));
+
+    // The same revision is refused by prod's policy at admission: the
+    // deployment fails, nothing runs, and prod is unchanged.
+    let refused = daemon
+        .add_project(
+            "prod",
+            project("attn", vec![service("api"), task("lint", "echo ok")]),
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(EnvironmentError::Denied(message)) if message.contains("not allowed by policy")),
+        "{refused:?}"
+    );
+    assert!(
+        daemon.project("prod", "attn").await.is_err(),
+        "no membership"
+    );
+    let deployments = daemon
+        .deployments(Some("prod".into()), Some("attn".into()), None)
+        .await
+        .unwrap();
+    assert_eq!(deployments.len(), 1);
+    let failed = &deployments[0].record;
+    assert_eq!(failed.status, DeploymentStatus::Failed);
+    assert!(failed.workloads.iter().all(|workload| !workload.admitted));
+    assert!(
+        failed
+            .workloads
+            .iter()
+            .all(|workload| workload.admission_id.is_some())
+    );
     assert_eq!(
         harness.provider.executions_started(),
         started,
@@ -585,14 +626,12 @@ async fn receipts_carry_environment_project_workload_and_execution() {
         )
         .await
         .unwrap();
-    let record = daemon.run_task("prod", "factory", "migrate").await.unwrap();
-    let receipt_path = harness
-        ._state
-        .path()
-        .join("environments/prod/receipts")
-        .join(format!("{}.json", record.execution_id));
+    let execution = daemon.run_task("prod", "factory", "migrate").await.unwrap();
+    let record = &execution.record;
+    let receipt_id = record.receipt_id.clone().unwrap();
+    // The receipt is evidence: a durable artifact, referenced by ID.
     let receipt: compute_core::ExecutionReceipt =
-        serde_json::from_slice(&std::fs::read(receipt_path).unwrap()).unwrap();
+        serde_json::from_value(daemon.receipt(&receipt_id).await.unwrap()).unwrap();
     receipt.verify().unwrap();
     let scope = receipt.scope.as_ref().unwrap();
     assert_eq!(scope.environment, "prod");
@@ -605,11 +644,16 @@ async fn receipts_carry_environment_project_workload_and_execution() {
     assert_eq!(receipt.admission_id, record.admission_id);
     assert_eq!(receipt.policy_id, record.policy_id);
     assert!(receipt.placement.is_some());
-    assert_eq!(Some(receipt.receipt_hash.0.clone()), record.receipt_id);
+    assert_eq!(receipt.receipt_hash.0, receipt_id);
     assert_eq!(
         daemon.execution(&record.execution_id).await.unwrap(),
-        record
+        execution
     );
+    let references = daemon.receipts("prod", "factory", 10).await.unwrap();
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].execution_id, record.execution_id);
+    assert_eq!(references[0].admission_id, record.admission_id);
+    assert!(record.deployment_id.is_some());
 
     // Services record evidence too once they finish.
     running(daemon, &[("prod", "factory", "api")]).await;
@@ -628,7 +672,13 @@ async fn receipts_carry_environment_project_workload_and_execution() {
 async fn desired_state_persists_across_daemon_restarts() {
     let state = tempfile::tempdir().unwrap();
     let config = || {
-        let mut config = DaemonConfig::new(state.path());
+        let store = Arc::new(
+            compute_state_file::FileState::open(state.path().join("control-state.json")).unwrap(),
+        );
+        let artifacts = Arc::new(compute_state_file::DirectoryArtifacts::new(
+            state.path().join("artifacts"),
+        ));
+        let mut config = DaemonConfig::new(state.path().join("node"), store, artifacts);
         config.restart_delay = Duration::from_millis(100);
         config
     };
@@ -678,7 +728,7 @@ async fn environment_placement_participates_in_provider_selection() {
         let _ = compute_provider::serve_listener(listener, server).await;
     });
     let state = tempfile::tempdir().unwrap();
-    let mut config = DaemonConfig::new(state.path());
+    let mut config = memory_config(state.path());
     config.pool = Some(
         compute_placement::PoolConfig::parse(&format!(
             "[providers.local]\nkind = \"local\"\npriority = 10\n\n[providers.edge]\nkind = \"remote\"\nendpoint = \"{endpoint}\"\npriority = 1\n"
@@ -703,13 +753,13 @@ async fn environment_placement_participates_in_provider_selection() {
         .run_task("edge-env", "factory", "build")
         .await
         .unwrap();
-    assert_eq!(remote.provider.as_deref(), Some("edge"));
+    assert_eq!(remote.record.provider.as_deref(), Some("edge"));
     let local = daemon
         .run_task("local-env", "factory", "build")
         .await
         .unwrap();
     assert_eq!(
-        local.provider.as_deref(),
+        local.record.provider.as_deref(),
         Some("local"),
         "priority selects local otherwise"
     );
