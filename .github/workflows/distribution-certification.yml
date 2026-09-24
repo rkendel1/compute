@@ -21,8 +21,7 @@ jobs:
       - run: cargo build --release --locked
       - run: target/release/compute distribution build --output compute-distribution --verify
       - run: target/release/compute distribution verify compute-distribution --json
-      - run: docker build -f distribution/Dockerfile --build-arg COMPUTE_DISTRIBUTION=compute-distribution -t compute-certification .
-      - run: docker run --rm compute-certification certify --json
+      - run: distribution/certify-distribution.sh compute-distribution
       - run: |
           mv compute-distribution compute-distribution-first
           mv compute-distribution.tar compute-distribution-first.tar

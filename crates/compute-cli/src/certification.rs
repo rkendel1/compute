@@ -500,6 +500,7 @@ async fn certify_runtime(
             ..ResourceLimits::default()
         },
         network,
+        isolation: compute_core::IsolationRequirement::default(),
     };
     let workload_path = workspace.path().join("workload.json");
     fs::write(
@@ -535,6 +536,23 @@ async fn certify_runtime(
         .map_err(|error| error.to_string())?;
     if execution.status != ExecutionStatus::Completed || execution.exit_code != Some(0) {
         return Err(format!("universal workload failed: {execution:?}"));
+    }
+    let process_evidence = execution
+        .isolation
+        .as_ref()
+        .ok_or_else(|| "execution omitted isolation evidence".to_string())?;
+    if process_evidence.requested != compute_core::IsolationProfile::Process
+        || process_evidence.effective != compute_core::IsolationProfile::Process
+    {
+        return Err("process isolation evidence is incorrect".into());
+    }
+    if !capabilities.isolation.filesystem_boundary
+        && process_evidence.filesystem != compute_core::BoundaryStatus::Unavailable
+    {
+        return Err("process runtime overstated its filesystem boundary".into());
+    }
+    if execution.receipt.as_ref().map(|receipt| &receipt.isolation) != Some(process_evidence) {
+        return Err("receipt isolation evidence differs from the execution".into());
     }
     if execution.stderr.text != "certification-stderr\n" {
         return Err(format!("unexpected stderr: {:?}", execution.stderr.text));
@@ -573,6 +591,29 @@ async fn certify_runtime(
     let bundle = compute
         .load_bundle(&bundle_path)
         .map_err(|error| error.to_string())?;
+    let supports_stronger_isolation = capabilities.isolation.filesystem_boundary
+        && capabilities.isolation.network_boundary
+        && capabilities.isolation.environment_boundary
+        && capabilities.isolation.timeout_enforcement;
+    if supports_stronger_isolation {
+        for profile in [
+            compute_core::IsolationProfile::Sandboxed,
+            compute_core::IsolationProfile::Strict,
+        ] {
+            let mut isolated = bundle.materialize().map_err(|error| error.to_string())?;
+            isolated.request.isolation = profile;
+            let result = compute
+                .run(isolated.request)
+                .await
+                .map_err(|error| format!("{profile} isolation certification failed: {error}"))?;
+            let evidence = result
+                .isolation
+                .ok_or_else(|| format!("{profile} execution omitted isolation evidence"))?;
+            if evidence.requested != profile || evidence.effective != profile {
+                return Err(format!("{profile} isolation evidence is incorrect"));
+            }
+        }
+    }
     let mut stdin_materialized = bundle.materialize().map_err(|error| error.to_string())?;
     let stdin_request = &mut stdin_materialized.request;
     stdin_request.args = vec!["stdin".into()];
@@ -592,6 +633,9 @@ async fn certify_runtime(
         let filesystem_request = &mut filesystem_materialized.request;
         filesystem_request.args = vec!["filesystem".into()];
         filesystem_request.outputs.clear();
+        if supports_stronger_isolation {
+            filesystem_request.isolation = compute_core::IsolationProfile::Strict;
+        }
         let filesystem_result = compute
             .run(filesystem_request.clone())
             .await
@@ -618,6 +662,9 @@ async fn certify_runtime(
         let denied_network = &mut network_materialized.request;
         denied_network.args = vec!["network".into()];
         denied_network.outputs.clear();
+        if supports_stronger_isolation {
+            denied_network.isolation = compute_core::IsolationProfile::Strict;
+        }
         let network_result = compute
             .run(denied_network.clone())
             .await
@@ -767,6 +814,7 @@ fn certify_negative_contracts() -> Result<String, String> {
         outputs: vec![],
         resources: ResourceLimits::default(),
         network: NetworkPolicy::Network,
+        isolation: compute_core::IsolationRequirement::default(),
     };
     let mut traversal = base.clone();
     traversal.inputs.push(WorkloadInput {

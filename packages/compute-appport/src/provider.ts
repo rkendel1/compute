@@ -55,6 +55,9 @@ export class LocalComputeProvider {
       "--workload",
       resolve(this.cwd ?? process.cwd(), request.invocation.workload_path),
       ...(mode === "dry_run" ? ["--dry-run"] : []),
+      ...(request.execution_capabilities?.isolation
+        ? ["--isolation", request.execution_capabilities.isolation.profile]
+        : []),
       "--json",
     ]);
     const plan = parseJson<WorkloadPlan>(command.stdout);
@@ -79,6 +82,9 @@ export class LocalComputeProvider {
       resolve(this.cwd ?? process.cwd(), request.invocation.workload_path),
       "--expected-workload-id",
       plan.workload_id,
+      ...(request.execution_capabilities?.isolation
+        ? ["--isolation", request.execution_capabilities.isolation.profile]
+        : []),
       "--json",
     ]);
     const result = parseJson<ExecutionResult>(command.stdout);
@@ -93,7 +99,13 @@ export class LocalComputeProvider {
       };
     }
     if (result.status === "completed" && (result.exit_code === null || result.exit_code === 0)) {
-      return { kind: "execution", workload_id: plan.workload_id, result };
+      return {
+        kind: "execution",
+        workload_id: plan.workload_id,
+        result,
+        ...(result.receipt ? { receipt: result.receipt } : {}),
+        ...(result.isolation ? { isolation: result.isolation } : {}),
+      };
     }
     const kind = classifyExecutionFailure(result);
     return {
@@ -101,6 +113,8 @@ export class LocalComputeProvider {
       workload_id: plan.workload_id,
       failure: { kind, message: result.error?.message ?? `execution ended with status ${result.status}` },
       result,
+      ...(result.receipt ? { receipt: result.receipt } : {}),
+      ...(result.isolation ? { isolation: result.isolation } : {}),
     };
   }
 
@@ -169,7 +183,13 @@ export class LocalComputeProvider {
         };
       }
       if (result.status === "completed" && (result.exit_code === null || result.exit_code === 0)) {
-        return { kind: "execution", ...identity, result };
+        return {
+          kind: "execution",
+          ...identity,
+          result,
+          ...(result.receipt ? { receipt: result.receipt } : {}),
+          ...(result.isolation ? { isolation: result.isolation } : {}),
+        };
       }
       return {
         kind: "failure",
@@ -179,6 +199,8 @@ export class LocalComputeProvider {
           message: result.error?.message ?? `execution ended with status ${result.status}`,
         },
         result,
+        ...(result.receipt ? { receipt: result.receipt } : {}),
+        ...(result.isolation ? { isolation: result.isolation } : {}),
       };
     });
   }
@@ -260,6 +282,13 @@ function validateExecutionRequest(request: WorkloadExecutionRequest): string | u
     return "execution environment must match the workload environment";
   }
   const requested = request.execution_capabilities;
+  if (requested?.isolation) {
+    const declared = request.workload.isolation?.profile ?? "process";
+    const rank = { process: 0, sandboxed: 1, strict: 2 } as const;
+    if (rank[requested.isolation.profile] < rank[declared]) {
+      return "requested isolation cannot weaken the workload isolation requirement";
+    }
+  }
   if (requested?.network && requested.network !== (request.workload.network ?? "none")) {
     return "requested network capability must match the workload requirement";
   }
@@ -287,6 +316,7 @@ function normalizeWorkload(workload: WorkloadSpec): unknown {
       .sort((a, b) => a.path.localeCompare(b.path)),
     resources: Object.fromEntries(Object.entries(workload.resources ?? {}).filter(([, value]) => value != null)),
     network: workload.network ?? "none",
+    isolation: workload.isolation ?? { profile: "process" },
   };
 }
 
@@ -316,7 +346,9 @@ function failure(kind: ExecutionFailureKind, message: string): InspectResult {
 
 function classifyPreExecutionFailure(message: string): ExecutionFailureKind {
   const normalized = message.toLowerCase();
-  if (normalized.includes("unsupported capability")) return "capability_denied";
+  if (normalized.includes("unsupported capability") || normalized.includes("isolation profile")) {
+    return "capability_denied";
+  }
   if (
     normalized.includes("does not resolve") ||
     normalized.includes("no such file") ||

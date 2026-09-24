@@ -4,6 +4,18 @@ const runtime = s.enum([
   "wasm", "node", "bun", "deno", "python", "ruby", "php", "jvm", "dotnet", "native", "shell",
 ] as const);
 const network = s.enum(["none", "localhost", "network"] as const);
+const isolationProfile = s.enum(["process", "sandboxed", "strict"] as const);
+const isolationRequirement = s.object({ profile: isolationProfile });
+const boundaryStatus = s.enum(["enforced", "disabled", "unavailable", "not_requested"] as const);
+const isolationEvidence = s.object({
+  profile: isolationProfile,
+  requested: isolationProfile,
+  effective: isolationProfile,
+  filesystem: boundaryStatus,
+  network: boundaryStatus,
+  environment: boundaryStatus,
+  resources: boundaryStatus,
+});
 const bytes = s.union([s.string(), s.array(s.integer({ minimum: 0, maximum: 255 }))] as const);
 const positiveInteger = () => s.integer({ minimum: 1 });
 
@@ -42,6 +54,7 @@ export const workloadSpecSchema = s.object({
   outputs: s.optional(s.array(workloadOutputSchema)),
   resources: s.optional(resourceLimitsSchema),
   network: s.optional(network),
+  isolation: s.optional(isolationRequirement),
 });
 
 const workloadExecutionRequestSchema = s.object({
@@ -49,6 +62,7 @@ const workloadExecutionRequestSchema = s.object({
   execution_capabilities: s.optional(s.object({
     network: s.optional(network),
     resources: s.optional(resourceLimitsSchema),
+    isolation: s.optional(isolationRequirement),
   })),
   environment: s.optional(s.record(s.string())),
   invocation: s.object({
@@ -100,6 +114,44 @@ const executionError = s.object({
   started: s.boolean(),
 });
 
+const digest = s.string({ pattern: "^sha256:[0-9a-f]{64}$" });
+const receipt = s.object({
+  receipt_version: s.literal("compute.receipt@1"),
+  execution_id: s.string(),
+  workload: digest,
+  bundle: s.nullable(digest),
+  distribution: s.object({ id: digest, platform: s.string(), manifest_version: s.string() }),
+  runtime: s.object({
+    declared: runtime, selected: runtime, observed: runtime, version: s.string(),
+    distribution_runtime_id: digest, executable_identity: digest,
+  }),
+  request: s.object({
+    entrypoint: s.string(), argument_count: s.integer({ minimum: 0 }),
+    stdin_size: s.integer({ minimum: 0 }), stdin_sha256: digest,
+  }),
+  policy: s.object({
+    network, filesystem: s.string(), timeout_ms: s.nullable(s.integer({ minimum: 0 })),
+    memory_bytes: s.nullable(s.integer({ minimum: 0 })), environment: s.literal("cleared"),
+    environment_names: s.array(s.string()),
+  }),
+  isolation: isolationEvidence,
+  inputs: s.array(s.object({
+    path: s.string(), size: s.integer({ minimum: 0 }), sha256: digest, required: s.boolean(),
+  })),
+  outputs: s.array(s.object({
+    path: s.string(), size: s.nullable(s.integer({ minimum: 0 })), sha256: s.nullable(digest),
+    collection_status: s.enum(["collected", "missing_required", "missing_optional"] as const),
+  })),
+  execution: s.object({
+    status: s.string(), exit_code: s.nullable(s.integer()),
+    error: s.nullable(s.object({ kind: s.string(), code: s.string() })),
+  }),
+  started_at: s.nullable(s.string()),
+  finished_at: s.nullable(s.string()),
+  provenance: s.object({ distribution_id: digest, runtime_lock_id: digest, manifest_id: digest }),
+  receipt_hash: digest,
+});
+
 export const executionResultSchema = s.object({
   execution_id: s.string(),
   runtime,
@@ -115,6 +167,8 @@ export const executionResultSchema = s.object({
   outputs: s.array(outputArtifact),
   missing_outputs: s.array(missingOutput),
   error: s.nullable(executionError),
+  isolation: s.optional(isolationEvidence),
+  receipt: s.optional(receipt),
 });
 
 export const inspectInputSchema = s.object({
@@ -150,10 +204,23 @@ export const workloadPlanSchema = s.object({
       cpu_limit: capability(),
       process_limit: capability(),
       network: s.object({ none: capability(), localhost: capability(), network: capability() }),
+      isolation: s.object({
+        process_boundary: s.boolean(), filesystem_boundary: s.boolean(),
+        network_boundary: s.boolean(), environment_boundary: s.boolean(),
+        timeout_enforcement: s.boolean(), memory_enforcement: s.boolean(),
+        cpu_enforcement: s.boolean(), process_enforcement: s.boolean(),
+      }),
     });
   })(),
   capability_compatible: s.boolean(),
   capability_error: s.optional(s.string()),
+  isolation: s.object({
+    requested: isolationProfile,
+    effective: s.nullable(isolationProfile),
+    compatible: s.boolean(),
+    evidence: s.optional(isolationEvidence),
+    reason: s.optional(s.object({ code: s.string(), message: s.string() })),
+  }),
   input_preparation: s.array(workloadInputSchema),
   output_root: s.string(),
   data_flow: s.object({
@@ -194,6 +261,8 @@ export const runResultSchema = s.union([
     workload_id: s.string(),
     bundle_id: s.optional(s.string()),
     result: executionResultSchema,
+    receipt: s.optional(receipt),
+    isolation: s.optional(isolationEvidence),
   }),
   s.object({
     kind: s.literal("failure"),
@@ -201,5 +270,7 @@ export const runResultSchema = s.union([
     bundle_id: s.optional(s.string()),
     failure,
     result: s.optional(executionResultSchema),
+    receipt: s.optional(receipt),
+    isolation: s.optional(isolationEvidence),
   }),
 ] as const);

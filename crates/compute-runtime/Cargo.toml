@@ -12,6 +12,8 @@ compute-runtime-wasm = { path = "../compute-runtime-wasm" }
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+walkdir.workspace = true
 
 [dev-dependencies]
 compute-runtime-conformance = { path = "../compute-runtime-conformance" }

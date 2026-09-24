@@ -21,6 +21,11 @@ const manifest = compute.manifest();
 scope. Passing an AuthBoundry-compatible AppPort `Authorizer` at provider
 initialization keeps identity and policy outside `WorkloadSpec`.
 
+Inspection plans expose structured isolation compatibility and stable rejection
+codes. Authorized execution responses return the effective boundary evidence
+both directly and in the execution receipt. Isolation remains a technical
+runtime contract and does not change AppPort authorization semantics.
+
 An operation input contains an `ExecutionRequest`: the portable
 `WorkloadSpec`, requested execution boundaries, and invocation metadata. The
 local provider uses `invocation.workload_path` to resolve the workload source file,

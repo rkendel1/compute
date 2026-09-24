@@ -3,12 +3,14 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use compute_core::{
-    EnvironmentVariable, Mount, NetworkPolicy, ResourceLimits, RuntimeKind, RuntimeSpec,
+    EnvironmentVariable, IsolationProfile, Mount, NetworkPolicy, ResourceLimits, RuntimeKind,
+    RuntimeSpec,
 };
 use compute_runtime::Compute;
 
 mod certification;
 mod distribution;
+mod receipt;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -29,11 +31,15 @@ enum Commands {
     Runtimes(JsonFlag),
     Runtime(RuntimeCommand),
     Capabilities(RuntimeCommand),
+    /// Show the versioned isolation profiles and runtime support matrix.
+    Isolation(JsonFlag),
     Exec(ExecCommand),
     Doctor(JsonFlag),
     Certify(CertifyCommand),
     /// Build, inspect, or verify a portable Compute distribution.
     Distribution(DistributionCommand),
+    /// Inspect or independently verify an execution receipt.
+    Receipt(ReceiptCommand),
     Version(JsonFlag),
 }
 
@@ -79,6 +85,30 @@ enum DistributionCommands {
 struct JsonFlag {
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args, Debug)]
+struct ReceiptCommand {
+    #[command(subcommand)]
+    command: ReceiptCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum ReceiptCommands {
+    Inspect {
+        receipt: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Verify {
+        receipt: PathBuf,
+        #[arg(long)]
+        distribution: Option<PathBuf>,
+        #[arg(long)]
+        artifacts: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -164,6 +194,8 @@ struct RunCommand {
     mounts: Vec<Mount>,
     #[arg(long, value_parser = parse_network)]
     network: Option<NetworkPolicy>,
+    #[arg(long, value_parser = parse_isolation)]
+    isolation: Option<IsolationProfile>,
     #[arg(long, value_parser = parse_memory)]
     memory: Option<u64>,
     #[arg(long, value_parser = parse_duration)]
@@ -173,6 +205,9 @@ struct RunCommand {
     stdin: Option<String>,
     #[arg(long)]
     json: bool,
+    /// Write canonical verifiable execution evidence to this file.
+    #[arg(long)]
+    receipt: Option<PathBuf>,
     /// Validate and plan a workload specification without executing it.
     #[arg(long)]
     dry_run: bool,
@@ -198,6 +233,8 @@ struct ExecCommand {
     mounts: Vec<Mount>,
     #[arg(long, default_value = "network", value_parser = parse_network)]
     network: NetworkPolicy,
+    #[arg(long, default_value = "process", value_parser = parse_isolation)]
+    isolation: IsolationProfile,
     #[arg(long, value_parser = parse_memory)]
     memory: Option<u64>,
     #[arg(long, value_parser = parse_duration)]
@@ -207,6 +244,9 @@ struct ExecCommand {
     stdin: Option<String>,
     #[arg(long)]
     json: bool,
+    /// Write canonical verifiable execution evidence to this file.
+    #[arg(long)]
+    receipt: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -238,21 +278,23 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     ));
                 }
                 if command.dry_run {
-                    let plan = compute.plan_bundle(
+                    let plan = compute.plan_bundle_with_isolation(
                         &bundle,
                         command.expected_workload_id.as_deref(),
                         command.expected_bundle_id.as_deref(),
+                        command.isolation,
                     )?;
                     print_bundle_plan(&plan, command.json);
                 } else {
                     let result = compute
-                        .run_bundle(
+                        .run_bundle_with_isolation(
                             &bundle,
                             command.expected_workload_id.as_deref(),
                             command.expected_bundle_id.as_deref(),
+                            command.isolation,
                         )
                         .await?;
-                    print_execution_result(result, command.json);
+                    print_execution_result(result, command.json, command.receipt.as_deref())?;
                 }
                 return Ok(());
             }
@@ -276,19 +318,23 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     ));
                 }
                 if command.dry_run {
-                    let plan = match command.expected_workload_id.as_deref() {
-                        Some(expected) => {
-                            compute.plan_workload_with_id(&workload, expected).await?
-                        }
-                        None => compute.plan_workload(&workload).await?,
-                    };
+                    let plan = compute
+                        .plan_workload_with_options(
+                            &workload,
+                            command.expected_workload_id.as_deref(),
+                            command.isolation,
+                        )
+                        .await?;
                     print_workload_plan(&plan, command.json);
                 } else {
-                    let result = match command.expected_workload_id.as_deref() {
-                        Some(expected) => compute.run_workload_with_id(&workload, expected).await?,
-                        None => compute.run_workload(&workload).await?,
-                    };
-                    print_execution_result(result, command.json);
+                    let result = compute
+                        .run_workload_with_options(
+                            &workload,
+                            command.expected_workload_id.as_deref(),
+                            command.isolation,
+                        )
+                        .await?;
+                    print_execution_result(result, command.json, command.receipt.as_deref())?;
                 }
                 return Ok(());
             }
@@ -310,10 +356,12 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 command.env,
                 command.mounts,
                 command.network.unwrap_or(NetworkPolicy::Network),
+                command.isolation.unwrap_or(IsolationProfile::Process),
                 command.memory,
                 command.timeout,
                 command.stdin,
                 command.json,
+                command.receipt,
             )
             .await?;
         }
@@ -458,8 +506,11 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Runtime(command) => {
             let kind: RuntimeKind = command.runtime.parse()?;
             let runtime = compute.runtime(kind, None).await?;
+            let capabilities = compute.capabilities(kind)?;
             if command.json {
-                println!("{}", serde_json::to_string_pretty(&runtime).unwrap());
+                let mut value = serde_json::to_value(runtime).unwrap();
+                value["isolation"] = serde_json::to_value(capabilities.isolation).unwrap();
+                println!("{}", serde_json::to_string_pretty(&value).unwrap());
             } else {
                 println!("Runtime: {}", runtime.kind);
                 println!("Known: {}", runtime.known);
@@ -472,6 +523,27 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 if let Some(executable) = runtime.executable {
                     println!("Executable: {}", executable.display());
                 }
+                println!("Isolation:");
+                println!(
+                    "  Process boundary: {}",
+                    yes_no(capabilities.isolation.process_boundary)
+                );
+                println!(
+                    "  Filesystem boundary: {}",
+                    yes_no(capabilities.isolation.filesystem_boundary)
+                );
+                println!(
+                    "  Network boundary: {}",
+                    yes_no(capabilities.isolation.network_boundary)
+                );
+                println!(
+                    "  Timeout enforcement: {}",
+                    yes_no(capabilities.isolation.timeout_enforcement)
+                );
+                println!(
+                    "  Memory enforcement: {}",
+                    yes_no(capabilities.isolation.memory_enforcement)
+                );
             }
         }
         Commands::Capabilities(command) => {
@@ -483,6 +555,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 print_capabilities(&capabilities, "");
             }
         }
+        Commands::Isolation(json_flag) => print_isolation_profiles(&compute, json_flag.json),
         Commands::Version(json_flag) => {
             if json_flag.json {
                 println!(
@@ -507,10 +580,12 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 command.env,
                 command.mounts,
                 command.network,
+                command.isolation,
                 command.memory,
                 command.timeout,
                 command.stdin,
                 command.json,
+                command.receipt,
             )
             .await?;
         }
@@ -606,6 +681,20 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 distribution::verify(&path, json)?;
             }
         },
+        Commands::Receipt(command) => match command.command {
+            ReceiptCommands::Inspect {
+                receipt: path,
+                json,
+            } => receipt::inspect(&path, json)?,
+            ReceiptCommands::Verify {
+                receipt: path,
+                distribution,
+                artifacts,
+                json,
+            } => {
+                receipt::verify(&path, distribution.as_deref(), artifacts.as_deref(), json)?;
+            }
+        },
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -617,12 +706,19 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         env: Vec<EnvironmentVariable>,
         mounts: Vec<Mount>,
         network: NetworkPolicy,
+        isolation: IsolationProfile,
         memory: Option<u64>,
         timeout: Option<Duration>,
         stdin: Option<String>,
         json: bool,
+        receipt_path: Option<PathBuf>,
     ) -> compute_core::Result<()> {
         if !path.exists() && runtime.is_none() && !args.is_empty() {
+            if receipt_path.is_some() {
+                return Err(compute_core::ComputeError::InvalidReceipt(
+                    "an accepted issue description is not an execution and cannot produce a receipt".into(),
+                ));
+            }
             let description = std::iter::once(path.to_string_lossy().into_owned())
                 .chain(args)
                 .collect::<Vec<_>>()
@@ -656,17 +752,28 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 stdout_bytes: None,
                 stderr_bytes: None,
             },
+            isolation,
         )?;
         workload.stdin = stdin.unwrap_or_default().into_bytes();
         let result = compute.run(workload).await?;
-        print_execution_result(result, json);
+        print_execution_result(result, json, receipt_path.as_deref())?;
         Ok(())
     }
 
     Ok(())
 }
 
-fn print_execution_result(result: compute_core::ExecutionResult, json: bool) {
+fn print_execution_result(
+    result: compute_core::ExecutionResult,
+    json: bool,
+    receipt_path: Option<&std::path::Path>,
+) -> compute_core::Result<()> {
+    if let Some(path) = receipt_path {
+        let receipt = result.receipt.as_ref().ok_or_else(|| {
+            compute_core::ComputeError::InvalidReceipt("execution did not produce a receipt".into())
+        })?;
+        std::fs::write(path, receipt.encoded_bytes()?)?;
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&result).unwrap());
     } else {
@@ -689,6 +796,7 @@ fn print_execution_result(result: compute_core::ExecutionResult, json: bool) {
     {
         std::process::exit(result.exit_code.filter(|code| *code != 0).unwrap_or(1));
     }
+    Ok(())
 }
 
 fn print_workload_plan(plan: &compute_core::WorkloadPlan, json: bool) {
@@ -710,6 +818,25 @@ fn print_workload_plan(plan: &compute_core::WorkloadPlan, json: bool) {
     println!("  Output root: {}", plan.output_root.display());
     println!("  Resolved runtime: {}", plan.resolved_runtime.kind);
     println!("  Capability compatible: {}", plan.capability_compatible);
+    println!("  Requested isolation: {}", plan.isolation.requested);
+    println!(
+        "  Isolation result: {}",
+        if plan.isolation.compatible {
+            "ACCEPTED"
+        } else {
+            "REJECTED"
+        }
+    );
+    if let Some(evidence) = &plan.isolation.evidence {
+        println!("  Effective isolation: {}", evidence.effective);
+        println!("  Filesystem: {:?}", evidence.filesystem);
+        println!("  Network boundary: {:?}", evidence.network);
+        println!("  Environment: {:?}", evidence.environment);
+        println!("  Resources: {:?}", evidence.resources);
+    }
+    if let Some(reason) = &plan.isolation.reason {
+        println!("  Isolation reason: {} ({})", reason.message, reason.code);
+    }
     if let Some(error) = &plan.capability_error {
         println!("  Capability error: {error}");
     }
@@ -768,6 +895,18 @@ fn print_capabilities(capabilities: &compute_core::RuntimeCapabilities, indent: 
     show("  environment", &capabilities.environment);
     show("  filesystem", &capabilities.filesystem_isolation);
     show("  artifacts", &capabilities.artifacts);
+    println!(
+        "{indent}  process boundary         {}",
+        yes_no(capabilities.isolation.process_boundary)
+    );
+    println!(
+        "{indent}  filesystem boundary      {}",
+        yes_no(capabilities.isolation.filesystem_boundary)
+    );
+    println!(
+        "{indent}  network boundary         {}",
+        yes_no(capabilities.isolation.network_boundary)
+    );
     println!("{indent}Network");
     for policy in [
         NetworkPolicy::None,
@@ -784,6 +923,78 @@ fn print_capabilities(capabilities: &compute_core::RuntimeCapabilities, indent: 
     show("  memory limit", &capabilities.memory_limit);
     show("  CPU limit", &capabilities.cpu_limit);
     show("  process limit", &capabilities.process_limit);
+}
+
+fn print_isolation_profiles(compute: &Compute, json: bool) {
+    let profiles = IsolationProfile::ALL
+        .into_iter()
+        .map(|profile| {
+            serde_json::json!({
+                "profile": profile,
+                "description": profile.description(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let runtimes = RuntimeKind::ALL
+        .into_iter()
+        .map(|runtime| {
+            let isolation = compute
+                .capabilities(runtime)
+                .expect("registered runtime")
+                .isolation;
+            let stronger = isolation.filesystem_boundary
+                && isolation.network_boundary
+                && isolation.environment_boundary
+                && isolation.timeout_enforcement;
+            let stronger_support = if !stronger {
+                "no"
+            } else if runtime == RuntimeKind::Deno {
+                "conditional"
+            } else {
+                "yes"
+            };
+            serde_json::json!({
+                "runtime": runtime,
+                "process": if isolation.process_boundary { "yes" } else { "no" },
+                "sandboxed": stronger_support,
+                "strict": stronger_support,
+                "capabilities": isolation,
+            })
+        })
+        .collect::<Vec<_>>();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": compute_core::ISOLATION_MODEL_VERSION,
+                "profiles": profiles,
+                "runtimes": runtimes,
+            }))
+            .unwrap()
+        );
+        return;
+    }
+    println!(
+        "Isolation Profiles (model {})",
+        compute_core::ISOLATION_MODEL_VERSION
+    );
+    for profile in IsolationProfile::ALL {
+        println!("{}\n  {}", profile, profile.description());
+    }
+    println!("\nRuntime\tProcess\tSandboxed\tStrict");
+    for item in runtimes {
+        println!(
+            "{}\t{}\t{}\t{}",
+            item["runtime"].as_str().unwrap_or("unknown"),
+            item["process"].as_str().unwrap_or("no"),
+            item["sandboxed"].as_str().unwrap_or("no"),
+            item["strict"].as_str().unwrap_or("no"),
+        );
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 fn parse_runtime_spec(value: Option<String>) -> compute_core::Result<Option<RuntimeSpec>> {
@@ -820,6 +1031,12 @@ fn parse_network(value: &str) -> Result<NetworkPolicy, String> {
         "network" => Ok(NetworkPolicy::Network),
         _ => Err("expected one of: none, localhost, network".to_string()),
     }
+}
+
+fn parse_isolation(value: &str) -> Result<IsolationProfile, String> {
+    value
+        .parse()
+        .map_err(|error: compute_core::ComputeError| error.to_string())
 }
 
 fn parse_memory(value: &str) -> Result<u64, String> {

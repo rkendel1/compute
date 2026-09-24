@@ -1,16 +1,33 @@
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
+use chrono::Utc;
 use compute_core::{
-    BundleInspection, BundleVerification, BundleWorkloadPlan, ComputeCapability, ComputeError,
-    ComputeManifest, Inspection, PortableDataFlow, Result, RuntimeAdapter, RuntimeAvailability,
-    RuntimeKind, RuntimeSpec, Workload, WorkloadBundle, WorkloadPlan, WorkloadSpec,
-    WorkloadValidationStatus,
+    BundleIdentity, BundleInspection, BundleVerification, BundleWorkloadPlan, ComputeCapability,
+    ComputeError, ComputeManifest, DistributionIdentity, Inspection, IsolationProfile,
+    PortableDataFlow, ReceiptEnvironment, Result, RuntimeAdapter, RuntimeAvailability, RuntimeKind,
+    RuntimeSpec, Workload, WorkloadBundle, WorkloadIdentity, WorkloadPlan, WorkloadSpec,
+    WorkloadValidationStatus, create_execution_receipt, input_receipts, request_workload_identity,
+    sha256_file_identity, sha256_identity,
 };
 use compute_runtime_process::{
     BunRuntime, DenoRuntime, DotnetRuntime, JvmRuntime, NativeRuntime, NodeRuntime, PhpRuntime,
     PythonRuntime, RubyRuntime, ShellRuntime,
 };
 use compute_runtime_wasm::WasmRuntime;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use walkdir::WalkDir;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReceiptManifestRuntime {
+    version: String,
+    executable: String,
+    artifact_sha256: String,
+    payload_sha256: String,
+    reported_version: String,
+}
 
 pub struct Compute {
     adapters: Vec<Box<dyn RuntimeAdapter>>,
@@ -144,10 +161,44 @@ impl Compute {
     }
 
     pub async fn run(&self, workload: Workload) -> Result<compute_core::ExecutionResult> {
+        let workload_id = request_workload_identity(&workload)?;
+        self.run_identified(workload, workload_id, None).await
+    }
+
+    async fn run_identified(
+        &self,
+        workload: Workload,
+        workload_id: WorkloadIdentity,
+        bundle_id: Option<BundleIdentity>,
+    ) -> Result<compute_core::ExecutionResult> {
+        let inputs = input_receipts(&workload)?;
         let adapter = self.adapter(workload.runtime.kind)?;
-        adapter.capabilities().validate(adapter.kind(), &workload)?;
+        let capabilities = adapter.capabilities();
+        let isolation = capabilities
+            .resolve_isolation(adapter.kind(), &workload)
+            .map_err(|reason| ComputeError::IsolationUnavailable {
+                runtime: adapter.kind(),
+                profile: workload.isolation,
+                code: reason.code,
+            })?;
         let runtime = adapter.resolve(&workload).await?;
-        adapter.execute(&workload, &runtime).await
+        let environment = receipt_environment(adapter, &runtime)?;
+        let started_at = Utc::now();
+        let mut result = adapter.execute(&workload, &runtime).await?;
+        let finished_at = Utc::now();
+        result.isolation = Some(isolation);
+        result.receipt = Some(create_execution_receipt(
+            &workload,
+            &runtime,
+            &result,
+            workload_id,
+            bundle_id,
+            inputs,
+            environment,
+            started_at,
+            finished_at,
+        )?);
+        Ok(result)
     }
 
     pub fn load_workload(&self, path: &Path) -> Result<WorkloadSpec> {
@@ -163,8 +214,7 @@ impl Compute {
     }
 
     pub async fn plan_workload(&self, path: &Path) -> Result<WorkloadPlan> {
-        let workload = self.load_workload(path)?;
-        self.plan_loaded_workload(path, workload)
+        self.plan_workload_with_options(path, None, None).await
     }
 
     pub async fn plan_workload_with_id(
@@ -172,14 +222,23 @@ impl Compute {
         path: &Path,
         expected_workload_id: &str,
     ) -> Result<WorkloadPlan> {
-        let workload = self.load_workload(path)?;
-        workload.require_id(expected_workload_id)?;
-        self.plan_loaded_workload(path, workload)
+        self.plan_workload_with_options(path, Some(expected_workload_id), None)
+            .await
     }
 
-    fn plan_loaded_workload(&self, path: &Path, workload: WorkloadSpec) -> Result<WorkloadPlan> {
+    pub async fn plan_workload_with_options(
+        &self,
+        path: &Path,
+        expected_workload_id: Option<&str>,
+        isolation: Option<IsolationProfile>,
+    ) -> Result<WorkloadPlan> {
+        let workload = self.load_workload(path)?;
+        if let Some(expected) = expected_workload_id {
+            workload.require_id(expected)?;
+        }
         let workload_id = workload.workload_id()?;
-        let request = self.execution_request(path, &workload)?;
+        let mut request = self.execution_request(path, &workload)?;
+        request.isolation = resolve_override(workload.isolation.profile, isolation)?;
         self.plan_request(workload, workload_id, &request)
     }
 
@@ -191,10 +250,11 @@ impl Compute {
     ) -> Result<WorkloadPlan> {
         let adapter = self.adapter(workload.runtime)?;
         let capabilities = adapter.capabilities();
-        let capability_error = capabilities
-            .validate(workload.runtime, request)
-            .err()
-            .map(|error| error.to_string());
+        let isolation = capabilities.isolation_plan(workload.runtime, request);
+        let capability_error = isolation
+            .reason
+            .as_ref()
+            .map(|reason| reason.message.clone());
         Ok(WorkloadPlan {
             valid: true,
             workload_id,
@@ -221,14 +281,13 @@ impl Compute {
             backend_capabilities: capabilities,
             capability_compatible: capability_error.is_none(),
             capability_error,
+            isolation,
             output_root: "/output".into(),
         })
     }
 
     pub async fn run_workload(&self, path: &Path) -> Result<compute_core::ExecutionResult> {
-        let workload = self.load_workload(path)?;
-        let request = self.execution_request(path, &workload)?;
-        self.run(request).await
+        self.run_workload_with_options(path, None, None).await
     }
 
     pub async fn run_workload_with_id(
@@ -236,10 +295,24 @@ impl Compute {
         path: &Path,
         expected_workload_id: &str,
     ) -> Result<compute_core::ExecutionResult> {
+        self.run_workload_with_options(path, Some(expected_workload_id), None)
+            .await
+    }
+
+    pub async fn run_workload_with_options(
+        &self,
+        path: &Path,
+        expected_workload_id: Option<&str>,
+        isolation: Option<IsolationProfile>,
+    ) -> Result<compute_core::ExecutionResult> {
         let workload = self.load_workload(path)?;
-        workload.require_id(expected_workload_id)?;
-        let request = self.execution_request(path, &workload)?;
-        self.run(request).await
+        if let Some(expected) = expected_workload_id {
+            workload.require_id(expected)?;
+        }
+        let workload_id = WorkloadIdentity::parse(workload.workload_id()?)?;
+        let mut request = self.execution_request(path, &workload)?;
+        request.isolation = resolve_override(workload.isolation.profile, isolation)?;
+        self.run_identified(request, workload_id, None).await
     }
 
     pub fn load_bundle(&self, path: &Path) -> Result<WorkloadBundle> {
@@ -266,10 +339,22 @@ impl Compute {
         expected_workload_id: Option<&str>,
         expected_bundle_id: Option<&str>,
     ) -> Result<BundleWorkloadPlan> {
+        self.plan_bundle_with_isolation(path, expected_workload_id, expected_bundle_id, None)
+    }
+
+    pub fn plan_bundle_with_isolation(
+        &self,
+        path: &Path,
+        expected_workload_id: Option<&str>,
+        expected_bundle_id: Option<&str>,
+        isolation: Option<IsolationProfile>,
+    ) -> Result<BundleWorkloadPlan> {
         let bundle = self.load_bundle(path)?;
         bundle.require_ids(expected_workload_id, expected_bundle_id)?;
         let verification = bundle.verification()?;
-        let materialized = bundle.materialize()?;
+        let mut materialized = bundle.materialize()?;
+        materialized.request.isolation =
+            resolve_override(bundle.workload.isolation.profile, isolation)?;
         let plan = self.plan_request(
             bundle.workload.clone(),
             verification.workload_id.clone(),
@@ -287,10 +372,29 @@ impl Compute {
         expected_workload_id: Option<&str>,
         expected_bundle_id: Option<&str>,
     ) -> Result<compute_core::ExecutionResult> {
+        self.run_bundle_with_isolation(path, expected_workload_id, expected_bundle_id, None)
+            .await
+    }
+
+    pub async fn run_bundle_with_isolation(
+        &self,
+        path: &Path,
+        expected_workload_id: Option<&str>,
+        expected_bundle_id: Option<&str>,
+        isolation: Option<IsolationProfile>,
+    ) -> Result<compute_core::ExecutionResult> {
         let bundle = self.load_bundle(path)?;
         bundle.require_ids(expected_workload_id, expected_bundle_id)?;
-        let materialized = bundle.materialize()?;
-        self.run(materialized.request).await
+        let verification = bundle.verification()?;
+        let mut materialized = bundle.materialize()?;
+        materialized.request.isolation =
+            resolve_override(bundle.workload.isolation.profile, isolation)?;
+        self.run_identified(
+            materialized.request,
+            WorkloadIdentity::parse(verification.workload_id)?,
+            Some(BundleIdentity::parse(verification.bundle_id)?),
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -303,6 +407,7 @@ impl Compute {
         mounts: Vec<compute_core::Mount>,
         network: compute_core::NetworkPolicy,
         resources: compute_core::ResourceLimits,
+        isolation: IsolationProfile,
     ) -> Result<Workload> {
         let inspection = self.inspect_path(path, runtime)?;
         if inspection.ambiguous {
@@ -333,6 +438,7 @@ impl Compute {
             mounts,
             network,
             resources,
+            isolation,
         })
     }
 
@@ -343,6 +449,213 @@ impl Compute {
             .map(|adapter| adapter.as_ref())
             .ok_or_else(|| ComputeError::UnknownRuntime(kind.to_string()))
     }
+}
+
+fn resolve_override(
+    declared: IsolationProfile,
+    requested: Option<IsolationProfile>,
+) -> Result<IsolationProfile> {
+    match requested {
+        Some(profile) if profile < declared => Err(ComputeError::InvalidWorkload(format!(
+            "isolation override {profile} cannot weaken declared profile {declared}"
+        ))),
+        Some(profile) => Ok(profile),
+        None => Ok(declared),
+    }
+}
+
+fn receipt_environment(
+    adapter: &dyn RuntimeAdapter,
+    runtime: &compute_core::ResolvedRuntime,
+) -> Result<ReceiptEnvironment> {
+    let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let executable_identity = runtime
+        .executable
+        .as_deref()
+        .filter(|path| path.is_file())
+        .map(sha256_file_identity)
+        .transpose()?
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| sha256_file_identity(&path).ok())
+                .unwrap_or_else(|| sha256_identity(adapter.descriptor().id.as_str().as_bytes()))
+        });
+
+    if let Some(root) = distribution_root() {
+        let manifest_path = root.join("runtime-manifest.json");
+        let manifest_bytes = std::fs::read(&manifest_path)?;
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
+        let string = |name: &str| {
+            manifest
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    ComputeError::InvalidReceipt(format!("distribution manifest is missing {name}"))
+                })
+        };
+        let id = string("distribution_id")?;
+        compute_core::validate_sha256_identity(&id)?;
+        let declared_platform = string("platform")?;
+        if declared_platform != platform {
+            return Err(ComputeError::InvalidReceipt(format!(
+                "distribution platform mismatch: declared {declared_platform}, observed {platform}"
+            )));
+        }
+        let schema = manifest
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                ComputeError::InvalidReceipt(
+                    "distribution manifest is missing schema_version".into(),
+                )
+            })?;
+        let lock = string("runtime_lock_sha256")?;
+        let compute_version = string("compute_version")?;
+        let runtimes: BTreeMap<String, ReceiptManifestRuntime> =
+            serde_json::from_value(manifest.get("runtimes").cloned().ok_or_else(|| {
+                ComputeError::InvalidReceipt("distribution manifest is missing runtimes".into())
+            })?)?;
+        let expected_distribution = sha256_identity(&serde_json::to_vec(&(
+            compute_version,
+            declared_platform,
+            lock.clone(),
+            &runtimes,
+        ))?);
+        if id != expected_distribution {
+            return Err(ComputeError::InvalidReceipt(
+                "distribution identity mismatch".into(),
+            ));
+        }
+        let runtime_entry = manifest
+            .get("runtimes")
+            .and_then(|value| value.get(runtime.kind.as_str()))
+            .ok_or_else(|| {
+                ComputeError::InvalidReceipt(format!(
+                    "distribution manifest is missing runtime {}",
+                    runtime.kind
+                ))
+            })?;
+        let payload = runtime_entry
+            .get("payload_sha256")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                ComputeError::InvalidReceipt(
+                    "distribution runtime is missing payload identity".into(),
+                )
+            })?;
+        let runtime_manifest = runtimes.get(runtime.kind.as_str()).expect("checked above");
+        if !runtime_manifest.executable.starts_with('<') {
+            let actual_payload = hash_tree(&root.join("runtimes").join(runtime.kind.as_str()))?;
+            if actual_payload != runtime_manifest.payload_sha256 {
+                return Err(ComputeError::InvalidReceipt(format!(
+                    "runtime payload identity mismatch for {}",
+                    runtime.kind
+                )));
+            }
+        }
+        return Ok(ReceiptEnvironment {
+            distribution: DistributionIdentity {
+                id,
+                platform,
+                manifest_version: schema.to_string(),
+            },
+            distribution_runtime_id: prefixed_digest(payload)?,
+            executable_identity,
+            runtime_lock_id: prefixed_digest(&lock)?,
+            manifest_id: sha256_identity(&manifest_bytes),
+        });
+    }
+
+    let lock_bytes = include_bytes!("../../../distribution/runtime-lock.json");
+    let lock: serde_json::Value = serde_json::from_slice(lock_bytes)?;
+    let runtime_entry = lock
+        .get("runtimes")
+        .and_then(|value| value.get(runtime.kind.as_str()))
+        .ok_or_else(|| {
+            ComputeError::InvalidReceipt(format!("runtime lock is missing {}", runtime.kind))
+        })?;
+    let descriptor = serde_json::to_vec(&serde_json::json!({
+        "kind": "source-development", "compute_version": env!("CARGO_PKG_VERSION"),
+        "platform": platform, "runtime_lock": sha256_identity(lock_bytes),
+    }))?;
+    let distribution_id = sha256_identity(&descriptor);
+    Ok(ReceiptEnvironment {
+        distribution: DistributionIdentity {
+            id: distribution_id.clone(),
+            platform,
+            manifest_version: "development".into(),
+        },
+        distribution_runtime_id: sha256_identity(&serde_json::to_vec(runtime_entry)?),
+        executable_identity,
+        runtime_lock_id: sha256_identity(lock_bytes),
+        manifest_id: sha256_identity(&descriptor),
+    })
+}
+
+fn prefixed_digest(value: &str) -> Result<String> {
+    let value = if value.starts_with("sha256:") {
+        value.to_owned()
+    } else {
+        format!("sha256:{value}")
+    };
+    compute_core::validate_sha256_identity(&value)?;
+    Ok(value)
+}
+
+fn distribution_root() -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("COMPUTE_HOME") {
+        return Some(root.into());
+    }
+    let executable = std::env::current_exe().ok()?;
+    let root = executable.parent()?.parent()?.to_path_buf();
+    root.join("runtime-manifest.json").is_file().then_some(root)
+}
+
+fn hash_tree(root: &Path) -> Result<String> {
+    if !root.is_dir() {
+        return Err(ComputeError::InvalidReceipt(format!(
+            "runtime payload is unavailable: {}",
+            root.display()
+        )));
+    }
+    let mut entries = WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| ComputeError::InvalidReceipt(error.to_string()))?;
+    entries.sort_by_key(|entry| entry.path().strip_prefix(root).unwrap().to_path_buf());
+    let mut digest = Sha256::new();
+    for entry in entries.into_iter().filter(|entry| entry.path() != root) {
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(|error| ComputeError::InvalidReceipt(error.to_string()))?;
+        digest.update(relative.to_string_lossy().as_bytes());
+        if entry.file_type().is_file() {
+            digest.update(b"f\0");
+            let mut file = std::fs::File::open(entry.path())?;
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = file.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                digest.update(&buffer[..count]);
+            }
+        } else if entry.file_type().is_symlink() {
+            digest.update(b"l\0");
+            digest.update(
+                std::fs::read_link(entry.path())?
+                    .to_string_lossy()
+                    .as_bytes(),
+            );
+        } else {
+            digest.update(b"d\0");
+        }
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn candidates_for_path(path: &Path) -> Vec<RuntimeKind> {

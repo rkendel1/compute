@@ -14,6 +14,9 @@ use tempfile::TempDir;
 use thiserror::Error;
 use walkdir::WalkDir;
 
+mod receipt;
+pub use receipt::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeKind {
@@ -144,6 +147,122 @@ pub enum NetworkPolicy {
     Network,
 }
 
+pub const ISOLATION_MODEL_VERSION: &str = "1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IsolationProfile {
+    #[default]
+    Process,
+    Sandboxed,
+    Strict,
+}
+
+impl IsolationProfile {
+    pub const ALL: [Self; 3] = [Self::Process, Self::Sandboxed, Self::Strict];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Process => "process",
+            Self::Sandboxed => "sandboxed",
+            Self::Strict => "strict",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Process => {
+                "Host process execution with a Compute-managed workspace; not a security sandbox."
+            }
+            Self::Sandboxed => "Runtime-enforced filesystem, network, and environment boundaries.",
+            Self::Strict => {
+                "The strongest boundaries the selected runtime can enforce; not a VM or container boundary."
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for IsolationProfile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for IsolationProfile {
+    type Err = ComputeError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "process" => Ok(Self::Process),
+            "sandboxed" => Ok(Self::Sandboxed),
+            "strict" => Ok(Self::Strict),
+            other => Err(ComputeError::InvalidIsolationProfile(other.into())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationRequirement {
+    #[serde(default)]
+    pub profile: IsolationProfile,
+}
+
+impl IsolationRequirement {
+    fn is_process(&self) -> bool {
+        self.profile == IsolationProfile::Process
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoundaryStatus {
+    Enforced,
+    Disabled,
+    Unavailable,
+    NotRequested,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IsolationCapabilities {
+    pub process_boundary: bool,
+    pub filesystem_boundary: bool,
+    pub network_boundary: bool,
+    pub environment_boundary: bool,
+    pub timeout_enforcement: bool,
+    pub memory_enforcement: bool,
+    pub cpu_enforcement: bool,
+    pub process_enforcement: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IsolationEvidence {
+    pub profile: IsolationProfile,
+    pub requested: IsolationProfile,
+    pub effective: IsolationProfile,
+    pub filesystem: BoundaryStatus,
+    pub network: BoundaryStatus,
+    pub environment: BoundaryStatus,
+    pub resources: BoundaryStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IsolationRejection {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IsolationPlan {
+    pub requested: IsolationProfile,
+    pub effective: Option<IsolationProfile>,
+    pub compatible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<IsolationEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<IsolationRejection>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResourceLimits {
@@ -187,6 +306,8 @@ pub struct ExecutionRequest {
     pub mounts: Vec<Mount>,
     pub network: NetworkPolicy,
     pub resources: ResourceLimits,
+    #[serde(default)]
+    pub isolation: IsolationProfile,
 }
 
 /// Backwards-compatible name for the adapter-facing, materialized request.
@@ -242,6 +363,8 @@ pub struct WorkloadSpec {
     pub resources: ResourceLimits,
     #[serde(default)]
     pub network: NetworkPolicy,
+    #[serde(default, skip_serializing_if = "IsolationRequirement::is_process")]
+    pub isolation: IsolationRequirement,
 }
 
 impl WorkloadSpec {
@@ -390,6 +513,7 @@ impl WorkloadSpec {
             mounts: vec![],
             network: self.network.clone(),
             resources: self.resources.clone(),
+            isolation: self.isolation.profile,
         })
     }
 
@@ -843,6 +967,7 @@ impl WorkloadBundle {
                 mounts: vec![],
                 network: self.workload.network.clone(),
                 resources: self.workload.resources.clone(),
+                isolation: self.workload.isolation.profile,
             },
             _source: source,
         })
@@ -1080,6 +1205,13 @@ pub struct ExecutionResult {
     pub outputs: Vec<OutputArtifact>,
     pub missing_outputs: Vec<MissingOutput>,
     pub error: Option<ExecutionError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<IsolationEvidence>,
+    /// Verifiable evidence attached by the orchestration layer. Runtime
+    /// adapters leave this empty because they do not own distribution or
+    /// portable workload identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<ExecutionReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1149,6 +1281,7 @@ pub struct RuntimeCapabilities {
     pub cpu_limit: Capability,
     pub process_limit: Capability,
     pub network: std::collections::BTreeMap<NetworkPolicy, Capability>,
+    pub isolation: IsolationCapabilities,
 }
 
 impl RuntimeCapabilities {
@@ -1177,6 +1310,16 @@ impl RuntimeCapabilities {
             .into_iter()
             .map(|(policy, supported)| (policy, Capability { supported }))
             .collect(),
+            isolation: IsolationCapabilities {
+                process_boundary: true,
+                filesystem_boundary: false,
+                network_boundary: false,
+                environment_boundary: true,
+                timeout_enforcement: true,
+                memory_enforcement: false,
+                cpu_enforcement: false,
+                process_enforcement: false,
+            },
         }
     }
 
@@ -1203,6 +1346,16 @@ impl RuntimeCapabilities {
             .into_iter()
             .map(|(policy, supported)| (policy, Capability { supported }))
             .collect(),
+            isolation: IsolationCapabilities {
+                process_boundary: true,
+                filesystem_boundary: true,
+                network_boundary: true,
+                environment_boundary: true,
+                timeout_enforcement: true,
+                memory_enforcement: true,
+                cpu_enforcement: false,
+                process_enforcement: false,
+            },
         }
     }
 
@@ -1216,7 +1369,138 @@ impl RuntimeCapabilities {
         ]
         .into_iter()
         .collect();
+        capabilities.isolation.filesystem_boundary = true;
+        capabilities.isolation.network_boundary = true;
         capabilities
+    }
+
+    pub fn isolation_plan(&self, runtime: RuntimeKind, workload: &Workload) -> IsolationPlan {
+        match self.resolve_isolation(runtime, workload) {
+            Ok(evidence) => IsolationPlan {
+                requested: workload.isolation,
+                effective: Some(evidence.effective),
+                compatible: true,
+                evidence: Some(evidence),
+                reason: None,
+            },
+            Err(reason) => IsolationPlan {
+                requested: workload.isolation,
+                effective: None,
+                compatible: false,
+                evidence: None,
+                reason: Some(reason),
+            },
+        }
+    }
+
+    pub fn resolve_isolation(
+        &self,
+        runtime: RuntimeKind,
+        workload: &Workload,
+    ) -> std::result::Result<IsolationEvidence, IsolationRejection> {
+        let reject = |code: &str, boundary: &str| IsolationRejection {
+            code: code.into(),
+            message: format!(
+                "{runtime} runtime cannot satisfy {} isolation: {boundary}",
+                workload.isolation
+            ),
+        };
+        if let Err(error) = self.validate(runtime, workload) {
+            let message = error.to_string();
+            let code = if message.contains("network policy") {
+                "network_policy_unavailable"
+            } else if message.contains("memory") {
+                "memory_enforcement_unavailable"
+            } else if message.contains("CPU") {
+                "cpu_enforcement_unavailable"
+            } else if message.contains("process-count") {
+                "process_enforcement_unavailable"
+            } else if message.contains("wall-time") {
+                "timeout_enforcement_unavailable"
+            } else {
+                "runtime_capability_unavailable"
+            };
+            return Err(IsolationRejection {
+                code: code.into(),
+                message,
+            });
+        }
+        let stronger = workload.isolation >= IsolationProfile::Sandboxed;
+        if stronger && !self.isolation.filesystem_boundary {
+            return Err(reject(
+                "filesystem_isolation_unavailable",
+                "filesystem boundary is unavailable",
+            ));
+        }
+        if stronger && !self.isolation.network_boundary {
+            return Err(reject(
+                "network_isolation_unavailable",
+                "network boundary is unavailable",
+            ));
+        }
+        if stronger && !self.isolation.environment_boundary {
+            return Err(reject(
+                "environment_isolation_unavailable",
+                "environment boundary is unavailable",
+            ));
+        }
+        if stronger && !self.isolation.timeout_enforcement {
+            return Err(reject(
+                "timeout_enforcement_unavailable",
+                "timeout enforcement is unavailable",
+            ));
+        }
+        let resource_requested = workload.resources.wall_time.is_some()
+            || workload.resources.memory_bytes.is_some()
+            || workload.resources.cpu_time.is_some()
+            || workload.resources.process_count.is_some();
+        let resources_enforced = (workload.resources.wall_time.is_none()
+            || self.isolation.timeout_enforcement)
+            && (workload.resources.memory_bytes.is_none() || self.isolation.memory_enforcement);
+        let resources_enforced = resources_enforced
+            && (workload.resources.cpu_time.is_none() || self.isolation.cpu_enforcement)
+            && (workload.resources.process_count.is_none() || self.isolation.process_enforcement);
+        if workload.isolation == IsolationProfile::Strict && !resources_enforced {
+            return Err(reject(
+                "resource_isolation_unavailable",
+                "a requested resource boundary is unavailable",
+            ));
+        }
+        Ok(IsolationEvidence {
+            profile: workload.isolation,
+            requested: workload.isolation,
+            effective: workload.isolation,
+            filesystem: if self.isolation.filesystem_boundary {
+                BoundaryStatus::Enforced
+            } else {
+                BoundaryStatus::Unavailable
+            },
+            network: if self.isolation.network_boundary {
+                if workload.network == NetworkPolicy::None {
+                    BoundaryStatus::Disabled
+                } else {
+                    BoundaryStatus::Enforced
+                }
+            } else if workload.network == NetworkPolicy::Network {
+                BoundaryStatus::NotRequested
+            } else {
+                BoundaryStatus::Unavailable
+            },
+            environment: if self.isolation.environment_boundary {
+                BoundaryStatus::Enforced
+            } else {
+                BoundaryStatus::Unavailable
+            },
+            resources: if resource_requested {
+                if resources_enforced {
+                    BoundaryStatus::Enforced
+                } else {
+                    BoundaryStatus::Unavailable
+                }
+            } else {
+                BoundaryStatus::NotRequested
+            },
+        })
     }
 
     /// Reject a request whenever satisfying it would require silently
@@ -1395,6 +1679,7 @@ pub struct WorkloadPlan {
     pub capability_compatible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capability_error: Option<String>,
+    pub isolation: IsolationPlan,
     pub input_preparation: Vec<WorkloadInput>,
     pub output_root: PathBuf,
     pub data_flow: PortableDataFlow,
@@ -1742,8 +2027,20 @@ pub enum ComputeError {
     },
     #[error("invalid workload: {0}")]
     InvalidWorkload(String),
+    #[error("invalid isolation profile: {0}")]
+    InvalidIsolationProfile(String),
+    #[error(
+        "unsupported capability: isolation profile {profile} is unavailable for runtime {runtime}: {code}"
+    )]
+    IsolationUnavailable {
+        runtime: RuntimeKind,
+        profile: IsolationProfile,
+        code: String,
+    },
     #[error("invalid workload bundle: {0}")]
     InvalidBundle(String),
+    #[error("invalid execution receipt: {0}")]
+    InvalidReceipt(String),
     #[error("invalid mount path: {0}")]
     InvalidMountPath(String),
     #[error("I/O error: {0}")]
@@ -1883,6 +2180,7 @@ mod tests {
             mounts: vec![],
             network: NetworkPolicy::Network,
             resources: ResourceLimits::default(),
+            isolation: IsolationProfile::Process,
         })
         .unwrap();
 
@@ -1915,6 +2213,7 @@ mod tests {
             mounts: vec![],
             network: NetworkPolicy::Network,
             resources: ResourceLimits::default(),
+            isolation: IsolationProfile::Process,
         };
 
         assert!(matches!(
@@ -1952,12 +2251,85 @@ mod tests {
             mounts: vec![],
             network: NetworkPolicy::None,
             resources: ResourceLimits::default(),
+            isolation: IsolationProfile::Process,
         };
 
         assert!(matches!(
             RuntimeCapabilities::process().validate(RuntimeKind::Python, &workload),
             Err(ComputeError::UnsupportedCapability { .. })
         ));
+    }
+
+    #[test]
+    fn isolation_profiles_resolve_without_downgrades() {
+        assert_eq!(
+            "process".parse::<IsolationProfile>().unwrap(),
+            IsolationProfile::Process
+        );
+        assert_eq!(
+            "sandboxed".parse::<IsolationProfile>().unwrap(),
+            IsolationProfile::Sandboxed
+        );
+        assert_eq!(
+            "strict".parse::<IsolationProfile>().unwrap(),
+            IsolationProfile::Strict
+        );
+        assert!("secure".parse::<IsolationProfile>().is_err());
+
+        let temp = tempfile::tempdir().unwrap();
+        let entrypoint = temp.path().join("module.wasm");
+        fs::write(&entrypoint, []).unwrap();
+        let mut request = Workload {
+            runtime: RuntimeSpec {
+                kind: RuntimeKind::Wasm,
+                version: None,
+            },
+            entrypoint,
+            args: vec![],
+            stdin: vec![],
+            env: vec![],
+            inputs: vec![],
+            outputs: vec![],
+            mounts: vec![],
+            network: NetworkPolicy::None,
+            resources: ResourceLimits {
+                memory_bytes: Some(64 * 1024),
+                ..ResourceLimits::default()
+            },
+            isolation: IsolationProfile::Strict,
+        };
+        let strict = RuntimeCapabilities::wasm()
+            .resolve_isolation(RuntimeKind::Wasm, &request)
+            .unwrap();
+        assert_eq!(strict.effective, IsolationProfile::Strict);
+        assert_eq!(strict.filesystem, BoundaryStatus::Enforced);
+        assert_eq!(strict.network, BoundaryStatus::Disabled);
+        assert_eq!(strict.resources, BoundaryStatus::Enforced);
+
+        let mut deno = request.clone();
+        deno.runtime.kind = RuntimeKind::Deno;
+        deno.resources.memory_bytes = None;
+        assert!(
+            RuntimeCapabilities::deno()
+                .resolve_isolation(RuntimeKind::Deno, &deno)
+                .is_ok()
+        );
+        deno.resources.memory_bytes = Some(64 * 1024);
+        assert_eq!(
+            RuntimeCapabilities::deno()
+                .resolve_isolation(RuntimeKind::Deno, &deno)
+                .unwrap_err()
+                .code,
+            "memory_enforcement_unavailable"
+        );
+
+        request.runtime.kind = RuntimeKind::Python;
+        request.network = NetworkPolicy::Network;
+        request.resources.memory_bytes = None;
+        let rejected = RuntimeCapabilities::process()
+            .resolve_isolation(RuntimeKind::Python, &request)
+            .unwrap_err();
+        assert_eq!(rejected.code, "filesystem_isolation_unavailable");
     }
 
     fn valid_spec() -> WorkloadSpec {
@@ -1983,6 +2355,7 @@ mod tests {
                 ..ResourceLimits::default()
             },
             network: NetworkPolicy::Network,
+            isolation: IsolationRequirement::default(),
         }
     }
 
@@ -2030,6 +2403,10 @@ mod tests {
         changed.args.push("contract-change".into());
         assert_ne!(changed.workload_id().unwrap(), id);
         assert!(changed.require_id(&id).is_err());
+
+        let mut strict = changed;
+        strict.isolation.profile = IsolationProfile::Strict;
+        assert_ne!(strict.workload_id().unwrap(), id);
     }
 
     fn bundle_fixture() -> (TempDir, PathBuf) {
@@ -2491,6 +2868,8 @@ mod tests {
             outputs: vec![],
             missing_outputs: vec![],
             error: None,
+            isolation: None,
+            receipt: None,
         }
     }
 
@@ -2581,6 +2960,7 @@ mod tests {
             mounts: vec![],
             network: NetworkPolicy::Network,
             resources: ResourceLimits::default(),
+            isolation: IsolationProfile::Process,
         };
         let first = stage_workload(&request).unwrap();
         let second = stage_workload(&request).unwrap();

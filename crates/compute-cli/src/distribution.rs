@@ -99,11 +99,11 @@ struct ManifestRuntime {
 }
 
 #[derive(Debug, Serialize)]
-struct VerificationReport {
-    distribution_id: Option<String>,
+pub(crate) struct VerificationReport {
+    pub(crate) distribution_id: Option<String>,
     platform: Option<String>,
     checks: Vec<VerificationCheck>,
-    passed: bool,
+    pub(crate) passed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -339,7 +339,7 @@ fn distribution_root() -> Option<PathBuf> {
     root.join("runtime-manifest.json").is_file().then_some(root)
 }
 
-fn verify_root(root: &Path) -> VerificationReport {
+pub(crate) fn verify_root(root: &Path) -> VerificationReport {
     let mut report = VerificationReport {
         distribution_id: None,
         platform: None,

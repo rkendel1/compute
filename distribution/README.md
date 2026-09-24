@@ -53,7 +53,10 @@ docker run --rm compute certify --json
 ```
 
 The Dockerfile does not download runtimes and contains no independent version
-matrix.
+matrix. `certify-distribution.sh` additionally executes one portable workload
+both bare and in Docker, verifies the container-produced receipt on the host
+against the assembled distribution and output artifact, and compares semantic
+receipt evidence after excluding timestamps, execution IDs, and receipt hashes.
 
 ## Development versus distribution
 

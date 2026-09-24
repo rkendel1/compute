@@ -13,6 +13,18 @@ export type RuntimeKind =
   | "native"
   | "shell";
 export type NetworkPolicy = "none" | "localhost" | "network";
+export type IsolationProfile = "process" | "sandboxed" | "strict";
+export type BoundaryStatus = "enforced" | "disabled" | "unavailable" | "not_requested";
+
+export interface IsolationEvidence {
+  profile: IsolationProfile;
+  requested: IsolationProfile;
+  effective: IsolationProfile;
+  filesystem: BoundaryStatus;
+  network: BoundaryStatus;
+  environment: BoundaryStatus;
+  resources: BoundaryStatus;
+}
 export type JsonBytes = string | number[];
 
 export interface ResourceLimits {
@@ -49,6 +61,7 @@ export interface WorkloadSpec {
   outputs?: WorkloadOutput[];
   resources?: ResourceLimits;
   network?: NetworkPolicy;
+  isolation?: { profile: IsolationProfile };
 }
 
 /**
@@ -61,6 +74,7 @@ export interface WorkloadExecutionRequest {
   execution_capabilities?: {
     network?: NetworkPolicy;
     resources?: ResourceLimits;
+    isolation?: { profile: IsolationProfile };
   };
   environment?: Record<string, string>;
   invocation: {
@@ -86,6 +100,48 @@ export interface OutputArtifact {
   path: string;
   data: JsonBytes;
   size: number;
+}
+
+export interface ExecutionReceipt {
+  receipt_version: "compute.receipt@1";
+  execution_id: string;
+  workload: string;
+  bundle: string | null;
+  distribution: { id: string; platform: string; manifest_version: string };
+  runtime: {
+    declared: RuntimeKind;
+    selected: RuntimeKind;
+    observed: RuntimeKind;
+    version: string;
+    distribution_runtime_id: string;
+    executable_identity: string;
+  };
+  request: { entrypoint: string; argument_count: number; stdin_size: number; stdin_sha256: string };
+  policy: {
+    network: NetworkPolicy;
+    filesystem: string;
+    timeout_ms: number | null;
+    memory_bytes: number | null;
+    environment: "cleared";
+    environment_names: string[];
+  };
+  isolation: IsolationEvidence;
+  inputs: Array<{ path: string; size: number; sha256: string; required: boolean }>;
+  outputs: Array<{
+    path: string;
+    size: number | null;
+    sha256: string | null;
+    collection_status: "collected" | "missing_required" | "missing_optional";
+  }>;
+  execution: {
+    status: string;
+    exit_code: number | null;
+    error: { kind: string; code: string } | null;
+  };
+  started_at: string | null;
+  finished_at: string | null;
+  provenance: { distribution_id: string; runtime_lock_id: string; manifest_id: string };
+  receipt_hash: string;
 }
 
 export type ExecutionFailureKind =
@@ -127,6 +183,8 @@ export interface ExecutionResult {
     exit_code: number | null;
     started: boolean;
   } | null;
+  isolation?: IsolationEvidence;
+  receipt?: ExecutionReceipt;
 }
 
 export interface RuntimeCapabilities {
@@ -144,6 +202,16 @@ export interface RuntimeCapabilities {
   cpu_limit: { supported: boolean };
   process_limit: { supported: boolean };
   network: Record<NetworkPolicy, { supported: boolean }>;
+  isolation: {
+    process_boundary: boolean;
+    filesystem_boundary: boolean;
+    network_boundary: boolean;
+    environment_boundary: boolean;
+    timeout_enforcement: boolean;
+    memory_enforcement: boolean;
+    cpu_enforcement: boolean;
+    process_enforcement: boolean;
+  };
 }
 
 export interface WorkloadPlan {
@@ -156,6 +224,13 @@ export interface WorkloadPlan {
   backend_capabilities: RuntimeCapabilities;
   capability_compatible: boolean;
   capability_error?: string;
+  isolation: {
+    requested: IsolationProfile;
+    effective: IsolationProfile | null;
+    compatible: boolean;
+    evidence?: IsolationEvidence;
+    reason?: { code: string; message: string };
+  };
   input_preparation: WorkloadInput[];
   output_root: string;
   data_flow: {
@@ -184,11 +259,13 @@ export type InspectResult =
   | { kind: "failure"; failure: { kind: ExecutionFailureKind; message: string } };
 
 export type RunResult =
-  | { kind: "execution"; workload_id: string; bundle_id?: string; result: ExecutionResult }
+  | { kind: "execution"; workload_id: string; bundle_id?: string; result: ExecutionResult; receipt?: ExecutionReceipt; isolation?: IsolationEvidence }
   | {
       kind: "failure";
       workload_id?: string;
       bundle_id?: string;
       failure: { kind: ExecutionFailureKind; message: string };
       result?: ExecutionResult;
+      receipt?: ExecutionReceipt;
+      isolation?: IsolationEvidence;
     };

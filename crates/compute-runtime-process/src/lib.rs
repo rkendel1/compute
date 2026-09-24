@@ -646,6 +646,8 @@ impl RuntimeAdapter for ProcessRuntime {
                 exit_code: None,
                 started: true,
             }),
+            isolation: None,
+            receipt: None,
         };
         apply_output_contract(&mut result, &staged.output_dir, &workload.outputs)?;
         Ok(result)
@@ -711,6 +713,8 @@ fn failure_result(
             exit_code: None,
             started: false,
         }),
+        isolation: None,
+        receipt: None,
     }
 }
 

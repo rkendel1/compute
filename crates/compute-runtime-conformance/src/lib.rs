@@ -562,6 +562,7 @@ fn workload(
         mounts: vec![],
         network,
         resources: ResourceLimits::default(),
+        isolation: compute_core::IsolationProfile::Process,
     }
 }
 

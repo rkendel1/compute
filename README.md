@@ -212,6 +212,24 @@ A `.compute` bundle is a transportable execution artifact, not an application
 package. `.app` remains an AppBoundry artifact; Compute bundles do not replace
 or overlap with AppBoundry `.app`.
 
+## Verifiable execution
+
+Every executed workload includes a `compute.receipt@1` evidence object in JSON
+output. The same canonical receipt can be written as a portable artifact:
+
+```sh
+compute run --workload workload.json --receipt receipt.json
+compute receipt inspect receipt.json
+compute receipt verify receipt.json
+```
+
+A Compute receipt lets another system independently verify what workload ran,
+under which exact Compute distribution and runtime, with which input and output
+digests, and what happened. Bind verification to local evidence with
+`--distribution <path>` and re-hash collected outputs with `--artifacts <dir>`.
+Receipts contain environment names but never their values. See
+[docs/receipts.md](docs/receipts.md) for the format and security model.
+
 ## AppPort capability
 
 The package in `packages/compute-appport` exposes the portable model as two
@@ -316,6 +334,26 @@ authorization system, durable state store, workflow engine, orchestration
 layer, or cloud control plane. AppPort supplies the capability boundary;
 Compute continues to own execution semantics. Execution workspaces are
 temporary and are cleaned up after the workload finishes.
+
+## Explicit isolation profiles
+
+Compute resolves a requested isolation profile against the selected runtime's
+actual filesystem, network, environment, timeout, and resource capabilities
+before execution:
+
+```sh
+compute isolation
+compute isolation --json
+compute run --workload workload.json --isolation strict --dry-run --json
+```
+
+`process` is the backwards-compatible baseline and is **not a security
+sandbox**. `sandboxed` requires runtime-enforced filesystem, network, and
+environment boundaries. `strict` requires the strongest enforceable Compute
+boundaries for the requested policy and fails closed when any requested limit
+cannot be enforced; it is not a VM or container boundary. Results and receipts
+record requested/effective profiles and concrete boundary states. See
+[docs/isolation.md](docs/isolation.md).
 
 ## Development
 

@@ -88,6 +88,8 @@ test("inspect and dry-run expose identity and data flow without executing", asyn
     assert.equal(result.kind, "inspection");
     assert.match(result.plan.workload_id, /^sha256:[0-9a-f]{64}$/);
     assert.deepEqual(result.plan.capability.operations, ["compute.inspect", "compute.run"]);
+    assert.equal(result.plan.isolation.requested, "process");
+    assert.equal(result.plan.isolation.compatible, true);
     assert.deepEqual(result.plan.data_flow.steps, [
       "input", "materialization", "entrypoint", "runtime", "declared_output", "collection",
     ]);
@@ -146,6 +148,37 @@ test("authorized run materializes nested inputs and returns only declared output
   assert.deepEqual(result.result.outputs.map((item: any) => item.path), ["result.bin"]);
   assert.deepEqual(result.result.outputs[0].data, [104, 101, 108, 108, 111, 0, 255, 7]);
   assert.deepEqual(result.result.missing_outputs, [{ path: "optional.txt", required: false }]);
+  assert.equal(result.isolation.profile, "process");
+  assert.equal(result.isolation.filesystem, "unavailable");
+  assert.deepEqual(result.receipt.isolation, result.isolation);
+});
+
+test("strict process isolation is rejected before authorized execution", async () => {
+  const root = await fixture("python", "main.py", "open('executed', 'w').write('bad')\n");
+  const request = await writeWorkload(root, {
+    version: "1",
+    runtime: "python",
+    entrypoint: "main.py",
+    network: "network",
+    isolation: { profile: "strict" },
+  });
+  const application = createComputeApplication({
+    computeBinary,
+    cwd: root,
+    authorizer: permissionAuthorizer(),
+  });
+  const inspected = output<any>(await application.handleRequest(
+    envelope("compute.inspect", { request, mode: "dry_run" }),
+  ));
+  assert.equal(inspected.plan.isolation.compatible, false);
+  assert.equal(inspected.plan.isolation.reason.code, "filesystem_isolation_unavailable");
+  const result = output<any>(await application.handleRequest(
+    envelope("compute.run", { request }),
+    { session: session(["compute.run"]) },
+  ));
+  assert.equal(result.kind, "failure");
+  assert.equal(result.failure.kind, "capability_denied");
+  await assert.rejects(readFile(join(root, "executed")));
 });
 
 test("missing required output remains a distinct output_contract failure", async () => {

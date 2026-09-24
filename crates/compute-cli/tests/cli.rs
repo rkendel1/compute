@@ -263,7 +263,123 @@ fn doctor_json_reports_each_runtime_capability_model() {
             && runtime["availability"]["source"].is_string()
             && runtime["capabilities"]["stdin"]["supported"].is_boolean()
             && runtime["capabilities"]["network"].is_object()
+            && runtime["capabilities"]["isolation"]["process_boundary"].is_boolean()
     }));
+}
+
+#[test]
+fn isolation_profiles_are_queryable_and_incompatible_plans_are_structured() {
+    let output = Command::cargo_bin("compute")
+        .unwrap()
+        .args(["isolation", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let matrix: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(matrix["version"], "1");
+    assert_eq!(matrix["profiles"].as_array().unwrap().len(), 3);
+    assert_eq!(matrix["runtimes"].as_array().unwrap().len(), 11);
+    let python = matrix["runtimes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["runtime"] == "python")
+        .unwrap();
+    assert_eq!(python["process"], "yes");
+    assert_eq!(python["strict"], "no");
+    let runtime = Command::cargo_bin("compute")
+        .unwrap()
+        .args(["runtime", "python", "--json"])
+        .output()
+        .unwrap();
+    assert!(runtime.status.success());
+    let runtime: serde_json::Value = serde_json::from_slice(&runtime.stdout).unwrap();
+    assert_eq!(runtime["isolation"]["filesystem_boundary"], false);
+
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("main.py"),
+        "raise SystemExit('must not run')",
+    )
+    .unwrap();
+    let workload = temp.path().join("workload.json");
+    write_json(
+        &workload,
+        serde_json::json!({
+            "version": "1", "runtime": "python", "entrypoint": "main.py",
+            "network": "network", "isolation": {"profile": "strict"}
+        }),
+    );
+    let dry_run = Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "run",
+            "--workload",
+            workload.to_str().unwrap(),
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(dry_run.status.success());
+    let plan: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!(plan["isolation"]["compatible"], false);
+    assert_eq!(
+        plan["isolation"]["reason"]["code"],
+        "filesystem_isolation_unavailable"
+    );
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["run", "--workload", workload.to_str().unwrap(), "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("filesystem_isolation_unavailable"));
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "run",
+            "--workload",
+            workload.to_str().unwrap(),
+            "--isolation",
+            "process",
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot weaken declared profile strict",
+        ));
+
+    let bundle = temp.path().join("strict.compute");
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "bundle",
+            "create",
+            "--workload",
+            workload.to_str().unwrap(),
+            "--output",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "run",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--isolation",
+            "process",
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot weaken declared profile strict",
+        ));
 }
 
 #[test]
@@ -439,7 +555,8 @@ fn wasm_workload_spec_executes_through_existing_contract() {
             "runtime": "wasm",
             "entrypoint": "module.wasm",
             "outputs": [{"path": "declared-but-optional.txt", "required": false}],
-            "network": "none"
+            "network": "none",
+            "isolation": {"profile": "strict"}
         }),
     );
 
@@ -456,6 +573,11 @@ fn wasm_workload_spec_executes_through_existing_contract() {
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["status"], "completed");
     assert_eq!(result["runtime"], "wasm");
+    assert_eq!(result["isolation"]["requested"], "strict");
+    assert_eq!(result["isolation"]["effective"], "strict");
+    assert_eq!(result["isolation"]["filesystem"], "enforced");
+    assert_eq!(result["isolation"]["network"], "disabled");
+    assert_eq!(result["receipt"]["isolation"], result["isolation"]);
 }
 
 #[test]
@@ -818,6 +940,8 @@ open(os.path.join(os.environ["COMPUTE_OUTPUT_DIR"], "result.bin"), "wb").write(v
     );
     let result: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
     assert_eq!(result["outputs"][0]["data"], serde_json::json!([0, 255, 7]));
+    assert_eq!(result["receipt"]["workload"], identity["workload_id"]);
+    assert_eq!(result["receipt"]["bundle"], identity["bundle_id"]);
 
     let mut tampered = std::fs::read(&second).unwrap();
     let offset = tampered
@@ -883,4 +1007,160 @@ fn bundle_expected_identity_mismatch_fails_before_execution() {
         .failure()
         .stderr(predicate::str::contains("bundle identity mismatch"))
         .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn execution_receipt_is_canonical_verifiable_and_binds_artifacts() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("main.py"),
+        "import os\nopen(os.path.join(os.environ['COMPUTE_OUTPUT_DIR'], 'result.txt'), 'w').write('evidence')\n",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("input.txt"), "portable input").unwrap();
+    let workload = temp.path().join("workload.json");
+    write_json(
+        &workload,
+        serde_json::json!({
+            "version": "1",
+            "runtime": "python",
+            "entrypoint": "main.py",
+            "env": {"VISIBLE_NAME": "secret-value-must-not-appear"},
+            "inputs": [{"path": "input.txt", "source": {"type": "file", "path": "input.txt"}}],
+            "outputs": [{"path": "result.txt", "required": true}],
+            "network": "network"
+        }),
+    );
+    let receipt = temp.path().join("receipt.json");
+    let run = Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "run",
+            "--workload",
+            workload.to_str().unwrap(),
+            "--receipt",
+            receipt.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert_eq!(result["receipt"]["receipt_version"], "compute.receipt@1");
+    assert!(
+        result["receipt"]["workload"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(
+        result["receipt"]["policy"]["environment_names"][0],
+        "VISIBLE_NAME"
+    );
+    assert!(
+        !String::from_utf8_lossy(&std::fs::read(&receipt).unwrap())
+            .contains("secret-value-must-not-appear")
+    );
+
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["receipt", "verify", receipt.to_str().unwrap(), "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"valid\": true"));
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["receipt", "inspect", receipt.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Valid:       yes"));
+
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "receipt",
+            "verify",
+            receipt.to_str().unwrap(),
+            "--distribution",
+            temp.path().join("missing-distribution").to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("distribution: unavailable"));
+    let invalid_distribution = temp.path().join("invalid-distribution");
+    std::fs::create_dir(&invalid_distribution).unwrap();
+    std::fs::write(invalid_distribution.join("runtime-manifest.json"), "{}").unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "receipt",
+            "verify",
+            receipt.to_str().unwrap(),
+            "--distribution",
+            invalid_distribution.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("distribution: invalid"));
+
+    let artifacts = temp.path().join("artifacts");
+    std::fs::create_dir(&artifacts).unwrap();
+    std::fs::write(artifacts.join("result.txt"), "evidence").unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "receipt",
+            "verify",
+            receipt.to_str().unwrap(),
+            "--artifacts",
+            artifacts.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("artifacts: verified"));
+    std::fs::write(artifacts.join("result.txt"), "modified").unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "receipt",
+            "verify",
+            receipt.to_str().unwrap(),
+            "--artifacts",
+            artifacts.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("output digest mismatch"));
+
+    let original = std::fs::read(&receipt).unwrap();
+    let mut tampered: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    tampered["runtime"]["version"] = serde_json::json!("tampered");
+    let mut bytes = serde_json::to_vec(&tampered).unwrap();
+    bytes.push(b'\n');
+    let tampered_path = temp.path().join("tampered.json");
+    std::fs::write(&tampered_path, bytes).unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["receipt", "verify", tampered_path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("receipt hash mismatch"));
+
+    let reformatted = temp.path().join("reformatted.json");
+    std::fs::write(
+        &reformatted,
+        serde_json::to_vec_pretty(&serde_json::from_slice::<serde_json::Value>(&original).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["receipt", "verify", reformatted.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid canonical encoding"));
 }
