@@ -1,1 +1,3 @@
 /target
+/packages/compute-appport/node_modules
+/packages/compute-appport/dist

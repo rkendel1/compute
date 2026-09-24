@@ -80,7 +80,43 @@ Execution contract checks can also be exercised directly:
 ```sh
 cargo test --workspace
 compute doctor --json
+cd packages/compute-appport && npm test
 ```
+
+The shared adapter contract lives in `compute-runtime-conformance`. Its
+failures include the runtime, test case, expected and actual behavior,
+execution configuration, and the adapter's capability declaration. Process
+runtimes are tested when their executable is installed. The suite builds JVM,
+.NET, and native fixture artifacts before execution; Compute only executes the
+resulting `.jar`, `.dll`, or Linux binary.
+
+## Runtime distribution
+
+Pinned runtime metadata lives only in `distribution/runtime-lock.json`.
+`distribution/assemble.sh` validates a prepared payload tree, emits the
+machine-readable distribution manifest, normalizes archive metadata, and
+produces the input consumed unchanged by `distribution/Dockerfile`. See
+`distribution/README.md` for the payload layout. Set `COMPUTE_HOME` to an
+assembled root to exercise official fail-closed resolution locally; leaving
+it unset permits explicitly labeled host-development discovery.
+
+Portable workload checks cover versioned JSON parsing, deterministic
+normalization, relative-path and symlink containment, input materialization,
+capability planning, dry-run behavior, and execution through the same adapter
+contract used by direct `compute run PATH` calls.
+
+Bundle checks cover byte-for-byte reproducibility, distinct workload and
+bundle identities, canonical archive headers and ordering, independent
+verification, input and manifest tampering, duplicate/missing/unexpected
+entries, archive traversal, expected identity enforcement, self-contained
+execution after source deletion, and CLI create/inspect/verify/dry-run/run.
+
+The AppPort package adds capability-level conformance for manifest discovery,
+inspect/dry-run non-execution, authorization denial, deterministic workload
+identity, inline and file-backed inputs, declared output bytes, output-contract
+failure, unsafe paths, symlinks, destination conflicts, fresh workspaces, and
+WASM/Node/Python/Bun workload and bundle execution when each runtime is
+installed.
 
 The JSON execution contract includes `execution_id`, `runtime`, `network`,
 `lifecycle`, terminal `status`, exit information, output, artifacts, and

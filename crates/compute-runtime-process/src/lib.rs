@@ -1,47 +1,339 @@
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Instant;
 
 use async_trait::async_trait;
 use compute_core::{
     ComputeError, ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionResult,
-    ExecutionStatus, NetworkPolicy, Output, ResolvedRuntime, ResourceUsage, Result, RuntimeAdapter,
-    RuntimeAvailability, RuntimeCapabilities, RuntimeKind, Workload, collect_artifacts,
-    new_execution_id, stage_workload,
+    ExecutionStatus, Output, ResolvedRuntime, ResourceUsage, Result, RuntimeAdapter,
+    RuntimeAvailability, RuntimeCapabilities, RuntimeDescriptor, RuntimeKind, RuntimeSource,
+    Workload, apply_output_contract, collect_artifacts, new_execution_id, stage_workload,
 };
-use tokio::io::AsyncReadExt;
+use serde::Deserialize;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct ProcessRuntime {
     kind: RuntimeKind,
-    executable_names: &'static [&'static str],
 }
 
 impl ProcessRuntime {
-    pub const fn new(kind: RuntimeKind, executable_names: &'static [&'static str]) -> Self {
+    pub const fn new(kind: RuntimeKind) -> Self {
+        Self { kind }
+    }
+
+    fn definition(&self) -> RuntimeDefinition {
+        runtime_definition(self.kind)
+    }
+
+    fn discover(&self) -> DiscoveredRuntime {
+        let definition = self.definition();
+        if self.kind == RuntimeKind::Native {
+            return if cfg!(target_os = "linux") {
+                DiscoveredRuntime::available(
+                    PathBuf::from("<workload-entrypoint>"),
+                    definition.version.clone(),
+                    RuntimeSource::Embedded,
+                )
+            } else {
+                DiscoveredRuntime::unavailable(
+                    RuntimeSource::Unavailable,
+                    "native workloads require a Linux Compute distribution".into(),
+                )
+            };
+        }
+        match distribution_root() {
+            Some(Ok(root)) => discover_distribution_runtime(&root, &definition),
+            Some(Err(message)) => {
+                DiscoveredRuntime::unavailable(RuntimeSource::Distribution, message)
+            }
+            None => discover_host_runtime(&definition),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeDefinition {
+    kind: RuntimeKind,
+    version: String,
+    executable: String,
+    host_names: &'static [&'static str],
+    invocation: Invocation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Invocation {
+    Direct,
+    Deno,
+    Jvm,
+    Dotnet,
+    Native,
+    Shell,
+}
+
+fn runtime_definition(kind: RuntimeKind) -> RuntimeDefinition {
+    let lock: RuntimeLock =
+        serde_json::from_str(include_str!("../../../distribution/runtime-lock.json"))
+            .expect("valid embedded runtime lock");
+    assert_eq!(lock.schema_version, 1, "supported runtime lock version");
+    let locked = lock
+        .runtimes
+        .get(kind.as_str())
+        .unwrap_or_else(|| panic!("runtime lock is missing {kind}"));
+    let (host_names, invocation) = match kind {
+        RuntimeKind::Python => (&["python3", "python"][..], Invocation::Direct),
+        RuntimeKind::Node => (&["node"][..], Invocation::Direct),
+        RuntimeKind::Bun => (&["bun"][..], Invocation::Direct),
+        RuntimeKind::Deno => (&["deno"][..], Invocation::Deno),
+        RuntimeKind::Ruby => (&["ruby"][..], Invocation::Direct),
+        RuntimeKind::Php => (&["php"][..], Invocation::Direct),
+        RuntimeKind::Jvm => (&["java"][..], Invocation::Jvm),
+        RuntimeKind::Dotnet => (&["dotnet"][..], Invocation::Dotnet),
+        RuntimeKind::Native => (&[][..], Invocation::Native),
+        RuntimeKind::Shell => (&["sh"][..], Invocation::Shell),
+        RuntimeKind::Wasm => unreachable!("WASM is embedded"),
+    };
+    RuntimeDefinition {
+        kind,
+        version: locked.version.clone(),
+        executable: locked.executable.clone(),
+        host_names,
+        invocation,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeLock {
+    schema_version: u32,
+    runtimes: BTreeMap<String, DistributionRuntime>,
+}
+
+#[derive(Debug)]
+struct DiscoveredRuntime {
+    path: Option<PathBuf>,
+    version: Option<String>,
+    installed: bool,
+    available: bool,
+    source: RuntimeSource,
+    remediation: Option<String>,
+}
+
+impl DiscoveredRuntime {
+    fn available(path: PathBuf, version: String, source: RuntimeSource) -> Self {
         Self {
-            kind,
-            executable_names,
+            path: Some(path),
+            version: Some(version),
+            installed: true,
+            available: true,
+            source,
+            remediation: None,
         }
     }
 
-    fn discover(&self) -> Option<(PathBuf, String)> {
-        for executable in self.executable_names {
-            let Ok(path) = which::which(executable) else {
-                continue;
-            };
-            let output = std::process::Command::new(&path)
-                .arg("--version")
-                .output()
-                .ok()?;
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let version = if stdout.is_empty() { stderr } else { stdout };
-            return Some((path, version));
+    fn unavailable(source: RuntimeSource, remediation: String) -> Self {
+        Self {
+            path: None,
+            version: None,
+            installed: false,
+            available: false,
+            source,
+            remediation: Some(remediation),
         }
-        None
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DistributionManifest {
+    compute_version: String,
+    distribution_version: String,
+    platform: String,
+    runtimes: BTreeMap<String, DistributionRuntime>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DistributionRuntime {
+    version: String,
+    executable: String,
+}
+
+fn distribution_root() -> Option<std::result::Result<PathBuf, String>> {
+    if let Some(root) = std::env::var_os("COMPUTE_HOME") {
+        let root = PathBuf::from(root);
+        return Some(if root.join("runtime-manifest.json").is_file() {
+            Ok(root)
+        } else {
+            Err(format!(
+                "COMPUTE_HOME does not contain runtime-manifest.json: {}",
+                root.display()
+            ))
+        });
+    }
+    let executable = std::env::current_exe().ok()?;
+    let root = executable.parent()?.parent()?.to_path_buf();
+    root.join("runtime-manifest.json")
+        .is_file()
+        .then_some(Ok(root))
+}
+
+fn discover_distribution_runtime(root: &Path, definition: &RuntimeDefinition) -> DiscoveredRuntime {
+    let manifest_path = root.join("runtime-manifest.json");
+    let manifest = match std::fs::read(&manifest_path)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            serde_json::from_slice::<DistributionManifest>(&bytes)
+                .map_err(|error| error.to_string())
+        }) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return DiscoveredRuntime::unavailable(
+                RuntimeSource::Distribution,
+                format!("invalid runtime manifest: {error}"),
+            );
+        }
+    };
+    let expected_compute = env!("CARGO_PKG_VERSION");
+    let expected_platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let expected_distribution = format!("compute-{expected_compute}-{expected_platform}");
+    if manifest.compute_version != expected_compute
+        || manifest.platform != expected_platform
+        || manifest.distribution_version != expected_distribution
+    {
+        return DiscoveredRuntime::unavailable(
+            RuntimeSource::Distribution,
+            format!(
+                "incompatible Compute distribution: expected {expected_distribution} for Compute {expected_compute}, found {} for Compute {}",
+                manifest.distribution_version, manifest.compute_version
+            ),
+        );
+    }
+    let Some(runtime) = manifest.runtimes.get(definition.kind.as_str()) else {
+        return DiscoveredRuntime::unavailable(
+            RuntimeSource::Distribution,
+            format!(
+                "runtime {} is missing from the Compute distribution",
+                definition.kind
+            ),
+        );
+    };
+    if runtime.version != definition.version || runtime.executable != definition.executable {
+        return DiscoveredRuntime::unavailable(
+            RuntimeSource::Distribution,
+            format!(
+                "runtime manifest mismatch for {}: expected {} at {}, declared {} at {}",
+                definition.kind,
+                definition.version,
+                definition.executable,
+                runtime.version,
+                runtime.executable
+            ),
+        );
+    }
+    let relative = Path::new(&runtime.executable);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return DiscoveredRuntime::unavailable(
+            RuntimeSource::Distribution,
+            format!(
+                "runtime executable must be a portable relative path: {}",
+                runtime.executable
+            ),
+        );
+    }
+    let path = root.join(relative);
+    discover_executable(&path, definition, RuntimeSource::Distribution, true)
+}
+
+fn discover_host_runtime(definition: &RuntimeDefinition) -> DiscoveredRuntime {
+    for name in definition.host_names {
+        if let Ok(path) = which::which(name) {
+            let discovered =
+                discover_executable(&path, definition, RuntimeSource::HostDevelopment, false);
+            if discovered.available {
+                return discovered;
+            }
+        }
+    }
+    DiscoveredRuntime::unavailable(
+        RuntimeSource::Unavailable,
+        format!(
+            "install the Compute runtime distribution containing {} {}",
+            definition.kind, definition.version
+        ),
+    )
+}
+
+fn discover_executable(
+    path: &Path,
+    definition: &RuntimeDefinition,
+    source: RuntimeSource,
+    require_pinned_version: bool,
+) -> DiscoveredRuntime {
+    if !path.is_file() {
+        return DiscoveredRuntime::unavailable(
+            source,
+            format!("runtime executable is missing: {}", path.display()),
+        );
+    }
+    let mut probe = std::process::Command::new(path);
+    match definition.invocation {
+        Invocation::Dotnet => {
+            probe.arg("--list-runtimes");
+        }
+        Invocation::Shell => {
+            probe.arg("--help");
+        }
+        _ => {
+            probe.arg("--version");
+        }
+    }
+    let output = match probe.output() {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            return DiscoveredRuntime::unavailable(
+                source,
+                format!(
+                    "runtime version probe failed for {} with status {}",
+                    path.display(),
+                    output.status
+                ),
+            );
+        }
+        Err(error) => {
+            return DiscoveredRuntime::unavailable(
+                source,
+                format!(
+                    "runtime version probe failed for {}: {error}",
+                    path.display()
+                ),
+            );
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let version = if stdout.is_empty() { stderr } else { stdout };
+    if require_pinned_version && !version.contains(&definition.version) {
+        return DiscoveredRuntime {
+            path: Some(path.to_path_buf()),
+            version: Some(version.clone()),
+            installed: true,
+            available: false,
+            source,
+            remediation: Some(format!(
+                "replace {} with Compute-pinned {} {} (detected {version})",
+                path.display(),
+                definition.kind,
+                definition.version
+            )),
+        };
+    }
+    DiscoveredRuntime::available(path.to_path_buf(), version, source)
 }
 
 #[async_trait]
@@ -50,30 +342,39 @@ impl RuntimeAdapter for ProcessRuntime {
         self.kind
     }
 
+    fn descriptor(&self) -> RuntimeDescriptor {
+        let definition = self.definition();
+        RuntimeDescriptor {
+            id: self.kind,
+            version: definition.version,
+            executable: definition.executable,
+            capabilities: self.capabilities(),
+        }
+    }
+
     async fn availability(&self, requested: Option<&str>) -> RuntimeAvailability {
-        match self.discover() {
-            Some((path, version)) => RuntimeAvailability {
-                kind: self.kind,
-                version: Some(version.clone()),
-                known: true,
-                installed: true,
-                available: true,
-                compatible: requested
-                    .map(|requested| version.contains(requested))
-                    .unwrap_or(true),
-                selected: false,
-                executable: Some(path),
-            },
-            None => RuntimeAvailability {
-                kind: self.kind,
-                version: None,
-                known: true,
-                installed: false,
-                available: false,
-                compatible: false,
-                selected: false,
-                executable: None,
-            },
+        let discovered = self.discover();
+        let compatible = discovered.available
+            && requested
+                .map(|requested| {
+                    discovered
+                        .version
+                        .as_deref()
+                        .is_some_and(|version| version.contains(requested))
+                })
+                .unwrap_or(true);
+        RuntimeAvailability {
+            kind: self.kind,
+            version: discovered.version,
+            known: true,
+            installed: discovered.installed,
+            available: discovered.available,
+            compatible,
+            selected: false,
+            executable: discovered.path,
+            source: discovered.source,
+            expected_version: Some(self.definition().version),
+            remediation: discovered.remediation,
         }
     }
 
@@ -101,7 +402,11 @@ impl RuntimeAdapter for ProcessRuntime {
     }
 
     fn capabilities(&self) -> RuntimeCapabilities {
-        RuntimeCapabilities::process()
+        if self.kind == RuntimeKind::Deno {
+            RuntimeCapabilities::deno()
+        } else {
+            RuntimeCapabilities::process()
+        }
     }
 
     async fn execute(
@@ -109,49 +414,127 @@ impl RuntimeAdapter for ProcessRuntime {
         workload: &Workload,
         runtime: &ResolvedRuntime,
     ) -> Result<ExecutionResult> {
-        if workload.network != NetworkPolicy::Network {
-            return Err(ComputeError::UnsupportedCapability {
-                runtime: self.kind,
-                capability: "network isolation is not yet supported for process-backed runtimes"
-                    .to_string(),
-            });
-        }
-        if workload.resources.memory_bytes.is_some()
-            || workload.resources.cpu_time.is_some()
-            || workload.resources.process_count.is_some()
-        {
-            return Err(ComputeError::UnsupportedCapability {
-                runtime: self.kind,
-                capability: "requested resource limit is not supported for process-backed runtimes"
-                    .to_string(),
-            });
-        }
+        self.capabilities().validate(self.kind, workload)?;
 
-        let staged = stage_workload(workload)?;
-        let executable = runtime
-            .executable
-            .as_ref()
-            .ok_or(ComputeError::RuntimeUnavailable(self.kind))?;
-        let mut command = Command::new(executable);
+        let execution_id = new_execution_id();
+        let staged = match stage_workload(workload) {
+            Ok(staged) => staged,
+            Err(error) => {
+                return Ok(failure_result(
+                    workload,
+                    execution_id,
+                    ExecutionPhase::Resolved,
+                    ExecutionErrorKind::Preparation,
+                    error.to_string(),
+                    vec![ExecutionStatus::Created, ExecutionStatus::Resolved],
+                ));
+            }
+        };
+        if self.definition().invocation == Invocation::Dotnet {
+            stage_dotnet_companions(&workload.entrypoint, &staged.entrypoint)?;
+        }
+        let definition = self.definition();
+        let mut command = match definition.invocation {
+            Invocation::Native => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut permissions = std::fs::metadata(&staged.entrypoint)?.permissions();
+                    permissions.set_mode(0o700);
+                    std::fs::set_permissions(&staged.entrypoint, permissions)?;
+                }
+                Command::new(&staged.entrypoint)
+            }
+            _ => Command::new(
+                runtime
+                    .executable
+                    .as_ref()
+                    .ok_or(ComputeError::RuntimeUnavailable(self.kind))?,
+            ),
+        };
+        match definition.invocation {
+            Invocation::Deno => {
+                command
+                    .arg("run")
+                    .arg(format!(
+                        "--allow-env={}",
+                        std::iter::once("COMPUTE_WORK_DIR")
+                            .chain(std::iter::once("COMPUTE_TMP_DIR"))
+                            .chain(std::iter::once("COMPUTE_OUTPUT_DIR"))
+                            .chain(workload.env.iter().map(|pair| pair.key.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ))
+                    .arg(format!("--allow-read={}", staged.work_dir.display()))
+                    .arg(format!(
+                        "--allow-write={},{}",
+                        staged.tmp_dir.display(),
+                        staged.output_dir.display()
+                    ));
+                match workload.network {
+                    compute_core::NetworkPolicy::None => {}
+                    compute_core::NetworkPolicy::Localhost => {
+                        command.arg("--allow-net=localhost,127.0.0.1,[::1]");
+                    }
+                    compute_core::NetworkPolicy::Network => {
+                        command.arg("--allow-net");
+                    }
+                }
+                command.arg(&staged.entrypoint);
+            }
+            Invocation::Jvm => {
+                command.args(["-jar"]).arg(&staged.entrypoint);
+            }
+            Invocation::Dotnet | Invocation::Shell | Invocation::Direct => {
+                command.arg(&staged.entrypoint);
+            }
+            Invocation::Native => {}
+        }
         command
-            .arg(&staged.entrypoint)
             .args(&workload.args)
             .current_dir(&staged.work_dir)
             .kill_on_drop(true)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env_clear()
             .env("COMPUTE_WORK_DIR", &staged.work_dir)
             .env("COMPUTE_TMP_DIR", &staged.tmp_dir)
             .env("COMPUTE_OUTPUT_DIR", &staged.output_dir);
+        #[cfg(unix)]
+        command.process_group(0);
 
         for pair in &workload.env {
             command.env(&pair.key, &pair.value);
         }
 
         let started = Instant::now();
-        let mut child = command.spawn()?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                return Ok(failure_result(
+                    workload,
+                    execution_id,
+                    ExecutionPhase::Prepared,
+                    ExecutionErrorKind::Start,
+                    error.to_string(),
+                    vec![
+                        ExecutionStatus::Created,
+                        ExecutionStatus::Resolved,
+                        ExecutionStatus::Prepared,
+                    ],
+                ));
+            }
+        };
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| ComputeError::Runtime("stdin pipe missing".into()))?;
+        let input = workload.stdin.clone();
+        let stdin_task = tokio::spawn(async move {
+            stdin.write_all(&input).await?;
+            stdin.shutdown().await
+        });
         let mut stdout = child
             .stdout
             .take()
@@ -176,7 +559,7 @@ impl RuntimeAdapter for ProcessRuntime {
                         (stdout, stderr, Some(status), false)
                     }
                     Err(_) => {
-                        let _ = child.kill().await;
+                        terminate(&mut child).await;
                         let _ = child.wait().await;
                         let (stdout, stderr) = tokio::join!(
                             read_limited(&mut stdout, stdout_limit),
@@ -191,6 +574,9 @@ impl RuntimeAdapter for ProcessRuntime {
             };
 
         let process_status = status;
+        stdin_task
+            .await
+            .map_err(|error| ComputeError::Runtime(error.to_string()))??;
         let execution_status = if timed_out {
             ExecutionStatus::TimedOut
         } else {
@@ -198,8 +584,7 @@ impl RuntimeAdapter for ProcessRuntime {
             ExecutionStatus::Completed
         };
 
-        let execution_id = new_execution_id();
-        Ok(ExecutionResult {
+        let mut result = ExecutionResult {
             execution_id: execution_id.clone(),
             runtime: self.kind,
             network: workload.network.clone(),
@@ -220,6 +605,8 @@ impl RuntimeAdapter for ProcessRuntime {
             duration: started.elapsed(),
             resource_usage: ResourceUsage::default(),
             artifacts: collect_artifacts(&staged.output_dir)?,
+            outputs: vec![],
+            missing_outputs: vec![],
             error: timed_out.then(|| ExecutionError {
                 execution_id,
                 phase: ExecutionPhase::Running,
@@ -229,7 +616,71 @@ impl RuntimeAdapter for ProcessRuntime {
                 exit_code: None,
                 started: true,
             }),
-        })
+        };
+        apply_output_contract(&mut result, &staged.output_dir, &workload.outputs)?;
+        Ok(result)
+    }
+}
+
+fn stage_dotnet_companions(source: &Path, staged: &Path) -> Result<()> {
+    let Some(stem) = source.file_stem().and_then(|value| value.to_str()) else {
+        return Ok(());
+    };
+    for suffix in ["runtimeconfig.json", "deps.json"] {
+        let companion = source.with_file_name(format!("{stem}.{suffix}"));
+        if companion.is_file() {
+            let destination = staged.with_file_name(format!("{stem}.{suffix}"));
+            std::fs::copy(companion, destination)?;
+        }
+    }
+    Ok(())
+}
+
+async fn terminate(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // The child is placed in a fresh process group before spawn. Killing
+        // that group reaps workload descendants as part of timeout cleanup.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+        return;
+    }
+    let _ = child.kill().await;
+}
+
+fn failure_result(
+    workload: &Workload,
+    execution_id: String,
+    phase: ExecutionPhase,
+    kind: ExecutionErrorKind,
+    message: String,
+    mut lifecycle: Vec<ExecutionStatus>,
+) -> ExecutionResult {
+    lifecycle.push(ExecutionStatus::Failed);
+    ExecutionResult {
+        execution_id: execution_id.clone(),
+        runtime: workload.runtime.kind,
+        network: workload.network.clone(),
+        lifecycle,
+        status: ExecutionStatus::Failed,
+        exit_code: None,
+        stdout: Output::from_bytes(vec![], None),
+        stderr: Output::from_bytes(vec![], None),
+        duration: std::time::Duration::ZERO,
+        resource_usage: ResourceUsage::default(),
+        artifacts: vec![],
+        outputs: vec![],
+        missing_outputs: vec![],
+        error: Some(ExecutionError {
+            execution_id,
+            phase,
+            kind,
+            message,
+            runtime: Some(workload.runtime.kind),
+            exit_code: None,
+            started: false,
+        }),
     }
 }
 
@@ -255,130 +706,58 @@ async fn read_limited<R: tokio::io::AsyncRead + Unpin>(
     Ok(output)
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct NodeRuntime;
-#[derive(Debug, Default, Clone)]
-pub struct BunRuntime;
-#[derive(Debug, Default, Clone)]
-pub struct DenoRuntime;
-#[derive(Debug, Default, Clone)]
-pub struct PythonRuntime;
+macro_rules! process_adapter {
+    ($name:ident, $kind:ident) => {
+        #[derive(Debug, Default, Clone)]
+        pub struct $name;
 
-#[async_trait]
-impl RuntimeAdapter for NodeRuntime {
-    fn kind(&self) -> RuntimeKind {
-        RuntimeKind::Node
-    }
-    fn capabilities(&self) -> RuntimeCapabilities {
-        RuntimeCapabilities::process()
-    }
-    async fn availability(&self, requested: Option<&str>) -> RuntimeAvailability {
-        ProcessRuntime::new(RuntimeKind::Node, &["node"])
-            .availability(requested)
-            .await
-    }
-    async fn resolve(&self, workload: &Workload) -> Result<ResolvedRuntime> {
-        ProcessRuntime::new(RuntimeKind::Node, &["node"])
-            .resolve(workload)
-            .await
-    }
-    async fn execute(
-        &self,
-        workload: &Workload,
-        runtime: &ResolvedRuntime,
-    ) -> Result<ExecutionResult> {
-        ProcessRuntime::new(RuntimeKind::Node, &["node"])
-            .execute(workload, runtime)
-            .await
-    }
+        #[async_trait]
+        impl RuntimeAdapter for $name {
+            fn kind(&self) -> RuntimeKind {
+                RuntimeKind::$kind
+            }
+
+            fn descriptor(&self) -> RuntimeDescriptor {
+                ProcessRuntime::new(self.kind()).descriptor()
+            }
+
+            fn capabilities(&self) -> RuntimeCapabilities {
+                ProcessRuntime::new(self.kind()).capabilities()
+            }
+
+            async fn availability(&self, requested: Option<&str>) -> RuntimeAvailability {
+                ProcessRuntime::new(self.kind())
+                    .availability(requested)
+                    .await
+            }
+
+            async fn resolve(&self, workload: &Workload) -> Result<ResolvedRuntime> {
+                ProcessRuntime::new(self.kind()).resolve(workload).await
+            }
+
+            async fn execute(
+                &self,
+                workload: &Workload,
+                runtime: &ResolvedRuntime,
+            ) -> Result<ExecutionResult> {
+                ProcessRuntime::new(self.kind())
+                    .execute(workload, runtime)
+                    .await
+            }
+        }
+    };
 }
 
-#[async_trait]
-impl RuntimeAdapter for BunRuntime {
-    fn kind(&self) -> RuntimeKind {
-        RuntimeKind::Bun
-    }
-    fn capabilities(&self) -> RuntimeCapabilities {
-        RuntimeCapabilities::process()
-    }
-    async fn availability(&self, requested: Option<&str>) -> RuntimeAvailability {
-        ProcessRuntime::new(RuntimeKind::Bun, &["bun"])
-            .availability(requested)
-            .await
-    }
-    async fn resolve(&self, workload: &Workload) -> Result<ResolvedRuntime> {
-        ProcessRuntime::new(RuntimeKind::Bun, &["bun"])
-            .resolve(workload)
-            .await
-    }
-    async fn execute(
-        &self,
-        workload: &Workload,
-        runtime: &ResolvedRuntime,
-    ) -> Result<ExecutionResult> {
-        ProcessRuntime::new(RuntimeKind::Bun, &["bun"])
-            .execute(workload, runtime)
-            .await
-    }
-}
-
-#[async_trait]
-impl RuntimeAdapter for DenoRuntime {
-    fn kind(&self) -> RuntimeKind {
-        RuntimeKind::Deno
-    }
-    fn capabilities(&self) -> RuntimeCapabilities {
-        RuntimeCapabilities::process()
-    }
-    async fn availability(&self, requested: Option<&str>) -> RuntimeAvailability {
-        ProcessRuntime::new(RuntimeKind::Deno, &["deno"])
-            .availability(requested)
-            .await
-    }
-    async fn resolve(&self, workload: &Workload) -> Result<ResolvedRuntime> {
-        ProcessRuntime::new(RuntimeKind::Deno, &["deno"])
-            .resolve(workload)
-            .await
-    }
-    async fn execute(
-        &self,
-        workload: &Workload,
-        runtime: &ResolvedRuntime,
-    ) -> Result<ExecutionResult> {
-        ProcessRuntime::new(RuntimeKind::Deno, &["deno"])
-            .execute(workload, runtime)
-            .await
-    }
-}
-
-#[async_trait]
-impl RuntimeAdapter for PythonRuntime {
-    fn kind(&self) -> RuntimeKind {
-        RuntimeKind::Python
-    }
-    fn capabilities(&self) -> RuntimeCapabilities {
-        RuntimeCapabilities::process()
-    }
-    async fn availability(&self, requested: Option<&str>) -> RuntimeAvailability {
-        ProcessRuntime::new(RuntimeKind::Python, &["python3", "python"])
-            .availability(requested)
-            .await
-    }
-    async fn resolve(&self, workload: &Workload) -> Result<ResolvedRuntime> {
-        ProcessRuntime::new(RuntimeKind::Python, &["python3", "python"])
-            .resolve(workload)
-            .await
-    }
-    async fn execute(
-        &self,
-        workload: &Workload,
-        runtime: &ResolvedRuntime,
-    ) -> Result<ExecutionResult> {
-        ProcessRuntime::new(RuntimeKind::Python, &["python3", "python"])
-            .execute(workload, runtime)
-            .await
-    }
-}
+process_adapter!(NodeRuntime, Node);
+process_adapter!(BunRuntime, Bun);
+process_adapter!(DenoRuntime, Deno);
+process_adapter!(PythonRuntime, Python);
+process_adapter!(RubyRuntime, Ruby);
+process_adapter!(PhpRuntime, Php);
+process_adapter!(JvmRuntime, Jvm);
+process_adapter!(DotnetRuntime, Dotnet);
+process_adapter!(NativeRuntime, Native);
+process_adapter!(ShellRuntime, Shell);
 
 #[cfg(test)]
 mod tests {
@@ -386,14 +765,65 @@ mod tests {
 
     #[tokio::test]
     async fn availability_reports_known_runtime() {
-        let runtime = ProcessRuntime::new(RuntimeKind::Node, &["node"]);
+        let runtime = ProcessRuntime::new(RuntimeKind::Node);
         let availability = runtime.availability(None).await;
         assert!(availability.known);
     }
 
     #[test]
     fn process_runtime_can_be_constructed() {
-        let runtime = ProcessRuntime::new(RuntimeKind::Python, &["python3", "python"]);
+        let runtime = ProcessRuntime::new(RuntimeKind::Python);
         assert_eq!(runtime.kind(), RuntimeKind::Python);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn distribution_resolution_is_pinned_and_never_falls_back_to_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let definition = runtime_definition(RuntimeKind::Ruby);
+        let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let manifest = serde_json::json!({
+            "compute_version": "0.1.0",
+            "distribution_version": format!("compute-0.1.0-{platform}"),
+            "platform": platform,
+            "runtimes": {
+                "ruby": {
+                    "version": definition.version,
+                    "executable": definition.executable,
+                }
+            }
+        });
+        std::fs::write(
+            root.path().join("runtime-manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let missing = discover_distribution_runtime(root.path(), &definition);
+        assert!(!missing.available);
+        assert_eq!(missing.source, RuntimeSource::Distribution);
+        assert!(missing.remediation.unwrap().contains("missing"));
+
+        let executable = root.path().join(&definition.executable);
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf 'ruby {}\\n'\n", definition.version),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let available = discover_distribution_runtime(root.path(), &definition);
+        assert!(available.available);
+        assert_eq!(available.path, Some(executable.clone()));
+
+        std::fs::write(&executable, "#!/bin/sh\necho wrong-version\n").unwrap();
+        let wrong = discover_distribution_runtime(root.path(), &definition);
+        assert!(wrong.installed);
+        assert!(!wrong.available);
+        assert!(wrong.remediation.unwrap().contains(&definition.version));
     }
 }

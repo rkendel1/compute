@@ -366,6 +366,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "wat",
 ]
 
 [[package]]
@@ -376,6 +377,8 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
+ "tar",
  "tempfile",
  "thiserror 2.0.21",
  "walkdir",
@@ -387,11 +390,23 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "compute-core",
+ "compute-runtime-conformance",
  "compute-runtime-process",
  "compute-runtime-wasm",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "compute-runtime-conformance"
+version = "0.1.0"
+dependencies = [
+ "compute-core",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -400,6 +415,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "compute-core",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "which",
 ]
@@ -410,9 +429,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "compute-core",
+ "compute-runtime-conformance",
+ "serde_json",
+ "tempfile",
  "tokio",
  "wasmtime",
  "wasmtime-wasi",
+ "wat",
 ]
 
 [[package]]
@@ -754,6 +777,16 @@ dependencies = [
  "cfg-if",
  "rustix 1.1.5",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
 ]
 
 [[package]]
@@ -1816,6 +1849,17 @@ dependencies = [
  "rustix 0.38.44",
  "windows-sys 0.59.0",
  "winx",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
 ]
 
 [[package]]
@@ -2905,6 +2949,16 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.5",
+]
 
 [[package]]
 name = "yoke"

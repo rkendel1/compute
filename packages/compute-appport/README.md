@@ -1,0 +1,34 @@
+# Compute AppPort provider
+
+This package publishes `compute.inspect@1` and `compute.run@1` through
+`@appport/core`. The local provider delegates validation, planning, isolation,
+runtime execution, and output collection to the existing `compute` binary.
+
+```ts
+import { permissionAuthorizer } from "@appport/authorization";
+import { createComputeApplication } from "@compute/appport";
+
+const compute = createComputeApplication({
+  computeBinary: "/path/to/compute",
+  authorizer: permissionAuthorizer(),
+});
+
+const manifest = compute.manifest();
+```
+
+`compute.inspect` is a public observation and never runs the workload.
+`compute.run` is consequential and requires the `compute.run` authorization
+scope. Passing an AuthBoundry-compatible AppPort `Authorizer` at provider
+initialization keeps identity and policy outside `WorkloadSpec`.
+
+An operation input contains an `ExecutionRequest`: the portable
+`WorkloadSpec`, requested execution boundaries, and invocation metadata. The
+local provider uses `invocation.workload_path` to resolve the workload source file,
+verifies that file against the transported specification, and pins execution
+to its deterministic workload ID.
+
+The same operation versions also accept a bundle request containing portable
+`.compute` bytes and optional expected workload and bundle IDs. The provider
+writes those bytes only to a private temporary adapter directory, delegates
+verification and execution to the Rust engine, pins both verified identities,
+and removes the adapter directory afterward.

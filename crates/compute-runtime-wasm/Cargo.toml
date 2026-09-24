@@ -11,3 +11,10 @@ async-trait.workspace = true
 tokio.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+compute-runtime-conformance = { path = "../compute-runtime-conformance" }
+tempfile.workspace = true
+tokio.workspace = true
+wat.workspace = true

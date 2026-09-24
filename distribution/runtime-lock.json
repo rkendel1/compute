@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "runtimes": {
+    "wasm": {
+      "version": "wasmtime-36.0.10+wasi-preview1",
+      "executable": "<embedded>"
+    },
+    "python": {
+      "version": "3.13.15",
+      "executable": "runtimes/python/bin/python3"
+    },
+    "node": {
+      "version": "24.18.0",
+      "executable": "runtimes/node/bin/node"
+    },
+    "bun": {
+      "version": "1.4.2",
+      "executable": "runtimes/bun/bin/bun"
+    },
+    "deno": {
+      "version": "2.9.7",
+      "executable": "runtimes/deno/bin/deno"
+    },
+    "ruby": {
+      "version": "3.4.11",
+      "executable": "runtimes/ruby/bin/ruby"
+    },
+    "php": {
+      "version": "8.4.24",
+      "executable": "runtimes/php/bin/php"
+    },
+    "jvm": {
+      "version": "21.0.12.1",
+      "executable": "runtimes/jvm/bin/java"
+    },
+    "dotnet": {
+      "version": "10.0.12",
+      "executable": "runtimes/dotnet/bin/dotnet"
+    },
+    "native": {
+      "version": "linux-v1",
+      "executable": "<workload-entrypoint>"
+    },
+    "shell": {
+      "version": "busybox-1.37.0",
+      "executable": "runtimes/shell/bin/sh"
+    }
+  }
+}
