@@ -535,6 +535,17 @@ impl RuntimeAdapter for ProcessRuntime {
         for pair in &workload.env {
             command.env(&pair.key, &pair.value);
         }
+        // With a cleared environment the JVM has no locale and decodes
+        // arguments and file names as ASCII, replacing non-ASCII text with
+        // '?'. Supply a UTF-8 character type unless the workload chose one.
+        if self.kind == RuntimeKind::Jvm
+            && !workload
+                .env
+                .iter()
+                .any(|pair| pair.key == "LC_ALL" || pair.key == "LC_CTYPE")
+        {
+            command.env("LC_CTYPE", "C.UTF-8");
+        }
         if self.kind == RuntimeKind::Python {
             command.env("PYTHONDONTWRITEBYTECODE", "1");
             command.env("PYTHONNOUSERSITE", "1");
