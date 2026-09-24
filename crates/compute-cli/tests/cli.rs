@@ -1668,3 +1668,50 @@ fn execution_receipt_is_canonical_verifiable_and_binds_artifacts() {
         .failure()
         .stderr(predicate::str::contains("invalid canonical encoding"));
 }
+
+#[test]
+fn bare_relative_workload_paths_resolve_against_the_current_directory() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("module.wasm"),
+        wat::parse_str(r#"(module (func (export "_start")))"#).unwrap(),
+    )
+    .unwrap();
+    write_json(
+        &root.path().join("workload.json"),
+        serde_json::json!({
+            "version": "1", "runtime": "wasm", "entrypoint": "module.wasm", "network": "none"
+        }),
+    );
+    let relative = Command::cargo_bin("compute")
+        .unwrap()
+        .current_dir(root.path())
+        .args(["bundle", "create", "--workload", "workload.json"])
+        .args(["--output", "relative.compute", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        relative.status.success(),
+        "{}",
+        String::from_utf8_lossy(&relative.stderr)
+    );
+    let absolute = Command::cargo_bin("compute")
+        .unwrap()
+        .args(["bundle", "create", "--workload"])
+        .arg(root.path().join("workload.json"))
+        .arg("--output")
+        .arg(root.path().join("absolute.compute"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    let id = |output: &std::process::Output| {
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["bundle_id"].clone()
+    };
+    assert_eq!(id(&relative), id(&absolute));
+    Command::cargo_bin("compute")
+        .unwrap()
+        .current_dir(root.path())
+        .args(["run", "--workload", "workload.json", "--json"])
+        .assert()
+        .success();
+}

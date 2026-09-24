@@ -478,7 +478,10 @@ impl WorkloadSpec {
     /// Resolve declared files relative to the workload file, producing the
     /// existing adapter-facing execution request.
     pub fn materialize(&self, workload_file: &Path) -> Result<ExecutionRequest> {
-        let base = workload_file.parent().unwrap_or_else(|| Path::new("."));
+        let base = workload_file
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         self.materialize_from(base)
     }
 
@@ -667,7 +670,10 @@ pub struct BundleInspection {
 impl WorkloadBundle {
     pub fn create(workload_file: &Path) -> Result<Self> {
         let workload = WorkloadSpec::load(workload_file)?;
-        let base = workload_file.parent().unwrap_or_else(|| Path::new("."));
+        let base = workload_file
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         Self::create_from(workload, base)
     }
 

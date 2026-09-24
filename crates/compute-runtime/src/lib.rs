@@ -545,7 +545,10 @@ impl Compute {
         capsule: DependencyCapsule,
     ) -> Result<BundleInspection> {
         let workload = WorkloadSpec::load(workload_path)?;
-        let base = workload_path.parent().unwrap_or_else(|| Path::new("."));
+        let base = workload_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         let bundle = WorkloadBundle::create_from_with_capsule(workload, base, Some(capsule))?;
         bundle.write(output)?;
         bundle.inspection()
