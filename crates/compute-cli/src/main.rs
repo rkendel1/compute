@@ -16,6 +16,7 @@ mod certification;
 mod direct;
 mod distribution;
 mod placement_certification;
+mod policy_certification;
 mod policy_cmd;
 mod pool;
 mod receipt;

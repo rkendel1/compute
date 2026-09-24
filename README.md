@@ -60,6 +60,20 @@ compute pool run --provider production ./script.py
 compute pool submit --bundle script.compute --json
 ```
 
+Capability asks "can it run?"; policy asks "may it run?". Compute executes
+only when both answers are yes. Every execution is admitted by a
+deterministic, fail-closed `compute.policy@1` evaluation. With nothing
+configured, the evaluation uses the documented baseline policy. Receipts
+record `policy_id`, `admission_id`, and `admission_status`. See
+[docs/policy.md](docs/policy.md) and [docs/admission.md](docs/admission.md).
+
+```sh
+compute policy validate production.json
+compute policy check ./script.py --policy production.json
+compute explain ./script.py
+compute serve --policy production.json
+```
+
 ## Universal runtime distribution
 
 Compute has first-class adapters for WASM, Python, Node, Bun, Deno, Ruby,

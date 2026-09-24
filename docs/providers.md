@@ -68,6 +68,15 @@ compute serve --listen 0.0.0.0:8080 \
 A request that exceeds the restriction fails with `capability_mismatch` and
 never runs.
 
+## Execution policy
+
+A server can enforce an execution policy with `compute serve --policy FILE`
+or `[server.policy] path` in `compute.toml`. It advertises that policy in its
+capabilities as `policy`. Every request is admitted before execution; a
+denial returns `admission_denied` with the complete decision and never
+reaches a runtime. See [policy.md](policy.md) and
+[admission.md](admission.md).
+
 ## Guarantees
 
 Capability discovery is descriptive. Compute never substitutes a runtime,

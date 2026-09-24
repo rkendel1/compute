@@ -12,8 +12,10 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 "$distribution/bin/compute" distribution verify "$distribution" --json
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/compute-distribution-certification.XXXXXX")
 job_container=
+policy_container=
 cleanup() {
   if [ -n "$job_container" ]; then docker rm -f "$job_container" >/dev/null 2>&1 || true; fi
+  if [ -n "$policy_container" ]; then docker rm -f "$policy_container" >/dev/null 2>&1 || true; fi
   rm -rf "$temporary"
 }
 trap cleanup EXIT HUP INT TERM
@@ -168,6 +170,85 @@ if pool pool run --provider local --bundle "$temporary/pool/workload.compute" \
 fi
 jq -e '.placement.failure.code == "explicit_provider_incompatible"' \
   "$temporary/pool/explicit.json" >/dev/null
+
+# Execution policy: a Docker server from the same distribution enforces a
+# restrictive production policy. The allowed workload executes with
+# admission evidence; disallowed workloads are refused before any runtime
+# starts, which the server's executions_started counter proves.
+mkdir "$temporary/policy"
+cat > "$temporary/policy/production.json" <<'JSON'
+{"version": 1, "name": "production-policy",
+ "allowed_runtimes": ["python"], "allowed_networks": ["network"],
+ "limits": {"max_timeout_ms": 60000}}
+JSON
+"$distribution/bin/compute" policy validate "$temporary/policy/production.json" --json \
+  > "$temporary/policy/validation.json"
+policy_container=$(docker run --rm -d \
+  -p 127.0.0.1::8080 \
+  -v "$temporary/policy:/policy:ro" \
+  "$image" serve \
+  --listen 0.0.0.0:8080 \
+  --public-url http://compute-policy:8080 \
+  --job-store /tmp/jobs \
+  --policy /policy/production.json)
+policy_port=$(docker port "$policy_container" 8080/tcp | sed 's/.*://')
+policy_provider="http://127.0.0.1:$policy_port"
+attempts=0
+until "$distribution/bin/compute" remote health --provider "$policy_provider" --json >/dev/null 2>&1; do
+  attempts=$((attempts + 1))
+  if [ "$attempts" -ge 50 ]; then echo "policy server did not become healthy" >&2; exit 1; fi
+  sleep 0.1
+done
+"$distribution/bin/compute" remote capabilities --provider "$policy_provider" --json \
+  > "$temporary/policy/capabilities.json"
+jq -e '.policy.name == "production-policy" and .policy.allowed_runtimes == ["python"]' \
+  "$temporary/policy/capabilities.json" >/dev/null
+"$distribution/bin/compute" remote run --provider "$policy_provider" \
+  --bundle "$temporary/workload.compute" \
+  --receipt "$temporary/policy/receipt.json" --json > "$temporary/policy/allowed.json"
+jq -e '.status == "completed" and .admission.admission_status == "admitted"' \
+  "$temporary/policy/allowed.json" >/dev/null
+jq -e --slurpfile run "$temporary/policy/allowed.json" '
+  .admission_status == "admitted"
+  and .admission_id == $run[0].admission.admission_id
+  and .policy_id == $run[0].admission.policy_id
+  and .provider.endpoint == "http://compute-policy:8080"' \
+  "$temporary/policy/receipt.json" >/dev/null
+"$distribution/bin/compute" receipt verify "$temporary/policy/receipt.json" \
+  --distribution "$distribution" --json >/dev/null
+started_before=$(curl -fsS -H 'X-Compute-Protocol: compute.remote@1' \
+  "$policy_provider/compute/health" | jq -r .executions_started)
+# slow.compute declares no timeout (timeout_unbounded); the node bundle is a
+# runtime the policy does not allow (runtime_denied).
+printf 'console.log("must not run")\n' > "$temporary/policy/denied.js"
+cat > "$temporary/policy/denied.json" <<'JSON'
+{"version":"1","runtime":"node","entrypoint":"denied.js","network":"network",
+ "resources":{"timeout_ms":1000}}
+JSON
+COMPUTE_HOME="$distribution" "$distribution/bin/compute" bundle create \
+  --workload "$temporary/policy/denied.json" \
+  --output "$temporary/policy/denied.compute" --json >/dev/null
+for denied in "$temporary/slow.compute" "$temporary/policy/denied.compute"; do
+  if "$distribution/bin/compute" remote run --provider "$policy_provider" \
+    --bundle "$denied" --json > "$temporary/policy/denied-run.json" 2> "$temporary/policy/denied-run.err"; then
+    echo "policy server executed a disallowed workload: $denied" >&2
+    exit 1
+  fi
+  grep -q "AdmissionDenied" "$temporary/policy/denied-run.err"
+  if "$distribution/bin/compute" remote submit --provider "$policy_provider" \
+    --bundle "$denied" --json > /dev/null 2>&1; then
+    echo "policy server accepted a job for a disallowed workload: $denied" >&2
+    exit 1
+  fi
+done
+started_after=$(curl -fsS -H 'X-Compute-Protocol: compute.remote@1' \
+  "$policy_provider/compute/health" | jq -r .executions_started)
+if [ "$started_before" != "$started_after" ]; then
+  echo "a denied workload reached the runtime ($started_before -> $started_after)" >&2
+  exit 1
+fi
+docker rm -f "$policy_container" >/dev/null
+policy_container=
 
 docker rm -f "$job_container" >/dev/null
 job_container=

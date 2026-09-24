@@ -120,7 +120,10 @@ There is no host dependency fallback.
 
 ## Selection
 
-1. Only **compatible** providers are candidates.
+1. Only providers that are **compatible** and **admitted by policy** are
+   candidates. Admission is evaluated per provider, independently of
+   capability, under the caller's policy intersected with the provider's
+   advertised policy; see [admission.md](admission.md).
 2. Candidates are ordered by `priority` (descending), then provider ID
    (ascending).
 3. The first candidate is selected.
@@ -140,6 +143,7 @@ Every evaluated provider has one status:
 | `provider_capabilities_invalid` | Malformed or contradictory capability data |
 | `provider_unavailable` | Capability discovery could not reach it |
 | `excluded_unhealthy` | Compatible, but excluded by `require_healthy` |
+| `policy_denied` | Compatible, but policy does not admit the execution |
 
 The report lists `compatible_providers`, `incompatible_providers` (proven
 incompatible), and `excluded_providers` (compatibility not established).

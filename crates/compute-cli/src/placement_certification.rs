@@ -21,8 +21,9 @@ use compute_placement::{
     SubmissionMode, dispatch, place,
 };
 use compute_provider::{
-    ComputeProvider, ExecuteResponse, InspectResponse, LocalProvider, ProviderCapabilities,
-    ProviderError, ProviderHealth, ProviderPolicy, ProviderRequest, RemoteProvider, ServerConfig,
+    Admission, ComputeProvider, ExecuteResponse, InspectResponse, LocalProvider,
+    ProviderCapabilities, ProviderError, ProviderHealth, ProviderPolicy, ProviderRequest,
+    RemoteProvider, ServerConfig,
 };
 
 /// The local provider, counting executions so certification can prove that
@@ -49,6 +50,17 @@ impl ComputeProvider for CountingLocal {
     }
     async fn health(&self) -> Result<ProviderHealth, ProviderError> {
         self.inner.health().await
+    }
+    async fn admit(&self, request: ProviderRequest) -> Result<Admission, ProviderError> {
+        self.inner.admit(request).await
+    }
+    async fn execute_admitted(
+        &self,
+        request: ProviderRequest,
+        admission: Admission,
+    ) -> Result<ExecuteResponse, ProviderError> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        self.inner.execute_admitted(request, admission).await
     }
 }
 

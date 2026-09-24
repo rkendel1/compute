@@ -412,6 +412,34 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
         Ok(detail) => pass_check(&mut report, "placement_failures", &detail),
         Err(error) => fail_check(&mut report, "placement_failures", error),
     }
+    match &certified_bundle {
+        Some(artifact) => {
+            for (name, result) in crate::policy_certification::certify(&artifact.bundle)
+                .await
+                .checks
+            {
+                match result {
+                    Ok(detail) => pass_check(&mut report, name, &detail),
+                    Err(error) => fail_check(&mut report, name, error),
+                }
+            }
+        }
+        None => {
+            for name in [
+                "policy",
+                "admission",
+                "placement_policy",
+                "remote_job_policy",
+                "receipt_policy",
+            ] {
+                fail_check(
+                    &mut report,
+                    name,
+                    "no certified bundle was available for policy certification".into(),
+                );
+            }
+        }
+    }
     if report
         .runtimes
         .iter()
