@@ -130,7 +130,7 @@ impl compute_state::StateStore for Recorder {
                 } => {
                     written.push((*collection, value.clone()));
                 }
-                compute_state::Write::Delete { .. } => {}
+                compute_state::Write::Update { .. } | compute_state::Write::Delete { .. } => {}
             }
         }
         compute_state::StateStore::commit(&self.inner, writes).await

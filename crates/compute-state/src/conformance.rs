@@ -61,7 +61,7 @@ pub async fn check(
     // Create, read, and refuse to create twice.
     let original = environment(&format!("conf-{run}"));
     state
-        .commit(Batch::new().create(&env_id, &original))
+        .transaction(Batch::new().create(&env_id, &original))
         .await
         .expect("create");
     let stored = state
@@ -71,7 +71,9 @@ pub async fn check(
         .expect("created document is readable");
     assert_eq!(stored.value, original, "documents round-trip exactly");
     assert!(stored.version > 0);
-    let duplicate = state.commit(Batch::new().create(&env_id, &original)).await;
+    let duplicate = state
+        .transaction(Batch::new().create(&env_id, &original))
+        .await;
     assert!(
         matches!(duplicate, Err(StateError::Conflict { .. })),
         "a second create is a conflict: {duplicate:?}"
@@ -85,7 +87,7 @@ pub async fn check(
     changed.provider = None;
     changed.config.clear();
     state
-        .commit(Batch::new().replace(&stored, &changed))
+        .transaction(Batch::new().replace(&stored, &changed))
         .await
         .expect("replace");
     let replaced = state
@@ -95,10 +97,36 @@ pub async fn check(
         .unwrap();
     assert_eq!(replaced.value, changed, "replace is total, not a merge");
     assert!(replaced.version > stored.version, "versions increase");
-    let stale = state.commit(Batch::new().replace(&stored, &original)).await;
+    let stale = state
+        .transaction(Batch::new().replace(&stored, &original))
+        .await;
     assert!(
         matches!(stale, Err(StateError::Precondition { .. })),
         "a stale replace is refused: {stale:?}"
+    );
+    // Update merges: given fields change, others keep their values.
+    state
+        .transaction(Batch::new().update(&replaced, json!({ "provider": "edge" })))
+        .await
+        .expect("update");
+    let updated = state
+        .get::<EnvironmentRecord>(&env_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.value.provider.as_deref(), Some("edge"));
+    assert_eq!(
+        updated.value.desired_state,
+        DesiredState::Stopped,
+        "unnamed fields keep their values"
+    );
+    assert!(updated.version > replaced.version);
+    let stale_update = state
+        .transaction(Batch::new().update(&replaced, json!({ "provider": "x" })))
+        .await;
+    assert!(
+        matches!(stale_update, Err(StateError::Precondition { .. })),
+        "a stale update is refused: {stale_update:?}"
     );
     let missing = Stored {
         id: format!("env_missing{run}"),
@@ -106,14 +134,14 @@ pub async fn check(
         value: original.clone(),
     };
     let absent = state
-        .commit(Batch::new().replace(&missing, &original))
+        .transaction(Batch::new().replace(&missing, &original))
         .await;
     assert!(absent.is_err(), "replacing a missing document fails");
 
     // A batch is atomic: one failing write commits nothing.
     let other_id = format!("env_other{run}");
     let failed = state
-        .commit(
+        .transaction(
             Batch::new()
                 .create(&other_id, &environment(&format!("other-{run}")))
                 .create(&env_id, &original),
@@ -134,7 +162,7 @@ pub async fn check(
     for sequence in 1..=5 {
         batch = batch.create(&format!("evt_conf{run}_{sequence}"), &event(&run, sequence));
     }
-    state.commit(batch).await.expect("create events");
+    state.transaction(batch).await.expect("create events");
     let kind = format!("conformance.{run}");
     let after_two = state
         .query::<EventRecord>(
@@ -176,7 +204,7 @@ pub async fn check(
         created_at: Utc::now(),
     };
     state
-        .commit(Batch::new().create(&env_id, &project))
+        .transaction(Batch::new().create(&env_id, &project))
         .await
         .expect("the same ID in another collection is independent");
 
@@ -186,10 +214,10 @@ pub async fn check(
         .await
         .unwrap()
         .unwrap();
-    let stale_delete = state.commit(Batch::new().delete(&stored)).await;
+    let stale_delete = state.transaction(Batch::new().delete(&stored)).await;
     assert!(stale_delete.is_err(), "a stale delete is refused");
     state
-        .commit(Batch::new().delete(&current))
+        .transaction(Batch::new().delete(&current))
         .await
         .expect("delete");
     assert!(
@@ -206,6 +234,32 @@ pub async fn check(
 
     // Every record type round-trips.
     round_trip_every_record(&state, &run).await;
+
+    // Artifacts larger than one chunk round-trip, verified, idempotently.
+    let artifacts = crate::artifacts::StateArtifacts::new(state.clone());
+    let bytes = (0..(crate::artifacts::StateArtifacts::CHUNK_BYTES * 2 + 1000))
+        .map(|index| (index as u64 ^ run.len() as u64).wrapping_mul(2654435761) as u8)
+        .chain(run.bytes())
+        .collect::<Vec<_>>();
+    use crate::artifacts::ArtifactStore as _;
+    let digest = artifacts.put("bundle", &bytes).await.expect("put artifact");
+    assert_eq!(digest, crate::artifacts::digest(&bytes));
+    assert_eq!(
+        artifacts.put("bundle", &bytes).await.unwrap(),
+        digest,
+        "put is idempotent"
+    );
+    assert_eq!(
+        artifacts.get(&digest).await.unwrap().as_deref(),
+        Some(&bytes[..])
+    );
+    assert!(
+        artifacts
+            .get(&crate::artifacts::digest(b"absent"))
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Durability.
     if let Some(reopen) = reopen {
@@ -231,7 +285,7 @@ async fn round_trip<T: Document + PartialEq + std::fmt::Debug>(
     value: T,
 ) {
     state
-        .commit(Batch::new().create(id, &value))
+        .transaction(Batch::new().create(id, &value))
         .await
         .unwrap_or_else(|error| panic!("create {}: {error}", T::COLLECTION.name()));
     let stored = state
@@ -400,6 +454,25 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             description: Some("LLM gateway".into()),
             created_at: now,
             updated_at: now,
+        },
+    )
+    .await;
+    round_trip(
+        state,
+        &format!("ws_conf{run}"),
+        WorkloadStatusRecord {
+            workload_id: "wl_conf".into(),
+            environment: "conf".into(),
+            project: "conf".into(),
+            workload: "api".into(),
+            actual_state: "running".into(),
+            health: "healthy".into(),
+            deployment_id: Some("dep_conf".into()),
+            execution_id: None,
+            restarts: 2,
+            error: None,
+            observed_by: "daemon_conf".into(),
+            observed_at: now,
         },
     )
     .await;

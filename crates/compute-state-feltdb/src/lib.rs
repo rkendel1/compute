@@ -431,6 +431,15 @@ impl StateStore for FeltDbState {
                         "kind": "insert", "collection": collection.name(), "id": id, "value": value,
                     }));
                 }
+                // FeltDB's native update merges top-level fields.
+                Write::Update {
+                    collection,
+                    id,
+                    fields,
+                    expected,
+                } => operations.push(json!({
+                    "kind": "update", "collection": collection.name(), "id": id, "value": fields, "if_version": expected,
+                })),
                 Write::Delete {
                     collection,
                     id,

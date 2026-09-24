@@ -85,6 +85,25 @@ impl Batch {
         self
     }
 
+    /// Merge fields into a document read at `stored.version`. Fields not
+    /// given keep their values; use `replace` to clear an optional field.
+    pub fn update<T: Document>(mut self, stored: &Stored<T>, fields: serde_json::Value) -> Self {
+        match fields {
+            Value::Object(fields) => self.writes.push(Write::Update {
+                collection: T::COLLECTION,
+                id: stored.id.clone(),
+                fields,
+                expected: Some(stored.version),
+            }),
+            _ => {
+                self.error = Some(StateError::Invalid(
+                    "update fields must be a JSON object".into(),
+                ))
+            }
+        }
+        self
+    }
+
     /// Delete a document read at `stored.version`.
     pub fn delete<T: Document>(mut self, stored: &Stored<T>) -> Self {
         self.writes.push(Write::Delete {
@@ -142,11 +161,13 @@ impl ControlState {
             .collect()
     }
 
-    pub async fn all<T: Document>(&self) -> Result<Vec<Stored<T>>, StateError> {
+    /// Every document of `T`'s collection.
+    pub async fn list<T: Document>(&self) -> Result<Vec<Stored<T>>, StateError> {
         self.query(Query::all(T::COLLECTION)).await
     }
 
-    pub async fn commit(&self, batch: Batch) -> Result<(), StateError> {
+    /// Apply a batch atomically.
+    pub async fn transaction(&self, batch: Batch) -> Result<(), StateError> {
         let writes = batch.into_writes()?;
         if writes.is_empty() {
             return Ok(());

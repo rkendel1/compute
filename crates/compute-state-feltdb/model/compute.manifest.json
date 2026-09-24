@@ -635,6 +635,121 @@
           "required": false
         }
       ]
+    },
+    {
+      "name": "WorkloadStatus",
+      "fields": [
+        {
+          "name": "workload_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "actual_state",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "health",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "deployment_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "execution_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "restarts",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "error",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "observed_by",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "observed_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Artifact",
+      "fields": [
+        {
+          "name": "digest",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "size",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "chunks",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "ArtifactChunk",
+      "fields": [
+        {
+          "name": "digest",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "position",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "data",
+          "type": "text",
+          "required": true
+        }
+      ]
     }
   ],
   "indexes": [
@@ -789,6 +904,38 @@
         "kind"
       ],
       "unique": false
+    },
+    {
+      "name": "WorkloadStatus.workload_id",
+      "collection": "WorkloadStatus",
+      "fields": [
+        "workload_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "WorkloadStatus.environment",
+      "collection": "WorkloadStatus",
+      "fields": [
+        "environment"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Artifact.digest",
+      "collection": "Artifact",
+      "fields": [
+        "digest"
+      ],
+      "unique": false
+    },
+    {
+      "name": "ArtifactChunk.digest",
+      "collection": "ArtifactChunk",
+      "fields": [
+        "digest"
+      ],
+      "unique": false
     }
   ],
   "references": [],
@@ -875,6 +1022,27 @@
     {
       "name": "Event",
       "resource": "Event",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "WorkloadStatus",
+      "resource": "WorkloadStatus",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Artifact",
+      "resource": "Artifact",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "ArtifactChunk",
+      "resource": "ArtifactChunk",
       "read": "authenticated",
       "write": "authenticated",
       "capabilities": []

@@ -25,10 +25,13 @@ pub enum Collection {
     Provider,
     Receipt,
     Event,
+    WorkloadStatus,
+    Artifact,
+    ArtifactChunk,
 }
 
 impl Collection {
-    pub const ALL: [Collection; 11] = [
+    pub const ALL: [Collection; 14] = [
         Self::Project,
         Self::ProjectRevision,
         Self::Environment,
@@ -40,6 +43,9 @@ impl Collection {
         Self::Provider,
         Self::Receipt,
         Self::Event,
+        Self::WorkloadStatus,
+        Self::Artifact,
+        Self::ArtifactChunk,
     ];
 
     /// The collection's name in every backend, and in `compute.flow`.
@@ -56,6 +62,9 @@ impl Collection {
             Self::Provider => "Provider",
             Self::Receipt => "Receipt",
             Self::Event => "Event",
+            Self::WorkloadStatus => "WorkloadStatus",
+            Self::Artifact => "Artifact",
+            Self::ArtifactChunk => "ArtifactChunk",
         }
     }
 
@@ -92,6 +101,15 @@ pub enum Write {
         value: Map<String, Value>,
         expected: Option<u64>,
     },
+    /// Merge top-level fields into an existing document; fields not given
+    /// keep their values. With `expected`, only if its version still
+    /// matches.
+    Update {
+        collection: Collection,
+        id: String,
+        fields: Map<String, Value>,
+        expected: Option<u64>,
+    },
     /// Delete an existing document. With `expected`, only if its version
     /// still matches.
     Delete {
@@ -106,13 +124,17 @@ impl Write {
         match self {
             Self::Create { collection, .. }
             | Self::Replace { collection, .. }
+            | Self::Update { collection, .. }
             | Self::Delete { collection, .. } => *collection,
         }
     }
 
     pub fn id(&self) -> &str {
         match self {
-            Self::Create { id, .. } | Self::Replace { id, .. } | Self::Delete { id, .. } => id,
+            Self::Create { id, .. }
+            | Self::Replace { id, .. }
+            | Self::Update { id, .. }
+            | Self::Delete { id, .. } => id,
         }
     }
 }
@@ -342,6 +364,19 @@ pub fn apply_in_memory(
                 fence(expected, &id)?;
                 *next_version += 1;
                 table.insert(id, (*next_version, value));
+            }
+            Write::Update {
+                id,
+                fields,
+                expected,
+                ..
+            } => {
+                fence(expected, &id)?;
+                *next_version += 1;
+                let (_, document) = table.get(&id).cloned().expect("fenced");
+                let mut document = document;
+                document.extend(fields);
+                table.insert(id, (*next_version, document));
             }
             Write::Delete { id, expected, .. } => {
                 fence(expected, &id)?;

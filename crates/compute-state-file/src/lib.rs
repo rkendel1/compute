@@ -218,3 +218,85 @@ mod tests {
         assert!(super::FileState::open(&path).is_err());
     }
 }
+
+/// Artifacts as files named by digest in a directory. File-backed control
+/// state keeps artifacts out of its JSON document.
+pub struct DirectoryArtifacts {
+    directory: PathBuf,
+}
+
+impl DirectoryArtifacts {
+    pub fn new(directory: impl Into<PathBuf>) -> Self {
+        Self {
+            directory: directory.into(),
+        }
+    }
+
+    fn path(&self, digest: &str) -> Result<PathBuf, StateError> {
+        let hex = digest
+            .strip_prefix("sha256:")
+            .filter(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or_else(|| StateError::Invalid(format!("invalid artifact digest {digest}")))?;
+        Ok(self.directory.join(hex))
+    }
+}
+
+#[async_trait]
+impl compute_state::ArtifactStore for DirectoryArtifacts {
+    async fn put(&self, _kind: &str, bytes: &[u8]) -> Result<String, StateError> {
+        let digest = compute_state::artifacts::digest(bytes);
+        let path = self.path(&digest)?;
+        if path.is_file() {
+            return Ok(digest);
+        }
+        std::fs::create_dir_all(&self.directory).map_err(|error| io(&self.directory, error))?;
+        let temporary = path.with_extension("tmp");
+        {
+            let mut file =
+                std::fs::File::create(&temporary).map_err(|error| io(&temporary, error))?;
+            file.write_all(bytes)
+                .map_err(|error| io(&temporary, error))?;
+            file.sync_all().map_err(|error| io(&temporary, error))?;
+        }
+        std::fs::rename(&temporary, &path).map_err(|error| io(&path, error))?;
+        Ok(digest)
+    }
+
+    async fn get(&self, digest: &str) -> Result<Option<Vec<u8>>, StateError> {
+        let path = self.path(digest)?;
+        match std::fs::read(&path) {
+            Ok(bytes) => compute_state::artifacts::verified(digest, bytes).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(io(&path, error)),
+        }
+    }
+
+    fn location(&self) -> String {
+        self.directory.display().to_string()
+    }
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use compute_state::ArtifactStore;
+
+    #[tokio::test]
+    async fn directory_artifacts_round_trip_and_detect_corruption() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = super::DirectoryArtifacts::new(directory.path());
+        let digest = store.put("bundle", b"bundle bytes").await.unwrap();
+        assert_eq!(
+            store.get(&digest).await.unwrap().as_deref(),
+            Some(&b"bundle bytes"[..])
+        );
+        let path = directory
+            .path()
+            .join(digest.strip_prefix("sha256:").unwrap());
+        std::fs::write(path, b"tampered").unwrap();
+        assert!(store.get(&digest).await.is_err(), "corruption is detected");
+        assert!(
+            store.get("../etc/passwd").await.is_err(),
+            "digests are validated"
+        );
+    }
+}

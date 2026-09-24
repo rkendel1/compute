@@ -12,11 +12,13 @@
 //! Nothing here depends on a particular backend, and no backend is a
 //! dependency of the execution engine.
 
+pub mod artifacts;
 pub mod conformance;
 pub mod control;
 pub mod model;
 pub mod store;
 
+pub use artifacts::{ArtifactStore, StateArtifacts};
 pub use control::{Batch, ControlState, Stored};
 pub use model::*;
 pub use store::{

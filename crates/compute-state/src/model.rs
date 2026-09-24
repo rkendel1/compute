@@ -408,6 +408,56 @@ pub struct EventRecord {
 }
 document!(EventRecord, Event);
 
+/// Actual state: what the daemon last observed of a workload. Written on
+/// transitions, never read back as intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadStatusRecord {
+    pub workload_id: String,
+    pub environment: String,
+    pub project: String,
+    pub workload: String,
+    /// `pending`, `starting`, `running`, `stopping`, `stopped`,
+    /// `completed`, `failed`, or `denied`.
+    pub actual_state: String,
+    /// `healthy`, `unhealthy`, or `unknown`.
+    pub health: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    pub restarts: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The daemon instance that observed it.
+    pub observed_by: String,
+    pub observed_at: DateTime<Utc>,
+}
+document!(WorkloadStatusRecord, WorkloadStatus);
+
+/// A content-addressed artifact: a workload bundle or a receipt. Its bytes
+/// are stored in chunks so every backend's request limits are respected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRecord {
+    /// `sha256:<hex>` of the bytes.
+    pub digest: String,
+    /// `bundle` or `receipt`.
+    pub kind: String,
+    pub size: u64,
+    pub chunks: u64,
+    pub created_at: DateTime<Utc>,
+}
+document!(ArtifactRecord, Artifact);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactChunkRecord {
+    pub digest: String,
+    /// The chunk's position in the artifact, from 0.
+    pub position: u64,
+    /// Standard base64 of this chunk's bytes.
+    pub data: String,
+}
+document!(ArtifactChunkRecord, ArtifactChunk);
+
 /// Lifecycle event kinds.
 pub mod events {
     pub const ENVIRONMENT_CREATED: &str = "environment.created";
@@ -442,6 +492,8 @@ pub mod events {
     pub const TASK_DENIED: &str = "task.denied";
     pub const SHARED_SERVICE_REGISTERED: &str = "shared_service.registered";
     pub const SHARED_SERVICE_REMOVED: &str = "shared_service.removed";
+    pub const DAEMON_STARTED: &str = "daemon.started";
+    pub const DAEMON_STOPPED: &str = "daemon.stopped";
 }
 
 /// A 24-hex-digit digest of length-prefixed parts.
@@ -488,5 +540,17 @@ pub mod ids {
 
     pub fn provider(id: &str) -> String {
         format!("pvd_{id}")
+    }
+
+    pub fn workload_status(workload_id: &str) -> String {
+        format!("ws_{}", workload_id.trim_start_matches("wl_"))
+    }
+
+    pub fn artifact(digest: &str) -> String {
+        format!("art_{}", digest.strip_prefix("sha256:").unwrap_or(digest))
+    }
+
+    pub fn artifact_chunk(digest: &str, index: u64) -> String {
+        format!("{}_{index:06}", artifact(digest))
     }
 }

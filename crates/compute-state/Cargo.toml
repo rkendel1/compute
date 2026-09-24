@@ -8,6 +8,7 @@ description = "The Compute control-state boundary: durable desired state and evi
 
 [dependencies]
 async-trait.workspace = true
+base64 = "0.22"
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
