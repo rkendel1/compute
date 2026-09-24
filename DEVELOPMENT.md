@@ -75,6 +75,18 @@ pax typecheck
 pax drift
 ```
 
+Execution contract checks can also be exercised directly:
+
+```sh
+cargo test --workspace
+compute doctor --json
+```
+
+The JSON execution contract includes `execution_id`, `runtime`, `network`,
+`lifecycle`, terminal `status`, exit information, output, artifacts, and
+structured errors. Backend capability reports are authoritative: a
+capability marked unsupported causes a request requiring it to fail.
+
 ## Cargo escape hatch
 
 When direct native behavior is needed for debugging or contributor-specific

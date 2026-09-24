@@ -1,6 +1,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -205,6 +206,10 @@ pub struct Artifact {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionResult {
+    pub execution_id: String,
+    pub runtime: RuntimeKind,
+    pub network: NetworkPolicy,
+    pub lifecycle: Vec<ExecutionStatus>,
     pub status: ExecutionStatus,
     pub exit_code: Option<i32>,
     pub stdout: Output,
@@ -232,9 +237,23 @@ pub enum ExecutionErrorKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionError {
+    pub execution_id: String,
     pub phase: ExecutionPhase,
     pub kind: ExecutionErrorKind,
     pub message: String,
+    pub runtime: Option<RuntimeKind>,
+    pub exit_code: Option<i32>,
+    pub started: bool,
+}
+
+static NEXT_EXECUTION_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn new_execution_id() -> String {
+    format!(
+        "exec_{}_{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        NEXT_EXECUTION_ID.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,10 +281,14 @@ impl RuntimeCapabilities {
             timeout: Capability { supported: true },
             stdout_limit: Capability { supported: true },
             stderr_limit: Capability { supported: true },
-            network: [(NetworkPolicy::None, false), (NetworkPolicy::Localhost, false), (NetworkPolicy::Network, true)]
-                .into_iter()
-                .map(|(policy, supported)| (policy, Capability { supported }))
-                .collect(),
+            network: [
+                (NetworkPolicy::None, false),
+                (NetworkPolicy::Localhost, false),
+                (NetworkPolicy::Network, true),
+            ]
+            .into_iter()
+            .map(|(policy, supported)| (policy, Capability { supported }))
+            .collect(),
         }
     }
 
@@ -277,10 +300,14 @@ impl RuntimeCapabilities {
             timeout: Capability { supported: true },
             stdout_limit: Capability { supported: true },
             stderr_limit: Capability { supported: true },
-            network: [(NetworkPolicy::None, true), (NetworkPolicy::Localhost, false), (NetworkPolicy::Network, false)]
-                .into_iter()
-                .map(|(policy, supported)| (policy, Capability { supported }))
-                .collect(),
+            network: [
+                (NetworkPolicy::None, true),
+                (NetworkPolicy::Localhost, false),
+                (NetworkPolicy::Network, false),
+            ]
+            .into_iter()
+            .map(|(policy, supported)| (policy, Capability { supported }))
+            .collect(),
         }
     }
 }
@@ -377,7 +404,10 @@ pub fn stage_workload(workload: &Workload) -> Result<StagedWorkload> {
 
     for input in &workload.inputs {
         let name = input.path.file_name().ok_or_else(|| {
-            ComputeError::InvalidWorkload(format!("input has no file name: {}", input.path.display()))
+            ComputeError::InvalidWorkload(format!(
+                "input has no file name: {}",
+                input.path.display()
+            ))
         })?;
         copy_path(&input.path, &work_dir.join(name))?;
     }
@@ -621,5 +651,15 @@ mod tests {
             stage_workload(&workload),
             Err(ComputeError::InvalidWorkload(_))
         ));
+    }
+
+    #[test]
+    fn execution_ids_are_unique_and_machine_readable() {
+        let first = new_execution_id();
+        let second = new_execution_id();
+
+        assert!(first.starts_with("exec_"));
+        assert!(second.starts_with("exec_"));
+        assert_ne!(first, second);
     }
 }

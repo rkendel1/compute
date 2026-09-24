@@ -3,8 +3,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use compute_core::{
     ComputeError, ExecutionResult, ExecutionStatus, NetworkPolicy, Output, ResolvedRuntime,
-    ResourceUsage, Result, RuntimeAdapter, RuntimeAvailability, RuntimeKind, Workload,
-    collect_artifacts, stage_workload, RuntimeCapabilities,
+    ResourceUsage, Result, RuntimeAdapter, RuntimeAvailability, RuntimeCapabilities, RuntimeKind,
+    Workload, collect_artifacts, new_execution_id, stage_workload,
 };
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
@@ -43,14 +43,14 @@ impl RuntimeAdapter for WasmRuntime {
     }
 
     async fn resolve(&self, workload: &Workload) -> Result<ResolvedRuntime> {
-        if let Some(version) = &workload.runtime.version {
-            if !version.eq_ignore_ascii_case("wasi") {
-                return Err(ComputeError::RuntimeVersionMismatch {
-                    kind: RuntimeKind::Wasm,
-                    requested: version.clone(),
-                    found: "wasi".to_string(),
-                });
-            }
+        if let Some(version) = &workload.runtime.version
+            && !version.eq_ignore_ascii_case("wasi")
+        {
+            return Err(ComputeError::RuntimeVersionMismatch {
+                kind: RuntimeKind::Wasm,
+                requested: version.clone(),
+                found: "wasi".to_string(),
+            });
         }
 
         Ok(ResolvedRuntime {
@@ -86,6 +86,7 @@ impl RuntimeAdapter for WasmRuntime {
 }
 
 fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
+    let execution_id = new_execution_id();
     let staged = stage_workload(workload)?;
     let capture_limit = workload
         .resources
@@ -155,6 +156,17 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
 
     match call_result {
         Ok(()) => Ok(ExecutionResult {
+            execution_id: execution_id.clone(),
+            runtime: RuntimeKind::Wasm,
+            network: workload.network.clone(),
+            lifecycle: vec![
+                ExecutionStatus::Created,
+                ExecutionStatus::Resolved,
+                ExecutionStatus::Prepared,
+                ExecutionStatus::Started,
+                ExecutionStatus::Running,
+                ExecutionStatus::Completed,
+            ],
             status: ExecutionStatus::Completed,
             exit_code: Some(0),
             stdout: Output::from_bytes(stdout, workload.resources.stdout_bytes),
@@ -170,6 +182,17 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
             if let Some(exit) = error.downcast_ref::<I32Exit>() {
                 let code = exit.0;
                 return Ok(ExecutionResult {
+                    execution_id: execution_id.clone(),
+                    runtime: RuntimeKind::Wasm,
+                    network: workload.network.clone(),
+                    lifecycle: vec![
+                        ExecutionStatus::Created,
+                        ExecutionStatus::Resolved,
+                        ExecutionStatus::Prepared,
+                        ExecutionStatus::Started,
+                        ExecutionStatus::Running,
+                        ExecutionStatus::Completed,
+                    ],
                     status: ExecutionStatus::Completed,
                     exit_code: Some(code),
                     stdout: Output::from_bytes(stdout, workload.resources.stdout_bytes),
@@ -190,9 +213,21 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
             } else {
                 ExecutionStatus::Failed
             };
+            let timed_out = status == ExecutionStatus::TimedOut;
             Ok(ExecutionResult {
+                execution_id: execution_id.clone(),
+                runtime: RuntimeKind::Wasm,
+                network: workload.network.clone(),
+                lifecycle: vec![
+                    ExecutionStatus::Created,
+                    ExecutionStatus::Resolved,
+                    ExecutionStatus::Prepared,
+                    ExecutionStatus::Started,
+                    ExecutionStatus::Running,
+                    status.clone(),
+                ],
                 status,
-                exit_code: Some(1),
+                exit_code: None,
                 stdout: Output::from_bytes(stdout, workload.resources.stdout_bytes),
                 stderr: Output::from_bytes(stderr, workload.resources.stderr_bytes),
                 duration,
@@ -200,7 +235,19 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
                     max_memory_bytes: workload.resources.memory_bytes,
                 },
                 artifacts: collect_artifacts(&staged.output_dir)?,
-                error: None,
+                error: Some(compute_core::ExecutionError {
+                    execution_id,
+                    phase: compute_core::ExecutionPhase::Running,
+                    kind: if timed_out {
+                        compute_core::ExecutionErrorKind::Timeout
+                    } else {
+                        compute_core::ExecutionErrorKind::Runtime
+                    },
+                    message: error.to_string(),
+                    runtime: Some(RuntimeKind::Wasm),
+                    exit_code: None,
+                    started: true,
+                }),
             })
         }
     }
