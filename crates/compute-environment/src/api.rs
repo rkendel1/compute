@@ -164,7 +164,7 @@ async fn handle(
             write_json(
                 &mut stream,
                 error.status(),
-                &serde_json::json!({ "kind": error.kind(), "message": error.to_string() }),
+                &serde_json::json!({ "kind": error.kind(), "message": error.message() }),
             )
             .await
         }

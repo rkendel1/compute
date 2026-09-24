@@ -15,6 +15,7 @@ mod admission;
 mod certification;
 mod direct;
 mod distribution;
+mod environment_cmd;
 mod placement_certification;
 mod policy_certification;
 mod policy_cmd;
@@ -65,6 +66,20 @@ enum Commands {
     /// Show the full decision chain for a workload: requirements,
     /// capabilities, policy, admission, and placement. Never executes.
     Explain(policy_cmd::ExplainCommand),
+    /// Run the persistent Compute daemon (environments and services).
+    Start(environment_cmd::StartCommand),
+    /// Stop the Compute daemon. Desired state is kept.
+    Stop(environment_cmd::DaemonCommand),
+    /// Show the Compute daemon's status.
+    Status(environment_cmd::DaemonCommand),
+    /// Create, inspect, and operate environments.
+    Environment(environment_cmd::EnvironmentCommand),
+    /// Add, remove, inspect, and operate projects within an environment.
+    Project(environment_cmd::ProjectCommand),
+    /// Operate one service or task within a project.
+    Workload(environment_cmd::WorkloadCommand),
+    /// Inspect one execution recorded by the daemon.
+    Execution(environment_cmd::ExecutionCommand),
     /// Serve compute.remote@1 with durable filesystem-backed jobs.
     Serve(ServeCommand),
 }
@@ -1204,6 +1219,13 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Pool(command) => pool::pool(command).await?,
         Commands::Policy(command) => policy_cmd::policy(command).await?,
         Commands::Explain(command) => policy_cmd::explain(command).await?,
+        Commands::Start(command) => environment_cmd::start(command).await?,
+        Commands::Stop(command) => environment_cmd::stop(command).await?,
+        Commands::Status(command) => environment_cmd::status(command).await?,
+        Commands::Environment(command) => environment_cmd::environment(command).await?,
+        Commands::Project(command) => environment_cmd::project(command).await?,
+        Commands::Workload(command) => environment_cmd::workload(command).await?,
+        Commands::Execution(command) => environment_cmd::execution(command).await?,
         Commands::Remote(command) => match command.command {
             RemoteCommands::Capabilities(command) => {
                 let value = RemoteProvider::new(command.provider)

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 async-trait.workspace = true
 compute-core = { path = "../compute-core" }
+compute-environment = { path = "../compute-environment" }
 compute-placement = { path = "../compute-placement" }
 compute-policy = { path = "../compute-policy" }
 compute-provider = { path = "../compute-provider" }

@@ -59,6 +59,19 @@ impl EnvironmentError {
         }
     }
 
+    /// The detail without the kind prefix; the API carries the kind
+    /// separately.
+    pub fn message(&self) -> String {
+        match self {
+            Self::Invalid(message)
+            | Self::NotFound(message)
+            | Self::Conflict(message)
+            | Self::Denied(message)
+            | Self::Unauthorized(message) => message.clone(),
+            other => other.to_string(),
+        }
+    }
+
     pub fn status(&self) -> u16 {
         match self {
             Self::Invalid(_) | Self::Json(_) | Self::Compute(_) => 400,

@@ -362,6 +362,7 @@ dependencies = [
  "chrono",
  "clap",
  "compute-core",
+ "compute-environment",
  "compute-placement",
  "compute-policy",
  "compute-provider",
