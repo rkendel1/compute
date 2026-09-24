@@ -257,7 +257,7 @@ impl Compute {
 
     pub async fn run(&self, workload: Workload) -> Result<compute_core::ExecutionResult> {
         let workload_id = request_workload_identity(&workload)?;
-        self.run_identified(workload, workload_id, None).await
+        self.run_identified(workload, workload_id, None, None).await
     }
 
     async fn run_identified(
@@ -265,6 +265,7 @@ impl Compute {
         workload: Workload,
         workload_id: WorkloadIdentity,
         bundle_id: Option<BundleIdentity>,
+        control: Option<&compute_core::ExecutionControl>,
     ) -> Result<compute_core::ExecutionResult> {
         let inputs = input_receipts(&workload)?;
         let adapter = self.adapter(workload.runtime.kind)?;
@@ -290,7 +291,14 @@ impl Compute {
         }
         let environment = receipt_environment(adapter, &runtime)?;
         let started_at = Utc::now();
-        let mut result = adapter.execute(&workload, &runtime).await?;
+        let mut result = match control {
+            Some(control) => {
+                adapter
+                    .execute_controlled(&workload, &runtime, control)
+                    .await?
+            }
+            None => adapter.execute(&workload, &runtime).await?,
+        };
         let finished_at = Utc::now();
         result.isolation = Some(isolation);
         result.dependencies = match &workload.dependencies {
@@ -383,7 +391,7 @@ impl Compute {
         let mut request = workload.materialize_from(root)?;
         attach_dependencies(&workload, &mut request, capsule)?;
         request.stdin = stdin;
-        self.run_identified(request, workload_id, None).await
+        self.run_identified(request, workload_id, None, None).await
     }
 
     pub async fn plan_workload(&self, path: &Path) -> Result<WorkloadPlan> {
@@ -517,7 +525,7 @@ impl Compute {
         let mut request = self.execution_request(path, &workload)?;
         attach_dependencies(&workload, &mut request, capsule)?;
         request.isolation = resolve_override(workload.isolation.profile, isolation)?;
-        self.run_identified(request, workload_id, None).await
+        self.run_identified(request, workload_id, None, None).await
     }
 
     pub fn load_bundle(&self, path: &Path) -> Result<WorkloadBundle> {
@@ -653,6 +661,32 @@ impl Compute {
         .await
     }
 
+    /// Run a bundle under host-side control (cancellation and live logs).
+    /// Used for long-lived services; identity and evidence are unchanged.
+    pub async fn run_bundle_controlled(
+        &self,
+        path: &Path,
+        expected_workload_id: Option<&str>,
+        expected_bundle_id: Option<&str>,
+        isolation: Option<IsolationProfile>,
+        control: &compute_core::ExecutionControl,
+    ) -> Result<compute_core::ExecutionResult> {
+        let bundle = self.load_bundle(path)?;
+        bundle.require_ids(expected_workload_id, expected_bundle_id)?;
+        let verification = bundle.verification()?;
+        let mut materialized = bundle.materialize()?;
+        attach_dependencies(&bundle.workload, &mut materialized.request, None)?;
+        materialized.request.isolation =
+            resolve_override(bundle.workload.isolation.profile, isolation)?;
+        self.run_identified(
+            materialized.request,
+            WorkloadIdentity::parse(verification.workload_id)?,
+            Some(BundleIdentity::parse(verification.bundle_id)?),
+            Some(control),
+        )
+        .await
+    }
+
     pub async fn run_bundle_with_dependencies(
         &self,
         path: &Path,
@@ -672,6 +706,7 @@ impl Compute {
             materialized.request,
             WorkloadIdentity::parse(verification.workload_id)?,
             Some(BundleIdentity::parse(verification.bundle_id)?),
+            None,
         )
         .await
     }

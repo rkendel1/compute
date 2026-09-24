@@ -2184,6 +2184,55 @@ pub trait RuntimeAdapter: Send + Sync {
         workload: &Workload,
         runtime: &ResolvedRuntime,
     ) -> Result<ExecutionResult>;
+
+    /// Execute with host-side control: cancellation and live log capture.
+    /// Adapters that cannot honour control execute normally.
+    async fn execute_controlled(
+        &self,
+        workload: &Workload,
+        runtime: &ResolvedRuntime,
+        control: &ExecutionControl,
+    ) -> Result<ExecutionResult> {
+        let _ = control;
+        self.execute(workload, runtime).await
+    }
+}
+
+/// Host-side control of one running execution. It is not part of the
+/// portable workload, its identity, or its receipt: it lets a long-lived
+/// service be stopped and its output observed while it runs.
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionControl {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    log_directory: Option<PathBuf>,
+}
+
+impl ExecutionControl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append stdout and stderr to `stdout.log` and `stderr.log` in
+    /// `directory` as they are produced.
+    pub fn with_log_directory(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.log_directory = Some(directory.into());
+        self
+    }
+
+    pub fn log_directory(&self) -> Option<&Path> {
+        self.log_directory.as_deref()
+    }
+
+    /// Request cancellation. The adapter terminates the workload's process
+    /// group and reports `cancelled`.
+    pub fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 #[derive(Debug, Error)]

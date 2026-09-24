@@ -5,10 +5,11 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use compute_core::{
-    ComputeError, ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionResult,
-    ExecutionStatus, Output, ResolvedRuntime, ResourceUsage, Result, RuntimeAdapter,
-    RuntimeAvailability, RuntimeCapabilities, RuntimeDescriptor, RuntimeKind, RuntimeSource,
-    Workload, apply_output_contract, collect_artifacts, new_execution_id, stage_workload,
+    ComputeError, ExecutionControl, ExecutionError, ExecutionErrorKind, ExecutionPhase,
+    ExecutionResult, ExecutionStatus, Output, ResolvedRuntime, ResourceUsage, Result,
+    RuntimeAdapter, RuntimeAvailability, RuntimeCapabilities, RuntimeDescriptor, RuntimeKind,
+    RuntimeSource, Workload, apply_output_contract, collect_artifacts, new_execution_id,
+    stage_workload,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -440,6 +441,26 @@ impl RuntimeAdapter for ProcessRuntime {
         workload: &Workload,
         runtime: &ResolvedRuntime,
     ) -> Result<ExecutionResult> {
+        self.execute_with(workload, runtime, None).await
+    }
+
+    async fn execute_controlled(
+        &self,
+        workload: &Workload,
+        runtime: &ResolvedRuntime,
+        control: &ExecutionControl,
+    ) -> Result<ExecutionResult> {
+        self.execute_with(workload, runtime, Some(control)).await
+    }
+}
+
+impl ProcessRuntime {
+    async fn execute_with(
+        &self,
+        workload: &Workload,
+        runtime: &ResolvedRuntime,
+        control: Option<&ExecutionControl>,
+    ) -> Result<ExecutionResult> {
         self.capabilities().validate(self.kind, workload)?;
 
         let execution_id = new_execution_id();
@@ -622,39 +643,86 @@ impl RuntimeAdapter for ProcessRuntime {
             .ok_or_else(|| ComputeError::Runtime("stderr pipe missing".into()))?;
         let stdout_limit = workload.resources.stdout_bytes;
         let stderr_limit = workload.resources.stderr_bytes;
+        let (mut stdout_log, mut stderr_log) = open_logs(control).await?;
+        let mut stdout_buffer = Vec::new();
+        let mut stderr_buffer = Vec::new();
         let read_output = async {
-            let stdout_read = read_limited(&mut stdout, stdout_limit);
-            let stderr_read = read_limited(&mut stderr, stderr_limit);
+            let stdout_read = read_teed(
+                &mut stdout,
+                stdout_limit,
+                &mut stdout_buffer,
+                stdout_log.as_mut(),
+            );
+            let stderr_read = read_teed(
+                &mut stderr,
+                stderr_limit,
+                &mut stderr_buffer,
+                stderr_log.as_mut(),
+            );
             let (stdout, stderr, status) = tokio::join!(stdout_read, stderr_read, child.wait());
-            Ok::<_, std::io::Error>((stdout?, stderr?, status?))
+            stdout?;
+            stderr?;
+            Ok::<_, std::io::Error>(status?)
         };
-        let (stdout, stderr, status, timed_out) =
-            if let Some(timeout) = workload.resources.wall_time {
-                match tokio::time::timeout(timeout, read_output).await {
-                    Ok(result) => {
-                        let (stdout, stderr, status) = result?;
-                        (stdout, stderr, Some(status), false)
+        let deadline = async {
+            match workload.resources.wall_time {
+                Some(timeout) => tokio::time::sleep(timeout).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        let cancelled = async {
+            match control {
+                Some(control) => loop {
+                    if control.is_cancelled() {
+                        break;
                     }
-                    Err(_) => {
-                        terminate(&mut child).await;
-                        let _ = child.wait().await;
-                        let (stdout, stderr) = tokio::join!(
-                            read_limited(&mut stdout, stdout_limit),
-                            read_limited(&mut stderr, stderr_limit)
-                        );
-                        (stdout?, stderr?, None, true)
-                    }
-                }
-            } else {
-                let (stdout, stderr, status) = read_output.await?;
-                (stdout, stderr, Some(status), false)
-            };
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                },
+                None => std::future::pending::<()>().await,
+            }
+        };
+        let outcome = tokio::select! {
+            result = read_output => Interruption::None(result?),
+            () = deadline => Interruption::TimedOut,
+            () = cancelled => Interruption::Cancelled,
+        };
+        let (status, timed_out, was_cancelled) = match outcome {
+            Interruption::None(status) => (Some(status), false, false),
+            interrupted => {
+                terminate(&mut child).await;
+                let _ = child.wait().await;
+                let (stdout_rest, stderr_rest) = tokio::join!(
+                    read_teed(
+                        &mut stdout,
+                        stdout_limit,
+                        &mut stdout_buffer,
+                        stdout_log.as_mut()
+                    ),
+                    read_teed(
+                        &mut stderr,
+                        stderr_limit,
+                        &mut stderr_buffer,
+                        stderr_log.as_mut()
+                    )
+                );
+                stdout_rest?;
+                stderr_rest?;
+                (
+                    None,
+                    matches!(interrupted, Interruption::TimedOut),
+                    matches!(interrupted, Interruption::Cancelled),
+                )
+            }
+        };
+        let (stdout, stderr) = (stdout_buffer, stderr_buffer);
 
         let process_status = status;
         stdin_task
             .await
             .map_err(|error| ComputeError::Runtime(error.to_string()))??;
-        let execution_status = if timed_out {
+        let execution_status = if was_cancelled {
+            ExecutionStatus::Cancelled
+        } else if timed_out {
             ExecutionStatus::TimedOut
         } else {
             // A workload's exit status is data, not a failure of Compute itself.
@@ -684,11 +752,19 @@ impl RuntimeAdapter for ProcessRuntime {
             artifacts: collect_artifacts(&staged.output_dir)?,
             outputs: vec![],
             missing_outputs: vec![],
-            error: timed_out.then(|| ExecutionError {
+            error: (timed_out || was_cancelled).then(|| ExecutionError {
                 execution_id,
                 phase: ExecutionPhase::Running,
-                kind: ExecutionErrorKind::Timeout,
-                message: "wall time limit exceeded".to_string(),
+                kind: if was_cancelled {
+                    ExecutionErrorKind::Cancelled
+                } else {
+                    ExecutionErrorKind::Timeout
+                },
+                message: if was_cancelled {
+                    "execution was cancelled".to_string()
+                } else {
+                    "wall time limit exceeded".to_string()
+                },
                 runtime: Some(self.kind),
                 exit_code: None,
                 started: true,
@@ -771,26 +847,54 @@ fn failure_result(
     }
 }
 
-async fn read_limited<R: tokio::io::AsyncRead + Unpin>(
+enum Interruption {
+    None(std::process::ExitStatus),
+    TimedOut,
+    Cancelled,
+}
+
+async fn open_logs(
+    control: Option<&ExecutionControl>,
+) -> std::io::Result<(Option<tokio::fs::File>, Option<tokio::fs::File>)> {
+    let Some(directory) = control.and_then(ExecutionControl::log_directory) else {
+        return Ok((None, None));
+    };
+    tokio::fs::create_dir_all(directory).await?;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create(true).append(true);
+    Ok((
+        Some(options.open(directory.join("stdout.log")).await?),
+        Some(options.open(directory.join("stderr.log")).await?),
+    ))
+}
+
+/// Read to end, keeping at most `limit + 1` bytes in memory and appending
+/// every byte to `log` as it arrives.
+async fn read_teed<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
     limit: Option<u64>,
-) -> std::io::Result<Vec<u8>> {
+    output: &mut Vec<u8>,
+    mut log: Option<&mut tokio::fs::File>,
+) -> std::io::Result<()> {
     let max = limit.and_then(|value| usize::try_from(value).ok());
-    let mut output = Vec::new();
     let mut buffer = [0_u8; 8192];
     loop {
         let count = reader.read(&mut buffer).await?;
         if count == 0 {
-            break;
+            return Ok(());
         }
-        if let Some(max) = max {
-            let remaining = max.saturating_add(1).saturating_sub(output.len());
-            output.extend_from_slice(&buffer[..count.min(remaining)]);
-        } else {
-            output.extend_from_slice(&buffer[..count]);
+        if let Some(log) = log.as_deref_mut() {
+            log.write_all(&buffer[..count]).await?;
+            log.flush().await?;
+        }
+        match max {
+            Some(max) => {
+                let remaining = max.saturating_add(1).saturating_sub(output.len());
+                output.extend_from_slice(&buffer[..count.min(remaining)]);
+            }
+            None => output.extend_from_slice(&buffer[..count]),
         }
     }
-    Ok(output)
 }
 
 macro_rules! process_adapter {
@@ -829,6 +933,17 @@ macro_rules! process_adapter {
             ) -> Result<ExecutionResult> {
                 ProcessRuntime::new(self.kind())
                     .execute(workload, runtime)
+                    .await
+            }
+
+            async fn execute_controlled(
+                &self,
+                workload: &Workload,
+                runtime: &ResolvedRuntime,
+                control: &ExecutionControl,
+            ) -> Result<ExecutionResult> {
+                ProcessRuntime::new(self.kind())
+                    .execute_controlled(workload, runtime, control)
                     .await
             }
         }
