@@ -16,6 +16,7 @@ mod certification;
 mod direct;
 mod distribution;
 mod placement_certification;
+mod policy_cmd;
 mod pool;
 mod receipt;
 
@@ -58,6 +59,11 @@ enum Commands {
     Placement(pool::PlacementCommand),
     /// Place a workload on a compatible provider and execute or submit it.
     Pool(pool::PoolCommand),
+    /// Inspect, validate, and check execution policy. Never executes.
+    Policy(policy_cmd::PolicyCommand),
+    /// Show the full decision chain for a workload: requirements,
+    /// capabilities, policy, admission, and placement. Never executes.
+    Explain(policy_cmd::ExplainCommand),
     /// Serve compute.remote@1 with durable filesystem-backed jobs.
     Serve(ServeCommand),
 }
@@ -1195,6 +1201,8 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Provider(command) => pool::provider(command).await?,
         Commands::Placement(command) => pool::placement(command).await?,
         Commands::Pool(command) => pool::pool(command).await?,
+        Commands::Policy(command) => policy_cmd::policy(command).await?,
+        Commands::Explain(command) => policy_cmd::explain(command).await?,
         Commands::Remote(command) => match command.command {
             RemoteCommands::Capabilities(command) => {
                 let value = RemoteProvider::new(command.provider)

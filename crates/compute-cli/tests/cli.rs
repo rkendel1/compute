@@ -1720,3 +1720,198 @@ fn bare_relative_workload_paths_resolve_against_the_current_directory() {
         .assert()
         .success();
 }
+
+fn policy_fixture() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("module.wasm"),
+        wat::parse_str(r#"(module (func (export "_start")))"#).unwrap(),
+    )
+    .unwrap();
+    write_json(
+        &root.path().join("strict.json"),
+        serde_json::json!({
+            "version": 1, "name": "strict-policy",
+            "allowed_runtimes": ["wasm"],
+            "allowed_networks": ["none"],
+            "minimum_isolation": "strict",
+            "limits": {"max_timeout_ms": 60000}
+        }),
+    );
+    root
+}
+
+#[test]
+fn policy_validate_rejects_unknown_versions_and_reports_identity() {
+    let root = policy_fixture();
+    let valid = Command::cargo_bin("compute")
+        .unwrap()
+        .current_dir(root.path())
+        .args(["policy", "validate", "strict.json", "--json"])
+        .output()
+        .unwrap();
+    assert!(valid.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&valid.stdout).unwrap();
+    assert_eq!(value["valid"], true);
+    assert_eq!(value["label"], "strict-policy@1");
+    assert!(value["policy_id"].as_str().unwrap().starts_with("sha256:"));
+    std::fs::write(root.path().join("future.json"), r#"{"version": 2}"#).unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .current_dir(root.path())
+        .args(["policy", "validate", "future.json", "--json"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("\"valid\": false"))
+        .stdout(predicate::str::contains("unsupported policy version"));
+}
+
+#[test]
+fn policy_check_explain_and_run_share_one_admission() {
+    let root = policy_fixture();
+    let check = |args: &[&str]| {
+        Command::cargo_bin("compute")
+            .unwrap()
+            .current_dir(root.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    // Denied: process isolation and no declared timeout.
+    let denied = check(&[
+        "policy",
+        "check",
+        "module.wasm",
+        "--policy",
+        "strict.json",
+        "--json",
+    ]);
+    assert_eq!(denied.status.code(), Some(2));
+    let value: serde_json::Value = serde_json::from_slice(&denied.stdout).unwrap();
+    assert_eq!(value["admission"]["status"], "denied");
+    let codes = value["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|reason| reason["code"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(codes, ["isolation_below_minimum", "timeout_unbounded"]);
+    for field in [
+        "policy",
+        "policy_id",
+        "requirements",
+        "provider",
+        "admission",
+        "effective_policy",
+    ] {
+        assert!(value.get(field).is_some(), "{field}");
+    }
+
+    // The same workload stated explicitly is admitted, and running it
+    // binds exactly that admission into the receipt.
+    let admitted_args = [
+        "module.wasm",
+        "--policy",
+        "strict.json",
+        "--isolation",
+        "strict",
+        "--timeout",
+        "5s",
+    ];
+    let admitted = check(&[&["policy", "check"][..], &admitted_args, &["--json"]].concat());
+    assert!(
+        admitted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&admitted.stdout)
+    );
+    let decision: serde_json::Value = serde_json::from_slice(&admitted.stdout).unwrap();
+    let explained = check(&[&["policy", "explain"][..], &admitted_args].concat());
+    assert!(explained.status.success());
+    let text = String::from_utf8(explained.stdout).unwrap();
+    assert!(text.contains("Policy: compute-baseline@1 ∩ strict-policy@1"));
+    assert!(text.contains("Admission: admitted"));
+    let run = check(
+        &[
+            &["run"][..],
+            &admitted_args,
+            &["--receipt", "receipt.json", "--json"],
+        ]
+        .concat(),
+    );
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join("receipt.json")).unwrap()).unwrap();
+    assert_eq!(receipt["admission_status"], "admitted");
+    assert_eq!(
+        receipt["admission_id"],
+        decision["admission"]["admission_id"]
+    );
+    assert_eq!(receipt["policy_id"], decision["policy_id"]);
+    Command::cargo_bin("compute")
+        .unwrap()
+        .current_dir(root.path())
+        .args(["receipt", "verify", "receipt.json"])
+        .assert()
+        .success();
+
+    // A denied run executes nothing and says so.
+    Command::cargo_bin("compute")
+        .unwrap()
+        .current_dir(root.path())
+        .args(["run", "module.wasm", "--policy", "strict.json"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("nothing was executed"));
+}
+
+#[test]
+fn local_configuration_policy_applies_and_defaults_fill_only_unstated_values() {
+    let root = policy_fixture();
+    write_json(
+        &root.path().join("defaults.json"),
+        serde_json::json!({"version": 1, "defaults": {"isolation": "strict"}}),
+    );
+    std::fs::write(
+        root.path().join("compute.toml"),
+        "[policy]\npath = \"defaults.json\"\n",
+    )
+    .unwrap();
+    let explain = |extra: &[&str]| {
+        let output = Command::cargo_bin("compute")
+            .unwrap()
+            .current_dir(root.path())
+            .args([&["run", "module.wasm", "--explain", "--json"][..], extra].concat())
+            .output()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        value["workload"]["isolation"]["profile"].clone()
+    };
+    assert_eq!(
+        explain(&[]),
+        "strict",
+        "policy default fills an unstated value"
+    );
+    assert_eq!(
+        explain(&["--isolation", "sandboxed"]),
+        "sandboxed",
+        "a stated value is never rewritten"
+    );
+    let inspect = Command::cargo_bin("compute")
+        .unwrap()
+        .current_dir(root.path())
+        .args(["policy", "inspect", "--json"])
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&inspect.stdout).unwrap();
+    let kinds = value["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|source| source["kind"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, ["baseline", "local"]);
+}

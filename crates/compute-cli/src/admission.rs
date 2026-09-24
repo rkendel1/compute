@@ -138,8 +138,12 @@ pub fn request_policy(sources: &[(PolicySourceKind, Policy)]) -> Option<Policy> 
         .iter()
         .map(|(_, policy)| policy.clone())
         .reduce(|left, right| left.intersect(&right))
+        // One source keeps its name so explanations can cite it; an
+        // intersection of several is unnamed.
         .map(|mut policy| {
-            policy.name = None;
+            if sources.len() > 1 {
+                policy.name = None;
+            }
             policy
         })
 }

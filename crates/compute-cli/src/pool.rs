@@ -65,7 +65,7 @@ impl PoolLocation {
             .unwrap_or_else(|| DEFAULT_CAPABILITY_CACHE.into())
     }
 
-    fn pool(&self) -> compute_core::Result<ProviderPool> {
+    pub(crate) fn pool(&self) -> compute_core::Result<ProviderPool> {
         ProviderPool::from_config(&self.config()?).map_err(placement_error)
     }
 
@@ -517,7 +517,7 @@ fn join(values: impl Iterator<Item = String>) -> String {
     }
 }
 
-fn enum_label(value: &impl serde::Serialize) -> String {
+pub(crate) fn enum_label(value: &impl serde::Serialize) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
