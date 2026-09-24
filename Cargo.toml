@@ -25,5 +25,5 @@ thiserror = "2.0"
 tokio = { version = "1.40", features = ["macros", "process", "rt-multi-thread", "time"] }
 walkdir = "2.5"
 which = "8.0"
-wasmtime = "25.0"
-wasmtime-wasi = "25.0"
+wasmtime = "36.0.10"
+wasmtime-wasi = "36.0.10"

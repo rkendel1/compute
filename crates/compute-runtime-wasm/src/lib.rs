@@ -7,7 +7,7 @@ use compute_core::{
     stage_workload,
 };
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
-use wasmtime_wasi::pipe::MemoryOutputPipe;
+use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::preview1::{self, WasiP1Ctx};
 use wasmtime_wasi::{I32Exit, WasiCtxBuilder};
 
