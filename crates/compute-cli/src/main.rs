@@ -7,6 +7,8 @@ use compute_core::{
 };
 use compute_runtime::Compute;
 
+mod certification;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "compute",
@@ -28,6 +30,7 @@ enum Commands {
     Capabilities(RuntimeCommand),
     Exec(ExecCommand),
     Doctor(JsonFlag),
+    Certify(CertifyCommand),
     Version(JsonFlag),
 }
 
@@ -35,6 +38,14 @@ enum Commands {
 struct JsonFlag {
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args, Debug)]
+struct CertifyCommand {
+    #[arg(long)]
+    json: bool,
+    #[arg(long, hide = true)]
+    internal_clean_environment: bool,
 }
 
 #[derive(Args, Debug)]
@@ -493,6 +504,18 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     }
                     print_capabilities(&report.capabilities, "  ");
                 }
+            }
+        }
+        Commands::Certify(command) => {
+            if !command.internal_clean_environment {
+                return certification::spawn_clean_certification(command.json);
+            }
+            let report = certification::certify(&compute).await;
+            certification::print_report(&report, command.json);
+            if !report.passed {
+                return Err(compute_core::ComputeError::Runtime(
+                    "distribution certification failed".into(),
+                ));
             }
         }
     }

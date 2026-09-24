@@ -72,6 +72,18 @@ fn doctor_json_reports_each_runtime_capability_model() {
 }
 
 #[test]
+fn certify_refuses_to_certify_the_source_tree() {
+    let mut command = Command::cargo_bin("compute").unwrap();
+    command
+        .args(["certify", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "requires an assembled distribution",
+        ));
+}
+
+#[test]
 fn run_and_exec_share_execution_semantics() {
     let temp = tempfile::tempdir().unwrap();
     let invalid = temp.path().join("invalid.wasm");

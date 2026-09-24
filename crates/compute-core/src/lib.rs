@@ -1305,6 +1305,7 @@ pub struct RuntimeAvailability {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeSource {
     Embedded,
+    #[serde(rename = "compute-distribution")]
     Distribution,
     HostDevelopment,
     Unavailable,

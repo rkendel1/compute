@@ -16,10 +16,18 @@ lock_file="$script_dir/runtime-lock.json"
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 test -x "$compute_binary" || { echo "Compute binary is not executable: $compute_binary" >&2; exit 1; }
 test ! -e "$output_dir" || { echo "Refusing to overwrite: $output_dir" >&2; exit 1; }
+test -f "$payload_root/certification/fixtures.json" || { echo "Missing certification fixtures" >&2; exit 1; }
+
+jq -r '.runtimes | to_entries[] | .value.entrypoint, (.value.files[]? // empty)' "$payload_root/certification/fixtures.json" |
+while IFS= read -r fixture; do
+  test -f "$payload_root/certification/$fixture" || { echo "Missing certification file: $fixture" >&2; exit 1; }
+done
 
 mkdir -p "$output_dir/bin" "$output_dir/runtimes"
 cp "$compute_binary" "$output_dir/bin/compute"
 chmod 0755 "$output_dir/bin/compute"
+cp "$lock_file" "$output_dir/runtime-lock.json"
+cp -R "$payload_root/certification" "$output_dir/certification"
 
 jq -r '.runtimes | to_entries[] | [.key, .value.version, .value.executable] | @tsv' "$lock_file" |
 while IFS="$(printf '\t')" read -r runtime version executable; do
