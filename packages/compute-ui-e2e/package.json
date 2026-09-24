@@ -1,0 +1,16 @@
+{
+  "name": "@compute/ui-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser certification of the Compute control-plane UI against a real daemon",
+  "scripts": {
+    "test": "node --test src/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "playwright-core": "1.56.1"
+  }
+}

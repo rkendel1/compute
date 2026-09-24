@@ -109,6 +109,8 @@ impl DaemonClient {
                 .to_string();
             return Err(match value["kind"].as_str() {
                 Some("not_found") => EnvironmentError::NotFound(message),
+                Some("no_route") => EnvironmentError::NoRoute(message),
+                Some("state_unavailable") => EnvironmentError::Unavailable(message),
                 Some("conflict") => EnvironmentError::Conflict(message),
                 Some("admission_denied") => EnvironmentError::Denied(message),
                 Some("unauthorized") => EnvironmentError::Unauthorized(message),

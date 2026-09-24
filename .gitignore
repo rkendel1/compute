@@ -2,3 +2,4 @@
 /packages/compute-appport/node_modules
 /packages/compute-appport/dist
 /packages/compute-state-model/node_modules
+/packages/compute-ui-e2e/node_modules

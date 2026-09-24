@@ -369,13 +369,7 @@ async fn write_event(
 ) -> std::io::Result<()> {
     let data = serde_json::to_string(event).unwrap_or_default();
     stream
-        .write_all(
-            format!(
-                "id: {}\nevent: {}\ndata: {data}\n\n",
-                event.sequence, event.kind
-            )
-            .as_bytes(),
-        )
+        .write_all(format!("id: {}\ndata: {data}\n\n", event.sequence).as_bytes())
         .await?;
     stream.flush().await
 }
