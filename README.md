@@ -74,6 +74,23 @@ compute explain ./script.py
 compute serve --policy production.json
 ```
 
+Compute also operates long-running software. A persistent daemon holds
+**environments** (such as `staging` and `prod`), each containing
+**projects**, each containing **workloads**: services that stay running and
+tasks that run to completion. Environments are isolated from each other in
+filesystem, configuration, policy, ports, and processes. Stopping a child
+never stops its parent or its siblings. The CLI, AppPort, and the UI are
+all clients of one Compute API. See [docs/environments.md](docs/environments.md)
+and [docs/daemon.md](docs/daemon.md).
+
+```sh
+compute start --detach
+compute environment apply compute.environment.toml
+compute environment status staging
+compute workload run authboundry/migrate --environment staging
+compute project restart authboundry --environment staging
+```
+
 ## Universal runtime distribution
 
 Compute has first-class adapters for WASM, Python, Node, Bun, Deno, Ruby,

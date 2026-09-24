@@ -1518,10 +1518,9 @@ impl Daemon {
     }
 
     fn persist_ports(&self, ports: &BTreeMap<String, u16>) -> Result<(), EnvironmentError> {
-        std::fs::write(
-            self.config.state_dir.join("ports.json"),
-            serde_json::to_vec_pretty(ports)?,
-        )?;
+        let temporary = self.config.state_dir.join(".ports.json.tmp");
+        std::fs::write(&temporary, serde_json::to_vec_pretty(ports)?)?;
+        std::fs::rename(temporary, self.config.state_dir.join("ports.json"))?;
         Ok(())
     }
 }

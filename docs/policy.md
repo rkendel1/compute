@@ -150,6 +150,7 @@ Policies come from:
 | Local | `compute.toml` `[policy] path = "compute-policy.json"`. The file is found through `--config`, then `$COMPUTE_CONFIG`, then `./compute.toml` |
 | Server | `compute serve --policy FILE`, or `[server.policy] path` in that `compute.toml` |
 | Provider | The server policy a remote provider advertises in its capabilities |
+| Environment | An environment's `policy`, for executions the Compute daemon runs in that environment ([docs/environments.md](environments.md#admission)) |
 | Explicit | `--policy FILE` on `run`, `pool`, `placement`, `policy`, and `explain` |
 
 The workload is not a policy source. Its requirements are the contract being
