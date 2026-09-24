@@ -1,47 +1,63 @@
-# Compute runtime distribution
+# Reproducible Compute distribution
 
-`runtime-lock.json` is the authoritative runtime-version set for a Compute
-release. Runtime payload production is deliberately separate from workload
-execution: language toolchains may build the payloads, but `compute run` never
-downloads, installs, or compiles dependencies.
+`runtime-lock.json` is the authoritative runtime artifact set. Each downloadable
+runtime is pinned by platform, immutable URL, SHA-256 digest, archive format,
+and installation layout. The builder never discovers or substitutes a host
+language runtime.
 
-Assemble an already-built Linux payload tree with:
+Build and certify the Linux distribution with the same command used by release
+CI:
 
 ```sh
-distribution/assemble.sh \
-  target/release/compute \
-  /path/to/runtime-payload \
-  linux-x86_64 \
-  dist/compute-distribution
+cargo build --release --locked
+rustup target add wasm32-wasip1
+target/release/compute distribution build \
+  --output dist/compute-distribution \
+  --verify
 ```
 
-The payload root mirrors `runtimes/<id>/...` from the lock. Assembly verifies
-every executable and exact pinned version, emits `runtime-manifest.json`,
-normalizes metadata, and creates a deterministically ordered uncompressed tar.
-An assembled Compute process sets `COMPUTE_HOME` to this root and fails closed
-if a declared executable is missing, relocated, or reports another version.
+The builder downloads missing artifacts into
+`$XDG_CACHE_HOME/compute/runtimes/sha256/<digest>` (or
+`~/.cache/compute/runtimes/sha256/<digest>`), verifies every cached or newly
+downloaded byte, installs the declared platform payload, launches each runtime,
+and records its reported identity and payload hash. `--offline` disables all
+artifact network access and fails on the first cache miss. An absent platform
+entry is an error; another architecture is never substituted.
 
-Build the Docker packaging target from that exact directory:
+The output contains `runtime-manifest.json`, `runtime-inventory.json`, the lock,
+the Compute executable, all runtime payloads, and—when `--verify` is used—the
+compiled certification fixtures. The adjacent uncompressed `.tar` has sorted
+entries, normalized ownership, permissions, timestamps, and a fixed internal
+root name, so the same source, binary, lock, and platform produce identical
+bytes.
+
+Inspect or verify an existing output without rebuilding it:
 
 ```sh
-docker build \
-  -f distribution/Dockerfile \
+compute distribution inspect dist/compute-distribution --json
+compute distribution verify dist/compute-distribution --json
+```
+
+Verification rechecks lock compatibility, manifest identity, every payload-tree
+hash, every required executable, and every runtime version probe. `--verify`
+also runs `compute doctor` and `compute certify` with all runtimes required and
+with the existing poisoned-host environment checks.
+
+Docker consumes only that assembled directory:
+
+```sh
+docker build -f distribution/Dockerfile \
   --build-arg COMPUTE_DISTRIBUTION=dist/compute-distribution \
   -t compute .
+docker run --rm compute certify --json
 ```
 
-The Dockerfile contains no runtime versions. It packages the same assembled
-distribution used for a host, VM, CI, Kubernetes, or Fly installation.
+The Dockerfile does not download runtimes and contains no independent version
+matrix.
 
-Release CI should run the shared suite against the assembled root without
-permitting unavailable-runtime skips:
+## Development versus distribution
 
-```sh
-COMPUTE_HOME="$PWD/dist/compute-distribution" \
-COMPUTE_REQUIRE_ALL_RUNTIMES=1 \
-cargo test -p compute-runtime --test conformance
-```
-
-This mode fails if any first-class runtime is missing or incompatible. JVM,
-.NET, and native fixture compilation happens before Compute execution and is
-test setup, not a workload build feature.
+A source checkout is a development environment: runtimes may be missing and
+`compute doctor` reports host reality. It cannot claim universal certification.
+An assembled distribution is rooted by `COMPUTE_HOME`, carries provenance for
+all pinned payloads, and is the only environment accepted by `compute certify`.

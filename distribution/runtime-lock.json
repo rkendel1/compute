@@ -1,49 +1,79 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "runtimes": {
-    "wasm": {
-      "version": "wasmtime-36.0.10+wasi-preview1",
-      "executable": "<embedded>"
-    },
+    "wasm": { "version": "wasmtime-36.0.10+wasi-preview1", "executable": "<embedded>" },
     "python": {
-      "version": "3.13.15",
-      "executable": "runtimes/python/bin/python3"
+      "version": "3.13.15", "executable": "runtimes/python/bin/python3",
+      "artifacts": { "linux-x86_64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+        "sha256": "8a689a077337bea6d1c4bc0b7df1d52fcaa28f5f67e50df8bf417c1e3f9d8874", "format": "tar_gz",
+        "install": [{ "source": "python", "destination": "runtimes/python" }]
+      }}
     },
     "node": {
-      "version": "24.18.0",
-      "executable": "runtimes/node/bin/node"
+      "version": "24.18.0", "executable": "runtimes/node/bin/node",
+      "artifacts": { "linux-x86_64": {
+        "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.xz",
+        "sha256": "55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742", "format": "tar_xz",
+        "install": [{ "source": "node-v24.18.0-linux-x64", "destination": "runtimes/node" }]
+      }}
     },
     "bun": {
-      "version": "1.4.2",
-      "executable": "runtimes/bun/bin/bun"
+      "version": "1.4.2", "executable": "runtimes/bun/bin/bun",
+      "artifacts": { "linux-x86_64": {
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip",
+        "sha256": "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913", "format": "zip",
+        "install": [{ "source": "bun-linux-x64/bun", "destination": "runtimes/bun/bin/bun" }]
+      }}
     },
     "deno": {
-      "version": "2.9.7",
-      "executable": "runtimes/deno/bin/deno"
+      "version": "2.9.7", "executable": "runtimes/deno/bin/deno",
+      "artifacts": { "linux-x86_64": {
+        "url": "https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip",
+        "sha256": "c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490", "format": "zip",
+        "install": [{ "source": "deno", "destination": "runtimes/deno/bin/deno" }]
+      }}
     },
     "ruby": {
-      "version": "3.4.11",
-      "executable": "runtimes/ruby/bin/ruby"
+      "version": "3.4.11", "executable": "runtimes/ruby/bin/ruby",
+      "artifacts": { "linux-x86_64": {
+        "url": "https://github.com/bazel-contrib/portable-ruby/releases/download/3.4.11-1/ruby-3.4.11.x86_64_linux.tar.gz",
+        "sha256": "f4a0ac310c7150586befb7fc885297be4a96bc4f7ad7b4dd362e427b87822055", "format": "tar_gz",
+        "install": [{ "source": "ruby-3.4.11", "destination": "runtimes/ruby" }]
+      }}
     },
     "php": {
-      "version": "8.4.24",
-      "executable": "runtimes/php/bin/php"
+      "version": "8.4.24", "executable": "runtimes/php/bin/php",
+      "artifacts": { "linux-x86_64": {
+        "url": "https://github.com/phpdevkit/php-builds/releases/download/php-8.4.24/php-8.4.24-linux-x86_64.tar.gz",
+        "sha256": "03686753effecacb2f7f3a9fb9ed73419cb885e8c89ecbaae5207081b8bb3a63", "format": "tar_gz",
+        "install": [{ "source": "bin", "destination": "runtimes/php/bin" }]
+      }}
     },
     "jvm": {
-      "version": "21.0.12.1",
-      "executable": "runtimes/jvm/bin/java"
+      "version": "21.0.12.1", "executable": "runtimes/jvm/bin/java",
+      "artifacts": { "linux-x86_64": {
+        "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz",
+        "sha256": "ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94", "format": "tar_gz",
+        "install": [{ "source": "jdk-21.0.12.1+1", "destination": "runtimes/jvm" }]
+      }}
     },
     "dotnet": {
-      "version": "10.0.12",
-      "executable": "runtimes/dotnet/bin/dotnet"
+      "version": "10.0.12", "executable": "runtimes/dotnet/dotnet",
+      "artifacts": { "linux-x86_64": {
+        "url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.112/dotnet-sdk-10.0.112-linux-x64.tar.gz",
+        "sha256": "93adf489110de46c6948ab2848a425d1dd99448f8374bc8a44a06d4ab892f3d2", "format": "tar_gz",
+        "install": [{ "source": "", "destination": "runtimes/dotnet" }]
+      }}
     },
-    "native": {
-      "version": "linux-v1",
-      "executable": "<workload-entrypoint>"
-    },
+    "native": { "version": "linux-v1", "executable": "<workload-entrypoint>" },
     "shell": {
-      "version": "busybox-1.37.0",
-      "executable": "runtimes/shell/bin/sh"
+      "version": "1.37.0", "executable": "runtimes/shell/bin/sh",
+      "artifacts": { "linux-x86_64": {
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/busybox-static-1.37.0-r20.apk",
+        "sha256": "488ad6efd04b5a722719e79f8e0dcc2c24afd6758867af3ce41b04839e60c74b", "format": "apk",
+        "install": [{ "source": "bin/busybox.static", "destination": "runtimes/shell/bin/sh" }]
+      }}
     }
   }
 }

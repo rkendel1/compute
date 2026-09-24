@@ -1,6 +1,7 @@
 name: distribution-certification
 
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     tags: ["v*"]
@@ -10,28 +11,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: packages/compute-appport/package-lock.json
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "10.0.x"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
-      - run: npm ci && npm run build
-        working-directory: packages/compute-appport
-      - run: cargo build --release --locked
-      - uses: actions/download-artifact@v4
+      - uses: actions/cache@v4
         with:
-          name: compute-runtime-payload-linux-x86_64
-          path: runtime-payload
-      - run: distribution/prepare-certification-fixtures.sh runtime-payload
-      - run: distribution/assemble.sh target/release/compute runtime-payload linux-x86_64 compute-distribution
-      - run: distribution/certify-distribution.sh compute-distribution
+          path: ~/.cache/compute/runtimes
+          key: compute-runtimes-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('distribution/runtime-lock.json', 'packages/compute-appport/package-lock.json') }}
+      - run: cargo build --release --locked
+      - run: target/release/compute distribution build --output compute-distribution --verify
+      - run: target/release/compute distribution verify compute-distribution --json
+      - run: docker build -f distribution/Dockerfile --build-arg COMPUTE_DISTRIBUTION=compute-distribution -t compute-certification .
+      - run: docker run --rm compute-certification certify --json
+      - run: |
+          mv compute-distribution compute-distribution-first
+          mv compute-distribution.tar compute-distribution-first.tar
+          target/release/compute distribution build --output compute-distribution --offline --verify
+          diff -u compute-distribution-first/runtime-manifest.json compute-distribution/runtime-manifest.json
+          diff -u compute-distribution-first/runtime-inventory.json compute-distribution/runtime-inventory.json
+          cmp compute-distribution-first.tar compute-distribution.tar

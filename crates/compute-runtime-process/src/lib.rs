@@ -77,7 +77,7 @@ fn runtime_definition(kind: RuntimeKind) -> RuntimeDefinition {
     let lock: RuntimeLock =
         serde_json::from_str(include_str!("../../../distribution/runtime-lock.json"))
             .expect("valid embedded runtime lock");
-    assert_eq!(lock.schema_version, 1, "supported runtime lock version");
+    assert_eq!(lock.schema_version, 2, "supported runtime lock version");
     let locked = lock
         .runtimes
         .get(kind.as_str())
@@ -147,9 +147,23 @@ impl DiscoveredRuntime {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DistributionManifest {
+    #[serde(rename = "schema_version")]
+    _schema_version: u32,
     compute_version: String,
+    #[serde(rename = "distribution_id")]
+    _distribution_id: String,
     distribution_version: String,
     platform: String,
+    #[serde(rename = "os")]
+    _os: String,
+    #[serde(rename = "architecture")]
+    _architecture: String,
+    #[serde(rename = "runtime_lock_sha256")]
+    _runtime_lock_sha256: String,
+    #[serde(rename = "certification_status")]
+    _certification_status: String,
+    #[serde(rename = "build")]
+    _build: serde_json::Value,
     runtimes: BTreeMap<String, DistributionRuntime>,
 }
 
@@ -158,6 +172,18 @@ struct DistributionManifest {
 struct DistributionRuntime {
     version: String,
     executable: String,
+    #[serde(default)]
+    #[serde(rename = "artifacts")]
+    _artifacts: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    #[serde(rename = "artifact_sha256")]
+    _artifact_sha256: String,
+    #[serde(default)]
+    #[serde(rename = "payload_sha256")]
+    _payload_sha256: String,
+    #[serde(default)]
+    #[serde(rename = "reported_version")]
+    _reported_version: String,
 }
 
 fn distribution_root() -> Option<std::result::Result<PathBuf, String>> {
@@ -497,16 +523,20 @@ impl RuntimeAdapter for ProcessRuntime {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env_clear()
-            .env("COMPUTE_WORK_DIR", &staged.work_dir)
-            .env("COMPUTE_TMP_DIR", &staged.tmp_dir)
-            .env("COMPUTE_OUTPUT_DIR", &staged.output_dir);
+            .env_clear();
         #[cfg(unix)]
         command.process_group(0);
 
         for pair in &workload.env {
             command.env(&pair.key, &pair.value);
         }
+        if self.kind == RuntimeKind::Python {
+            command.env("PYTHONDONTWRITEBYTECODE", "1");
+        }
+        command
+            .env("COMPUTE_WORK_DIR", &staged.work_dir)
+            .env("COMPUTE_TMP_DIR", &staged.tmp_dir)
+            .env("COMPUTE_OUTPUT_DIR", &staged.output_dir);
 
         let started = Instant::now();
         let mut child = match command.spawn() {
@@ -785,13 +815,23 @@ mod tests {
         let definition = runtime_definition(RuntimeKind::Ruby);
         let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
         let manifest = serde_json::json!({
+            "schema_version": 2,
             "compute_version": "0.1.0",
+            "distribution_id": "sha256:test",
             "distribution_version": format!("compute-0.1.0-{platform}"),
             "platform": platform,
+            "os": std::env::consts::OS,
+            "architecture": std::env::consts::ARCH,
+            "runtime_lock_sha256": "test",
+            "certification_status": "not_run",
+            "build": {},
             "runtimes": {
                 "ruby": {
                     "version": definition.version,
                     "executable": definition.executable,
+                    "artifact_sha256": "test",
+                    "payload_sha256": "test",
+                    "reported_version": definition.version,
                 }
             }
         });

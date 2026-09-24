@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use compute_core::{
     ExecutionStatus, InputSource, NetworkPolicy, ResourceLimits, RuntimeKind, RuntimeSource,
-    WorkloadInput, WorkloadOutput, WorkloadSpec,
+    WorkloadBundle, WorkloadInput, WorkloadOutput, WorkloadSpec,
 };
 use compute_runtime::Compute;
 use serde::{Deserialize, Serialize};
@@ -29,9 +29,27 @@ pub struct RuntimeCertification {
     pub reported_version: Option<String>,
     pub executable: Option<PathBuf>,
     pub source: Option<RuntimeSource>,
+    pub resource_controls: ResourceCertification,
+    pub network_policy: String,
+    pub filesystem_isolation: String,
     pub result: CertificationResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResourceCertification {
+    pub timeout: String,
+    pub memory: String,
+    pub cpu: String,
+    pub process_count: String,
+}
+
+struct CertifiedArtifact {
+    bundle: PathBuf,
+    workload_id: String,
+    bundle_id: String,
+    resources: ResourceCertification,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,10 +77,17 @@ struct RuntimeLock {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DistributionManifest {
+    schema_version: u32,
     compute_version: String,
+    distribution_id: String,
     distribution_version: String,
     platform: String,
-    runtimes: BTreeMap<String, LockedRuntime>,
+    os: String,
+    architecture: String,
+    runtime_lock_sha256: String,
+    certification_status: String,
+    build: serde_json::Value,
+    runtimes: BTreeMap<String, ManifestRuntime>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -70,6 +95,18 @@ struct DistributionManifest {
 struct LockedRuntime {
     version: String,
     executable: String,
+    #[serde(default)]
+    artifacts: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ManifestRuntime {
+    version: String,
+    executable: String,
+    artifact_sha256: String,
+    payload_sha256: String,
+    reported_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,10 +219,20 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
         "PATH and host environment are poisoned",
     );
 
-    let metadata_valid = lock.schema_version == 1
+    let metadata_valid = lock.schema_version == 2
+        && manifest.schema_version == 2
         && fixtures.schema_version == 1
-        && lock.runtimes == manifest.runtimes
-        && manifest.compute_version == env!("CARGO_PKG_VERSION");
+        && lock.runtimes.iter().all(|(name, locked)| {
+            manifest.runtimes.get(name).is_some_and(|installed| {
+                installed.version == locked.version && installed.executable == locked.executable
+            })
+        })
+        && manifest.compute_version == env!("CARGO_PKG_VERSION")
+        && manifest.distribution_id.starts_with("sha256:")
+        && manifest.platform == format!("{}-{}", manifest.os, manifest.architecture)
+        && manifest.runtime_lock_sha256.len() == 64
+        && matches!(manifest.certification_status.as_str(), "not_run" | "pass")
+        && !manifest.build.is_null();
     if metadata_valid {
         pass_check(
             &mut report,
@@ -200,8 +247,13 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
         );
     }
 
+    match certify_negative_contracts() {
+        Ok(detail) => pass_check(&mut report, "security_and_negative_cases", &detail),
+        Err(error) => fail_check(&mut report, "security_and_negative_cases", error),
+    }
+
     let inventory = compute.inventory().await;
-    let mut certified_bundle: Option<(PathBuf, String, String)> = None;
+    let mut certified_bundle: Option<CertifiedArtifact> = None;
     for kind in RuntimeKind::ALL {
         let locked = lock.runtimes.get(kind.as_str());
         let fixture = fixtures.runtimes.get(kind.as_str());
@@ -213,11 +265,12 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
             _ => Err("runtime is missing from lock, fixture manifest, or inventory".into()),
         };
         match result {
-            Ok(bundle) => {
+            Ok(artifact) => {
+                let resource_controls = artifact.resources.clone();
                 if certified_bundle.is_none() {
-                    certified_bundle = Some(bundle);
+                    certified_bundle = Some(artifact);
                 } else {
-                    let _ = fs::remove_file(&bundle.0);
+                    let _ = fs::remove_file(&artifact.bundle);
                 }
                 report.runtimes.push(RuntimeCertification {
                     runtime: kind,
@@ -225,6 +278,27 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
                     reported_version: entry.and_then(|value| value.detected_version.clone()),
                     executable: entry.and_then(|value| value.detected_executable.clone()),
                     source: entry.map(|value| value.source),
+                    resource_controls,
+                    network_policy: if entry.is_some_and(|value| {
+                        value
+                            .capabilities
+                            .network
+                            .get(&NetworkPolicy::None)
+                            .is_some_and(|capability| capability.supported)
+                    }) {
+                        "denied_policy_executed"
+                    } else {
+                        "unsupported_policy_rejected"
+                    }
+                    .into(),
+                    filesystem_isolation: if entry
+                        .is_some_and(|value| value.capabilities.filesystem_isolation.supported)
+                    {
+                        "supported_and_enforced"
+                    } else {
+                        "not_supported"
+                    }
+                    .into(),
                     result: CertificationResult::Pass,
                     error: None,
                 });
@@ -235,15 +309,61 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
                 reported_version: entry.and_then(|value| value.detected_version.clone()),
                 executable: entry.and_then(|value| value.detected_executable.clone()),
                 source: entry.map(|value| value.source),
+                resource_controls: resource_evidence(entry, false, false),
+                network_policy: "failed".into(),
+                filesystem_isolation: "failed".into(),
                 result: CertificationResult::Fail,
                 error: Some(error),
             }),
         }
     }
 
-    if let Some((bundle, workload_id, bundle_id)) = certified_bundle {
-        let appport_result = certify_appport(&root, &fixtures, &bundle, &workload_id, &bundle_id);
-        let _ = fs::remove_file(&bundle);
+    let all_runtimes_pass = report
+        .runtimes
+        .iter()
+        .all(|runtime| runtime.result == CertificationResult::Pass);
+    for (name, detail) in [
+        (
+            "workload_bundle",
+            "all runtime fixtures executed from verified .compute bundles",
+        ),
+        (
+            "input_output_contract",
+            "all runtimes produced the canonical semantic result",
+        ),
+        (
+            "identity_verification",
+            "correct identities ran and incorrect identities were rejected",
+        ),
+        (
+            "timeout_enforcement",
+            "all runtime processes were terminated at their deadline",
+        ),
+        (
+            "host_path_leakage",
+            "poisoned PATH executables were not used",
+        ),
+    ] {
+        if all_runtimes_pass {
+            pass_check(&mut report, name, detail);
+        } else {
+            fail_check(
+                &mut report,
+                name,
+                "one or more runtime certifications failed".into(),
+            );
+        }
+    }
+
+    if let Some(artifact) = certified_bundle {
+        let appport_result = certify_appport(
+            &root,
+            &fixtures,
+            &artifact.bundle,
+            &artifact.workload_id,
+            &artifact.bundle_id,
+        );
+        let _ = fs::remove_file(&artifact.bundle);
         match appport_result {
             Ok(detail) => pass_check(&mut report, "appport_authorization", &detail),
             Err(error) => fail_check(&mut report, "appport_authorization", error),
@@ -275,7 +395,7 @@ async fn certify_runtime(
     locked: &LockedRuntime,
     fixture: &FixtureDefinition,
     inventory: &compute_core::RuntimeInventoryEntry,
-) -> Result<(PathBuf, String, String), String> {
+) -> Result<CertifiedArtifact, String> {
     if !inventory.available || !inventory.compatible {
         return Err(inventory
             .remediation
@@ -346,6 +466,9 @@ async fn certify_runtime(
     }
 
     let capabilities = &inventory.capabilities;
+    if capabilities.cpu_limit.supported || capabilities.process_limit.supported {
+        return Err("runtime declares CPU or process limits without a certification probe".into());
+    }
     let network = if capabilities
         .network
         .get(&NetworkPolicy::None)
@@ -357,6 +480,7 @@ async fn certify_runtime(
     };
     let mut env = BTreeMap::new();
     env.insert("CERTIFICATION_ENV".into(), "controlled".into());
+    env.insert("CERTIFICATION_VERSION".into(), locked.version.clone());
     let specification = WorkloadSpec {
         version: "1".into(),
         runtime: kind,
@@ -449,49 +573,101 @@ async fn certify_runtime(
     let bundle = compute
         .load_bundle(&bundle_path)
         .map_err(|error| error.to_string())?;
-    let mut stdin_request = bundle
-        .materialize()
-        .map_err(|error| error.to_string())?
-        .request;
+    let mut stdin_materialized = bundle.materialize().map_err(|error| error.to_string())?;
+    let stdin_request = &mut stdin_materialized.request;
     stdin_request.args = vec!["stdin".into()];
     stdin_request.stdin = b"certification-stdin".to_vec();
     stdin_request.outputs.clear();
     let stdin_result = compute
-        .run(stdin_request)
+        .run(stdin_request.clone())
         .await
         .map_err(|error| error.to_string())?;
     if stdin_result.stdout.text != "certification-stdin" {
         return Err("stdin contract failed".into());
     }
 
-    let mut exit_request = bundle
-        .materialize()
-        .map_err(|error| error.to_string())?
-        .request;
+    if capabilities.filesystem_isolation.supported {
+        let mut filesystem_materialized =
+            bundle.materialize().map_err(|error| error.to_string())?;
+        let filesystem_request = &mut filesystem_materialized.request;
+        filesystem_request.args = vec!["filesystem".into()];
+        filesystem_request.outputs.clear();
+        let filesystem_result = compute
+            .run(filesystem_request.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        if filesystem_result.stdout.text.trim() != "blocked" {
+            return Err("host filesystem probe was not blocked".into());
+        }
+    }
+
+    if !capabilities
+        .network
+        .get(&NetworkPolicy::None)
+        .is_some_and(|value| value.supported)
+    {
+        let mut network_materialized = bundle.materialize().map_err(|error| error.to_string())?;
+        let denied_network = &mut network_materialized.request;
+        denied_network.network = NetworkPolicy::None;
+        denied_network.outputs.clear();
+        if compute.run(denied_network.clone()).await.is_ok() {
+            return Err("unsupported denied-network policy was silently accepted".into());
+        }
+    } else {
+        let mut network_materialized = bundle.materialize().map_err(|error| error.to_string())?;
+        let denied_network = &mut network_materialized.request;
+        denied_network.args = vec!["network".into()];
+        denied_network.outputs.clear();
+        let network_result = compute
+            .run(denied_network.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        if network_result.stdout.text.trim() != "blocked" {
+            return Err("denied network probe was not blocked".into());
+        }
+    }
+
+    let mut exit_materialized = bundle.materialize().map_err(|error| error.to_string())?;
+    let exit_request = &mut exit_materialized.request;
     exit_request.args = vec!["exit".into()];
     exit_request.outputs.clear();
     let exit_result = compute
-        .run(exit_request)
+        .run(exit_request.clone())
         .await
         .map_err(|error| error.to_string())?;
     if exit_result.status != ExecutionStatus::Completed || exit_result.exit_code != Some(7) {
         return Err("exit-code contract failed".into());
     }
 
-    let mut timeout_request = bundle
-        .materialize()
-        .map_err(|error| error.to_string())?
-        .request;
+    let mut timeout_materialized = bundle.materialize().map_err(|error| error.to_string())?;
+    let timeout_request = &mut timeout_materialized.request;
     timeout_request.args = vec!["sleep".into()];
     timeout_request.outputs.clear();
     timeout_request.resources.wall_time = Some(Duration::from_millis(50));
     let timeout_result = compute
-        .run(timeout_request)
+        .run(timeout_request.clone())
         .await
         .map_err(|error| error.to_string())?;
     if timeout_result.status != ExecutionStatus::TimedOut {
         return Err("timeout was not enforced".into());
     }
+
+    let memory = if capabilities.memory_limit.supported {
+        let mut memory_materialized = bundle.materialize().map_err(|error| error.to_string())?;
+        let memory_request = &mut memory_materialized.request;
+        memory_request.args = vec!["memory".into()];
+        memory_request.outputs.clear();
+        memory_request.resources.memory_bytes = Some(4 * 65_536);
+        if let Ok(memory_result) = compute.run(memory_request.clone()).await
+            && memory_result.status == ExecutionStatus::Completed
+            && memory_result.exit_code == Some(0)
+        {
+            return Err("declared memory limit was not enforced".into());
+        }
+        "supported_and_enforced"
+    } else {
+        "not_supported"
+    };
 
     let persistent_bundle = tempfile::Builder::new()
         .prefix(&format!("compute-certified-{}-", kind.as_str()))
@@ -502,11 +678,27 @@ async fn certify_runtime(
         .keep()
         .map_err(|error| error.error.to_string())?;
     fs::copy(&bundle_path, &persistent_path).map_err(|error| error.to_string())?;
-    Ok((
-        persistent_path,
-        inspection.workload_id,
-        inspection.bundle_id,
-    ))
+    Ok(CertifiedArtifact {
+        bundle: persistent_path,
+        workload_id: inspection.workload_id,
+        bundle_id: inspection.bundle_id,
+        resources: ResourceCertification {
+            timeout: "supported_and_enforced".into(),
+            memory: memory.into(),
+            cpu: if capabilities.cpu_limit.supported {
+                "supported_not_certified"
+            } else {
+                "not_supported"
+            }
+            .into(),
+            process_count: if capabilities.process_limit.supported {
+                "supported_not_certified"
+            } else {
+                "not_supported"
+            }
+            .into(),
+        },
+    })
 }
 
 fn certify_appport(
@@ -558,6 +750,85 @@ fn load_artifact_metadata(
     let manifest = read_json::<DistributionManifest>(&root.join("runtime-manifest.json"))?;
     let fixtures = read_json::<FixtureManifest>(&root.join("certification/fixtures.json"))?;
     Ok((lock, manifest, fixtures))
+}
+
+fn certify_negative_contracts() -> Result<String, String> {
+    let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+    fs::write(root.path().join("entry.py"), "print('must not execute')\n")
+        .map_err(|error| error.to_string())?;
+    let base = WorkloadSpec {
+        version: "1".into(),
+        runtime: RuntimeKind::Python,
+        runtime_version: None,
+        entrypoint: PathBuf::from("entry.py"),
+        args: vec![],
+        env: BTreeMap::new(),
+        inputs: vec![],
+        outputs: vec![],
+        resources: ResourceLimits::default(),
+        network: NetworkPolicy::Network,
+    };
+    let mut traversal = base.clone();
+    traversal.inputs.push(WorkloadInput {
+        path: PathBuf::from("../secret"),
+        source: InputSource::Inline { data: vec![] },
+    });
+    let mut absolute = base.clone();
+    absolute.outputs.push(WorkloadOutput {
+        path: PathBuf::from("/tmp/result"),
+        required: true,
+    });
+    let mut output_traversal = base.clone();
+    output_traversal.outputs.push(WorkloadOutput {
+        path: PathBuf::from("../../result"),
+        required: true,
+    });
+    if traversal.validate().is_ok()
+        || absolute.validate().is_ok()
+        || output_traversal.validate().is_ok()
+    {
+        return Err("unsafe input or output path was accepted".into());
+    }
+
+    let workload_path = root.path().join("workload.json");
+    fs::write(
+        &workload_path,
+        base.to_pretty_json().map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let bundle = WorkloadBundle::create(&workload_path).map_err(|error| error.to_string())?;
+    let mut bytes = bundle.to_bytes().map_err(|error| error.to_string())?;
+    let last = bytes
+        .last_mut()
+        .ok_or_else(|| "empty certification bundle".to_string())?;
+    *last ^= 0xff;
+    if WorkloadBundle::from_bytes(&bytes).is_ok() {
+        return Err("tampered bundle was accepted".into());
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("../outside", root.path().join("escape"))
+            .map_err(|error| error.to_string())?;
+        let mut symlink = base;
+        symlink.inputs.push(WorkloadInput {
+            path: PathBuf::from("data.txt"),
+            source: InputSource::File {
+                path: PathBuf::from("escape"),
+            },
+        });
+        fs::write(
+            &workload_path,
+            symlink
+                .to_pretty_json()
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        if WorkloadBundle::create(&workload_path).is_ok() {
+            return Err("symlink escape was accepted".into());
+        }
+    }
+    Ok("traversal, absolute paths, symlink escape, and tampered bundles were rejected".into())
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
@@ -633,6 +904,46 @@ fn fail_check(report: &mut CertificationReport, name: &str, detail: String) {
     });
 }
 
+fn resource_evidence(
+    entry: Option<&compute_core::RuntimeInventoryEntry>,
+    timeout_enforced: bool,
+    memory_enforced: bool,
+) -> ResourceCertification {
+    let capabilities = entry.map(|value| &value.capabilities);
+    let evidence = |supported: bool, enforced: bool| {
+        if !supported {
+            "not_supported"
+        } else if enforced {
+            "supported_and_enforced"
+        } else {
+            "failed"
+        }
+        .to_string()
+    };
+    ResourceCertification {
+        timeout: evidence(
+            capabilities.is_some_and(|value| value.timeout.supported),
+            timeout_enforced,
+        ),
+        memory: evidence(
+            capabilities.is_some_and(|value| value.memory_limit.supported),
+            memory_enforced,
+        ),
+        cpu: if capabilities.is_some_and(|value| value.cpu_limit.supported) {
+            "supported_not_certified"
+        } else {
+            "not_supported"
+        }
+        .into(),
+        process_count: if capabilities.is_some_and(|value| value.process_limit.supported) {
+            "supported_not_certified"
+        } else {
+            "not_supported"
+        }
+        .into(),
+    }
+}
+
 pub fn print_report(report: &CertificationReport, json: bool) {
     if json {
         println!(
@@ -653,22 +964,29 @@ pub fn print_report(report: &CertificationReport, json: bool) {
     println!("Runtime\tVersion\tResult");
     for runtime in &report.runtimes {
         println!(
-            "{}\t{}\t{:?}",
+            "{}\t{}\t{}",
             runtime.runtime,
             runtime.locked_version.as_deref().unwrap_or("-"),
-            runtime.result
+            result_label(runtime.result)
         );
         if let Some(error) = &runtime.error {
             println!("  {error}");
         }
     }
     for check in &report.checks {
-        println!("{}\t{:?}", check.name, check.result);
+        println!("{}\t{}", check.name, result_label(check.result));
     }
     println!(
         "CERTIFICATION: {}",
         if report.passed { "PASS" } else { "FAIL" }
     );
+}
+
+fn result_label(result: CertificationResult) -> &'static str {
+    match result {
+        CertificationResult::Pass => "PASS",
+        CertificationResult::Fail => "FAIL",
+    }
 }
 
 #[cfg(test)]

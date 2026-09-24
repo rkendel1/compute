@@ -26,6 +26,24 @@ Source-tree builds may use installed host tools for development and label
 them `host_development` in the inventory so this cannot be mistaken for an
 official distribution.
 
+The canonical builder resolves the current OS and architecture, downloads
+only the exact locked artifacts, verifies their SHA-256 digests even when
+they come from the local cache, launches each installed runtime, and emits a
+deterministic manifest, inventory, identity, and tar archive:
+
+```sh
+cargo build --release --locked
+target/release/compute distribution build --output dist/compute-distribution
+target/release/compute distribution build --output dist/verified --verify
+target/release/compute distribution build --output dist/offline --offline
+compute distribution inspect dist/compute-distribution --json
+compute distribution verify dist/compute-distribution --json
+```
+
+The currently locked official payload targets `linux-x86_64`; unsupported OS
+or architecture combinations fail explicitly. See `distribution/README.md`
+for cache, offline, reproducibility, certification, and Docker details.
+
 ```sh
 compute runtimes
 compute runtimes --json
@@ -44,6 +62,36 @@ is scoped to the staged work, temporary, and output directories, environment
 access is restricted to declared variables plus Compute directories, and
 `--allow-net` is absent for `network: none` (or scoped for localhost). Compute
 policy remains the outer authority.
+
+## Compute certification
+
+The validation layers answer different questions:
+
+- `cargo test` tests the implementation in the source workspace.
+- `compute doctor` reports whether the current runtime environment is healthy.
+- `compute certify` tests the assembled artifact that users actually receive.
+
+Certification refuses to run from `cargo target/` or a source checkout. It
+loads the distribution's embedded runtime lock and fixture manifest, re-runs
+itself with controlled `PATH`, `HOME`, `TMPDIR`, locale, and `COMPUTE_*`
+variables, and places deliberately broken host-runtime names first on `PATH`.
+Every locked runtime must then self-identify and execute the same semantic
+input/output workload through a verified `.compute` bundle. Certification
+also checks expected workload and bundle identities, stdin, arguments,
+environment clearing, stdout/stderr, exit status, timeout enforcement, and
+authorized/unauthorized `compute.run@1` behavior through AppPort.
+
+```sh
+compute certify
+compute certify --json
+COMPUTE_REQUIRE_ALL_RUNTIMES=1 compute certify --json
+```
+
+The last command is the release gate. It cannot produce a successful partial
+report: a missing fixture, runtime, exact version, library, output, or AppPort
+check makes certification fail. The reusable distribution-certification CI
+workflow runs this gate against bare Linux and then against the Docker image
+assembled from the same directory.
 
 ## Portable workloads
 

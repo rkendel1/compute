@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, Read};
+use std::net::TcpStream;
 use std::process;
 use std::thread;
 use std::time::Duration;
@@ -15,6 +16,16 @@ fn main() {
         }
         "exit" => process::exit(7),
         "sleep" => thread::sleep(Duration::from_secs(5)),
+        "memory" => {
+            let data = vec![0x5a_u8; 64 * 1024 * 1024];
+            println!("{}", data[data.len() - 1]);
+        }
+        "filesystem" => {
+            println!("{}", if fs::read("/etc/passwd").is_err() { "blocked" } else { "visible" });
+        }
+        "network" => {
+            println!("{}", if TcpStream::connect("127.0.0.1:9").is_err() { "blocked" } else { "visible" });
+        }
         "certify" => {
             let value = |name: &str| env::var(name).unwrap_or_else(|_| "missing".into());
             let input = fs::read_to_string(format!("{}/hello.txt", value("COMPUTE_WORK_DIR"))).unwrap();

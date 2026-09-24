@@ -189,6 +189,9 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
     for env in &workload.env {
         wasi.env(&env.key, &env.value);
     }
+    wasi.env("COMPUTE_WORK_DIR", "/work");
+    wasi.env("COMPUTE_TMP_DIR", "/tmp");
+    wasi.env("COMPUTE_OUTPUT_DIR", "/output");
     wasi.stdout(stdout.clone());
     wasi.stderr(stderr.clone());
 

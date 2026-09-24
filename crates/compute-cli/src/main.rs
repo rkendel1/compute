@@ -8,6 +8,7 @@ use compute_core::{
 use compute_runtime::Compute;
 
 mod certification;
+mod distribution;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -31,7 +32,47 @@ enum Commands {
     Exec(ExecCommand),
     Doctor(JsonFlag),
     Certify(CertifyCommand),
+    /// Build, inspect, or verify a portable Compute distribution.
+    Distribution(DistributionCommand),
     Version(JsonFlag),
+}
+
+#[derive(Args, Debug)]
+struct DistributionCommand {
+    #[command(subcommand)]
+    command: DistributionCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum DistributionCommands {
+    Build {
+        #[arg(long, default_value = "dist/compute-distribution")]
+        output: PathBuf,
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        verify: bool,
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        platform: Option<String>,
+        #[arg(long, hide = true)]
+        lock: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        compute_binary: Option<PathBuf>,
+    },
+    Inspect {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Verify {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -475,7 +516,19 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         }
         Commands::Doctor(json_flag) => {
             let reports = compute.doctor().await;
+            let provenance = distribution::doctor_provenance();
             if json_flag.json {
+                let reports = reports
+                    .into_iter()
+                    .map(|report| {
+                        let runtime = report.runtime.as_str();
+                        let mut value = serde_json::to_value(report).unwrap();
+                        if let Some(item) = provenance.get(runtime) {
+                            value["distribution_provenance"] = item.clone();
+                        }
+                        value
+                    })
+                    .collect::<Vec<_>>();
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({ "runtimes": reports }))
@@ -502,6 +555,16 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     if let Some(remediation) = &report.availability.remediation {
                         println!("  Remediation: {remediation}");
                     }
+                    if let Some(item) = provenance.get(report.runtime.as_str()) {
+                        println!(
+                            "  Artifact: sha256:{}",
+                            item["artifact_sha256"].as_str().unwrap_or("unknown")
+                        );
+                        println!(
+                            "  Provenance: {}",
+                            item["status"].as_str().unwrap_or("fail").to_uppercase()
+                        );
+                    }
                     print_capabilities(&report.capabilities, "  ");
                 }
             }
@@ -518,6 +581,31 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 ));
             }
         }
+        Commands::Distribution(command) => match command.command {
+            DistributionCommands::Build {
+                output,
+                offline,
+                verify,
+                cache,
+                platform,
+                lock,
+                compute_binary,
+            } => distribution::build(distribution::BuildOptions {
+                output,
+                offline,
+                verify,
+                cache,
+                platform,
+                lock,
+                compute_binary,
+            })?,
+            DistributionCommands::Inspect { path, json } => {
+                distribution::inspect(&path, json)?;
+            }
+            DistributionCommands::Verify { path, json } => {
+                distribution::verify(&path, json)?;
+            }
+        },
     }
 
     #[allow(clippy::too_many_arguments)]

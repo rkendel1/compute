@@ -1,8 +1,203 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+use sha2::{Digest, Sha256};
 
 fn write_json(path: &std::path::Path, value: serde_json::Value) {
     std::fs::write(path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn fixture_distribution_lock(
+    artifact: &[u8],
+    platform: &str,
+    url: &std::path::Path,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 2,
+        "runtimes": {
+            "fixture": {
+                "version": "1.2.3",
+                "executable": "runtimes/fixture/bin/fixture",
+                "artifacts": {
+                    (platform): {
+                        "url": format!("file://{}", url.display()),
+                        "sha256": sha256(artifact),
+                        "format": "file",
+                        "install": [{
+                            "source": "artifact",
+                            "destination": "runtimes/fixture/bin/fixture"
+                        }]
+                    }
+                }
+            },
+            "wasm": { "version": "embedded", "executable": "<embedded>" }
+        }
+    })
+}
+
+#[test]
+fn distribution_build_is_reproducible_and_verify_detects_tampering() {
+    let temporary = tempfile::tempdir().unwrap();
+    let artifact = b"#!/bin/sh\necho fixture 1.2.3\n";
+    let artifact_path = temporary.path().join("fixture");
+    std::fs::write(&artifact_path, artifact).unwrap();
+    let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let lock_path = temporary.path().join("runtime-lock.json");
+    write_json(
+        &lock_path,
+        fixture_distribution_lock(artifact, &platform, &artifact_path),
+    );
+    let cache = temporary.path().join("cache/sha256");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join(sha256(artifact)), artifact).unwrap();
+
+    let first = temporary.path().join("first");
+    let second = temporary.path().join("second");
+    for output in [&first, &second] {
+        Command::cargo_bin("compute")
+            .unwrap()
+            .args([
+                "distribution",
+                "build",
+                "--offline",
+                "--output",
+                output.to_str().unwrap(),
+                "--cache",
+                temporary.path().join("cache").to_str().unwrap(),
+                "--lock",
+                lock_path.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+    }
+    assert_eq!(
+        std::fs::read(first.join("runtime-manifest.json")).unwrap(),
+        std::fs::read(second.join("runtime-manifest.json")).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(format!("{}.tar", first.display())).unwrap(),
+        std::fs::read(format!("{}.tar", second.display())).unwrap()
+    );
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["distribution", "verify", first.to_str().unwrap(), "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"passed\": true"));
+
+    std::fs::write(first.join("runtimes/fixture/bin/fixture"), b"tampered").unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["distribution", "verify", first.to_str().unwrap(), "--json"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("payload hash mismatch"));
+
+    std::fs::remove_file(second.join("runtimes/fixture/bin/fixture")).unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["distribution", "verify", second.to_str().unwrap(), "--json"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("runtime executable is missing"));
+
+    let manifest_path = second.join("runtime-manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["runtimes"]["fixture"]["version"] = "9.9.9".into();
+    write_json(&manifest_path, manifest);
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["distribution", "verify", second.to_str().unwrap(), "--json"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("manifest/lock"));
+}
+
+#[test]
+fn distribution_offline_cache_miss_and_wrong_platform_fail_explicitly() {
+    let temporary = tempfile::tempdir().unwrap();
+    let artifact = b"#!/bin/sh\necho fixture 1.2.3\n";
+    let artifact_path = temporary.path().join("fixture");
+    std::fs::write(&artifact_path, artifact).unwrap();
+    let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let lock_path = temporary.path().join("runtime-lock.json");
+    write_json(
+        &lock_path,
+        fixture_distribution_lock(artifact, &platform, &artifact_path),
+    );
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "distribution",
+            "build",
+            "--offline",
+            "--output",
+            temporary.path().join("miss").to_str().unwrap(),
+            "--cache",
+            temporary.path().join("empty-cache").to_str().unwrap(),
+            "--lock",
+            lock_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("offline cache miss"));
+
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "distribution",
+            "build",
+            "--output",
+            temporary.path().join("wrong").to_str().unwrap(),
+            "--platform",
+            "unsupported-architecture",
+            "--cache",
+            temporary.path().join("cache").to_str().unwrap(),
+            "--lock",
+            lock_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported platform"));
+
+    let wrong_runtime = b"#!/bin/sh\necho fixture 9.9.9\n";
+    let wrong_digest = sha256(wrong_runtime);
+    std::fs::create_dir_all(temporary.path().join("wrong-cache/sha256")).unwrap();
+    std::fs::write(
+        temporary
+            .path()
+            .join("wrong-cache/sha256")
+            .join(&wrong_digest),
+        wrong_runtime,
+    )
+    .unwrap();
+    let wrong_path = temporary.path().join("wrong-runtime");
+    std::fs::write(&wrong_path, wrong_runtime).unwrap();
+    let wrong_lock = temporary.path().join("wrong-lock.json");
+    write_json(
+        &wrong_lock,
+        fixture_distribution_lock(wrong_runtime, &platform, &wrong_path),
+    );
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "distribution",
+            "build",
+            "--offline",
+            "--output",
+            temporary.path().join("wrong-version").to_str().unwrap(),
+            "--cache",
+            temporary.path().join("wrong-cache").to_str().unwrap(),
+            "--lock",
+            wrong_lock.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("version mismatch"));
 }
 
 #[test]
@@ -81,6 +276,63 @@ fn certify_refuses_to_certify_the_source_tree() {
         .stderr(predicate::str::contains(
             "requires an assembled distribution",
         ));
+}
+
+#[test]
+fn certification_report_detects_a_broken_assembled_distribution() {
+    let root = tempfile::tempdir().unwrap();
+    let lock: serde_json::Value =
+        serde_json::from_str(include_str!("../../../distribution/runtime-lock.json")).unwrap();
+    write_json(&root.path().join("runtime-lock.json"), lock.clone());
+    write_json(
+        &root.path().join("runtime-manifest.json"),
+        serde_json::json!({
+            "compute_version": env!("CARGO_PKG_VERSION"),
+            "distribution_version": format!(
+                "compute-{}-{}-{}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
+            "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            "runtimes": lock["runtimes"],
+        }),
+    );
+    std::fs::create_dir_all(root.path().join("certification")).unwrap();
+    let runtime_fixtures = compute_core::RuntimeKind::ALL
+        .iter()
+        .map(|runtime| {
+            (
+                runtime.as_str().to_string(),
+                serde_json::json!({ "entrypoint": format!("{}/missing", runtime.as_str()) }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    write_json(
+        &root.path().join("certification/fixtures.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "appport_runner": "appport/missing.js",
+            "runtimes": runtime_fixtures,
+        }),
+    );
+
+    let output = Command::cargo_bin("compute")
+        .unwrap()
+        .env("COMPUTE_HOME", root.path())
+        .args(["certify", "--internal-clean-environment", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["passed"], false);
+    assert!(
+        report["runtimes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|runtime| runtime["result"] == "fail")
+    );
 }
 
 #[test]
