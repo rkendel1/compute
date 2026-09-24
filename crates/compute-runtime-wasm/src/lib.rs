@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use compute_core::{
     ComputeError, ExecutionResult, ExecutionStatus, NetworkPolicy, Output, ResolvedRuntime,
     ResourceUsage, Result, RuntimeAdapter, RuntimeAvailability, RuntimeKind, Workload,
-    stage_workload,
+    collect_artifacts, stage_workload, RuntimeCapabilities,
 };
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
@@ -59,6 +59,10 @@ impl RuntimeAdapter for WasmRuntime {
             resolved_version: Some("wasi".to_string()),
             executable: None,
         })
+    }
+
+    fn capabilities(&self) -> RuntimeCapabilities {
+        RuntimeCapabilities::wasm()
     }
 
     async fn execute(
@@ -159,17 +163,14 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
             resource_usage: ResourceUsage {
                 max_memory_bytes: workload.resources.memory_bytes,
             },
-            artifacts: vec![],
+            artifacts: collect_artifacts(&staged.output_dir)?,
+            error: None,
         }),
         Err(error) => {
             if let Some(exit) = error.downcast_ref::<I32Exit>() {
                 let code = exit.0;
                 return Ok(ExecutionResult {
-                    status: if code == 0 {
-                        ExecutionStatus::Completed
-                    } else {
-                        ExecutionStatus::Failed
-                    },
+                    status: ExecutionStatus::Completed,
                     exit_code: Some(code),
                     stdout: Output::from_bytes(stdout, workload.resources.stdout_bytes),
                     stderr: Output::from_bytes(stderr, workload.resources.stderr_bytes),
@@ -177,7 +178,8 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
                     resource_usage: ResourceUsage {
                         max_memory_bytes: workload.resources.memory_bytes,
                     },
-                    artifacts: vec![],
+                    artifacts: collect_artifacts(&staged.output_dir)?,
+                    error: None,
                 });
             }
 
@@ -197,7 +199,8 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
                 resource_usage: ResourceUsage {
                     max_memory_bytes: workload.resources.memory_bytes,
                 },
-                artifacts: vec![],
+                artifacts: collect_artifacts(&staged.output_dir)?,
+                error: None,
             })
         }
     }

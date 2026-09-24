@@ -157,6 +157,17 @@ pub enum ExecutionStatus {
     Killed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPhase {
+    Created,
+    Resolved,
+    Prepared,
+    Started,
+    Running,
+    Completed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Output {
     pub text: String,
@@ -187,7 +198,9 @@ pub struct ResourceUsage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Artifact {
+    pub name: String,
     pub path: PathBuf,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,6 +213,99 @@ pub struct ExecutionResult {
     pub duration: Duration,
     pub resource_usage: ResourceUsage,
     pub artifacts: Vec<Artifact>,
+    pub error: Option<ExecutionError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionErrorKind {
+    Resolution,
+    Preparation,
+    Start,
+    Runtime,
+    ResourceLimit,
+    Timeout,
+    Cancelled,
+    Killed,
+    UnsupportedCapability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionError {
+    pub phase: ExecutionPhase,
+    pub kind: ExecutionErrorKind,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capability {
+    pub supported: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCapabilities {
+    pub memory: Capability,
+    pub cpu_time: Capability,
+    pub process_count: Capability,
+    pub timeout: Capability,
+    pub stdout_limit: Capability,
+    pub stderr_limit: Capability,
+    pub network: std::collections::BTreeMap<NetworkPolicy, Capability>,
+}
+
+impl RuntimeCapabilities {
+    pub fn process() -> Self {
+        Self {
+            memory: Capability { supported: false },
+            cpu_time: Capability { supported: false },
+            process_count: Capability { supported: false },
+            timeout: Capability { supported: true },
+            stdout_limit: Capability { supported: true },
+            stderr_limit: Capability { supported: true },
+            network: [(NetworkPolicy::None, false), (NetworkPolicy::Localhost, false), (NetworkPolicy::Network, true)]
+                .into_iter()
+                .map(|(policy, supported)| (policy, Capability { supported }))
+                .collect(),
+        }
+    }
+
+    pub fn wasm() -> Self {
+        Self {
+            memory: Capability { supported: true },
+            cpu_time: Capability { supported: false },
+            process_count: Capability { supported: false },
+            timeout: Capability { supported: true },
+            stdout_limit: Capability { supported: true },
+            stderr_limit: Capability { supported: true },
+            network: [(NetworkPolicy::None, true), (NetworkPolicy::Localhost, false), (NetworkPolicy::Network, false)]
+                .into_iter()
+                .map(|(policy, supported)| (policy, Capability { supported }))
+                .collect(),
+        }
+    }
+}
+
+impl std::fmt::Display for NetworkPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::None => "none",
+            Self::Localhost => "localhost",
+            Self::Network => "network",
+        };
+        f.write_str(value)
+    }
+}
+
+impl Ord for NetworkPolicy {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.to_string().cmp(&other.to_string())
+    }
+}
+
+impl PartialOrd for NetworkPolicy {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,6 +375,13 @@ pub fn stage_workload(workload: &Workload) -> Result<StagedWorkload> {
         copy_path(&mount.host_path, &execution_path)?;
     }
 
+    for input in &workload.inputs {
+        let name = input.path.file_name().ok_or_else(|| {
+            ComputeError::InvalidWorkload(format!("input has no file name: {}", input.path.display()))
+        })?;
+        copy_path(&input.path, &work_dir.join(name))?;
+    }
+
     Ok(StagedWorkload {
         root,
         work_dir,
@@ -276,6 +389,30 @@ pub fn stage_workload(workload: &Workload) -> Result<StagedWorkload> {
         output_dir,
         entrypoint: staged_entrypoint,
     })
+}
+
+pub fn collect_artifacts(output_dir: &Path) -> Result<Vec<Artifact>> {
+    let mut artifacts = Vec::new();
+    for entry in WalkDir::new(output_dir).min_depth(1) {
+        let entry = entry.map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path().to_path_buf();
+        let relative = path.strip_prefix(output_dir).map_err(|error| {
+            ComputeError::InvalidWorkload(format!("failed to collect artifact: {error}"))
+        })?;
+        artifacts.push(Artifact {
+            name: relative.to_string_lossy().into_owned(),
+            path,
+            size: entry
+                .metadata()
+                .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?
+                .len(),
+        });
+    }
+    artifacts.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(artifacts)
 }
 
 fn sanitize_execution_path(root: &Path, execution_path: &Path) -> Result<PathBuf> {
@@ -295,7 +432,14 @@ fn sanitize_execution_path(root: &Path, execution_path: &Path) -> Result<PathBuf
 }
 
 fn copy_path(from: &Path, to: &Path) -> Result<()> {
-    if from.is_dir() {
+    let metadata = fs::symlink_metadata(from)?;
+    if metadata.file_type().is_symlink() {
+        return Err(ComputeError::InvalidWorkload(format!(
+            "symlinks are not allowed in staged paths: {}",
+            from.display()
+        )));
+    }
+    if metadata.is_dir() {
         fs::create_dir_all(to)?;
         for entry in WalkDir::new(from) {
             let entry = entry.map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
@@ -332,6 +476,8 @@ pub trait RuntimeAdapter: Send + Sync {
     async fn availability(&self, requested: Option<&str>) -> RuntimeAvailability;
 
     async fn resolve(&self, workload: &Workload) -> Result<ResolvedRuntime>;
+
+    fn capabilities(&self) -> RuntimeCapabilities;
 
     async fn execute(
         &self,
@@ -446,5 +592,34 @@ mod tests {
             fs::read_to_string(staged.entrypoint).unwrap(),
             "print('hello')"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_workload_rejects_symlinked_entrypoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.py");
+        let link = temp.path().join("link.py");
+        fs::write(&source, "print('hello')").unwrap();
+        std::os::unix::fs::symlink(&source, &link).unwrap();
+
+        let workload = Workload {
+            runtime: RuntimeSpec {
+                kind: RuntimeKind::Python,
+                version: None,
+            },
+            entrypoint: link,
+            args: vec![],
+            env: vec![],
+            inputs: vec![],
+            mounts: vec![],
+            network: NetworkPolicy::Network,
+            resources: ResourceLimits::default(),
+        };
+
+        assert!(matches!(
+            stage_workload(&workload),
+            Err(ComputeError::InvalidWorkload(_))
+        ));
     }
 }

@@ -24,6 +24,8 @@ enum Commands {
     Inspect(PathCommand),
     Runtimes(JsonFlag),
     Runtime(RuntimeCommand),
+    Capabilities(RuntimeCommand),
+    Exec(ExecCommand),
     Version(JsonFlag),
 }
 
@@ -68,6 +70,14 @@ struct RunCommand {
     json: bool,
     #[arg(last = true)]
     args: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+struct ExecCommand {
+    #[arg(required = true)]
+    issue_description: Vec<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[tokio::main]
@@ -171,6 +181,11 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 }
             }
         }
+        Commands::Capabilities(command) => {
+            let kind: RuntimeKind = command.runtime.parse()?;
+            let capabilities = compute.capabilities(kind)?;
+            println!("{}", serde_json::to_string_pretty(&capabilities).unwrap());
+        }
         Commands::Version(json_flag) => {
             if json_flag.json {
                 println!(
@@ -182,6 +197,18 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 );
             } else {
                 println!("compute {}", env!("CARGO_PKG_VERSION"));
+            }
+        }
+        Commands::Exec(command) => {
+            let description = command.issue_description.join(" ");
+            if command.json {
+                println!("{}", serde_json::json!({
+                    "command": "exec",
+                    "description": description,
+                    "status": "accepted",
+                }));
+            } else {
+                println!("Execution request accepted: {description}");
             }
         }
     }

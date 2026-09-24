@@ -4,10 +4,12 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use compute_core::{
-    ComputeError, ExecutionResult, ExecutionStatus, NetworkPolicy, Output, ResolvedRuntime,
+    ComputeError, ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionResult,
+    ExecutionStatus, NetworkPolicy, Output, ResolvedRuntime,
     ResourceUsage, Result, RuntimeAdapter, RuntimeAvailability, RuntimeKind, Workload,
-    stage_workload,
+    collect_artifacts, stage_workload, RuntimeCapabilities,
 };
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 #[derive(Debug, Clone)]
@@ -80,6 +82,7 @@ impl RuntimeAdapter for ProcessRuntime {
         if !runtime.available {
             return Err(ComputeError::RuntimeUnavailable(self.kind));
         }
+
         if let (Some(requested), Some(found)) = (&workload.runtime.version, &runtime.version) {
             if !found.contains(requested) {
                 return Err(ComputeError::RuntimeVersionMismatch {
@@ -97,6 +100,10 @@ impl RuntimeAdapter for ProcessRuntime {
         })
     }
 
+    fn capabilities(&self) -> RuntimeCapabilities {
+        RuntimeCapabilities::process()
+    }
+
     async fn execute(
         &self,
         workload: &Workload,
@@ -106,6 +113,16 @@ impl RuntimeAdapter for ProcessRuntime {
             return Err(ComputeError::UnsupportedCapability {
                 runtime: self.kind,
                 capability: "network isolation is not yet supported for process-backed runtimes"
+                    .to_string(),
+            });
+        }
+        if workload.resources.memory_bytes.is_some()
+            || workload.resources.cpu_time.is_some()
+            || workload.resources.process_count.is_some()
+        {
+            return Err(ComputeError::UnsupportedCapability {
+                runtime: self.kind,
+                capability: "requested resource limit is not supported for process-backed runtimes"
                     .to_string(),
             });
         }
@@ -134,42 +151,82 @@ impl RuntimeAdapter for ProcessRuntime {
         }
 
         let started = Instant::now();
-        let child = command.spawn()?;
-        let output = if let Some(timeout) = workload.resources.wall_time {
-            match tokio::time::timeout(timeout, child.wait_with_output()).await {
-                Ok(result) => result?,
+        let mut child = command.spawn()?;
+        let mut stdout = child.stdout.take().ok_or_else(|| ComputeError::Runtime("stdout pipe missing".into()))?;
+        let mut stderr = child.stderr.take().ok_or_else(|| ComputeError::Runtime("stderr pipe missing".into()))?;
+        let stdout_limit = workload.resources.stdout_bytes;
+        let stderr_limit = workload.resources.stderr_bytes;
+        let read_output = async {
+            let stdout_read = read_limited(&mut stdout, stdout_limit);
+            let stderr_read = read_limited(&mut stderr, stderr_limit);
+            let (stdout, stderr, status) = tokio::join!(stdout_read, stderr_read, child.wait());
+            Ok::<_, std::io::Error>((stdout?, stderr?, status?))
+        };
+        let (stdout, stderr, status, timed_out) = if let Some(timeout) = workload.resources.wall_time {
+            match tokio::time::timeout(timeout, read_output).await {
+                Ok(result) => {
+                    let (stdout, stderr, status) = result?;
+                    (stdout, stderr, Some(status), false)
+                }
                 Err(_) => {
-                    return Ok(ExecutionResult {
-                        status: ExecutionStatus::TimedOut,
-                        exit_code: None,
-                        stdout: Output::from_bytes(Vec::new(), workload.resources.stdout_bytes),
-                        stderr: Output::from_bytes(Vec::new(), workload.resources.stderr_bytes),
-                        duration: started.elapsed(),
-                        resource_usage: ResourceUsage::default(),
-                        artifacts: vec![],
-                    });
+                    let _ = child.kill().await;
+                    let (stdout, stderr) = tokio::join!(
+                        read_limited(&mut stdout, stdout_limit),
+                        read_limited(&mut stderr, stderr_limit)
+                    );
+                    (stdout?, stderr?, None, true)
                 }
             }
         } else {
-            child.wait_with_output().await?
+            let (stdout, stderr, status) = read_output.await?;
+            (stdout, stderr, Some(status), false)
         };
 
-        let status = if output.status.success() {
-            ExecutionStatus::Completed
+        let process_status = status;
+        let execution_status = if timed_out {
+            ExecutionStatus::TimedOut
         } else {
-            ExecutionStatus::Failed
+            // A workload's exit status is data, not a failure of Compute itself.
+            ExecutionStatus::Completed
         };
 
         Ok(ExecutionResult {
-            status,
-            exit_code: output.status.code(),
-            stdout: Output::from_bytes(output.stdout, workload.resources.stdout_bytes),
-            stderr: Output::from_bytes(output.stderr, workload.resources.stderr_bytes),
+            status: execution_status,
+            exit_code: process_status.as_ref().and_then(std::process::ExitStatus::code),
+            stdout: Output::from_bytes(stdout, workload.resources.stdout_bytes),
+            stderr: Output::from_bytes(stderr, workload.resources.stderr_bytes),
             duration: started.elapsed(),
             resource_usage: ResourceUsage::default(),
-            artifacts: vec![],
+            artifacts: collect_artifacts(&staged.output_dir)?,
+            error: timed_out.then(|| ExecutionError {
+                phase: ExecutionPhase::Running,
+                kind: ExecutionErrorKind::Timeout,
+                message: "wall time limit exceeded".to_string(),
+            }),
         })
     }
+}
+
+async fn read_limited<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    limit: Option<u64>,
+) -> std::io::Result<Vec<u8>> {
+    let max = limit.and_then(|value| usize::try_from(value).ok());
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        if let Some(max) = max {
+            let remaining = max.saturating_add(1).saturating_sub(output.len());
+            output.extend_from_slice(&buffer[..count.min(remaining)]);
+        } else {
+            output.extend_from_slice(&buffer[..count]);
+        }
+    }
+    Ok(output)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -185,6 +242,9 @@ pub struct PythonRuntime;
 impl RuntimeAdapter for NodeRuntime {
     fn kind(&self) -> RuntimeKind {
         RuntimeKind::Node
+    }
+    fn capabilities(&self) -> RuntimeCapabilities {
+        RuntimeCapabilities::process()
     }
     async fn availability(&self, requested: Option<&str>) -> RuntimeAvailability {
         ProcessRuntime::new(RuntimeKind::Node, &["node"])
@@ -212,6 +272,9 @@ impl RuntimeAdapter for BunRuntime {
     fn kind(&self) -> RuntimeKind {
         RuntimeKind::Bun
     }
+    fn capabilities(&self) -> RuntimeCapabilities {
+        RuntimeCapabilities::process()
+    }
     async fn availability(&self, requested: Option<&str>) -> RuntimeAvailability {
         ProcessRuntime::new(RuntimeKind::Bun, &["bun"])
             .availability(requested)
@@ -238,6 +301,9 @@ impl RuntimeAdapter for DenoRuntime {
     fn kind(&self) -> RuntimeKind {
         RuntimeKind::Deno
     }
+    fn capabilities(&self) -> RuntimeCapabilities {
+        RuntimeCapabilities::process()
+    }
     async fn availability(&self, requested: Option<&str>) -> RuntimeAvailability {
         ProcessRuntime::new(RuntimeKind::Deno, &["deno"])
             .availability(requested)
@@ -263,6 +329,9 @@ impl RuntimeAdapter for DenoRuntime {
 impl RuntimeAdapter for PythonRuntime {
     fn kind(&self) -> RuntimeKind {
         RuntimeKind::Python
+    }
+    fn capabilities(&self) -> RuntimeCapabilities {
+        RuntimeCapabilities::process()
     }
     async fn availability(&self, requested: Option<&str>) -> RuntimeAvailability {
         ProcessRuntime::new(RuntimeKind::Python, &["python3", "python"])
