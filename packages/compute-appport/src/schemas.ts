@@ -477,7 +477,7 @@ export const policyInspectResultSchema = s.object({
   policy_id: digest,
   policy: s.object({}, { additionalProperties: true }),
   sources: s.array(s.object({
-    kind: s.enum(["baseline", "local", "server", "provider", "explicit"] as const),
+    kind: s.enum(["baseline", "local", "server", "provider", "environment", "explicit"] as const),
     policy_id: digest,
     label: s.optional(s.string()),
   })),
@@ -510,3 +510,131 @@ export const policyExplainResultSchema = s.object({
   evidence: policyCheckResultSchema,
   explanation: s.array(s.string()),
 });
+
+// compute.environment@1: the persistent daemon's model. Compute defines
+// its semantics; these schemas describe the Compute API's JSON exactly.
+const name = s.string({ pattern: "^[a-z0-9][a-z0-9-]{0,62}$" });
+const desiredState = s.enum(["running", "stopped"] as const);
+const actualState = s.enum([
+  "pending", "starting", "running", "stopping", "stopped", "completed", "failed", "denied", "degraded",
+] as const);
+const health = s.enum(["healthy", "unhealthy", "unknown"] as const);
+const workloadKind = s.enum(["service", "task"] as const);
+const timestamp = s.string({ minLength: 1 });
+const configuration = s.record(s.string());
+
+const workloadView = s.object({
+  workload_id: s.string({ pattern: "^wl_[0-9a-f]+$" }),
+  name,
+  kind: workloadKind,
+  desired_state: desiredState,
+  actual_state: actualState,
+  health,
+  runtime,
+  bundle_id: digest,
+  execution_id: s.optional(s.string()),
+  ports: s.array(s.object({ name: s.string(), logical: s.integer(), host: s.integer() })),
+  restarts: s.integer({ minimum: 0 }),
+  started_at: s.optional(timestamp),
+  finished_at: s.optional(timestamp),
+  exit_code: s.optional(s.integer()),
+  error: s.optional(s.string()),
+  placement: s.object({
+    placement_id: s.optional(s.string()),
+    provider: s.optional(s.string()),
+    node: s.optional(s.string()),
+  }),
+  evidence: s.object({
+    policy_id: s.optional(digest),
+    admission_id: s.optional(digest),
+    receipt_ids: s.array(s.string()),
+  }),
+  resources: s.object({
+    cpu: s.string(),
+    memory_limit_bytes: s.optional(s.integer({ minimum: 0 })),
+    timeout_ms: s.optional(s.integer({ minimum: 0 })),
+    disk_bytes: s.integer({ minimum: 0 }),
+    network,
+  }),
+  log_directory: s.optional(s.string()),
+});
+
+export const projectViewSchema = s.object({
+  project_id: s.string({ pattern: "^prj_[0-9a-f]+$" }),
+  name,
+  revision: s.string(),
+  revision_digest: digest,
+  source: s.optional(s.string()),
+  desired_state: desiredState,
+  actual_state: actualState,
+  health,
+  deployed_at: timestamp,
+  workloads: s.array(workloadView),
+  disk_bytes: s.integer({ minimum: 0 }),
+});
+
+export const environmentViewSchema = s.object({
+  version: s.literal("compute.environment@1"),
+  environment_id: s.string({ pattern: "^env_[0-9a-f]+$" }),
+  name,
+  desired_state: desiredState,
+  actual_state: actualState,
+  health,
+  created_at: timestamp,
+  policy_id: digest,
+  provider: s.optional(s.string()),
+  project_count: s.integer({ minimum: 0 }),
+  projects: s.array(projectViewSchema),
+  disk_bytes: s.integer({ minimum: 0 }),
+});
+
+export const environmentListInputSchema = s.object({});
+export const environmentListResultSchema = s.array(s.object({
+  environment_id: s.string({ pattern: "^env_[0-9a-f]+$" }),
+  name,
+  desired_state: desiredState,
+  actual_state: actualState,
+  health,
+  project_count: s.integer({ minimum: 0 }),
+}));
+
+/** An environment name or ID. */
+export const environmentSelectorSchema = s.object({ environment: s.string({ minLength: 1 }) });
+
+export const environmentCreateInputSchema = s.object({
+  name,
+  desired_state: s.optional(desiredState),
+  env: s.optional(configuration),
+  /** compute.policy@1; it is intersected with the daemon's policy. */
+  policy: s.optional(s.object({}, { additionalProperties: true })),
+  provider: s.optional(providerId),
+});
+
+export const workloadDefinitionSchema = s.object({
+  name,
+  kind: workloadKind,
+  /** The canonical `.compute` bundle. */
+  bundle: bytes,
+  ports: s.optional(s.array(s.object({ name: s.string({ minLength: 1 }), port: s.integer({ minimum: 1, maximum: 65535 }) }))),
+  restart: s.optional(s.enum(["never", "on_failure"] as const)),
+  desired_state: s.optional(desiredState),
+});
+
+export const projectAddInputSchema = s.object({
+  environment: s.string({ minLength: 1 }),
+  project: s.object({
+    name,
+    revision: s.string({ minLength: 1 }),
+    source: s.optional(s.string()),
+    desired_state: s.optional(desiredState),
+    env: s.optional(configuration),
+    workloads: s.array(workloadDefinitionSchema),
+  }),
+});
+
+export const projectRemoveInputSchema = s.object({
+  environment: s.string({ minLength: 1 }),
+  project: name,
+});
+
+export const projectRemoveResultSchema = s.object({ removed: s.string() });

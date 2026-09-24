@@ -385,3 +385,104 @@ export interface PolicyCheckResult {
   effective_policy: Record<string, unknown>;
   decision: AdmissionDecision;
 }
+
+/** compute.environment@1 lifecycle states. */
+export type DesiredState = "running" | "stopped";
+export type ActualState =
+  | "pending" | "starting" | "running" | "stopping" | "stopped"
+  | "completed" | "failed" | "denied" | "degraded";
+export type Health = "healthy" | "unhealthy" | "unknown";
+export type EnvironmentWorkloadKind = "service" | "task";
+
+export interface EnvironmentWorkloadView {
+  workload_id: string;
+  name: string;
+  kind: EnvironmentWorkloadKind;
+  desired_state: DesiredState;
+  actual_state: ActualState;
+  health: Health;
+  runtime: RuntimeKind;
+  bundle_id: string;
+  execution_id?: string;
+  /** Logical project ports and the host ports the environment bound them to. */
+  ports: Array<{ name: string; logical: number; host: number }>;
+  restarts: number;
+  started_at?: string;
+  finished_at?: string;
+  exit_code?: number;
+  error?: string;
+  placement: { placement_id?: string; provider?: string; node?: string };
+  evidence: { policy_id?: string; admission_id?: string; receipt_ids: string[] };
+  /** CPU usage is reported as "not_measured". */
+  resources: { cpu: string; memory_limit_bytes?: number; timeout_ms?: number; disk_bytes: number; network: NetworkPolicy };
+  log_directory?: string;
+}
+
+export interface ProjectView {
+  project_id: string;
+  name: string;
+  revision: string;
+  revision_digest: string;
+  source?: string;
+  desired_state: DesiredState;
+  actual_state: ActualState;
+  health: Health;
+  deployed_at: string;
+  workloads: EnvironmentWorkloadView[];
+  disk_bytes: number;
+}
+
+export interface EnvironmentView {
+  version: "compute.environment@1";
+  environment_id: string;
+  name: string;
+  desired_state: DesiredState;
+  actual_state: ActualState;
+  health: Health;
+  created_at: string;
+  /** The environment's effective policy: daemon ∩ environment ∩ baseline. */
+  policy_id: string;
+  provider?: string;
+  project_count: number;
+  projects: ProjectView[];
+  disk_bytes: number;
+}
+
+export interface EnvironmentSummary {
+  environment_id: string;
+  name: string;
+  desired_state: DesiredState;
+  actual_state: ActualState;
+  health: Health;
+  project_count: number;
+}
+
+export interface EnvironmentCreateInput {
+  name: string;
+  desired_state?: DesiredState | undefined;
+  env?: Record<string, string> | undefined;
+  policy?: Record<string, unknown> | undefined;
+  provider?: string | undefined;
+}
+
+export interface EnvironmentWorkloadDefinition {
+  name: string;
+  kind: EnvironmentWorkloadKind;
+  /** The canonical `.compute` bundle bytes. */
+  bundle: string | number[];
+  ports?: Array<{ name: string; port: number }> | undefined;
+  restart?: "never" | "on_failure" | undefined;
+  desired_state?: DesiredState | undefined;
+}
+
+export interface ProjectAddInput {
+  environment: string;
+  project: {
+    name: string;
+    revision: string;
+    source?: string | undefined;
+    desired_state?: DesiredState | undefined;
+    env?: Record<string, string> | undefined;
+    workloads: EnvironmentWorkloadDefinition[];
+  };
+}
