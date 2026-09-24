@@ -99,6 +99,7 @@ const failureKind = s.enum([
   "provider_unavailable",
   "provider_rejected",
   "evidence_invalid",
+  "admission_denied",
 ] as const);
 
 const failure = s.object({ kind: failureKind, message: s.string() });
@@ -145,6 +146,9 @@ const receipt = s.object({
   provider: s.optional(providerIdentity),
   provider_protocol: s.optional(s.string()),
   placement: s.optional(receiptPlacement),
+  policy_id: s.optional(digest),
+  admission_id: s.optional(digest),
+  admission_status: s.optional(s.literal("admitted")),
   distribution: s.object({ id: digest, platform: s.string(), manifest_version: s.string() }),
   runtime: s.object({
     declared: runtime, selected: runtime, observed: runtime, version: s.string(),
@@ -198,6 +202,11 @@ export const executionResultSchema = s.object({
     capsule_id: digest, file_count: s.integer({ minimum: 0 }), verified: s.boolean(),
   })),
   provider: s.optional(providerIdentity),
+  admission: s.optional(s.object({
+    policy_id: digest,
+    admission_id: digest,
+    admission_status: s.literal("admitted"),
+  })),
   receipt: s.optional(receipt),
 });
 
@@ -308,6 +317,7 @@ export const providerCapabilitiesSchema = s.object({
   runtime_artifacts: s.optional(s.record(digest)),
   max_timeout_ms: s.optional(s.integer({ minimum: 1 })),
   max_memory_bytes: s.optional(s.integer({ minimum: 1 })),
+  policy: s.optional(s.object({}, { additionalProperties: true })),
   inventory: s.unknown(),
 });
 
@@ -370,6 +380,8 @@ export const placementReportSchema = s.object({
     require_healthy: s.boolean(),
     allow_stale_capabilities: s.boolean(),
   }),
+  policy_id: digest,
+  admission: s.object({}, { additionalProperties: true }),
   providers: s.array(s.object({}, { additionalProperties: true })),
   compatible_providers: s.array(providerId),
   incompatible_providers: s.array(providerId),
@@ -436,3 +448,65 @@ export const runResultSchema = s.union([
     isolation: s.optional(isolationEvidence),
   }),
 ] as const);
+
+const admissionReason = s.object({
+  code: s.string(),
+  kind: s.enum(["contract", "capability", "policy"] as const),
+  dimension: s.string(),
+  requested: s.unknown(),
+  allowed: s.unknown(),
+  message: s.string(),
+});
+
+/** A compute.admission@1 decision. Compute defines its semantics. */
+export const admissionDecisionSchema = s.object({
+  admission_version: s.literal("compute.admission@1"),
+  admission_id: digest,
+  status: s.enum(["admitted", "denied"] as const),
+  admitted: s.boolean(),
+  policy_id: digest,
+  provider: s.object({}, { additionalProperties: true }),
+  capability: s.object({}, { additionalProperties: true }),
+  reasons: s.array(admissionReason),
+  contract: s.object({}, { additionalProperties: true }),
+});
+
+export const policyInspectInputSchema = s.object({});
+
+export const policyInspectResultSchema = s.object({
+  policy_id: digest,
+  policy: s.object({}, { additionalProperties: true }),
+  sources: s.array(s.object({
+    kind: s.enum(["baseline", "local", "server", "provider", "explicit"] as const),
+    policy_id: digest,
+    label: s.optional(s.string()),
+  })),
+  baseline: s.object({}, { additionalProperties: true }),
+});
+
+export const admissionInputSchema = s.object({
+  request: executionRequestSchema,
+  provider: s.optional(providerId),
+  isolation: s.optional(isolationProfile),
+});
+
+export const policyCheckResultSchema = s.object({
+  policy: s.array(s.object({}, { additionalProperties: true })),
+  policy_id: digest,
+  requirements: s.object({}, { additionalProperties: true }),
+  provider: s.object({}, { additionalProperties: true }),
+  admission: s.object({
+    admission_id: digest,
+    status: s.enum(["admitted", "denied"] as const),
+    admitted: s.boolean(),
+    capability: s.object({}, { additionalProperties: true }),
+  }),
+  reasons: s.array(admissionReason),
+  effective_policy: s.object({}, { additionalProperties: true }),
+  decision: admissionDecisionSchema,
+});
+
+export const policyExplainResultSchema = s.object({
+  evidence: policyCheckResultSchema,
+  explanation: s.array(s.string()),
+});

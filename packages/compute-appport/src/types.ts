@@ -133,6 +133,9 @@ export interface ExecutionReceipt {
   provider?: { kind: "local"; id: string } | { kind: "remote"; id: string; endpoint: string };
   provider_protocol?: string;
   placement?: ReceiptPlacement;
+  policy_id?: string;
+  admission_id?: string;
+  admission_status?: "admitted";
   distribution: { id: string; platform: string; manifest_version: string };
   runtime: {
     declared: RuntimeKind;
@@ -183,7 +186,8 @@ export type ExecutionFailureKind =
   | "placement_failed"
   | "provider_unavailable"
   | "provider_rejected"
-  | "evidence_invalid";
+  | "evidence_invalid"
+  | "admission_denied";
 
 export interface OutputContractFailure {
   kind: "output_contract";
@@ -217,6 +221,7 @@ export interface ExecutionResult {
   isolation?: IsolationEvidence;
   dependencies?: { capsule_id: string; file_count: number; verified: boolean };
   provider?: { kind: "local"; id: string } | { kind: "remote"; id: string; endpoint: string };
+  admission?: { policy_id: string; admission_id: string; admission_status: "admitted" };
   receipt?: ExecutionReceipt;
 }
 
@@ -326,6 +331,8 @@ export interface PlacementReport {
   requested_provider?: string;
   requirements: Record<string, unknown>;
   selection_policy: { ordering: string[]; require_healthy: boolean; allow_stale_capabilities: boolean };
+  policy_id: string;
+  admission: Record<string, unknown>;
   providers: Array<Record<string, unknown>>;
   compatible_providers: string[];
   incompatible_providers: string[];
@@ -345,3 +352,36 @@ export interface PlacementOptions {
 export type PoolRunResult =
   | (Extract<RunResult, { kind: "execution" }> & { receipt: ExecutionReceipt; placement: PlacementReport })
   | (Extract<RunResult, { kind: "failure" }> & { placement?: PlacementReport });
+
+export interface AdmissionReason {
+  code: string;
+  kind: "contract" | "capability" | "policy";
+  dimension: string;
+  requested: unknown;
+  allowed: unknown;
+  message: string;
+}
+
+/** compute.admission@1: whether an execution is permitted, and why. */
+export interface AdmissionDecision {
+  admission_version: "compute.admission@1";
+  admission_id: string;
+  status: "admitted" | "denied";
+  admitted: boolean;
+  policy_id: string;
+  provider: Record<string, unknown>;
+  capability: Record<string, unknown>;
+  reasons: AdmissionReason[];
+  contract: Record<string, unknown>;
+}
+
+export interface PolicyCheckResult {
+  policy: Array<Record<string, unknown>>;
+  policy_id: string;
+  requirements: Record<string, unknown>;
+  provider: Record<string, unknown>;
+  admission: { admission_id: string; status: "admitted" | "denied"; admitted: boolean; capability: Record<string, unknown> };
+  reasons: AdmissionReason[];
+  effective_policy: Record<string, unknown>;
+  decision: AdmissionDecision;
+}

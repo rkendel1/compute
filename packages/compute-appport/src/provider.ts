@@ -22,6 +22,12 @@ import {
   poolRunInputSchema,
   poolRunResultSchema,
   poolSubmitInputSchema,
+  admissionDecisionSchema,
+  admissionInputSchema,
+  policyCheckResultSchema,
+  policyExplainResultSchema,
+  policyInspectInputSchema,
+  policyInspectResultSchema,
 } from "./schemas.js";
 import type {
   ExecutionFailureKind,
@@ -35,6 +41,8 @@ import type {
   BundleWorkloadPlan,
   WorkloadExecutionRequest,
   PlacementOptions,
+  PolicyCheckResult,
+  IsolationProfile,
   PlacementReport,
   PoolRunResult,
 } from "./types.js";
@@ -69,6 +77,15 @@ export interface ComputeProvider {
   inspectPlacement?(request: ExecutionRequest, options: PlacementOptions & { submit?: boolean | undefined }): Promise<PlacementReport>;
   poolRun?(request: ExecutionRequest, options: PlacementOptions): Promise<PoolRunResult>;
   poolSubmit?(request: ExecutionRequest, options: PlacementOptions & { idempotency_key?: string | undefined }): Promise<unknown>;
+  /** Policy capabilities. Compute defines the policy semantics. */
+  inspectPolicy?(): Promise<unknown>;
+  checkPolicy?(request: ExecutionRequest, options: AdmissionOptions): Promise<PolicyCheckResult>;
+  explainPolicy?(request: ExecutionRequest, options: AdmissionOptions): Promise<unknown>;
+}
+
+export interface AdmissionOptions {
+  provider?: string | undefined;
+  isolation?: IsolationProfile | undefined;
 }
 
 interface CommandResult {
@@ -227,6 +244,39 @@ export class LocalComputeProvider implements ComputeProvider {
     });
   }
 
+  async inspectPolicy(): Promise<unknown> {
+    return this.invokeJson(["policy", "inspect", ...this.poolArgs(), "--json"], "policy inspection failed");
+  }
+
+  async checkPolicy(request: ExecutionRequest, options: AdmissionOptions): Promise<PolicyCheckResult> {
+    return this.policyCommand("check", request, options) as Promise<PolicyCheckResult>;
+  }
+
+  async explainPolicy(request: ExecutionRequest, options: AdmissionOptions): Promise<unknown> {
+    return this.policyCommand("explain", request, options);
+  }
+
+  private async policyCommand(
+    operation: "check" | "explain",
+    request: ExecutionRequest,
+    options: AdmissionOptions,
+  ): Promise<unknown> {
+    return this.withRequestBundle(request, async (path) => {
+      const command = await this.invoke([
+        "policy", operation, "--bundle", path,
+        ...(options.provider ? ["--provider", options.provider] : []),
+        ...(options.isolation ? ["--isolation", options.isolation] : []),
+        ...this.poolArgs(), "--json",
+      ]);
+      const value = parseJson<unknown>(command.stdout);
+      // Exit status 2 is a completed decision that denied admission.
+      if (!value || (command.status !== 0 && command.status !== 2)) {
+        throw new Error(command.stderr.trim() || `policy ${operation} failed`);
+      }
+      return value;
+    });
+  }
+
   private async invokeJson(args: string[], message: string): Promise<unknown> {
     const command = await this.invoke(args);
     const value = parseJson<unknown>(command.stdout);
@@ -301,6 +351,8 @@ export class LocalComputeProvider implements ComputeProvider {
         : []),
       "--json",
     ]);
+    const denied = admissionDenial(command.stdout);
+    if (denied) return { kind: "failure", workload_id: plan.workload_id, failure: denied };
     const result = parseJson<ExecutionResult>(command.stdout);
     if (!result) {
       return {
@@ -432,11 +484,13 @@ export class LocalComputeProvider implements ComputeProvider {
         "--expected-bundle-id", plan.bundle_verification.bundle_id,
         "--json",
       ]);
-      const result = parseJson<ExecutionResult>(command.stdout);
       const identity = {
         workload_id: plan.bundle_verification.workload_id,
         bundle_id: plan.bundle_verification.bundle_id,
       };
+      const denied = admissionDenial(command.stdout);
+      if (denied) return { kind: "failure", ...identity, failure: denied };
+      const result = parseJson<ExecutionResult>(command.stdout);
       if (!result) {
         return {
           kind: "failure",
@@ -659,6 +713,53 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
     authorizationContract: { required: true, scopes: ["compute.receipt"] },
     handler: ({ job_id }) => provider.receipt(job_id),
   });
+  const policyInspect = defineCapability({
+    name: "compute.policy.inspect",
+    version: 1,
+    description: "Show the effective execution policy and its intersected sources.",
+    input: policyInspectInputSchema,
+    output: policyInspectResultSchema,
+    effect: "observation",
+    authorizationContract: { required: false, public: true },
+    attributes: { "compute.contract": "1", "compute.executes": false },
+    handler: async () => (await pool("inspectPolicy")()) as never,
+  });
+  const policyCheck = defineCapability({
+    name: "compute.policy.check",
+    version: 1,
+    description: "Decide whether policy admits a workload on a provider. Never executes.",
+    input: admissionInputSchema,
+    output: policyCheckResultSchema,
+    effect: "observation",
+    authorizationContract: { required: false, public: true },
+    attributes: { "compute.contract": "1", "compute.executes": false },
+    handler: async ({ request, ...options }) =>
+      (await pool("checkPolicy")(request as ExecutionRequest, options)) as never,
+  });
+  const policyExplain = defineCapability({
+    name: "compute.policy.explain",
+    version: 1,
+    description: "Explain every policy dimension of an admission decision. Never executes.",
+    input: admissionInputSchema,
+    output: policyExplainResultSchema,
+    effect: "observation",
+    authorizationContract: { required: false, public: true },
+    attributes: { "compute.contract": "1", "compute.executes": false },
+    handler: async ({ request, ...options }) =>
+      (await pool("explainPolicy")(request as ExecutionRequest, options)) as never,
+  });
+  const admission = defineCapability({
+    name: "compute.admission",
+    version: 1,
+    description: "Return the compute.admission@1 decision for a workload on a provider. Never executes.",
+    input: admissionInputSchema,
+    output: admissionDecisionSchema,
+    effect: "observation",
+    authorizationContract: { required: false, public: true },
+    attributes: { "compute.contract": "1", "compute.executes": false },
+    handler: async ({ request, ...options }) =>
+      (await pool("checkPolicy")(request as ExecutionRequest, options)).decision as never,
+  });
   return createApplication({
     application: {
       id: "dev.compute.provider.local",
@@ -669,6 +770,7 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
     capabilities: [
       inspect, run, providerList, providerInspect, providerCapabilities, providerRun,
       placementInspect, poolRun, poolSubmit,
+      policyInspect, policyCheck, policyExplain, admission,
       submit, status, cancel, result, jobReceipt,
     ],
     ...(options.authorizer ? { authorizer: options.authorizer } : {}),
@@ -700,6 +802,26 @@ function validateExecutionRequest(request: WorkloadExecutionRequest): string | u
   return undefined;
 }
 
+/** A denied admission printed by `compute run --json`: nothing executed. */
+function admissionDenial(stdout: string): { kind: ExecutionFailureKind; message: string } | undefined {
+  const value = parseJson<Record<string, unknown>>(stdout);
+  if (!value || "execution_id" in value || !value.admission) return undefined;
+  const decision = value.admission as {
+    admission_id?: string;
+    reasons?: Array<{ message: string; kind?: string }>;
+  };
+  const reasons = decision.reasons ?? [];
+  // Capability and policy stay distinct: a denial with only capability
+  // reasons is a capability failure, not a policy decision.
+  const capabilityOnly = reasons.length > 0 && reasons.every((reason) => reason.kind === "capability");
+  return {
+    kind: capabilityOnly ? "capability_denied" : "admission_denied",
+    message: `admission denied (${decision.admission_id ?? "unknown"}): ${
+      (decision.reasons ?? []).map((reason) => reason.message).join("; ")
+    }`,
+  };
+}
+
 function placementArgs(options: PlacementOptions): string[] {
   return [
     ...(options.provider ? ["--provider", options.provider] : []),
@@ -714,6 +836,7 @@ function dispatchFailureKind(code: string): ExecutionFailureKind {
     case "placement_failed": return "placement_failed";
     case "provider_unavailable": return "provider_unavailable";
     case "evidence_invalid": return "evidence_invalid";
+    case "admission_denied": return "admission_denied";
     default: return "provider_rejected";
   }
 }

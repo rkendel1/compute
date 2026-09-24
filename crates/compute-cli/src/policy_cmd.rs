@@ -194,6 +194,7 @@ fn evidence(admission: &Admission) -> serde_json::Value {
         },
         "reasons": decision.reasons,
         "effective_policy": admission.policy.policy,
+        "decision": decision,
     })
 }
 
