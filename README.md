@@ -4,6 +4,19 @@
 It exposes a single CLI and library interface for inspecting runtimes
 and running workloads across WASM and common process-backed runtimes.
 
+Each execution returns a machine-readable result with a unique
+`execution_id`, lifecycle states, exit status, captured output, artifacts,
+and structured errors. `compute run ... --json` and `compute exec ... --json`
+expose this contract without mixing human diagnostics into the JSON stream.
+Use `compute doctor --json` to inspect the execution capabilities available
+on the current backend. Unsupported resource or network boundaries are
+reported rather than silently downgraded.
+
+Compute is an execution substrate, not an application model, package format,
+capability or authorization system, durable state store, workflow engine,
+orchestration layer, or cloud control plane. Execution workspaces are
+temporary and are cleaned up after the workload finishes.
+
 ## Development
 
 PAX is the preferred project-tooling interface for this repository. From

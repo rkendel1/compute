@@ -5,9 +5,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 use compute_core::{
     ComputeError, ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionResult,
-    ExecutionStatus, NetworkPolicy, Output, ResolvedRuntime,
-    ResourceUsage, Result, RuntimeAdapter, RuntimeAvailability, RuntimeKind, Workload,
-    collect_artifacts, stage_workload, RuntimeCapabilities,
+    ExecutionStatus, NetworkPolicy, Output, ResolvedRuntime, ResourceUsage, Result, RuntimeAdapter,
+    RuntimeAvailability, RuntimeCapabilities, RuntimeKind, Workload, collect_artifacts,
+    new_execution_id, stage_workload,
 };
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -83,14 +83,14 @@ impl RuntimeAdapter for ProcessRuntime {
             return Err(ComputeError::RuntimeUnavailable(self.kind));
         }
 
-        if let (Some(requested), Some(found)) = (&workload.runtime.version, &runtime.version) {
-            if !found.contains(requested) {
-                return Err(ComputeError::RuntimeVersionMismatch {
-                    kind: self.kind,
-                    requested: requested.clone(),
-                    found: found.clone(),
-                });
-            }
+        if let (Some(requested), Some(found)) = (&workload.runtime.version, &runtime.version)
+            && !found.contains(requested)
+        {
+            return Err(ComputeError::RuntimeVersionMismatch {
+                kind: self.kind,
+                requested: requested.clone(),
+                found: found.clone(),
+            });
         }
         Ok(ResolvedRuntime {
             kind: self.kind,
@@ -152,8 +152,14 @@ impl RuntimeAdapter for ProcessRuntime {
 
         let started = Instant::now();
         let mut child = command.spawn()?;
-        let mut stdout = child.stdout.take().ok_or_else(|| ComputeError::Runtime("stdout pipe missing".into()))?;
-        let mut stderr = child.stderr.take().ok_or_else(|| ComputeError::Runtime("stderr pipe missing".into()))?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ComputeError::Runtime("stdout pipe missing".into()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ComputeError::Runtime("stderr pipe missing".into()))?;
         let stdout_limit = workload.resources.stdout_bytes;
         let stderr_limit = workload.resources.stderr_bytes;
         let read_output = async {
@@ -162,25 +168,27 @@ impl RuntimeAdapter for ProcessRuntime {
             let (stdout, stderr, status) = tokio::join!(stdout_read, stderr_read, child.wait());
             Ok::<_, std::io::Error>((stdout?, stderr?, status?))
         };
-        let (stdout, stderr, status, timed_out) = if let Some(timeout) = workload.resources.wall_time {
-            match tokio::time::timeout(timeout, read_output).await {
-                Ok(result) => {
-                    let (stdout, stderr, status) = result?;
-                    (stdout, stderr, Some(status), false)
+        let (stdout, stderr, status, timed_out) =
+            if let Some(timeout) = workload.resources.wall_time {
+                match tokio::time::timeout(timeout, read_output).await {
+                    Ok(result) => {
+                        let (stdout, stderr, status) = result?;
+                        (stdout, stderr, Some(status), false)
+                    }
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        let (stdout, stderr) = tokio::join!(
+                            read_limited(&mut stdout, stdout_limit),
+                            read_limited(&mut stderr, stderr_limit)
+                        );
+                        (stdout?, stderr?, None, true)
+                    }
                 }
-                Err(_) => {
-                    let _ = child.kill().await;
-                    let (stdout, stderr) = tokio::join!(
-                        read_limited(&mut stdout, stdout_limit),
-                        read_limited(&mut stderr, stderr_limit)
-                    );
-                    (stdout?, stderr?, None, true)
-                }
-            }
-        } else {
-            let (stdout, stderr, status) = read_output.await?;
-            (stdout, stderr, Some(status), false)
-        };
+            } else {
+                let (stdout, stderr, status) = read_output.await?;
+                (stdout, stderr, Some(status), false)
+            };
 
         let process_status = status;
         let execution_status = if timed_out {
@@ -190,18 +198,36 @@ impl RuntimeAdapter for ProcessRuntime {
             ExecutionStatus::Completed
         };
 
+        let execution_id = new_execution_id();
         Ok(ExecutionResult {
+            execution_id: execution_id.clone(),
+            runtime: self.kind,
+            network: workload.network.clone(),
+            lifecycle: vec![
+                ExecutionStatus::Created,
+                ExecutionStatus::Resolved,
+                ExecutionStatus::Prepared,
+                ExecutionStatus::Started,
+                ExecutionStatus::Running,
+                execution_status.clone(),
+            ],
             status: execution_status,
-            exit_code: process_status.as_ref().and_then(std::process::ExitStatus::code),
+            exit_code: process_status
+                .as_ref()
+                .and_then(std::process::ExitStatus::code),
             stdout: Output::from_bytes(stdout, workload.resources.stdout_bytes),
             stderr: Output::from_bytes(stderr, workload.resources.stderr_bytes),
             duration: started.elapsed(),
             resource_usage: ResourceUsage::default(),
             artifacts: collect_artifacts(&staged.output_dir)?,
             error: timed_out.then(|| ExecutionError {
+                execution_id,
                 phase: ExecutionPhase::Running,
                 kind: ExecutionErrorKind::Timeout,
                 message: "wall time limit exceeded".to_string(),
+                runtime: Some(self.kind),
+                exit_code: None,
+                started: true,
             }),
         })
     }

@@ -26,6 +26,7 @@ enum Commands {
     Runtime(RuntimeCommand),
     Capabilities(RuntimeCommand),
     Exec(ExecCommand),
+    Doctor(JsonFlag),
     Version(JsonFlag),
 }
 
@@ -68,7 +69,7 @@ struct RunCommand {
     timeout: Option<Duration>,
     #[arg(long)]
     json: bool,
-    #[arg(last = true)]
+    #[arg(trailing_var_arg = true)]
     args: Vec<String>,
 }
 
@@ -76,6 +77,18 @@ struct RunCommand {
 struct ExecCommand {
     #[arg(required = true)]
     issue_description: Vec<String>,
+    #[arg(long)]
+    runtime: Option<String>,
+    #[arg(long = "env", value_parser = parse_env)]
+    env: Vec<EnvironmentVariable>,
+    #[arg(long = "mount", value_parser = parse_mount)]
+    mounts: Vec<Mount>,
+    #[arg(long, default_value = "network", value_parser = parse_network)]
+    network: NetworkPolicy,
+    #[arg(long, value_parser = parse_memory)]
+    memory: Option<u64>,
+    #[arg(long, value_parser = parse_duration)]
+    timeout: Option<Duration>,
     #[arg(long)]
     json: bool,
 }
@@ -94,37 +107,19 @@ async fn main() {
 async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
     match cli.command {
         Commands::Run(command) => {
-            let runtime = parse_runtime_spec(command.runtime)?;
-            let workload = compute.workload_from_path(
-                &command.path,
-                runtime,
+            execute_path(
+                &compute,
+                command.path,
+                command.runtime,
                 command.args,
                 command.env,
                 command.mounts,
                 command.network,
-                ResourceLimits {
-                    memory_bytes: command.memory,
-                    wall_time: command.timeout,
-                    cpu_time: None,
-                    process_count: None,
-                    stdout_bytes: None,
-                    stderr_bytes: None,
-                },
-            )?;
-            let result = compute.run(workload).await?;
-            if command.json {
-                println!("{}", serde_json::to_string_pretty(&result).unwrap());
-            } else {
-                if !result.stdout.text.is_empty() {
-                    print!("{}", result.stdout.text);
-                }
-                if !result.stderr.text.is_empty() {
-                    eprint!("{}", result.stderr.text);
-                }
-            }
-            if !matches!(result.status, compute_core::ExecutionStatus::Completed) {
-                std::process::exit(result.exit_code.unwrap_or(1));
-            }
+                command.memory,
+                command.timeout,
+                command.json,
+            )
+            .await?;
         }
         Commands::Inspect(command) => {
             let runtime = parse_runtime_spec(command.runtime)?;
@@ -200,17 +195,124 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
             }
         }
         Commands::Exec(command) => {
-            let description = command.issue_description.join(" ");
-            if command.json {
-                println!("{}", serde_json::json!({
-                    "command": "exec",
-                    "description": description,
-                    "status": "accepted",
-                }));
+            let mut description = command.issue_description.into_iter();
+            let path = PathBuf::from(description.next().expect("required by clap"));
+            execute_path(
+                &compute,
+                path,
+                command.runtime,
+                description.collect(),
+                command.env,
+                command.mounts,
+                command.network,
+                command.memory,
+                command.timeout,
+                command.json,
+            )
+            .await?;
+        }
+        Commands::Doctor(json_flag) => {
+            let capabilities = serde_json::json!({
+                "runtime_discovery": true,
+                "execution_isolation": true,
+                "timeout_enforcement": true,
+                "cancellation": false,
+                "stdout_limits": true,
+                "stderr_limits": true,
+                "filesystem_isolation": true,
+                "environment_isolation": true,
+                "network_isolation": false,
+                "memory_limits": false,
+            });
+            if json_flag.json {
+                println!("{}", serde_json::to_string_pretty(&capabilities).unwrap());
+            } else {
+                println!("Compute");
+                for (name, value) in capabilities.as_object().unwrap() {
+                    println!(
+                        "  {name:24} {}",
+                        if value.as_bool() == Some(true) {
+                            "✓"
+                        } else {
+                            "—"
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    async fn execute_path(
+        compute: &Compute,
+        path: PathBuf,
+        runtime: Option<String>,
+        args: Vec<String>,
+        env: Vec<EnvironmentVariable>,
+        mounts: Vec<Mount>,
+        network: NetworkPolicy,
+        memory: Option<u64>,
+        timeout: Option<Duration>,
+        json: bool,
+    ) -> compute_core::Result<()> {
+        if !path.exists() && runtime.is_none() && !args.is_empty() {
+            let description = std::iter::once(path.to_string_lossy().into_owned())
+                .chain(args)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "command": "exec",
+                        "description": description,
+                        "status": "accepted",
+                    })
+                );
             } else {
                 println!("Execution request accepted: {description}");
             }
+            return Ok(());
         }
+        let workload = compute.workload_from_path(
+            &path,
+            parse_runtime_spec(runtime)?,
+            args,
+            env,
+            mounts,
+            network,
+            ResourceLimits {
+                memory_bytes: memory,
+                wall_time: timeout,
+                cpu_time: None,
+                process_count: None,
+                stdout_bytes: None,
+                stderr_bytes: None,
+            },
+        )?;
+        let result = compute.run(workload).await?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+        } else {
+            if !result.stdout.text.is_empty() {
+                print!("{}", result.stdout.text);
+            }
+            if !result.stderr.text.is_empty() {
+                eprint!("{}", result.stderr.text);
+            }
+            eprintln!(
+                "\nexecution {}: {}",
+                result.execution_id,
+                serde_json::to_string(&result.status)
+                    .unwrap()
+                    .trim_matches('"')
+            );
+        }
+        if !matches!(result.status, compute_core::ExecutionStatus::Completed)
+            || result.exit_code.is_some_and(|code| code != 0)
+        {
+            std::process::exit(result.exit_code.unwrap_or(1));
+        }
+        Ok(())
     }
 
     Ok(())
