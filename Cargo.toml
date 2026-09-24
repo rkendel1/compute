@@ -5,6 +5,7 @@ members = [
   "crates/compute-runtime-process",
   "crates/compute-runtime-wasm",
   "crates/compute-runtime-conformance",
+  "crates/compute-provider",
   "crates/compute-cli",
 ]
 resolver = "2"
@@ -27,7 +28,7 @@ tar = "0.4"
 tempfile = "3.12"
 thiserror = "2.0"
 toml = "0.8"
-tokio = { version = "1.40", features = ["io-util", "macros", "process", "rt-multi-thread", "time"] }
+tokio = { version = "1.40", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 walkdir = "2.5"
 wat = "1.0"
 which = "8.0"

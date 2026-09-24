@@ -97,6 +97,28 @@ export interface BundleExecutionRequest {
 
 export type ExecutionRequest = WorkloadExecutionRequest | BundleExecutionRequest;
 
+export type JobStatus =
+  | "created" | "accepted" | "queued" | "preparing" | "running"
+  | "succeeded" | "failed" | "cancelled" | "timed_out" | "rejected";
+
+export interface JobSubmission {
+  job_id: string;
+  request_id?: string;
+  status: JobStatus;
+}
+
+export interface ExecutionJob {
+  version: "compute.job@1";
+  job_id: string;
+  status: JobStatus;
+  execution_id?: string;
+  result_digest?: string;
+  cancellation: { requested: boolean; effective: boolean; phase?: string };
+  failure?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface OutputArtifact {
   path: string;
   data: JsonBytes;
@@ -108,6 +130,8 @@ export interface ExecutionReceipt {
   execution_id: string;
   workload: string;
   bundle: string | null;
+  provider?: { kind: "local"; id: string } | { kind: "remote"; id: string; endpoint: string };
+  provider_protocol?: string;
   distribution: { id: string; platform: string; manifest_version: string };
   runtime: {
     declared: RuntimeKind;
@@ -187,6 +211,7 @@ export interface ExecutionResult {
   } | null;
   isolation?: IsolationEvidence;
   dependencies?: { capsule_id: string; file_count: number; verified: boolean };
+  provider?: { kind: "local"; id: string } | { kind: "remote"; id: string; endpoint: string };
   receipt?: ExecutionReceipt;
 }
 

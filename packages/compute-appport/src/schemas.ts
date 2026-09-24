@@ -116,11 +116,17 @@ const executionError = s.object({
 });
 
 const digest = s.string({ pattern: "^sha256:[0-9a-f]{64}$" });
+const providerIdentity = s.union([
+  s.object({ kind: s.literal("local"), id: s.string() }),
+  s.object({ kind: s.literal("remote"), id: s.string(), endpoint: s.string() }),
+] as const);
 const receipt = s.object({
   receipt_version: s.literal("compute.receipt@1"),
   execution_id: s.string(),
   workload: digest,
   bundle: s.nullable(digest),
+  provider: s.optional(providerIdentity),
+  provider_protocol: s.optional(s.string()),
   distribution: s.object({ id: digest, platform: s.string(), manifest_version: s.string() }),
   runtime: s.object({
     declared: runtime, selected: runtime, observed: runtime, version: s.string(),
@@ -173,6 +179,7 @@ export const executionResultSchema = s.object({
   dependencies: s.optional(s.object({
     capsule_id: digest, file_count: s.integer({ minimum: 0 }), verified: s.boolean(),
   })),
+  provider: s.optional(providerIdentity),
   receipt: s.optional(receipt),
 });
 
@@ -262,6 +269,29 @@ export const inspectResultSchema = s.union([
 ] as const);
 
 export const runInputSchema = s.object({ request: executionRequestSchema });
+
+export const providerSelectorSchema = s.object({
+  provider: s.optional(s.string()),
+});
+
+export const providerCapabilitiesSchema = s.object({
+  protocol: s.string(),
+  provider: providerIdentity,
+  artifact_modes: s.array(s.string()),
+  isolation_profiles: s.array(isolationProfile),
+  network_policies: s.array(network),
+  dependency_capsule_formats: s.array(s.string()),
+  max_request_bytes: s.integer({ minimum: 0 }),
+  max_output_bytes: s.integer({ minimum: 0 }),
+  distribution_id: s.optional(s.string()),
+  max_concurrent_jobs: s.optional(s.integer({ minimum: 1 })),
+  job_retention_seconds: s.optional(s.integer({ minimum: 0 })),
+  inventory: s.unknown(),
+});
+
+export const jobSubmissionInputSchema = s.object({ request: executionRequestSchema });
+export const jobAccessInputSchema = s.object({ job_id: s.string({ pattern: "^job_[0-9a-f]{64}$" }) });
+export const jobValueSchema = s.unknown();
 
 export const runResultSchema = s.union([
   s.object({

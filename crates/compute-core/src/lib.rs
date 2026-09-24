@@ -18,6 +18,8 @@ mod receipt;
 pub use receipt::*;
 mod dependencies;
 pub use dependencies::*;
+mod jobs;
+pub use jobs::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1316,11 +1318,22 @@ pub struct ExecutionResult {
     pub isolation: Option<IsolationEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<ExecutionDependencyEvidence>,
+    /// The execution provider that produced this result. Runtime adapters do
+    /// not set this; provider implementations bind it before returning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderIdentity>,
     /// Verifiable evidence attached by the orchestration layer. Runtime
     /// adapters leave this empty because they do not own distribution or
     /// portable workload identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<ExecutionReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ProviderIdentity {
+    Local { id: String },
+    Remote { id: String, endpoint: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3039,6 +3052,7 @@ mod tests {
             error: None,
             isolation: None,
             dependencies: None,
+            provider: None,
             receipt: None,
         }
     }

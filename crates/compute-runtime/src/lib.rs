@@ -93,6 +93,53 @@ impl Compute {
         }
     }
 
+    /// Identity of the installed Compute distribution, independent of any
+    /// particular runtime selection.
+    pub fn installed_distribution_identity(&self) -> Result<DistributionIdentity> {
+        if let Ok(home) = std::env::var("COMPUTE_HOME") {
+            let manifest_path = Path::new(&home).join("runtime-manifest.json");
+            if manifest_path.is_file() {
+                let manifest: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(manifest_path)?)?;
+                let string = |name: &str| {
+                    manifest
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            ComputeError::InvalidReceipt(format!(
+                                "distribution manifest is missing {name}"
+                            ))
+                        })
+                };
+                return Ok(DistributionIdentity {
+                    id: string("distribution_id")?,
+                    platform: string("platform")?,
+                    manifest_version: manifest
+                        .get("schema_version")
+                        .and_then(serde_json::Value::as_u64)
+                        .ok_or_else(|| {
+                            ComputeError::InvalidReceipt(
+                                "distribution manifest is missing schema_version".into(),
+                            )
+                        })?
+                        .to_string(),
+                });
+            }
+        }
+        let lock_bytes = include_bytes!("../../../distribution/runtime-lock.json");
+        let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let descriptor = serde_json::to_vec(&serde_json::json!({
+            "kind": "source-development", "compute_version": env!("CARGO_PKG_VERSION"),
+            "platform": platform, "runtime_lock": sha256_identity(lock_bytes),
+        }))?;
+        Ok(DistributionIdentity {
+            id: sha256_identity(&descriptor),
+            platform,
+            manifest_version: "development".into(),
+        })
+    }
+
     pub async fn doctor(&self) -> Vec<compute_core::RuntimeReport> {
         let mut reports = Vec::with_capacity(self.adapters.len());
         for adapter in &self.adapters {
@@ -119,6 +166,17 @@ impl Compute {
         let mut runtime = adapter.availability(requested).await;
         runtime.selected = true;
         Ok(runtime)
+    }
+
+    /// Resolve the distribution identity that would execute a request without
+    /// starting the workload. Providers use this for fail-closed preflight.
+    pub async fn distribution_identity(
+        &self,
+        request: &compute_core::ExecutionRequest,
+    ) -> Result<DistributionIdentity> {
+        let adapter = self.adapter(request.runtime.kind)?;
+        let resolved = adapter.resolve(request).await?;
+        Ok(receipt_environment(adapter, &resolved)?.distribution)
     }
 
     pub fn inspect_path(&self, path: &Path, runtime: Option<RuntimeSpec>) -> Result<Inspection> {
@@ -218,6 +276,13 @@ impl Compute {
             started_at,
             finished_at,
         )?);
+        let provider = compute_core::ProviderIdentity::Local { id: "local".into() };
+        result.provider = Some(provider.clone());
+        if let Some(receipt) = &mut result.receipt {
+            receipt.provider = Some(provider);
+            receipt.provider_protocol = Some("compute.local@1".into());
+            receipt.seal()?;
+        }
         Ok(result)
     }
 

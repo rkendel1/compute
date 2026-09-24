@@ -360,6 +360,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "compute-core",
+ "compute-provider",
  "compute-runtime",
  "predicates",
  "serde",
@@ -386,6 +387,22 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "walkdir",
+]
+
+[[package]]
+name = "compute-provider"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "compute-core",
+ "compute-runtime",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "wat",
 ]
 
 [[package]]

@@ -6,6 +6,9 @@ use compute_core::{
     DependencyCapsule, DependencyEntry, EnvironmentVariable, IsolationProfile, Mount,
     NetworkPolicy, PlatformIdentity, ResourceLimits, RuntimeKind, RuntimeSpec,
 };
+use compute_provider::{
+    ComputeProvider, LocalProvider, ProviderRequest, RemoteProvider, ServerConfig,
+};
 use compute_runtime::Compute;
 
 mod certification;
@@ -44,6 +47,160 @@ enum Commands {
     /// Inspect or independently verify an execution receipt.
     Receipt(ReceiptCommand),
     Version(JsonFlag),
+    /// Execute portable workloads through a remote Compute provider.
+    Remote(RemoteCommand),
+    /// Inspect local or remote provider capabilities.
+    Provider(ProviderCommand),
+    /// Serve compute.remote@1 with durable filesystem-backed jobs.
+    Serve(ServeCommand),
+}
+
+#[derive(Args, Debug)]
+struct ServeCommand {
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    listen: std::net::SocketAddr,
+    /// Public identity recorded in remote receipts.
+    #[arg(long)]
+    public_url: Option<String>,
+    #[arg(long, default_value = ".compute/jobs")]
+    job_store: PathBuf,
+    #[arg(long, default_value = "7d", value_parser = parse_retention)]
+    job_retention: Duration,
+    #[arg(long, default_value_t = 4)]
+    max_concurrent_jobs: usize,
+}
+
+#[derive(Args, Debug)]
+struct ProviderCommand {
+    #[command(subcommand)]
+    command: ProviderCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum ProviderCommands {
+    Inspect {
+        #[arg(default_value = "local")]
+        provider: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Capabilities {
+        #[arg(default_value = "local")]
+        provider: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Args, Debug)]
+struct RemoteCommand {
+    #[command(subcommand)]
+    command: RemoteCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum RemoteCommands {
+    Run(Box<RemoteArtifactCommand>),
+    Inspect(Box<RemoteArtifactCommand>),
+    Submit(Box<RemoteArtifactCommand>),
+    Status(RemoteJobCommand),
+    Result(RemoteJobCommand),
+    Wait(RemoteWaitCommand),
+    Receipt(RemoteReceiptCommand),
+    Artifacts(RemoteJobCommand),
+    Cancel(RemoteJobCommand),
+    Capabilities(RemoteEndpointCommand),
+    Health(RemoteEndpointCommand),
+}
+
+#[derive(Args, Debug)]
+struct RemoteJobCommand {
+    #[arg(long)]
+    provider: String,
+    job_id: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct RemoteWaitCommand {
+    #[arg(long)]
+    provider: String,
+    job_id: String,
+    #[arg(long, default_value = "60s", value_parser = parse_duration)]
+    timeout: Duration,
+    #[arg(long)]
+    json: bool,
+    #[arg(long)]
+    receipt: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct RemoteReceiptCommand {
+    #[arg(long)]
+    provider: String,
+    job_id: String,
+    #[arg(long)]
+    output: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct RemoteEndpointCommand {
+    #[arg(long)]
+    provider: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct RemoteArtifactCommand {
+    #[arg(required_unless_present = "bundle", conflicts_with = "bundle")]
+    path: Option<PathBuf>,
+    #[arg(long)]
+    bundle: Option<PathBuf>,
+    #[arg(long)]
+    provider: String,
+    #[arg(long)]
+    runtime: Option<String>,
+    #[arg(long = "env", value_parser = parse_env)]
+    env: Vec<EnvironmentVariable>,
+    #[arg(long)]
+    env_file: Option<PathBuf>,
+    #[arg(long = "input")]
+    inputs: Vec<PathBuf>,
+    #[arg(long = "output")]
+    outputs: Vec<PathBuf>,
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    #[arg(long)]
+    entrypoint: Option<PathBuf>,
+    #[arg(long)]
+    deps: Option<PathBuf>,
+    #[arg(long)]
+    offline: bool,
+    #[arg(long, value_parser = parse_network)]
+    network: Option<NetworkPolicy>,
+    #[arg(long, value_parser = parse_isolation)]
+    isolation: Option<IsolationProfile>,
+    #[arg(long, value_parser = parse_memory)]
+    memory: Option<u64>,
+    #[arg(long, value_parser = parse_duration)]
+    timeout: Option<Duration>,
+    #[arg(long)]
+    receipt: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long)]
+    explain: bool,
+    #[arg(last = true)]
+    args: Vec<String>,
+    /// Prevent duplicate jobs when retrying a submission.
+    #[arg(long)]
+    idempotency_key: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -939,6 +1096,146 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 receipt::verify(&path, distribution.as_deref(), artifacts.as_deref(), json)?;
             }
         },
+        Commands::Serve(command) => {
+            let endpoint = command
+                .public_url
+                .unwrap_or_else(|| format!("http://{}", command.listen));
+            eprintln!(
+                "Compute provider listening on {} ({})",
+                command.listen, endpoint
+            );
+            let mut config = ServerConfig::local(endpoint);
+            config.job_store = command.job_store;
+            config.job_retention = command.job_retention;
+            config.max_concurrent_jobs = command.max_concurrent_jobs;
+            compute_provider::serve(command.listen, config)
+                .await
+                .map_err(provider_error)?;
+        }
+        Commands::Provider(command) => {
+            let (provider, json) = match command.command {
+                ProviderCommands::Inspect { provider, json }
+                | ProviderCommands::Capabilities { provider, json } => (provider, json),
+            };
+            let capabilities = provider_for(&provider)
+                .capabilities()
+                .await
+                .map_err(provider_error)?;
+            print_provider_value(&capabilities, json);
+        }
+        Commands::Remote(command) => match command.command {
+            RemoteCommands::Capabilities(command) => {
+                let value = RemoteProvider::new(command.provider)
+                    .capabilities()
+                    .await
+                    .map_err(provider_error)?;
+                print_provider_value(&value, command.json);
+            }
+            RemoteCommands::Health(command) => {
+                let value = RemoteProvider::new(command.provider)
+                    .health()
+                    .await
+                    .map_err(provider_error)?;
+                print_provider_value(&value, command.json);
+            }
+            RemoteCommands::Submit(command) => {
+                let (provider, request, explain) = remote_request(*command)?;
+                if request.3.is_some() {
+                    return Err(compute_core::ComputeError::InvalidWorkload(
+                        "--receipt is valid for remote run or remote wait".into(),
+                    ));
+                }
+                if let Some(resolved) = explain {
+                    print_generated_workload(&resolved, request.1)?;
+                } else if request.2 {
+                    let response = provider.inspect(request.0).await.map_err(provider_error)?;
+                    print_bundle_plan(&response.plan, request.1);
+                } else {
+                    let submission = provider
+                        .submit(request.0, request.4.as_deref())
+                        .await
+                        .map_err(provider_error)?;
+                    print_provider_value(&submission, request.1);
+                }
+            }
+            RemoteCommands::Status(command) => {
+                let status = RemoteProvider::new(command.provider)
+                    .job_status(&command.job_id)
+                    .await
+                    .map_err(provider_error)?;
+                print_provider_value(&status, command.json);
+            }
+            RemoteCommands::Result(command) => {
+                let result = RemoteProvider::new(command.provider)
+                    .job_result(&command.job_id)
+                    .await
+                    .map_err(provider_error)?;
+                print_provider_value(&result, command.json);
+            }
+            RemoteCommands::Cancel(command) => {
+                let status = RemoteProvider::new(command.provider)
+                    .cancel_job(&command.job_id)
+                    .await
+                    .map_err(provider_error)?;
+                print_provider_value(&status, command.json);
+            }
+            RemoteCommands::Receipt(command) => {
+                let receipt = RemoteProvider::new(command.provider)
+                    .job_receipt(&command.job_id)
+                    .await
+                    .map_err(provider_error)?;
+                if let Some(output) = command.output {
+                    std::fs::write(output, receipt.receipt.encoded_bytes()?)?;
+                } else {
+                    print_provider_value(&receipt.receipt, command.json);
+                }
+            }
+            RemoteCommands::Artifacts(command) => {
+                let artifacts = RemoteProvider::new(command.provider)
+                    .job_artifacts(&command.job_id)
+                    .await
+                    .map_err(provider_error)?;
+                print_provider_value(&artifacts, command.json);
+            }
+            RemoteCommands::Wait(command) => remote_wait(command).await?,
+            RemoteCommands::Inspect(command) => {
+                let (provider, request, explain) = remote_request(*command)?;
+                if request.4.is_some() {
+                    return Err(compute_core::ComputeError::InvalidWorkload(
+                        "--idempotency-key is valid only for remote submit".into(),
+                    ));
+                }
+                if request.3.is_some() {
+                    return Err(compute_core::ComputeError::InvalidWorkload(
+                        "--receipt is not valid for remote inspect".into(),
+                    ));
+                }
+                if let Some(resolved) = explain {
+                    print_generated_workload(&resolved, request.1)?;
+                } else {
+                    let response = provider.inspect(request.0).await.map_err(provider_error)?;
+                    print_bundle_plan(&response.plan, request.1);
+                }
+            }
+            RemoteCommands::Run(command) => {
+                let (provider, request, explain) = remote_request(*command)?;
+                if request.4.is_some() {
+                    return Err(compute_core::ComputeError::InvalidWorkload(
+                        "--idempotency-key is valid only for remote submit".into(),
+                    ));
+                }
+                if let Some(resolved) = explain {
+                    print_generated_workload(&resolved, request.1)?;
+                } else if request.2 {
+                    let response = provider.inspect(request.0).await.map_err(provider_error)?;
+                    print_bundle_plan(&response.plan, request.1);
+                } else {
+                    let receipt_path = request.3;
+                    let response = provider.execute(request.0).await.map_err(provider_error)?;
+                    print_execution_result(response.result, request.1, receipt_path.as_deref())?;
+                }
+            }
+        },
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1005,6 +1302,160 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
     }
 
     Ok(())
+}
+
+type RemotePrepared = (
+    RemoteProvider,
+    (ProviderRequest, bool, bool, Option<PathBuf>, Option<String>),
+    Option<direct::ResolvedDirect>,
+);
+
+fn remote_request(command: RemoteArtifactCommand) -> compute_core::Result<RemotePrepared> {
+    let RemoteArtifactCommand {
+        path,
+        bundle,
+        provider,
+        runtime,
+        env,
+        env_file,
+        inputs,
+        outputs,
+        cwd,
+        entrypoint,
+        deps,
+        offline: _,
+        network,
+        isolation,
+        memory,
+        timeout,
+        receipt,
+        json,
+        dry_run,
+        explain,
+        args,
+        idempotency_key,
+    } = command;
+    let mut explained = None;
+    let bytes = if let Some(bundle) = bundle {
+        if runtime.is_some()
+            || !env.is_empty()
+            || env_file.is_some()
+            || !inputs.is_empty()
+            || !outputs.is_empty()
+            || cwd.is_some()
+            || entrypoint.is_some()
+            || deps.is_some()
+            || network.is_some()
+            || memory.is_some()
+            || timeout.is_some()
+            || !args.is_empty()
+        {
+            return Err(compute_core::ComputeError::InvalidWorkload(
+                "--bundle cannot be combined with direct execution overrides".into(),
+            ));
+        }
+        std::fs::read(bundle)?
+    } else {
+        let resolved = direct::resolve(direct::DirectOptions {
+            path: path.expect("required by clap"),
+            runtime,
+            args,
+            env,
+            env_file,
+            inputs,
+            outputs,
+            cwd,
+            entrypoint,
+            deps,
+            network,
+            isolation,
+            memory,
+            timeout,
+        })?;
+        let bundle = compute_core::WorkloadBundle::create_from_with_capsule(
+            resolved.workload.clone(),
+            &resolved.root,
+            resolved.dependency_capsule.clone(),
+        )?;
+        if explain {
+            explained = Some(resolved);
+        }
+        bundle.to_bytes()?
+    };
+    let mut request = ProviderRequest::bundle(bytes);
+    if let compute_provider::ArtifactTransport::Bundle { data } = &request.artifact {
+        let bundle = compute_core::WorkloadBundle::from_bytes(data)?;
+        request.expected.workload_id = Some(bundle.workload_id()?);
+        request.expected.bundle_id = Some(bundle.bundle_id()?);
+        request.expected.dependency_id = bundle
+            .dependency_capsule
+            .as_ref()
+            .map(DependencyCapsule::capsule_id)
+            .transpose()?;
+    }
+    request.execution.isolation = isolation;
+    Ok((
+        RemoteProvider::new(provider),
+        (request, json, dry_run, receipt, idempotency_key),
+        explained,
+    ))
+}
+
+async fn remote_wait(command: RemoteWaitCommand) -> compute_core::Result<()> {
+    let provider = RemoteProvider::new(command.provider);
+    let deadline = tokio::time::Instant::now() + command.timeout;
+    let mut delay = Duration::from_millis(100);
+    loop {
+        let status = provider
+            .job_status(&command.job_id)
+            .await
+            .map_err(provider_error)?;
+        if status.status.is_terminal() {
+            match provider.job_result(&command.job_id).await {
+                Ok(result) => {
+                    print_execution_result(result.result, command.json, command.receipt.as_deref())?
+                }
+                Err(_)
+                    if matches!(
+                        status.status,
+                        compute_core::JobStatus::Cancelled | compute_core::JobStatus::Rejected
+                    ) =>
+                {
+                    print_provider_value(&status, command.json);
+                }
+                Err(error) => return Err(provider_error(error)),
+            }
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(compute_core::ComputeError::Runtime(format!(
+                "client wait timed out after {}ms; job {} continues running",
+                command.timeout.as_millis(),
+                command.job_id
+            )));
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_secs(2));
+    }
+}
+
+fn provider_for(value: &str) -> Box<dyn ComputeProvider> {
+    if value == "local" {
+        Box::new(LocalProvider::new())
+    } else {
+        Box::new(RemoteProvider::new(value))
+    }
+}
+
+fn provider_error(error: compute_provider::ProviderError) -> compute_core::ComputeError {
+    compute_core::ComputeError::Runtime(error.to_string())
+}
+
+fn print_provider_value(value: &impl serde::Serialize, _json: bool) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).expect("provider response is serializable")
+    );
 }
 
 fn print_execution_result(
@@ -1433,4 +1884,21 @@ fn parse_duration(value: &str) -> Result<Duration, String> {
         return Ok(Duration::from_secs(minutes * 60));
     }
     Err("expected a duration like 250ms, 10s, or 1m".to_string())
+}
+
+fn parse_retention(value: &str) -> Result<Duration, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if let Some(raw) = normalized.strip_suffix('d') {
+        return raw
+            .parse::<u64>()
+            .map(|days| Duration::from_secs(days * 24 * 60 * 60))
+            .map_err(|error| error.to_string());
+    }
+    if let Some(raw) = normalized.strip_suffix('h') {
+        return raw
+            .parse::<u64>()
+            .map(|hours| Duration::from_secs(hours * 60 * 60))
+            .map_err(|error| error.to_string());
+    }
+    parse_duration(value)
 }

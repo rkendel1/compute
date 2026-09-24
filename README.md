@@ -29,6 +29,22 @@ Resolved dependencies can be packaged separately as deterministic,
 content-addressed `compute.deps@1` capsules and embedded in the same `.compute`
 bundle. See [docs/dependencies.md](docs/dependencies.md).
 
+Compute executes the same portable workload locally or remotely. The workload
+does not know where it runs: a provider supplies transport, the Compute runtime
+supplies execution, and the receipt proves what happened. See
+[docs/providers.md](docs/providers.md) and
+[docs/remote-execution.md](docs/remote-execution.md).
+
+```sh
+compute run script.py
+compute remote run --provider http://127.0.0.1:8080 script.py
+compute remote submit --provider http://127.0.0.1:8080 --bundle script.compute
+compute remote status --provider http://127.0.0.1:8080 job_...
+compute remote wait --provider http://127.0.0.1:8080 job_... --timeout 60s
+```
+
+Durable jobs are documented in [docs/jobs.md](docs/jobs.md).
+
 ## Universal runtime distribution
 
 Compute has first-class adapters for WASM, Python, Node, Bun, Deno, Ruby,

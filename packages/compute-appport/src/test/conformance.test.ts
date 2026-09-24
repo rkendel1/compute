@@ -24,7 +24,7 @@ function session(permissions: string[]): Session {
   };
 }
 
-function envelope(capability: "compute.inspect" | "compute.run", input: unknown) {
+function envelope(capability: string, input: unknown) {
   return createRequest({
     requestId: `${capability}-${Math.random()}`,
     capability: { name: capability, version: 1 },
@@ -68,6 +68,17 @@ test("manifest exposes public inspection and authorized consequential execution"
   assert.deepEqual(run.authorization, ["compute.run"]);
   assert.equal(run.definitions[0]?.effect, "consequential");
   assert.equal(run.definitions[0]?.authorizationContract?.required, true);
+  for (const [name, scope] of [
+    ["compute.submit", "compute.submit"],
+    ["compute.status", "compute.status"],
+    ["compute.cancel", "compute.cancel"],
+    ["compute.result", "compute.result"],
+    ["compute.receipt", "compute.receipt"],
+  ] as const) {
+    const capability = manifest.capabilities.find((item) => item.name === name)!;
+    assert.deepEqual(capability.authorization, [scope]);
+    assert.equal(capability.definitions[0]?.authorizationContract?.required, true);
+  }
   assert.equal(application.verify().ready, true);
 });
 

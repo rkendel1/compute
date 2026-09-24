@@ -9,6 +9,7 @@ use compute_core::{
     ResourceLimits, RuntimeKind, RuntimeSource, WorkloadBundle, WorkloadDependencies,
     WorkloadInput, WorkloadOutput, WorkloadSpec,
 };
+use compute_provider::{ComputeProvider, ProviderRequest, RemoteProvider, ServerConfig};
 use compute_runtime::Compute;
 use serde::{Deserialize, Serialize};
 
@@ -254,6 +255,32 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
     }
 
     let inventory = compute.inventory().await;
+    let remote_listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(error) => {
+            fail_check(&mut report, "remote_provider", error.to_string());
+            return report;
+        }
+    };
+    let remote_addr = remote_listener
+        .local_addr()
+        .expect("bound listener has an address");
+    let remote_endpoint = format!("http://{remote_addr}");
+    let remote_server_endpoint = remote_endpoint.clone();
+    let remote_job_store = match tempfile::tempdir() {
+        Ok(directory) => directory,
+        Err(error) => {
+            fail_check(&mut report, "remote_provider", error.to_string());
+            return report;
+        }
+    };
+    let remote_job_store_path = remote_job_store.path().to_path_buf();
+    let remote_server = tokio::spawn(async move {
+        let mut config = ServerConfig::local(remote_server_endpoint);
+        config.job_store = remote_job_store_path;
+        let _ = compute_provider::serve_listener(remote_listener, config).await;
+    });
+    let remote_provider = RemoteProvider::new(remote_endpoint);
     let mut certified_bundle: Option<CertifiedArtifact> = None;
     for kind in RuntimeKind::ALL {
         let locked = lock.runtimes.get(kind.as_str());
@@ -261,7 +288,16 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
         let entry = inventory.runtimes.iter().find(|item| item.id == kind);
         let result = match (locked, fixture, entry) {
             (Some(locked), Some(fixture), Some(entry)) => {
-                certify_runtime(compute, &root, kind, locked, fixture, entry).await
+                certify_runtime(
+                    compute,
+                    &remote_provider,
+                    &root,
+                    kind,
+                    locked,
+                    fixture,
+                    entry,
+                )
+                .await
             }
             _ => Err("runtime is missing from lock, fixture manifest, or inventory".into()),
         };
@@ -317,6 +353,24 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
                 error: Some(error),
             }),
         }
+    }
+    remote_server.abort();
+    if report
+        .runtimes
+        .iter()
+        .all(|runtime| runtime.result == CertificationResult::Pass)
+    {
+        pass_check(
+            &mut report,
+            "remote_provider",
+            "every runtime passed client-to-transport-to-server execution equivalence",
+        );
+    } else {
+        fail_check(
+            &mut report,
+            "remote_provider",
+            "one or more remote runtime executions failed".into(),
+        );
     }
 
     let all_runtimes_pass = report
@@ -391,6 +445,7 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
 
 async fn certify_runtime(
     compute: &Compute,
+    remote_provider: &RemoteProvider,
     root: &Path,
     kind: RuntimeKind,
     locked: &LockedRuntime,
@@ -441,23 +496,38 @@ async fn certify_runtime(
         .ok_or_else(|| "fixture entrypoint has no file name".to_string())?;
     let local_entrypoint = workspace.path().join(entry_name);
     fs::copy(&entrypoint_source, &local_entrypoint).map_err(|error| error.to_string())?;
-    let dependency_capsule = if kind == RuntimeKind::Python {
+    let dependency_capsule = if matches!(kind, RuntimeKind::Python | RuntimeKind::Node) {
         use std::io::Write;
         let mut entrypoint = fs::OpenOptions::new()
             .append(true)
             .open(&local_entrypoint)
             .map_err(|error| error.to_string())?;
-        writeln!(
-            entrypoint,
-            "\nimport certification_dependency\nassert certification_dependency.VALUE == 'packaged'"
-        )
+        match kind {
+            RuntimeKind::Python => writeln!(
+                entrypoint,
+                "\nimport certification_dependency\nassert certification_dependency.VALUE == 'packaged'"
+            ),
+            RuntimeKind::Node => writeln!(
+                entrypoint,
+                "\nif (require('certification_dependency').value !== 'packaged') process.exit(91);"
+            ),
+            _ => unreachable!(),
+        }
         .map_err(|error| error.to_string())?;
         let payload = workspace.path().join("resolved-dependencies");
         fs::create_dir(&payload).map_err(|error| error.to_string())?;
-        fs::write(
-            payload.join("certification_dependency.py"),
-            "VALUE = 'packaged'\n",
-        )
+        match kind {
+            RuntimeKind::Python => fs::write(
+                payload.join("certification_dependency.py"),
+                "VALUE = 'packaged'\n",
+            ),
+            RuntimeKind::Node => {
+                let module = payload.join("certification_dependency");
+                fs::create_dir(&module).map_err(|error| error.to_string())?;
+                fs::write(module.join("index.js"), "exports.value = 'packaged';\n")
+            }
+            _ => unreachable!(),
+        }
         .map_err(|error| error.to_string())?;
         Some(
             DependencyCapsule::create(
@@ -600,13 +670,15 @@ async fn certify_runtime(
     if execution.receipt.as_ref().map(|receipt| &receipt.isolation) != Some(process_evidence) {
         return Err("receipt isolation evidence differs from the execution".into());
     }
-    if kind == RuntimeKind::Python
+    if matches!(kind, RuntimeKind::Python | RuntimeKind::Node)
         && execution
             .dependencies
             .as_ref()
             .is_none_or(|dependencies| !dependencies.verified)
     {
-        return Err("Python dependency capsule was not verified during certification".into());
+        return Err(format!(
+            "{kind} dependency capsule was not verified during certification"
+        ));
     }
     if execution.stderr.text != "certification-stderr\n" {
         return Err(format!("unexpected stderr: {:?}", execution.stderr.text));
@@ -641,6 +713,77 @@ async fn certify_runtime(
     {
         return Err("poisoned host PATH runtime was executed".into());
     }
+
+    let mut remote_request =
+        ProviderRequest::bundle(fs::read(&bundle_path).map_err(|error| error.to_string())?);
+    remote_request.expected.workload_id = Some(inspection.workload_id.clone());
+    remote_request.expected.bundle_id = Some(inspection.bundle_id.clone());
+    if let Some(dependencies) = &execution.dependencies {
+        remote_request.expected.dependency_id = Some(dependencies.capsule_id.clone());
+    }
+    let remote = remote_provider
+        .execute(remote_request.clone())
+        .await
+        .map_err(|error| format!("remote provider execution failed: {error}"))?
+        .result;
+    if remote.runtime != execution.runtime
+        || remote.status != execution.status
+        || remote.exit_code != execution.exit_code
+        || remote.stdout != execution.stdout
+        || remote.stderr != execution.stderr
+        || remote.outputs != execution.outputs
+        || remote.dependencies != execution.dependencies
+    {
+        return Err("local and remote execution results differ".into());
+    }
+    let remote_receipt = remote
+        .receipt
+        .ok_or_else(|| "remote provider omitted its receipt".to_string())?;
+    if remote_receipt.provider_protocol.as_deref() != Some(compute_provider::REMOTE_PROTOCOL) {
+        return Err("remote receipt omitted provider protocol binding".into());
+    }
+    remote_receipt.verify().map_err(|error| error.to_string())?;
+
+    let submission = remote_provider
+        .submit(remote_request, None)
+        .await
+        .map_err(|error| format!("asynchronous provider submission failed: {error}"))?;
+    let async_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let asynchronous = loop {
+        let job = remote_provider
+            .job_status(&submission.job_id.0)
+            .await
+            .map_err(|error| format!("asynchronous provider status failed: {error}"))?;
+        if job.status.is_terminal() {
+            break remote_provider
+                .job_result(&submission.job_id.0)
+                .await
+                .map_err(|error| format!("asynchronous provider result failed: {error}"))?;
+        }
+        if tokio::time::Instant::now() >= async_deadline {
+            return Err("asynchronous provider job did not become terminal".into());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    if asynchronous.status != compute_core::JobStatus::Succeeded
+        || asynchronous.result.runtime != execution.runtime
+        || asynchronous.result.status != execution.status
+        || asynchronous.result.exit_code != execution.exit_code
+        || asynchronous.result.stdout != execution.stdout
+        || asynchronous.result.stderr != execution.stderr
+        || asynchronous.result.outputs != execution.outputs
+        || asynchronous.result.dependencies != execution.dependencies
+    {
+        return Err("local and asynchronous remote execution results differ".into());
+    }
+    remote_provider
+        .job_receipt(&submission.job_id.0)
+        .await
+        .map_err(|error| format!("asynchronous receipt retrieval failed: {error}"))?;
+    remote_provider
+        .job_artifacts(&submission.job_id.0)
+        .await
+        .map_err(|error| format!("asynchronous artifact retrieval failed: {error}"))?;
 
     let bundle = compute
         .load_bundle(&bundle_path)

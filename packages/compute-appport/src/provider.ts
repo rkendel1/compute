@@ -9,6 +9,11 @@ import {
   inspectResultSchema,
   runInputSchema,
   runResultSchema,
+  providerCapabilitiesSchema,
+  providerSelectorSchema,
+  jobAccessInputSchema,
+  jobSubmissionInputSchema,
+  jobValueSchema,
 } from "./schemas.js";
 import type {
   ExecutionFailureKind,
@@ -28,6 +33,20 @@ export interface LocalComputeProviderOptions {
   cwd?: string;
   authorizer?: Authorizer;
   mode?: "development" | "production";
+  provider?: ComputeProvider;
+  remoteProvider?: string;
+}
+
+/** Transport-neutral provider selected by the AppPort application boundary. */
+export interface ComputeProvider {
+  inspect(request: ExecutionRequest, mode?: "inspect" | "dry_run"): Promise<InspectResult>;
+  run(request: ExecutionRequest): Promise<RunResult>;
+  capabilities(): Promise<unknown>;
+  submit(request: ExecutionRequest): Promise<unknown>;
+  status(jobId: string): Promise<unknown>;
+  cancel(jobId: string): Promise<unknown>;
+  result(jobId: string): Promise<unknown>;
+  receipt(jobId: string): Promise<unknown>;
 }
 
 interface CommandResult {
@@ -36,13 +55,15 @@ interface CommandResult {
   stderr: string;
 }
 
-export class LocalComputeProvider {
+export class LocalComputeProvider implements ComputeProvider {
   readonly computeBinary: string;
   readonly cwd: string | undefined;
+  readonly remoteProvider: string | undefined;
 
-  constructor(options: Pick<LocalComputeProviderOptions, "computeBinary" | "cwd"> = {}) {
+  constructor(options: Pick<LocalComputeProviderOptions, "computeBinary" | "cwd" | "remoteProvider"> = {}) {
     this.computeBinary = options.computeBinary ?? "compute";
     this.cwd = options.cwd;
+    this.remoteProvider = options.remoteProvider;
   }
 
   async inspect(request: ExecutionRequest, mode: "inspect" | "dry_run" = "inspect"): Promise<InspectResult> {
@@ -116,6 +137,60 @@ export class LocalComputeProvider {
       ...(result.receipt ? { receipt: result.receipt } : {}),
       ...(result.isolation ? { isolation: result.isolation } : {}),
     };
+  }
+
+  async capabilities(): Promise<unknown> {
+    const command = await this.invoke(["provider", "capabilities", "local", "--json"]);
+    const value = parseJson<unknown>(command.stdout);
+    if (command.status !== 0 || !value) throw new Error(command.stderr.trim() || "provider capability discovery failed");
+    return value;
+  }
+
+  async submit(request: ExecutionRequest): Promise<unknown> {
+    const provider = this.requireRemoteProvider();
+    if ("bundle" in request) {
+      return this.withBundle(request, async (path) => this.invokeRemoteJson([
+        "remote", "submit", "--provider", provider, "--bundle", path, "--json",
+      ]));
+    }
+    const directory = await mkdtemp(join(tmpdir(), "compute-appport-submit-"));
+    const bundle = join(directory, "workload.compute");
+    try {
+      const create = await this.invoke([
+        "bundle", "create", "--workload",
+        resolve(this.cwd ?? process.cwd(), request.invocation.workload_path),
+        "--output", bundle, "--json",
+      ]);
+      if (create.status !== 0) throw new Error(create.stderr.trim() || "bundle creation failed");
+      return await this.invokeRemoteJson([
+        "remote", "submit", "--provider", provider, "--bundle", bundle, "--json",
+      ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  status(jobId: string): Promise<unknown> { return this.jobCommand("status", jobId); }
+  cancel(jobId: string): Promise<unknown> { return this.jobCommand("cancel", jobId); }
+  result(jobId: string): Promise<unknown> { return this.jobCommand("result", jobId); }
+  receipt(jobId: string): Promise<unknown> { return this.jobCommand("receipt", jobId); }
+
+  private async jobCommand(operation: string, jobId: string): Promise<unknown> {
+    return this.invokeRemoteJson([
+      "remote", operation, "--provider", this.requireRemoteProvider(), jobId, "--json",
+    ]);
+  }
+
+  private requireRemoteProvider(): string {
+    if (!this.remoteProvider) throw new Error("remoteProvider is required for asynchronous capabilities");
+    return this.remoteProvider;
+  }
+
+  private async invokeRemoteJson(args: string[]): Promise<unknown> {
+    const command = await this.invoke(args);
+    const value = parseJson<unknown>(command.stdout);
+    if (command.status !== 0 || !value) throw new Error(command.stderr.trim() || "remote provider operation failed");
+    return value;
   }
 
   private async inspectBundle(
@@ -237,7 +312,7 @@ export class LocalComputeProvider {
 }
 
 export function createComputeApplication(options: LocalComputeProviderOptions = {}): AppPortApplication {
-  const provider = new LocalComputeProvider(options);
+  const provider = options.provider ?? new LocalComputeProvider(options);
   const inspect = defineCapability({
     name: "compute.inspect",
     version: 1,
@@ -261,6 +336,76 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
     attributes: { "compute.contract": "1", "compute.executes": true },
     handler: ({ request }) => provider.run(request as ExecutionRequest),
   });
+  const providerInspect = defineCapability({
+    name: "compute.provider.inspect",
+    version: 1,
+    description: "Inspect the selected Compute execution provider.",
+    input: providerSelectorSchema,
+    output: providerCapabilitiesSchema,
+    effect: "observation",
+    authorizationContract: { required: false, public: true },
+    attributes: { "compute.contract": "1", "compute.executes": false },
+    handler: () => provider.capabilities(),
+  });
+  const providerCapabilities = defineCapability({
+    name: "compute.provider.capabilities",
+    version: 1,
+    description: "Describe local Compute provider capabilities.",
+    input: providerSelectorSchema,
+    output: providerCapabilitiesSchema,
+    effect: "observation",
+    authorizationContract: { required: false, public: true },
+    attributes: { "compute.contract": "1", "compute.executes": false },
+    handler: () => provider.capabilities(),
+  });
+  const providerRun = defineCapability({
+    name: "compute.provider.run",
+    version: 1,
+    description: "Execute through the selected Compute provider.",
+    input: runInputSchema,
+    output: runResultSchema,
+    effect: "consequential",
+    authorization: ["compute.run"],
+    authorizationContract: { required: true, scopes: ["compute.run"] },
+    attributes: { "compute.contract": "1", "compute.executes": true },
+    handler: ({ request }) => provider.run(request as ExecutionRequest),
+  });
+  const submit = defineCapability({
+    name: "compute.submit", version: 1,
+    description: "Submit a durable asynchronous Compute execution job.",
+    input: jobSubmissionInputSchema, output: jobValueSchema, effect: "consequential",
+    authorization: ["compute.submit"],
+    authorizationContract: { required: true, scopes: ["compute.submit"] },
+    handler: ({ request }) => provider.submit(request as ExecutionRequest),
+  });
+  const status = defineCapability({
+    name: "compute.status", version: 1,
+    description: "Observe a durable Compute job.", input: jobAccessInputSchema,
+    output: jobValueSchema, effect: "observation", authorization: ["compute.status"],
+    authorizationContract: { required: true, scopes: ["compute.status"] },
+    handler: ({ job_id }) => provider.status(job_id),
+  });
+  const cancel = defineCapability({
+    name: "compute.cancel", version: 1,
+    description: "Request cancellation of a durable Compute job.", input: jobAccessInputSchema,
+    output: jobValueSchema, effect: "consequential", authorization: ["compute.cancel"],
+    authorizationContract: { required: true, scopes: ["compute.cancel"] },
+    handler: ({ job_id }) => provider.cancel(job_id),
+  });
+  const result = defineCapability({
+    name: "compute.result", version: 1,
+    description: "Retrieve a terminal Compute job result.", input: jobAccessInputSchema,
+    output: jobValueSchema, effect: "observation", authorization: ["compute.result"],
+    authorizationContract: { required: true, scopes: ["compute.result"] },
+    handler: ({ job_id }) => provider.result(job_id),
+  });
+  const jobReceipt = defineCapability({
+    name: "compute.receipt", version: 1,
+    description: "Retrieve independently verifiable job evidence.", input: jobAccessInputSchema,
+    output: jobValueSchema, effect: "observation", authorization: ["compute.receipt"],
+    authorizationContract: { required: true, scopes: ["compute.receipt"] },
+    handler: ({ job_id }) => provider.receipt(job_id),
+  });
   return createApplication({
     application: {
       id: "dev.compute.provider.local",
@@ -268,7 +413,10 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
       version: "0.1.0",
       description: "Local AppPort provider for portable Compute workloads",
     },
-    capabilities: [inspect, run],
+    capabilities: [
+      inspect, run, providerInspect, providerCapabilities, providerRun,
+      submit, status, cancel, result, jobReceipt,
+    ],
     ...(options.authorizer ? { authorizer: options.authorizer } : {}),
     mode: options.mode ?? "development",
     transports: [{ kind: "inprocess" }],

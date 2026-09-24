@@ -179,6 +179,10 @@ pub struct ExecutionReceipt {
     pub execution_id: ExecutionId,
     pub workload: WorkloadIdentity,
     pub bundle: Option<BundleIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::ProviderIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_protocol: Option<String>,
     pub distribution: DistributionIdentity,
     pub runtime: RuntimeIdentity,
     pub request: ExecutionRequestSummary,
@@ -208,6 +212,10 @@ struct ReceiptBody<'a> {
     execution_id: &'a ExecutionId,
     workload: &'a WorkloadIdentity,
     bundle: &'a Option<BundleIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: &'a Option<crate::ProviderIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_protocol: &'a Option<String>,
     distribution: &'a DistributionIdentity,
     runtime: &'a RuntimeIdentity,
     request: &'a ExecutionRequestSummary,
@@ -254,6 +262,27 @@ impl ExecutionReceipt {
         validate_sha256_identity(&self.workload.0)?;
         if let Some(bundle) = &self.bundle {
             validate_sha256_identity(&bundle.0)?;
+        }
+        match &self.provider {
+            Some(crate::ProviderIdentity::Local { id }) => {
+                if id.is_empty() || self.provider_protocol.as_deref() != Some("compute.local@1") {
+                    return Err(invalid("invalid local provider binding"));
+                }
+            }
+            Some(crate::ProviderIdentity::Remote { id, endpoint }) => {
+                if id.is_empty()
+                    || endpoint.is_empty()
+                    || self.provider_protocol.as_deref() != Some("compute.remote@1")
+                {
+                    return Err(invalid("invalid remote provider binding"));
+                }
+            }
+            None if self.provider_protocol.is_some() => {
+                return Err(invalid(
+                    "provider protocol is present without provider identity",
+                ));
+            }
+            None => {}
         }
         validate_sha256_identity(&self.distribution.id)?;
         validate_sha256_identity(&self.runtime.distribution_runtime_id)?;
@@ -318,6 +347,8 @@ impl ExecutionReceipt {
             execution_id: &self.execution_id,
             workload: &self.workload,
             bundle: &self.bundle,
+            provider: &self.provider,
+            provider_protocol: &self.provider_protocol,
             distribution: &self.distribution,
             runtime: &self.runtime,
             request: &self.request,
@@ -433,6 +464,8 @@ pub fn create_execution_receipt(
         execution_id: ExecutionId::parse(result.execution_id.clone())?,
         workload,
         bundle,
+        provider: None,
+        provider_protocol: None,
         distribution: environment.distribution.clone(),
         runtime: RuntimeIdentity {
             declared: request.runtime.kind,
@@ -586,6 +619,7 @@ mod tests {
                 resources: BoundaryStatus::NotRequested,
             }),
             dependencies: None,
+            provider: None,
             receipt: None,
         };
         let environment = ReceiptEnvironment {
