@@ -1,0 +1,12 @@
+[package]
+name = "compute-runtime-process"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+compute-core = { path = "../compute-core" }
+async-trait.workspace = true
+tokio.workspace = true
+which.workspace = true
