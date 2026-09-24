@@ -37,3 +37,23 @@ The same operation versions also accept a bundle request containing portable
 writes those bytes only to a private temporary adapter directory, delegates
 verification and execution to the Rust engine, pins both verified identities,
 and removes the adapter directory afterward.
+
+## Provider pools and placement
+
+`compute.provider.list@1`, `compute.provider.inspect@1`,
+`compute.provider.capabilities@1`, and `compute.placement.inspect@1` are
+public observations and never execute. `compute.pool.run@1` requires the
+`compute.run` scope, and `compute.pool.submit@1` requires `compute.submit`.
+Placement is evaluated by the Compute CLI against a caller-owned pool.
+Configure the pool with the `poolConfig` and `capabilityCache` options:
+
+```ts
+const compute = createComputeApplication({
+  computeBinary: "/path/to/compute",
+  poolConfig: "compute-pool.toml",
+});
+```
+
+Pool results carry the full placement report. Their receipts bind the
+placement ID, provider ID, and selection mode. A failed placement returns a
+`placement_failed` failure and executes nothing.
