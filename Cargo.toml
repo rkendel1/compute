@@ -8,6 +8,10 @@ members = [
   "crates/compute-provider",
   "crates/compute-policy",
   "crates/compute-placement",
+  "crates/compute-state",
+  "crates/compute-state-memory",
+  "crates/compute-state-file",
+  "crates/compute-state-feltdb",
   "crates/compute-environment",
   "crates/compute-cli",
 ]

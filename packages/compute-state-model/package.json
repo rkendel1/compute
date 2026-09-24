@@ -1,0 +1,18 @@
+{
+  "name": "@compute/state-model",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Compiles compute.flow, the Compute control model, to the FeltDB application manifest Compute provisions",
+  "scripts": {
+    "generate": "node src/compile.mjs --write",
+    "check": "node src/compile.mjs --check",
+    "test": "node --test src/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@feltdb/core": "0.11.7"
+  }
+}

@@ -1,0 +1,212 @@
+// compute.state@1: the durable Compute control model.
+//
+// Managed FeltDB is the durable authority for Compute control state:
+// desired state and evidence. Compute owns live process state and never
+// writes it here. Nested values are json; every other field is typed.
+
+app compute {
+  collection Project {
+    name: text
+    source: text?
+    created_at: datetime
+    index name using hash(name)
+  }
+
+  collection ProjectRevision {
+    project_id: text
+    project: text
+    revision: text
+    revision_digest: text
+    source: text?
+    workloads: json
+    created_at: datetime
+    index project_id using hash(project_id)
+    index revision using hash(revision)
+  }
+
+  collection Environment {
+    name: text
+    desired_state: enum(running, stopped)
+    config: json
+    policy: json?
+    provider: text?
+    created_at: datetime
+    index name using hash(name)
+  }
+
+  collection EnvironmentProject {
+    environment_id: text
+    environment: text
+    project_id: text
+    project: text
+    desired_state: enum(running, stopped)
+    config: json
+    revision_id: text?
+    deployment_id: text?
+    created_at: datetime
+    updated_at: datetime
+    index environment_id using hash(environment_id)
+    index project_id using hash(project_id)
+  }
+
+  collection Deployment {
+    environment_id: text
+    environment: text
+    project_id: text
+    project: text
+    revision_id: text
+    revision: text
+    revision_digest: text
+    status: enum(queued, admitted, placed, starting, healthy, failed, stopped, superseded)
+    promoted_from: text?
+    previous: text?
+    workloads: json
+    failure: text?
+    receipt_ids: json
+    created_at: datetime
+    updated_at: datetime
+    index environment_id using hash(environment_id)
+    index project_id using hash(project_id)
+    index status using hash(status)
+  }
+
+  collection Workload {
+    environment_id: text
+    environment: text
+    project_id: text
+    project: text
+    name: text
+    kind: enum(service, task)
+    desired_state: enum(running, stopped)
+    restart: enum(never, on_failure)
+    bundle_id: text
+    workload_identity: text
+    runtime: text
+    ports: json
+    deployment_id: text
+    index environment_id using hash(environment_id)
+    index project_id using hash(project_id)
+  }
+
+  collection Execution {
+    execution_id: text
+    environment_id: text
+    environment: text
+    project_id: text
+    project: text
+    workload_id: text
+    workload: text
+    kind: enum(service, task)
+    deployment_id: text?
+    status: text
+    exit_code: integer?
+    started_at: datetime
+    finished_at: datetime?
+    receipt_id: text?
+    policy_id: text?
+    admission_id: text?
+    placement_id: text?
+    provider: text?
+    error: text?
+    index workload_id using hash(workload_id)
+    index environment_id using hash(environment_id)
+    index deployment_id using hash(deployment_id)
+  }
+
+  collection Receipt {
+    receipt_id: text
+    execution_id: text
+    environment_id: text
+    project_id: text
+    workload_id: text
+    deployment_id: text?
+    policy_id: text?
+    admission_id: text?
+    created_at: datetime
+    index execution_id using hash(execution_id)
+    index receipt_id using hash(receipt_id)
+  }
+
+  collection Service {
+    name: text
+    capabilities: json
+    provider: text
+    environment: text?
+    project: text?
+    workload: text?
+    endpoint: text?
+    description: text?
+    created_at: datetime
+    updated_at: datetime
+    index name using hash(name)
+  }
+
+  collection Provider {
+    provider_id: text
+    kind: text
+    endpoint: text?
+    priority: integer
+    registered_by: text
+    observed_at: datetime
+  }
+
+  collection Event {
+    sequence: integer
+    kind: text
+    at: datetime
+    environment: text?
+    project: text?
+    workload: text?
+    deployment_id: text?
+    execution_id: text?
+    message: text
+    data: json?
+    index sequence using sorted(sequence)
+    index kind using hash(kind)
+  }
+
+  policy Project {
+    read: authenticated
+    write: authenticated
+  }
+  policy ProjectRevision {
+    read: authenticated
+    write: authenticated
+  }
+  policy Environment {
+    read: authenticated
+    write: authenticated
+  }
+  policy EnvironmentProject {
+    read: authenticated
+    write: authenticated
+  }
+  policy Deployment {
+    read: authenticated
+    write: authenticated
+  }
+  policy Workload {
+    read: authenticated
+    write: authenticated
+  }
+  policy Execution {
+    read: authenticated
+    write: authenticated
+  }
+  policy Receipt {
+    read: authenticated
+    write: authenticated
+  }
+  policy Service {
+    read: authenticated
+    write: authenticated
+  }
+  policy Provider {
+    read: authenticated
+    write: authenticated
+  }
+  policy Event {
+    read: authenticated
+    write: authenticated
+  }
+}
