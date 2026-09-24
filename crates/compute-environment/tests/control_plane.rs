@@ -430,6 +430,7 @@ async fn deploy_verify_and_promote_the_exact_revision() {
             from: "preprod".into(),
             to: "production".into(),
             allow_unhealthy: false,
+            config: None,
         })
         .await
         .unwrap();
@@ -532,6 +533,7 @@ async fn deploy_verify_and_promote_the_exact_revision() {
                 from: "preprod".into(),
                 to: "production".into(),
                 allow_unhealthy: false,
+                config: None,
             })
             .await
             .is_err(),

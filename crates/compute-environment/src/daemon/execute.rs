@@ -359,6 +359,9 @@ impl Daemon {
             if runtime.generation != generation {
                 return None;
             }
+            if service {
+                super::processes::forget(&self.config.state_dir, key);
+            }
             let stopping = runtime
                 .control
                 .as_ref()

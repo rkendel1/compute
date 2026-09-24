@@ -400,6 +400,7 @@ dependencies = [
  "compute-state-feltdb",
  "compute-state-file",
  "compute-state-memory",
+ "libc",
  "predicates",
  "serde",
  "serde_json",

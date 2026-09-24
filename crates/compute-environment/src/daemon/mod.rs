@@ -15,6 +15,7 @@
 mod deploy;
 mod execute;
 mod lifecycle;
+mod processes;
 mod reconcile;
 mod views;
 
@@ -272,6 +273,9 @@ impl Daemon {
     pub async fn start(config: DaemonConfig) -> Result<Arc<Self>, EnvironmentError> {
         std::fs::create_dir_all(&config.state_dir)?;
         let lock = lock_state_dir(&config.state_dir)?;
+        // Services a killed predecessor left running on this node would
+        // otherwise run twice.
+        let reaped = processes::reap(&config.state_dir).await;
         let control = ControlState::new(config.state.clone());
         // The first read proves the control state is reachable and ours.
         let last = control
@@ -333,6 +337,7 @@ impl Daemon {
             serde_json::json!({
                 "state": daemon.config.state.backend(),
                 "artifacts": daemon.config.artifacts.location(),
+                "reaped": reaped,
             }),
         );
         daemon.apply(started).await?;

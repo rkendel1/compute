@@ -608,7 +608,12 @@ impl ProcessRuntime {
 
         let started = Instant::now();
         let mut child = match command.spawn() {
-            Ok(child) => child,
+            Ok(child) => {
+                if let (Some(control), Some(pid)) = (control, child.id()) {
+                    control.record_process(pid);
+                }
+                child
+            }
             Err(error) => {
                 return Ok(failure_result(
                     workload,

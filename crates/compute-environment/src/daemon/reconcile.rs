@@ -136,6 +136,24 @@ impl Daemon {
             runtime.health = None;
             runtime.log_directory = Some(log_directory);
         }
+        // Record the process group on this node once it exists.
+        {
+            let control = control.clone();
+            let state_dir = self.config.state_dir.clone();
+            let key = key.clone();
+            tokio::spawn(async move {
+                for _ in 0..600 {
+                    if let Some(pid) = control.process_id() {
+                        super::processes::record(&state_dir, &key, pid);
+                        return;
+                    }
+                    if control.is_cancelled() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            });
+        }
         let daemon = self.clone();
         let task_key = key.clone();
         let handle = tokio::spawn(async move {

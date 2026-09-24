@@ -1295,6 +1295,10 @@ pub struct PromoteCommand {
     /// Promote even when the source deployment is not healthy.
     #[arg(long)]
     pub allow_unhealthy: bool,
+    /// Set the project's configuration in the target environment.
+    /// Promotion never copies the source environment's configuration.
+    #[arg(long = "set", value_parser = parse_pair)]
+    pub env: Vec<(String, String)>,
     #[arg(long)]
     pub wait: bool,
     #[command(flatten)]
@@ -1310,6 +1314,7 @@ pub async fn promote(command: PromoteCommand) -> compute_core::Result<()> {
         from: command.from,
         to: command.to,
         allow_unhealthy: command.allow_unhealthy,
+        config: (!command.env.is_empty()).then(|| command.env.into_iter().collect()),
     };
     let deployment: DeploymentView = client
         .post("/deployments/promote", Some(&request))
@@ -1534,6 +1539,12 @@ pub async fn events(command: EventsCommand) -> compute_core::Result<()> {
         .await
         .map_err(error)?;
     let mut last = command.after.unwrap_or_default();
+    // One JSON document, like every other command; a followed stream is
+    // one JSON document per line.
+    if command.json && !command.follow {
+        print_json(&events);
+        return Ok(());
+    }
     for event in &events {
         last = last.max(event.sequence);
         print_event(event, command.json);

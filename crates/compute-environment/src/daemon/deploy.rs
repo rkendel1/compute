@@ -625,7 +625,7 @@ impl Daemon {
                     project: request.project.clone(),
                     environment: request.to.clone(),
                     revision: Some(source.value.revision_id.clone()),
-                    config: None,
+                    config: request.config.clone(),
                     desired_state: None,
                 },
                 Some(source_id.clone()),

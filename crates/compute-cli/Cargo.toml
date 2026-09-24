@@ -33,6 +33,7 @@ toml.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+libc.workspace = true
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile.workspace = true

@@ -162,6 +162,11 @@ pub struct PromoteRequest {
     /// Promote even when the source deployment is not healthy.
     #[serde(default)]
     pub allow_unhealthy: bool,
+    /// The project's configuration in the target environment. Promotion
+    /// copies the revision, never the source environment's configuration.
+    /// Defaults to the target's existing configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<BTreeMap<String, String>>,
 }
 
 /// Register a shared service other projects can consume.

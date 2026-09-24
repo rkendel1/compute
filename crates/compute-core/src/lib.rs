@@ -2205,6 +2205,8 @@ pub trait RuntimeAdapter: Send + Sync {
 pub struct ExecutionControl {
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     log_directory: Option<PathBuf>,
+    /// The workload's process (and process group) once spawned; 0 before.
+    process: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl ExecutionControl {
@@ -2232,6 +2234,20 @@ impl ExecutionControl {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Adapters that spawn a process record it here, so the host can find
+    /// the workload's process group again, for example after a crash.
+    pub fn record_process(&self, pid: u32) {
+        self.process.store(pid, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The spawned process, which also leads the workload's process group.
+    pub fn process_id(&self) -> Option<u32> {
+        match self.process.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => None,
+            pid => Some(pid),
+        }
     }
 }
 
