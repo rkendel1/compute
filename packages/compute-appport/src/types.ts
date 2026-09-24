@@ -132,6 +132,7 @@ export interface ExecutionReceipt {
   bundle: string | null;
   provider?: { kind: "local"; id: string } | { kind: "remote"; id: string; endpoint: string };
   provider_protocol?: string;
+  placement?: ReceiptPlacement;
   distribution: { id: string; platform: string; manifest_version: string };
   runtime: {
     declared: RuntimeKind;
@@ -178,7 +179,11 @@ export type ExecutionFailureKind =
   | "capability_denied"
   | "runtime_failure"
   | "input_materialization_failure"
-  | "output_contract";
+  | "output_contract"
+  | "placement_failed"
+  | "provider_unavailable"
+  | "provider_rejected"
+  | "evidence_invalid";
 
 export interface OutputContractFailure {
   kind: "output_contract";
@@ -298,3 +303,45 @@ export type RunResult =
       receipt?: ExecutionReceipt;
       isolation?: IsolationEvidence;
     };
+
+export interface ReceiptPlacement {
+  placement_id: string;
+  provider_id: string;
+  provider_protocol: string;
+  selection_mode: "explicit" | "pool";
+  selection_reason: {
+    compatibility_result: "compatible";
+    selection_priority: number;
+    ordering: string;
+    compatible_candidates: number;
+  };
+}
+
+/** Deterministic placement decision produced by `compute placement inspect`. */
+export interface PlacementReport {
+  placement_version: "compute.placement@1";
+  placement_id: string;
+  outcome: "placed" | "placement_failed";
+  selection_mode: "explicit" | "pool";
+  requested_provider?: string;
+  requirements: Record<string, unknown>;
+  selection_policy: { ordering: string[]; require_healthy: boolean; allow_stale_capabilities: boolean };
+  providers: Array<Record<string, unknown>>;
+  compatible_providers: string[];
+  incompatible_providers: string[];
+  excluded_providers: string[];
+  selected?: Record<string, unknown> & { provider_id: string };
+  failure?: { code: string; message: string };
+  explanation: { requires: string[]; considered: string[]; selection: string };
+}
+
+export interface PlacementOptions {
+  provider?: string | undefined;
+  refresh?: boolean | undefined;
+  distribution_id?: string | undefined;
+  isolation?: IsolationProfile | undefined;
+}
+
+export type PoolRunResult =
+  | (Extract<RunResult, { kind: "execution" }> & { receipt: ExecutionReceipt; placement: PlacementReport })
+  | (Extract<RunResult, { kind: "failure" }> & { placement?: PlacementReport });
