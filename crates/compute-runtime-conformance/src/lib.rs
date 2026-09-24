@@ -563,6 +563,7 @@ fn workload(
         network,
         resources: ResourceLimits::default(),
         isolation: compute_core::IsolationProfile::Process,
+        dependencies: None,
     }
 }
 

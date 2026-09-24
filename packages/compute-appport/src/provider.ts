@@ -317,6 +317,7 @@ function normalizeWorkload(workload: WorkloadSpec): unknown {
     resources: Object.fromEntries(Object.entries(workload.resources ?? {}).filter(([, value]) => value != null)),
     network: workload.network ?? "none",
     isolation: workload.isolation ?? { profile: "process" },
+    ...(workload.dependencies === undefined ? {} : { dependencies: workload.dependencies }),
   };
 }
 

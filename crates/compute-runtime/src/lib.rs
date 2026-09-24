@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use compute_core::{
     BundleIdentity, BundleInspection, BundleVerification, BundleWorkloadPlan, ComputeCapability,
-    ComputeError, ComputeManifest, DistributionIdentity, Inspection, IsolationProfile,
-    PortableDataFlow, ReceiptEnvironment, Result, RuntimeAdapter, RuntimeAvailability, RuntimeKind,
-    RuntimeSpec, Workload, WorkloadBundle, WorkloadIdentity, WorkloadPlan, WorkloadSpec,
+    ComputeError, ComputeManifest, DependencyCapsule, DistributionIdentity,
+    ExecutionDependencyEvidence, Inspection, IsolationProfile, PortableDataFlow,
+    ReceiptEnvironment, Result, RuntimeAdapter, RuntimeAvailability, RuntimeKind, RuntimeSpec,
+    Workload, WorkloadBundle, WorkloadIdentity, WorkloadPlan, WorkloadSpec,
     WorkloadValidationStatus, create_execution_receipt, input_receipts, request_workload_identity,
     sha256_file_identity, sha256_identity,
 };
@@ -182,11 +183,30 @@ impl Compute {
                 code: reason.code,
             })?;
         let runtime = adapter.resolve(&workload).await?;
+        if let Some(capsule) = &workload.dependencies
+            && let Some(required) = &capsule.runtime_version
+        {
+            let found = runtime.resolved_version.as_deref().unwrap_or("unknown");
+            if found != required {
+                return Err(ComputeError::InvalidDependencyCapsule(format!(
+                    "dependency capsule requires {}@{required}, resolved {found}",
+                    capsule.runtime
+                )));
+            }
+        }
         let environment = receipt_environment(adapter, &runtime)?;
         let started_at = Utc::now();
         let mut result = adapter.execute(&workload, &runtime).await?;
         let finished_at = Utc::now();
         result.isolation = Some(isolation);
+        result.dependencies = match &workload.dependencies {
+            Some(capsule) => Some(ExecutionDependencyEvidence {
+                capsule_id: capsule.capsule_id()?,
+                file_count: capsule.files.len() as u64,
+                verified: true,
+            }),
+            None => None,
+        };
         result.receipt = Some(create_execution_receipt(
             &workload,
             &runtime,
@@ -213,6 +233,58 @@ impl Compute {
         workload.materialize(path)
     }
 
+    pub fn execution_request_from(
+        &self,
+        root: &Path,
+        workload: &WorkloadSpec,
+    ) -> Result<compute_core::ExecutionRequest> {
+        workload.materialize_from(root)
+    }
+
+    pub fn plan_generated_workload(
+        &self,
+        root: &Path,
+        workload: WorkloadSpec,
+    ) -> Result<WorkloadPlan> {
+        self.plan_generated_workload_with_dependencies(root, workload, None)
+    }
+
+    pub fn plan_generated_workload_with_dependencies(
+        &self,
+        root: &Path,
+        workload: WorkloadSpec,
+        capsule: Option<DependencyCapsule>,
+    ) -> Result<WorkloadPlan> {
+        let workload_id = workload.workload_id()?;
+        let mut request = workload.materialize_from(root)?;
+        attach_dependencies_for_plan(&workload, &mut request, capsule)?;
+        self.plan_request(workload, workload_id, &request)
+    }
+
+    pub async fn run_generated_workload(
+        &self,
+        root: &Path,
+        workload: WorkloadSpec,
+        stdin: Vec<u8>,
+    ) -> Result<compute_core::ExecutionResult> {
+        self.run_generated_workload_with_dependencies(root, workload, stdin, None)
+            .await
+    }
+
+    pub async fn run_generated_workload_with_dependencies(
+        &self,
+        root: &Path,
+        workload: WorkloadSpec,
+        stdin: Vec<u8>,
+        capsule: Option<DependencyCapsule>,
+    ) -> Result<compute_core::ExecutionResult> {
+        let workload_id = WorkloadIdentity::parse(workload.workload_id()?)?;
+        let mut request = workload.materialize_from(root)?;
+        attach_dependencies(&workload, &mut request, capsule)?;
+        request.stdin = stdin;
+        self.run_identified(request, workload_id, None).await
+    }
+
     pub async fn plan_workload(&self, path: &Path) -> Result<WorkloadPlan> {
         self.plan_workload_with_options(path, None, None).await
     }
@@ -232,12 +304,24 @@ impl Compute {
         expected_workload_id: Option<&str>,
         isolation: Option<IsolationProfile>,
     ) -> Result<WorkloadPlan> {
+        self.plan_workload_with_dependencies(path, expected_workload_id, isolation, None)
+            .await
+    }
+
+    pub async fn plan_workload_with_dependencies(
+        &self,
+        path: &Path,
+        expected_workload_id: Option<&str>,
+        isolation: Option<IsolationProfile>,
+        capsule: Option<DependencyCapsule>,
+    ) -> Result<WorkloadPlan> {
         let workload = self.load_workload(path)?;
         if let Some(expected) = expected_workload_id {
             workload.require_id(expected)?;
         }
         let workload_id = workload.workload_id()?;
         let mut request = self.execution_request(path, &workload)?;
+        attach_dependencies_for_plan(&workload, &mut request, capsule)?;
         request.isolation = resolve_override(workload.isolation.profile, isolation)?;
         self.plan_request(workload, workload_id, &request)
     }
@@ -275,7 +359,7 @@ impl Compute {
                 output_root: "/output".into(),
             },
             input_preparation: workload.inputs.clone(),
-            workload,
+            workload: workload.clone(),
             validation: WorkloadValidationStatus::Valid,
             resolved_runtime: request.runtime.clone(),
             backend_capabilities: capabilities,
@@ -283,6 +367,14 @@ impl Compute {
             capability_error,
             isolation,
             output_root: "/output".into(),
+            dependencies: compute_core::DependencyRequirementPlan {
+                required: workload.dependencies.is_some(),
+                capsule_id: workload
+                    .dependencies
+                    .as_ref()
+                    .map(|value| value.capsule.clone()),
+                available: request.dependencies.is_some(),
+            },
         })
     }
 
@@ -305,12 +397,24 @@ impl Compute {
         expected_workload_id: Option<&str>,
         isolation: Option<IsolationProfile>,
     ) -> Result<compute_core::ExecutionResult> {
+        self.run_workload_with_dependencies(path, expected_workload_id, isolation, None)
+            .await
+    }
+
+    pub async fn run_workload_with_dependencies(
+        &self,
+        path: &Path,
+        expected_workload_id: Option<&str>,
+        isolation: Option<IsolationProfile>,
+        capsule: Option<DependencyCapsule>,
+    ) -> Result<compute_core::ExecutionResult> {
         let workload = self.load_workload(path)?;
         if let Some(expected) = expected_workload_id {
             workload.require_id(expected)?;
         }
         let workload_id = WorkloadIdentity::parse(workload.workload_id()?)?;
         let mut request = self.execution_request(path, &workload)?;
+        attach_dependencies(&workload, &mut request, capsule)?;
         request.isolation = resolve_override(workload.isolation.profile, isolation)?;
         self.run_identified(request, workload_id, None).await
     }
@@ -333,6 +437,40 @@ impl Compute {
         bundle.inspection()
     }
 
+    pub fn create_bundle_with_dependencies(
+        &self,
+        workload_path: &Path,
+        output: &Path,
+        capsule: DependencyCapsule,
+    ) -> Result<BundleInspection> {
+        let workload = WorkloadSpec::load(workload_path)?;
+        let base = workload_path.parent().unwrap_or_else(|| Path::new("."));
+        let bundle = WorkloadBundle::create_from_with_capsule(workload, base, Some(capsule))?;
+        bundle.write(output)?;
+        bundle.inspection()
+    }
+
+    pub fn create_generated_bundle(
+        &self,
+        root: &Path,
+        workload: WorkloadSpec,
+        output: &Path,
+    ) -> Result<BundleInspection> {
+        self.create_generated_bundle_with_dependencies(root, workload, output, None)
+    }
+
+    pub fn create_generated_bundle_with_dependencies(
+        &self,
+        root: &Path,
+        workload: WorkloadSpec,
+        output: &Path,
+        capsule: Option<DependencyCapsule>,
+    ) -> Result<BundleInspection> {
+        let bundle = WorkloadBundle::create_from_with_capsule(workload, root, capsule)?;
+        bundle.write(output)?;
+        bundle.inspection()
+    }
+
     pub fn plan_bundle(
         &self,
         path: &Path,
@@ -349,10 +487,28 @@ impl Compute {
         expected_bundle_id: Option<&str>,
         isolation: Option<IsolationProfile>,
     ) -> Result<BundleWorkloadPlan> {
+        self.plan_bundle_with_dependencies(
+            path,
+            expected_workload_id,
+            expected_bundle_id,
+            isolation,
+            None,
+        )
+    }
+
+    pub fn plan_bundle_with_dependencies(
+        &self,
+        path: &Path,
+        expected_workload_id: Option<&str>,
+        expected_bundle_id: Option<&str>,
+        isolation: Option<IsolationProfile>,
+        capsule: Option<DependencyCapsule>,
+    ) -> Result<BundleWorkloadPlan> {
         let bundle = self.load_bundle(path)?;
         bundle.require_ids(expected_workload_id, expected_bundle_id)?;
         let verification = bundle.verification()?;
         let mut materialized = bundle.materialize()?;
+        attach_dependencies_for_plan(&bundle.workload, &mut materialized.request, capsule)?;
         materialized.request.isolation =
             resolve_override(bundle.workload.isolation.profile, isolation)?;
         let plan = self.plan_request(
@@ -383,10 +539,29 @@ impl Compute {
         expected_bundle_id: Option<&str>,
         isolation: Option<IsolationProfile>,
     ) -> Result<compute_core::ExecutionResult> {
+        self.run_bundle_with_dependencies(
+            path,
+            expected_workload_id,
+            expected_bundle_id,
+            isolation,
+            None,
+        )
+        .await
+    }
+
+    pub async fn run_bundle_with_dependencies(
+        &self,
+        path: &Path,
+        expected_workload_id: Option<&str>,
+        expected_bundle_id: Option<&str>,
+        isolation: Option<IsolationProfile>,
+        capsule: Option<DependencyCapsule>,
+    ) -> Result<compute_core::ExecutionResult> {
         let bundle = self.load_bundle(path)?;
         bundle.require_ids(expected_workload_id, expected_bundle_id)?;
         let verification = bundle.verification()?;
         let mut materialized = bundle.materialize()?;
+        attach_dependencies(&bundle.workload, &mut materialized.request, capsule)?;
         materialized.request.isolation =
             resolve_override(bundle.workload.isolation.profile, isolation)?;
         self.run_identified(
@@ -439,6 +614,7 @@ impl Compute {
             network,
             resources,
             isolation,
+            dependencies: None,
         })
     }
 
@@ -462,6 +638,68 @@ fn resolve_override(
         Some(profile) => Ok(profile),
         None => Ok(declared),
     }
+}
+
+fn attach_dependencies(
+    workload: &WorkloadSpec,
+    request: &mut compute_core::ExecutionRequest,
+    supplied: Option<DependencyCapsule>,
+) -> Result<()> {
+    let Some(reference) = &workload.dependencies else {
+        if supplied.is_some() || request.dependencies.is_some() {
+            return Err(ComputeError::InvalidDependencyCapsule(
+                "dependency capsule supplied but not declared by WorkloadSpec".into(),
+            ));
+        }
+        return Ok(());
+    };
+    let capsule = match supplied.or_else(|| request.dependencies.take()) {
+        Some(capsule) => capsule,
+        None => load_cached_capsule(&reference.capsule)?,
+    };
+    let actual = capsule.capsule_id()?;
+    if actual != reference.capsule {
+        return Err(ComputeError::InvalidDependencyCapsule(format!(
+            "dependency capsule identity mismatch: expected {}, found {actual}",
+            reference.capsule
+        )));
+    }
+    capsule.require_compatible(workload.runtime)?;
+    request.dependencies = Some(capsule);
+    Ok(())
+}
+
+fn attach_dependencies_for_plan(
+    workload: &WorkloadSpec,
+    request: &mut compute_core::ExecutionRequest,
+    supplied: Option<DependencyCapsule>,
+) -> Result<()> {
+    if supplied.is_some() || request.dependencies.is_some() || workload.dependencies.is_none() {
+        attach_dependencies(workload, request, supplied)?;
+    }
+    Ok(())
+}
+
+fn load_cached_capsule(identity: &str) -> Result<DependencyCapsule> {
+    compute_core::validate_sha256_identity(identity)?;
+    let root = std::env::var_os("COMPUTE_DEPENDENCY_CACHE")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            ComputeError::InvalidDependencyCapsule(format!(
+                "dependency_missing: capsule {identity} is referenced but not embedded; set COMPUTE_DEPENDENCY_CACHE"
+            ))
+        })?;
+    let digest = identity
+        .strip_prefix("sha256:")
+        .expect("validated identity");
+    let path = root.join(format!("{digest}.deps"));
+    if !path.is_file() {
+        return Err(ComputeError::InvalidDependencyCapsule(format!(
+            "dependency_missing: capsule {identity} was not found in {}",
+            root.display()
+        )));
+    }
+    DependencyCapsule::read(&path)
 }
 
 fn receipt_environment(

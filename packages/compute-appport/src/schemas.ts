@@ -55,6 +55,7 @@ export const workloadSpecSchema = s.object({
   resources: s.optional(resourceLimitsSchema),
   network: s.optional(network),
   isolation: s.optional(isolationRequirement),
+  dependencies: s.optional(s.object({ capsule: s.string({ pattern: "^sha256:[0-9a-f]{64}$" }) })),
 });
 
 const workloadExecutionRequestSchema = s.object({
@@ -135,6 +136,7 @@ const receipt = s.object({
     environment_names: s.array(s.string()),
   }),
   isolation: isolationEvidence,
+  dependencies: s.optional(s.object({ capsule_id: digest, verified: s.boolean() })),
   inputs: s.array(s.object({
     path: s.string(), size: s.integer({ minimum: 0 }), sha256: digest, required: s.boolean(),
   })),
@@ -168,6 +170,9 @@ export const executionResultSchema = s.object({
   missing_outputs: s.array(missingOutput),
   error: s.nullable(executionError),
   isolation: s.optional(isolationEvidence),
+  dependencies: s.optional(s.object({
+    capsule_id: digest, file_count: s.integer({ minimum: 0 }), verified: s.boolean(),
+  })),
   receipt: s.optional(receipt),
 });
 
@@ -214,6 +219,9 @@ export const workloadPlanSchema = s.object({
   })(),
   capability_compatible: s.boolean(),
   capability_error: s.optional(s.string()),
+  dependencies: s.object({
+    required: s.boolean(), capsule_id: s.optional(digest), available: s.boolean(),
+  }),
   isolation: s.object({
     requested: isolationProfile,
     effective: s.nullable(isolationProfile),

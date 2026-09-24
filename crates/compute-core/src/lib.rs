@@ -16,6 +16,8 @@ use walkdir::WalkDir;
 
 mod receipt;
 pub use receipt::*;
+mod dependencies;
+pub use dependencies::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -308,6 +310,8 @@ pub struct ExecutionRequest {
     pub resources: ResourceLimits,
     #[serde(default)]
     pub isolation: IsolationProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<DependencyCapsule>,
 }
 
 /// Backwards-compatible name for the adapter-facing, materialized request.
@@ -344,6 +348,12 @@ pub struct WorkloadOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct WorkloadDependencies {
+    pub capsule: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkloadSpec {
     #[serde(with = "schema_version")]
     pub version: String,
@@ -365,6 +375,8 @@ pub struct WorkloadSpec {
     pub network: NetworkPolicy,
     #[serde(default, skip_serializing_if = "IsolationRequirement::is_process")]
     pub isolation: IsolationRequirement,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<WorkloadDependencies>,
 }
 
 impl WorkloadSpec {
@@ -397,6 +409,9 @@ impl WorkloadSpec {
                     pair.0
                 )));
             }
+        }
+        if let Some(dependencies) = &self.dependencies {
+            validate_sha256_identity(&dependencies.capsule)?;
         }
 
         let mut input_paths = BTreeSet::new();
@@ -461,8 +476,15 @@ impl WorkloadSpec {
     /// Resolve declared files relative to the workload file, producing the
     /// existing adapter-facing execution request.
     pub fn materialize(&self, workload_file: &Path) -> Result<ExecutionRequest> {
-        self.validate()?;
         let base = workload_file.parent().unwrap_or_else(|| Path::new("."));
+        self.materialize_from(base)
+    }
+
+    /// Materialize a generated portable specification relative to its logical
+    /// workload root. This is the same operation used for file-backed specs;
+    /// the separate entry point keeps host paths out of the portable identity.
+    pub fn materialize_from(&self, base: &Path) -> Result<ExecutionRequest> {
+        self.validate()?;
         let entrypoint = resolve_declared_path(base, &self.entrypoint, "entrypoint")?;
         let mut declared_inputs = self.inputs.clone();
         declared_inputs.sort_by(|left, right| left.path.cmp(&right.path));
@@ -514,6 +536,7 @@ impl WorkloadSpec {
             network: self.network.clone(),
             resources: self.resources.clone(),
             isolation: self.isolation.profile,
+            dependencies: None,
         })
     }
 
@@ -575,6 +598,7 @@ pub struct WorkloadBundle {
     pub workload: WorkloadSpec,
     pub entrypoint: BundleInput,
     pub inputs: Vec<BundleInput>,
+    pub dependency_capsule: Option<DependencyCapsule>,
 }
 
 #[derive(Debug)]
@@ -600,6 +624,16 @@ pub struct WorkloadBundleManifest {
     pub bundle_id: String,
     pub entrypoint: BundleEntryManifest,
     pub inputs: Vec<BundleEntryManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<BundleDependencyManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleDependencyManifest {
+    pub capsule_id: String,
+    pub size: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -625,12 +659,27 @@ pub struct BundleInspection {
     pub network: NetworkPolicy,
     pub inputs: Vec<BundleEntryManifest>,
     pub outputs: Vec<WorkloadOutput>,
+    pub dependencies: Option<BundleDependencyManifest>,
 }
 
 impl WorkloadBundle {
     pub fn create(workload_file: &Path) -> Result<Self> {
         let workload = WorkloadSpec::load(workload_file)?;
         let base = workload_file.parent().unwrap_or_else(|| Path::new("."));
+        Self::create_from(workload, base)
+    }
+
+    /// Create the canonical bundle from an already-resolved WorkloadSpec.
+    pub fn create_from(workload: WorkloadSpec, base: &Path) -> Result<Self> {
+        Self::create_from_with_capsule(workload, base, None)
+    }
+
+    pub fn create_from_with_capsule(
+        workload: WorkloadSpec,
+        base: &Path,
+        dependency_capsule: Option<DependencyCapsule>,
+    ) -> Result<Self> {
+        workload.validate()?;
         let entrypoint_path = resolve_declared_path(base, &workload.entrypoint, "entrypoint")?;
         if !entrypoint_path.is_file() {
             return Err(ComputeError::InvalidBundle(
@@ -663,6 +712,7 @@ impl WorkloadBundle {
             workload,
             entrypoint,
             inputs,
+            dependency_capsule,
         };
         bundle.validate()?;
         Ok(bundle)
@@ -721,6 +771,18 @@ impl WorkloadBundle {
                 });
             }
         }
+        let dependency_capsule = if let Some(dependency) = &manifest.dependencies {
+            let data =
+                take_bundle_file(&mut files, Path::new("dependencies/capsule.compute.deps"))?;
+            if data.len() as u64 != dependency.size || sha256_identity(&data) != dependency.sha256 {
+                return Err(ComputeError::InvalidBundle(
+                    "embedded dependency capsule metadata mismatch".into(),
+                ));
+            }
+            Some(DependencyCapsule::from_bytes(&data)?)
+        } else {
+            None
+        };
         if let Some(unexpected) = files.keys().next() {
             return Err(ComputeError::InvalidBundle(format!(
                 "unexpected bundle input: {}",
@@ -733,6 +795,7 @@ impl WorkloadBundle {
             workload,
             entrypoint,
             inputs,
+            dependency_capsule,
         };
         bundle.validate()?;
         if bundle.manifest()? != manifest {
@@ -795,6 +858,28 @@ impl WorkloadBundle {
             };
             return Err(ComputeError::InvalidBundle(detail));
         }
+        match (&self.workload.dependencies, &self.dependency_capsule) {
+            (None, None) | (Some(_), None) => {}
+            (None, Some(_)) => {
+                return Err(ComputeError::InvalidBundle(
+                    "bundle embeds an undeclared dependency capsule".into(),
+                ));
+            }
+            (Some(reference), Some(capsule)) => {
+                let capsule_id = capsule.capsule_id()?;
+                if reference.capsule != capsule_id {
+                    return Err(ComputeError::InvalidBundle(format!(
+                        "dependency capsule identity mismatch: declared {}, embedded {capsule_id}",
+                        reference.capsule
+                    )));
+                }
+                if capsule.runtime != self.workload.runtime {
+                    return Err(ComputeError::InvalidBundle(
+                        "dependency capsule runtime does not match workload".into(),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -813,6 +898,9 @@ impl WorkloadBundle {
         inputs.sort_by(|left, right| left.path.cmp(&right.path));
         for input in &inputs {
             hash_bundle_input(&mut hasher, input);
+        }
+        if let Some(capsule) = &self.dependency_capsule {
+            hash_bundle_field(&mut hasher, &capsule.to_bytes()?);
         }
         Ok(format!("sha256:{:x}", hasher.finalize()))
     }
@@ -851,6 +939,17 @@ impl WorkloadBundle {
             bundle_id: self.bundle_id()?,
             entrypoint: bundle_entry_manifest(&self.entrypoint),
             inputs,
+            dependencies: match &self.dependency_capsule {
+                Some(capsule) => {
+                    let data = capsule.to_bytes()?;
+                    Some(BundleDependencyManifest {
+                        capsule_id: capsule.capsule_id()?,
+                        size: data.len() as u64,
+                        sha256: sha256_identity(&data),
+                    })
+                }
+                None => None,
+            },
         })
     }
 
@@ -903,6 +1002,7 @@ impl WorkloadBundle {
             network: self.workload.network.clone(),
             inputs,
             outputs: self.workload.outputs.clone(),
+            dependencies: manifest.dependencies,
         })
     }
 
@@ -968,6 +1068,7 @@ impl WorkloadBundle {
                 network: self.workload.network.clone(),
                 resources: self.workload.resources.clone(),
                 isolation: self.workload.isolation.profile,
+                dependencies: self.dependency_capsule.clone(),
             },
             _source: source,
         })
@@ -989,6 +1090,12 @@ impl WorkloadBundle {
                 .iter()
                 .map(|input| (Path::new("inputs").join(&input.path), input.data.clone())),
         );
+        if let Some(capsule) = &self.dependency_capsule {
+            entries.push((
+                PathBuf::from("dependencies/capsule.compute.deps"),
+                capsule.to_bytes()?,
+            ));
+        }
         entries.sort_by(|left, right| left.0.cmp(&right.0));
 
         let mut bytes = Vec::new();
@@ -1207,11 +1314,20 @@ pub struct ExecutionResult {
     pub error: Option<ExecutionError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<IsolationEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<ExecutionDependencyEvidence>,
     /// Verifiable evidence attached by the orchestration layer. Runtime
     /// adapters leave this empty because they do not own distribution or
     /// portable workload identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<ExecutionReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionDependencyEvidence {
+    pub capsule_id: String,
+    pub file_count: u64,
+    pub verified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1683,6 +1799,15 @@ pub struct WorkloadPlan {
     pub input_preparation: Vec<WorkloadInput>,
     pub output_root: PathBuf,
     pub data_flow: PortableDataFlow,
+    pub dependencies: DependencyRequirementPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyRequirementPlan {
+    pub required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capsule_id: Option<String>,
+    pub available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1723,6 +1848,7 @@ pub struct StagedWorkload {
     pub tmp_dir: PathBuf,
     pub output_dir: PathBuf,
     pub entrypoint: PathBuf,
+    pub dependencies_dir: Option<PathBuf>,
 }
 
 pub fn stage_workload(workload: &Workload) -> Result<StagedWorkload> {
@@ -1733,6 +1859,28 @@ pub fn stage_workload(workload: &Workload) -> Result<StagedWorkload> {
     fs::create_dir_all(&work_dir)?;
     fs::create_dir_all(&tmp_dir)?;
     fs::create_dir_all(&output_dir)?;
+    let dependencies_dir = if let Some(capsule) = &workload.dependencies {
+        capsule.validate()?;
+        capsule.require_compatible(workload.runtime.kind)?;
+        let directory = root.path().join("dependencies");
+        fs::create_dir(&directory)?;
+        for file in &capsule.files {
+            validate_portable_path(&file.path, "dependency path")?;
+            let destination = directory.join(&file.path);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&destination, &file.data)?;
+            #[cfg(unix)]
+            if file.executable {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&destination, fs::Permissions::from_mode(0o755))?;
+            }
+        }
+        Some(directory)
+    } else {
+        None
+    };
 
     let entry_name = workload
         .entrypoint
@@ -1779,6 +1927,7 @@ pub fn stage_workload(workload: &Workload) -> Result<StagedWorkload> {
         tmp_dir,
         output_dir,
         entrypoint: staged_entrypoint,
+        dependencies_dir,
     })
 }
 
@@ -2039,6 +2188,8 @@ pub enum ComputeError {
     },
     #[error("invalid workload bundle: {0}")]
     InvalidBundle(String),
+    #[error("invalid dependency capsule: {0}")]
+    InvalidDependencyCapsule(String),
     #[error("invalid execution receipt: {0}")]
     InvalidReceipt(String),
     #[error("invalid mount path: {0}")]
@@ -2181,6 +2332,7 @@ mod tests {
             network: NetworkPolicy::Network,
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
+            dependencies: None,
         })
         .unwrap();
 
@@ -2214,6 +2366,7 @@ mod tests {
             network: NetworkPolicy::Network,
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
+            dependencies: None,
         };
 
         assert!(matches!(
@@ -2252,6 +2405,7 @@ mod tests {
             network: NetworkPolicy::None,
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
+            dependencies: None,
         };
 
         assert!(matches!(
@@ -2297,6 +2451,7 @@ mod tests {
                 ..ResourceLimits::default()
             },
             isolation: IsolationProfile::Strict,
+            dependencies: None,
         };
         let strict = RuntimeCapabilities::wasm()
             .resolve_isolation(RuntimeKind::Wasm, &request)
@@ -2356,6 +2511,7 @@ mod tests {
             },
             network: NetworkPolicy::Network,
             isolation: IsolationRequirement::default(),
+            dependencies: None,
         }
     }
 
@@ -2407,6 +2563,19 @@ mod tests {
         let mut strict = changed;
         strict.isolation.profile = IsolationProfile::Strict;
         assert_ne!(strict.workload_id().unwrap(), id);
+    }
+
+    #[test]
+    fn dependency_capsule_reference_is_part_of_workload_identity() {
+        let mut first = valid_spec();
+        first.dependencies = Some(WorkloadDependencies {
+            capsule: sha256_identity(b"capsule-a"),
+        });
+        let mut second = first.clone();
+        second.dependencies = Some(WorkloadDependencies {
+            capsule: sha256_identity(b"capsule-b"),
+        });
+        assert_ne!(first.workload_id().unwrap(), second.workload_id().unwrap());
     }
 
     fn bundle_fixture() -> (TempDir, PathBuf) {
@@ -2869,6 +3038,7 @@ mod tests {
             missing_outputs: vec![],
             error: None,
             isolation: None,
+            dependencies: None,
             receipt: None,
         }
     }
@@ -2961,6 +3131,7 @@ mod tests {
             network: NetworkPolicy::Network,
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
+            dependencies: None,
         };
         let first = stage_workload(&request).unwrap();
         let second = stage_workload(&request).unwrap();

@@ -368,6 +368,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "toml",
  "walkdir",
  "wat",
 ]

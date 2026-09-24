@@ -5,8 +5,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use compute_core::{
-    ExecutionStatus, InputSource, NetworkPolicy, ResourceLimits, RuntimeKind, RuntimeSource,
-    WorkloadBundle, WorkloadInput, WorkloadOutput, WorkloadSpec,
+    DependencyCapsule, ExecutionStatus, InputSource, NetworkPolicy, PlatformIdentity,
+    ResourceLimits, RuntimeKind, RuntimeSource, WorkloadBundle, WorkloadDependencies,
+    WorkloadInput, WorkloadOutput, WorkloadSpec,
 };
 use compute_runtime::Compute;
 use serde::{Deserialize, Serialize};
@@ -440,6 +441,38 @@ async fn certify_runtime(
         .ok_or_else(|| "fixture entrypoint has no file name".to_string())?;
     let local_entrypoint = workspace.path().join(entry_name);
     fs::copy(&entrypoint_source, &local_entrypoint).map_err(|error| error.to_string())?;
+    let dependency_capsule = if kind == RuntimeKind::Python {
+        use std::io::Write;
+        let mut entrypoint = fs::OpenOptions::new()
+            .append(true)
+            .open(&local_entrypoint)
+            .map_err(|error| error.to_string())?;
+        writeln!(
+            entrypoint,
+            "\nimport certification_dependency\nassert certification_dependency.VALUE == 'packaged'"
+        )
+        .map_err(|error| error.to_string())?;
+        let payload = workspace.path().join("resolved-dependencies");
+        fs::create_dir(&payload).map_err(|error| error.to_string())?;
+        fs::write(
+            payload.join("certification_dependency.py"),
+            "VALUE = 'packaged'\n",
+        )
+        .map_err(|error| error.to_string())?;
+        Some(
+            DependencyCapsule::create(
+                &payload,
+                kind,
+                Some(locked.version.clone()),
+                PlatformIdentity::current(),
+                vec![],
+                None,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
 
     let mut inputs = vec![WorkloadInput {
         path: PathBuf::from("hello.txt"),
@@ -501,6 +534,15 @@ async fn certify_runtime(
         },
         network,
         isolation: compute_core::IsolationRequirement::default(),
+        dependencies: dependency_capsule
+            .as_ref()
+            .map(|capsule| {
+                Ok(WorkloadDependencies {
+                    capsule: capsule.capsule_id()?,
+                })
+            })
+            .transpose()
+            .map_err(|error: compute_core::ComputeError| error.to_string())?,
     };
     let workload_path = workspace.path().join("workload.json");
     fs::write(
@@ -511,9 +553,13 @@ async fn certify_runtime(
     )
     .map_err(|error| error.to_string())?;
     let bundle_path = workspace.path().join("workload.compute");
-    let inspection = compute
-        .create_bundle(&workload_path, &bundle_path)
-        .map_err(|error| error.to_string())?;
+    let inspection = match dependency_capsule {
+        Some(capsule) => {
+            compute.create_bundle_with_dependencies(&workload_path, &bundle_path, capsule)
+        }
+        None => compute.create_bundle(&workload_path, &bundle_path),
+    }
+    .map_err(|error| error.to_string())?;
     compute
         .verify_bundle(&bundle_path)
         .map_err(|error| error.to_string())?;
@@ -553,6 +599,14 @@ async fn certify_runtime(
     }
     if execution.receipt.as_ref().map(|receipt| &receipt.isolation) != Some(process_evidence) {
         return Err("receipt isolation evidence differs from the execution".into());
+    }
+    if kind == RuntimeKind::Python
+        && execution
+            .dependencies
+            .as_ref()
+            .is_none_or(|dependencies| !dependencies.verified)
+    {
+        return Err("Python dependency capsule was not verified during certification".into());
     }
     if execution.stderr.text != "certification-stderr\n" {
         return Err(format!("unexpected stderr: {:?}", execution.stderr.text));
@@ -815,6 +869,7 @@ fn certify_negative_contracts() -> Result<String, String> {
         resources: ResourceLimits::default(),
         network: NetworkPolicy::Network,
         isolation: compute_core::IsolationRequirement::default(),
+        dependencies: None,
     };
     let mut traversal = base.clone();
     traversal.inputs.push(WorkloadInput {

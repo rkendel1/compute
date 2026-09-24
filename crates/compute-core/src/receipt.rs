@@ -184,6 +184,8 @@ pub struct ExecutionReceipt {
     pub request: ExecutionRequestSummary,
     pub policy: ExecutionPolicySummary,
     pub isolation: IsolationEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<ReceiptDependencies>,
     pub inputs: Vec<InputReceipt>,
     pub outputs: Vec<OutputReceipt>,
     pub execution: ExecutionReceiptStatus,
@@ -191,6 +193,13 @@ pub struct ExecutionReceipt {
     pub finished_at: Option<DateTime<Utc>>,
     pub provenance: ExecutionProvenance,
     pub receipt_hash: ReceiptHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptDependencies {
+    pub capsule_id: String,
+    pub verified: bool,
 }
 
 #[derive(Serialize)]
@@ -204,6 +213,7 @@ struct ReceiptBody<'a> {
     request: &'a ExecutionRequestSummary,
     policy: &'a ExecutionPolicySummary,
     isolation: &'a IsolationEvidence,
+    dependencies: &'a Option<ReceiptDependencies>,
     inputs: &'a [InputReceipt],
     outputs: &'a [OutputReceipt],
     execution: &'a ExecutionReceiptStatus,
@@ -252,6 +262,12 @@ impl ExecutionReceipt {
         validate_sha256_identity(&self.provenance.runtime_lock_id)?;
         validate_sha256_identity(&self.provenance.manifest_id)?;
         validate_sha256_identity(&self.receipt_hash.0)?;
+        if let Some(dependencies) = &self.dependencies {
+            validate_sha256_identity(&dependencies.capsule_id)?;
+            if !dependencies.verified {
+                return Err(invalid("receipt dependency capsule is not verified"));
+            }
+        }
         if self.distribution.id != self.provenance.distribution_id {
             return Err(invalid("distribution identity mismatch"));
         }
@@ -307,6 +323,7 @@ impl ExecutionReceipt {
             request: &self.request,
             policy: &self.policy,
             isolation: &self.isolation,
+            dependencies: &self.dependencies,
             inputs: &self.inputs,
             outputs: &self.outputs,
             execution: &self.execution,
@@ -443,6 +460,13 @@ pub fn create_execution_receipt(
             .isolation
             .clone()
             .ok_or_else(|| invalid("execution result is missing isolation evidence"))?,
+        dependencies: result
+            .dependencies
+            .as_ref()
+            .map(|dependencies| ReceiptDependencies {
+                capsule_id: dependencies.capsule_id.clone(),
+                verified: dependencies.verified,
+            }),
         inputs,
         outputs,
         execution: ExecutionReceiptStatus {
@@ -529,6 +553,7 @@ mod tests {
             network: NetworkPolicy::Network,
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
+            dependencies: None,
         };
         let resolved = ResolvedRuntime {
             kind: RuntimeKind::Python,
@@ -560,6 +585,7 @@ mod tests {
                 environment: BoundaryStatus::Enforced,
                 resources: BoundaryStatus::NotRequested,
             }),
+            dependencies: None,
             receipt: None,
         };
         let environment = ReceiptEnvironment {

@@ -12,6 +12,23 @@ Use `compute doctor --json` to inspect the execution capabilities available
 on the current backend. Unsupported resource or network boundaries are
 reported rather than silently downgraded.
 
+Start with an existing file—no workload JSON is required:
+
+```sh
+compute run script.py
+compute run --runtime node app.js -- --port 8080
+compute run script.py --explain
+compute bundle create script.py --output script.compute
+```
+
+These commands generate the canonical `WorkloadSpec` and use the existing
+engine. See [docs/getting-started.md](docs/getting-started.md) for project
+configuration, inputs, outputs, environment, policy, dry runs, and receipts.
+
+Resolved dependencies can be packaged separately as deterministic,
+content-addressed `compute.deps@1` capsules and embedded in the same `.compute`
+bundle. See [docs/dependencies.md](docs/dependencies.md).
+
 ## Universal runtime distribution
 
 Compute has first-class adapters for WASM, Python, Node, Bun, Deno, Ruby,

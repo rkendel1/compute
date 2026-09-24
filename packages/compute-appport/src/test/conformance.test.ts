@@ -97,6 +97,28 @@ test("inspect and dry-run expose identity and data flow without executing", asyn
   await assert.rejects(readFile(join(root, "executed")));
 });
 
+test("inspect reports immutable dependency requirements without package semantics", async () => {
+  const root = await fixture("python", "main.py", "print('not executed')\n");
+  const capsule = `sha256:${"a".repeat(64)}`;
+  const request = await writeWorkload(root, {
+    version: "1",
+    runtime: "python",
+    entrypoint: "main.py",
+    network: "network",
+    dependencies: { capsule },
+  });
+  const application = createComputeApplication({ computeBinary, cwd: root });
+  const result = output<any>(
+    await application.handleRequest(envelope("compute.inspect", { request, mode: "inspect" })),
+  );
+  assert.equal(result.kind, "inspection");
+  assert.deepEqual(result.plan.dependencies, {
+    required: true,
+    capsule_id: capsule,
+    available: false,
+  });
+});
+
 test("run is denied without compute.run authority before workload execution", async () => {
   const root = await fixture("python", "main.py", "open('executed', 'w').write('bad')\n");
   const request = await writeWorkload(root, {

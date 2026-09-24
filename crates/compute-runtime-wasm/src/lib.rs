@@ -262,6 +262,7 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
                 missing_outputs: vec![],
                 error: None,
                 isolation: None,
+                dependencies: None,
                 receipt: None,
             },
             workload,
@@ -296,6 +297,7 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
                         missing_outputs: vec![],
                         error: None,
                         isolation: None,
+                        dependencies: None,
                         receipt: None,
                     },
                     workload,
@@ -347,6 +349,7 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
                         started: true,
                     }),
                     isolation: None,
+                    dependencies: None,
                     receipt: None,
                 },
                 workload,
@@ -398,6 +401,7 @@ fn failure_result(
             started: false,
         }),
         isolation: None,
+        dependencies: None,
         receipt: None,
     }
 }
@@ -427,6 +431,7 @@ mod tests {
             network: NetworkPolicy::None,
             resources: ResourceLimits::default(),
             isolation: compute_core::IsolationProfile::Process,
+            dependencies: None,
         };
         let adapter = WasmRuntime;
         let resolved = adapter.resolve(&workload).await.unwrap();

@@ -511,6 +511,11 @@ impl RuntimeAdapter for ProcessRuntime {
             Invocation::Jvm => {
                 command.args(["-jar"]).arg(&staged.entrypoint);
             }
+            Invocation::Direct
+                if self.kind == RuntimeKind::Python && workload.dependencies.is_some() =>
+            {
+                command.arg("-S").arg(&staged.entrypoint);
+            }
             Invocation::Dotnet | Invocation::Shell | Invocation::Direct => {
                 command.arg(&staged.entrypoint);
             }
@@ -532,6 +537,37 @@ impl RuntimeAdapter for ProcessRuntime {
         }
         if self.kind == RuntimeKind::Python {
             command.env("PYTHONDONTWRITEBYTECODE", "1");
+            command.env("PYTHONNOUSERSITE", "1");
+        }
+        if let Some(dependencies) = &staged.dependencies_dir {
+            match self.kind {
+                RuntimeKind::Python => {
+                    command.env("PYTHONPATH", dependencies);
+                }
+                RuntimeKind::Node | RuntimeKind::Bun => {
+                    command.env("NODE_PATH", dependencies);
+                }
+                RuntimeKind::Ruby => {
+                    command
+                        .env("GEM_HOME", dependencies)
+                        .env("GEM_PATH", dependencies);
+                }
+                RuntimeKind::Jvm => {
+                    let classpath = std::fs::read_dir(dependencies)?
+                        .filter_map(std::result::Result::ok)
+                        .map(|entry| entry.path())
+                        .filter(|path| path.extension().is_some_and(|extension| extension == "jar"))
+                        .collect::<Vec<_>>();
+                    let classpath = std::env::join_paths(classpath).map_err(|error| {
+                        ComputeError::Runtime(format!("invalid dependency classpath: {error}"))
+                    })?;
+                    command.env("CLASSPATH", classpath);
+                }
+                RuntimeKind::Dotnet => {
+                    command.env("NUGET_PACKAGES", dependencies);
+                }
+                _ => {}
+            }
         }
         command
             .env("COMPUTE_WORK_DIR", &staged.work_dir)
@@ -647,6 +683,7 @@ impl RuntimeAdapter for ProcessRuntime {
                 started: true,
             }),
             isolation: None,
+            dependencies: None,
             receipt: None,
         };
         apply_output_contract(&mut result, &staged.output_dir, &workload.outputs)?;
@@ -714,6 +751,7 @@ fn failure_result(
             started: false,
         }),
         isolation: None,
+        dependencies: None,
         receipt: None,
     }
 }

@@ -62,6 +62,7 @@ export interface WorkloadSpec {
   resources?: ResourceLimits;
   network?: NetworkPolicy;
   isolation?: { profile: IsolationProfile };
+  dependencies?: { capsule: string };
 }
 
 /**
@@ -126,6 +127,7 @@ export interface ExecutionReceipt {
     environment_names: string[];
   };
   isolation: IsolationEvidence;
+  dependencies?: { capsule_id: string; verified: boolean };
   inputs: Array<{ path: string; size: number; sha256: string; required: boolean }>;
   outputs: Array<{
     path: string;
@@ -184,6 +186,7 @@ export interface ExecutionResult {
     started: boolean;
   } | null;
   isolation?: IsolationEvidence;
+  dependencies?: { capsule_id: string; file_count: number; verified: boolean };
   receipt?: ExecutionReceipt;
 }
 
@@ -224,6 +227,7 @@ export interface WorkloadPlan {
   backend_capabilities: RuntimeCapabilities;
   capability_compatible: boolean;
   capability_error?: string;
+  dependencies: { required: boolean; capsule_id?: string; available: boolean };
   isolation: {
     requested: IsolationProfile;
     effective: IsolationProfile | null;

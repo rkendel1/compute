@@ -635,6 +635,510 @@ fn direct_and_workload_file_execution_are_semantically_equivalent() {
 }
 
 #[test]
+fn direct_parser_generates_a_canonical_workload_and_separates_arguments() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("main.py");
+    std::fs::write(&script, "print('not executed')").unwrap();
+    std::fs::write(temp.path().join("input.txt"), "input").unwrap();
+    std::fs::write(
+        temp.path().join(".env.compute"),
+        "FROM_FILE=yes\nVALUE=file\n",
+    )
+    .unwrap();
+    let output = Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "run",
+            script.to_str().unwrap(),
+            "--env-file",
+            ".env.compute",
+            "--env",
+            "VALUE=cli",
+            "--input",
+            "input.txt",
+            "--output",
+            "result.json",
+            "--timeout",
+            "30s",
+            "--memory",
+            "512MB",
+            "--network",
+            "disabled",
+            "--explain",
+            "--json",
+            "--",
+            "--port",
+            "8080",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["source"], "direct");
+    assert_eq!(document["workload"]["runtime"], "python");
+    assert_eq!(document["workload"]["entrypoint"], "main.py");
+    assert_eq!(
+        document["workload"]["args"],
+        serde_json::json!(["--port", "8080"])
+    );
+    assert_eq!(document["workload"]["env"]["FROM_FILE"], "yes");
+    assert_eq!(document["workload"]["env"]["VALUE"], "cli");
+    assert_eq!(document["workload"]["network"], "none");
+    assert_eq!(document["workload"]["resources"]["timeout_ms"], 30_000);
+    assert_eq!(
+        document["workload"]["resources"]["memory_bytes"],
+        512 * 1024 * 1024
+    );
+}
+
+#[test]
+fn direct_javascript_is_ambiguous_and_compute_toml_resolves_it() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("app.js"), "console.log('ok')").unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "run",
+            temp.path().join("app.js").to_str().unwrap(),
+            "--explain",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("node"))
+        .stderr(predicate::str::contains("bun"))
+        .stderr(predicate::str::contains("deno"));
+
+    std::fs::write(
+        temp.path().join("compute.toml"),
+        "[run]\nruntime = \"node\"\nentrypoint = \"app.js\"\n[network]\nmode = \"disabled\"\n",
+    )
+    .unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["inspect", temp.path().to_str().unwrap(), "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"runtime\": \"node\""))
+        .stdout(predicate::str::contains(
+            "\"configuration\": \"compute.toml\"",
+        ));
+}
+
+#[test]
+fn direct_dry_run_rejects_isolation_downgrade_and_does_not_execute() {
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("marker");
+    let script = temp.path().join("main.py");
+    std::fs::write(&script, format!("open({marker:?}, 'w').write('ran')")).unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "run",
+            script.to_str().unwrap(),
+            "--isolation",
+            "strict",
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"compatible\": false"));
+    assert!(!marker.exists());
+}
+
+#[test]
+fn direct_bundle_matches_equivalent_explicit_workload_bundle() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("main.py");
+    std::fs::write(&script, "print('bundle')").unwrap();
+    let workload = temp.path().join("workload.json");
+    write_json(
+        &workload,
+        serde_json::json!({
+            "version": "1",
+            "runtime": "python",
+            "entrypoint": "main.py",
+            "network": "none"
+        }),
+    );
+    let direct = temp.path().join("direct.compute");
+    let explicit = temp.path().join("explicit.compute");
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "bundle",
+            "create",
+            script.to_str().unwrap(),
+            "--output",
+            direct.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "bundle",
+            "create",
+            "--workload",
+            workload.to_str().unwrap(),
+            "--output",
+            explicit.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read(direct).unwrap(),
+        std::fs::read(explicit).unwrap()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn direct_paths_and_configuration_fail_closed() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let outside = temp.path().join("outside.py");
+    std::fs::write(&outside, "print('outside')").unwrap();
+
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "run",
+            "../outside.py",
+            "--cwd",
+            root.to_str().unwrap(),
+            "--explain",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("escapes the working directory"));
+
+    let main = root.join("main.py");
+    std::fs::write(&main, "print('safe')").unwrap();
+    symlink(&outside, root.join("linked.py")).unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["run", root.join("linked.py").to_str().unwrap(), "--explain"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("symbolic link"));
+
+    symlink(&outside, root.join("input.txt")).unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "run",
+            main.to_str().unwrap(),
+            "--input",
+            "input.txt",
+            "--explain",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("escapes the workload root"));
+
+    std::fs::write(root.join("compute.toml"), "unexpected = true\n").unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["run", main.to_str().unwrap(), "--explain"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid compute.toml"));
+}
+
+#[test]
+fn dependency_capsules_are_reproducible_verifiable_and_executable_offline() {
+    let temp = tempfile::tempdir().unwrap();
+    let dependencies = temp.path().join("resolved");
+    std::fs::create_dir(&dependencies).unwrap();
+    std::fs::write(
+        dependencies.join("capsule_only.py"),
+        "MESSAGE = 'from capsule'\n",
+    )
+    .unwrap();
+    let lock = temp.path().join("requirements.lock");
+    std::fs::write(&lock, "capsule-only==1.0\n").unwrap();
+    let first = temp.path().join("first.deps");
+    let second = temp.path().join("second.deps");
+    for output in [&first, &second] {
+        Command::cargo_bin("compute")
+            .unwrap()
+            .args([
+                "deps",
+                "create",
+                "--runtime",
+                "python",
+                "--resolved",
+                dependencies.to_str().unwrap(),
+                "--lock",
+                lock.to_str().unwrap(),
+                "--package",
+                "capsule-only=1.0",
+                "--output",
+                output.to_str().unwrap(),
+                "--json",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"valid\": true"));
+    }
+    assert_eq!(
+        std::fs::read(&first).unwrap(),
+        std::fs::read(&second).unwrap()
+    );
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["deps", "verify", first.to_str().unwrap(), "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("compute.deps"))
+        .stdout(predicate::str::contains("capsule_id"));
+
+    let script = temp.path().join("main.py");
+    std::fs::write(
+        &script,
+        "import capsule_only\nprint(capsule_only.MESSAGE)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("compute.toml"),
+        "[run]\nruntime = \"python\"\nentrypoint = \"main.py\"\n[network]\nmode = \"network\"\n",
+    )
+    .unwrap();
+    let receipt = temp.path().join("dependency-receipt.json");
+    let output = Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "run",
+            script.to_str().unwrap(),
+            "--deps",
+            first.to_str().unwrap(),
+            "--receipt",
+            receipt.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["stdout"]["text"], "from capsule\n");
+    assert_eq!(result["dependencies"]["verified"], true);
+    assert_eq!(
+        result["dependencies"]["capsule_id"],
+        result["receipt"]["dependencies"]["capsule_id"]
+    );
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["receipt", "verify", receipt.to_str().unwrap(), "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"valid\": true"));
+    std::fs::write(
+        temp.path().join("compute.toml"),
+        "[run]\nruntime = \"python\"\nentrypoint = \"main.py\"\n[network]\nmode = \"network\"\n[dependencies]\ncapsule = \"first.deps\"\n",
+    )
+    .unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["run", script.to_str().unwrap(), "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from capsule"));
+
+    let capsule_id = result["dependencies"]["capsule_id"].as_str().unwrap();
+    let cache = temp.path().join("dependency-cache");
+    std::fs::create_dir(&cache).unwrap();
+    std::fs::copy(
+        &first,
+        cache.join(format!(
+            "{}.deps",
+            capsule_id.strip_prefix("sha256:").unwrap()
+        )),
+    )
+    .unwrap();
+    let workload = temp.path().join("referenced-workload.json");
+    write_json(
+        &workload,
+        serde_json::json!({
+            "version": "1",
+            "runtime": "python",
+            "entrypoint": "main.py",
+            "network": "network",
+            "dependencies": { "capsule": capsule_id }
+        }),
+    );
+    Command::cargo_bin("compute")
+        .unwrap()
+        .env("COMPUTE_DEPENDENCY_CACHE", &cache)
+        .args(["run", "--workload", workload.to_str().unwrap(), "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from capsule"));
+
+    let bundle_a = temp.path().join("a.compute");
+    let bundle_b = temp.path().join("b.compute");
+    for bundle in [&bundle_a, &bundle_b] {
+        Command::cargo_bin("compute")
+            .unwrap()
+            .args([
+                "bundle",
+                "create",
+                script.to_str().unwrap(),
+                "--deps",
+                first.to_str().unwrap(),
+                "--output",
+                bundle.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+    }
+    assert_eq!(
+        std::fs::read(&bundle_a).unwrap(),
+        std::fs::read(&bundle_b).unwrap()
+    );
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "run",
+            "--bundle",
+            bundle_a.to_str().unwrap(),
+            "--offline",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from capsule"))
+        .stdout(predicate::str::contains("\"verified\": true"));
+}
+
+#[test]
+fn capsule_binding_tampering_and_host_dependency_leakage_fail_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let dependencies = temp.path().join("resolved");
+    std::fs::create_dir(&dependencies).unwrap();
+    std::fs::write(dependencies.join("payload.txt"), "payload").unwrap();
+    let capsule = temp.path().join("python.deps");
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "deps",
+            "create",
+            "--runtime",
+            "python",
+            "--resolved",
+            dependencies.to_str().unwrap(),
+            "--output",
+            capsule.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let mut tampered = std::fs::read(&capsule).unwrap();
+    let index = tampered.len() / 2;
+    tampered[index] ^= 1;
+    let tampered_path = temp.path().join("tampered.deps");
+    std::fs::write(&tampered_path, tampered).unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["deps", "verify", tampered_path.to_str().unwrap()])
+        .assert()
+        .failure();
+
+    let wrong_platform = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "macos-aarch64"
+    } else {
+        "linux-x86_64"
+    };
+    let platform_capsule = temp.path().join("wrong-platform.deps");
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "deps",
+            "create",
+            "--runtime",
+            "python",
+            "--resolved",
+            dependencies.to_str().unwrap(),
+            "--platform",
+            wrong_platform,
+            "--output",
+            platform_capsule.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["deps", "verify", platform_capsule.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not match execution platform",
+        ));
+
+    let node_capsule = temp.path().join("node.deps");
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "deps",
+            "create",
+            "--runtime",
+            "node",
+            "--resolved",
+            dependencies.to_str().unwrap(),
+            "--output",
+            node_capsule.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let host = temp.path().join("host");
+    std::fs::create_dir(&host).unwrap();
+    std::fs::write(host.join("host_only.py"), "VALUE = 'leaked'\n").unwrap();
+    let script = temp.path().join("main.py");
+    std::fs::write(&script, "import host_only\nprint(host_only.VALUE)\n").unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "run",
+            script.to_str().unwrap(),
+            "--deps",
+            node_capsule.to_str().unwrap(),
+            "--network",
+            "network",
+            "--explain",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not match workload runtime"));
+    Command::cargo_bin("compute")
+        .unwrap()
+        .env("PYTHONPATH", &host)
+        .args([
+            "run",
+            script.to_str().unwrap(),
+            "--deps",
+            capsule.to_str().unwrap(),
+            "--network",
+            "network",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("ModuleNotFoundError"));
+}
+
+#[test]
 fn node_workload_spec_executes_when_node_is_installed() {
     if std::process::Command::new("node")
         .arg("--version")

@@ -3,12 +3,13 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use compute_core::{
-    EnvironmentVariable, IsolationProfile, Mount, NetworkPolicy, ResourceLimits, RuntimeKind,
-    RuntimeSpec,
+    DependencyCapsule, DependencyEntry, EnvironmentVariable, IsolationProfile, Mount,
+    NetworkPolicy, PlatformIdentity, ResourceLimits, RuntimeKind, RuntimeSpec,
 };
 use compute_runtime::Compute;
 
 mod certification;
+mod direct;
 mod distribution;
 mod receipt;
 
@@ -25,8 +26,10 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    Run(RunCommand),
+    Run(Box<RunCommand>),
     Bundle(BundleCommand),
+    /// Create and verify portable dependency capsules.
+    Deps(DepsCommand),
     Inspect(InspectCommand),
     Runtimes(JsonFlag),
     Runtime(RuntimeCommand),
@@ -125,11 +128,57 @@ struct BundleCommand {
     command: BundleCommands,
 }
 
+#[derive(Args, Debug)]
+struct DepsCommand {
+    #[command(subcommand)]
+    command: DepsCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum DepsCommands {
+    Create {
+        #[arg(long)]
+        runtime: String,
+        #[arg(long)]
+        runtime_version: Option<String>,
+        /// Directory populated by an external package resolver.
+        #[arg(long)]
+        resolved: PathBuf,
+        #[arg(long)]
+        lock: Option<PathBuf>,
+        #[arg(long, value_parser = parse_platform)]
+        platform: Option<PlatformIdentity>,
+        /// SBOM-style package inventory entry NAME=VERSION.
+        #[arg(long = "package", value_parser = parse_dependency_entry)]
+        packages: Vec<DependencyEntry>,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Inspect {
+        capsule: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Verify {
+        capsule: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 enum BundleCommands {
     Create {
+        #[arg(required_unless_present = "workload", conflicts_with = "workload")]
+        path: Option<PathBuf>,
         #[arg(long)]
-        workload: PathBuf,
+        workload: Option<PathBuf>,
+        #[arg(long)]
+        runtime: Option<String>,
+        #[arg(long)]
+        deps: Option<PathBuf>,
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]
@@ -190,6 +239,23 @@ struct RunCommand {
     runtime: Option<String>,
     #[arg(long = "env", value_parser = parse_env)]
     env: Vec<EnvironmentVariable>,
+    #[arg(long)]
+    env_file: Option<PathBuf>,
+    #[arg(long = "input")]
+    inputs: Vec<PathBuf>,
+    #[arg(long = "output")]
+    outputs: Vec<PathBuf>,
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    /// Select an entrypoint when PATH is a directory.
+    #[arg(long)]
+    entrypoint: Option<PathBuf>,
+    /// Attach a verified compute.deps@1 capsule.
+    #[arg(long)]
+    deps: Option<PathBuf>,
+    /// Require execution to use only already-materialized artifacts.
+    #[arg(long)]
+    offline: bool,
     #[arg(long = "mount", value_parser = parse_mount)]
     mounts: Vec<Mount>,
     #[arg(long, value_parser = parse_network)]
@@ -206,18 +272,21 @@ struct RunCommand {
     #[arg(long)]
     json: bool,
     /// Write canonical verifiable execution evidence to this file.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["dry_run", "explain"])]
     receipt: Option<PathBuf>,
     /// Validate and plan a workload specification without executing it.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "explain")]
     dry_run: bool,
+    /// Print the generated WorkloadSpec without executing it.
+    #[arg(long)]
+    explain: bool,
     /// Refuse to execute a workload whose canonical identity differs.
     #[arg(long)]
     expected_workload_id: Option<String>,
     /// Refuse to execute a bundle whose deterministic identity differs.
     #[arg(long, requires = "bundle")]
     expected_bundle_id: Option<String>,
-    #[arg(trailing_var_arg = true)]
+    #[arg(last = true)]
     args: Vec<String>,
 }
 
@@ -263,35 +332,50 @@ async fn main() {
 async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
     match cli.command {
         Commands::Run(command) => {
+            let command = *command;
+            let dependency_capsule = command
+                .deps
+                .as_deref()
+                .map(DependencyCapsule::read)
+                .transpose()?;
+            let _offline = command.offline;
             if let Some(bundle) = command.bundle {
                 if command.runtime.is_some()
                     || !command.env.is_empty()
+                    || command.env_file.is_some()
+                    || !command.inputs.is_empty()
+                    || !command.outputs.is_empty()
+                    || command.cwd.is_some()
+                    || command.entrypoint.is_some()
                     || !command.mounts.is_empty()
                     || command.network.is_some()
                     || command.memory.is_some()
                     || command.timeout.is_some()
                     || command.stdin.is_some()
                     || !command.args.is_empty()
+                    || command.explain
                 {
                     return Err(compute_core::ComputeError::InvalidWorkload(
                         "--bundle cannot be combined with direct execution overrides".into(),
                     ));
                 }
                 if command.dry_run {
-                    let plan = compute.plan_bundle_with_isolation(
+                    let plan = compute.plan_bundle_with_dependencies(
                         &bundle,
                         command.expected_workload_id.as_deref(),
                         command.expected_bundle_id.as_deref(),
                         command.isolation,
+                        dependency_capsule,
                     )?;
                     print_bundle_plan(&plan, command.json);
                 } else {
                     let result = compute
-                        .run_bundle_with_isolation(
+                        .run_bundle_with_dependencies(
                             &bundle,
                             command.expected_workload_id.as_deref(),
                             command.expected_bundle_id.as_deref(),
                             command.isolation,
+                            dependency_capsule,
                         )
                         .await?;
                     print_execution_result(result, command.json, command.receipt.as_deref())?;
@@ -306,12 +390,18 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 }
                 if command.runtime.is_some()
                     || !command.env.is_empty()
+                    || command.env_file.is_some()
+                    || !command.inputs.is_empty()
+                    || !command.outputs.is_empty()
+                    || command.cwd.is_some()
+                    || command.entrypoint.is_some()
                     || !command.mounts.is_empty()
                     || command.network.is_some()
                     || command.memory.is_some()
                     || command.timeout.is_some()
                     || command.stdin.is_some()
                     || !command.args.is_empty()
+                    || command.explain
                 {
                     return Err(compute_core::ComputeError::InvalidWorkload(
                         "--workload cannot be combined with direct execution overrides".into(),
@@ -319,56 +409,82 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 }
                 if command.dry_run {
                     let plan = compute
-                        .plan_workload_with_options(
+                        .plan_workload_with_dependencies(
                             &workload,
                             command.expected_workload_id.as_deref(),
                             command.isolation,
+                            dependency_capsule,
                         )
                         .await?;
                     print_workload_plan(&plan, command.json);
                 } else {
                     let result = compute
-                        .run_workload_with_options(
+                        .run_workload_with_dependencies(
                             &workload,
                             command.expected_workload_id.as_deref(),
                             command.isolation,
+                            dependency_capsule,
                         )
                         .await?;
                     print_execution_result(result, command.json, command.receipt.as_deref())?;
                 }
                 return Ok(());
             }
-            if command.dry_run {
-                return Err(compute_core::ComputeError::InvalidWorkload(
-                    "--dry-run requires --workload".into(),
-                ));
-            }
             if command.expected_workload_id.is_some() || command.expected_bundle_id.is_some() {
                 return Err(compute_core::ComputeError::InvalidWorkload(
                     "expected identities require --workload or --bundle".into(),
                 ));
             }
-            execute_path(
-                &compute,
-                command.path.expect("required by clap"),
-                command.runtime,
-                command.args,
-                command.env,
-                command.mounts,
-                command.network.unwrap_or(NetworkPolicy::Network),
-                command.isolation.unwrap_or(IsolationProfile::Process),
-                command.memory,
-                command.timeout,
-                command.stdin,
-                command.json,
-                command.receipt,
-            )
-            .await?;
+            if !command.mounts.is_empty() {
+                return Err(compute_core::ComputeError::InvalidWorkload(
+                    "--mount is not part of portable WorkloadSpec; use declared --input files"
+                        .into(),
+                ));
+            }
+            let resolved = direct::resolve(direct::DirectOptions {
+                path: command.path.expect("required by clap"),
+                runtime: command.runtime,
+                args: command.args,
+                env: command.env,
+                env_file: command.env_file,
+                inputs: command.inputs,
+                outputs: command.outputs,
+                cwd: command.cwd,
+                entrypoint: command.entrypoint,
+                deps: command.deps,
+                network: command.network,
+                isolation: command.isolation,
+                memory: command.memory,
+                timeout: command.timeout,
+            })?;
+            if command.explain {
+                print_generated_workload(&resolved, command.json)?;
+            } else if command.dry_run {
+                let plan = compute.plan_generated_workload_with_dependencies(
+                    &resolved.root,
+                    resolved.workload,
+                    resolved.dependency_capsule,
+                )?;
+                print_workload_plan(&plan, command.json);
+            } else {
+                let result = compute
+                    .run_generated_workload_with_dependencies(
+                        &resolved.root,
+                        resolved.workload,
+                        command.stdin.unwrap_or_default().into_bytes(),
+                        resolved.dependency_capsule,
+                    )
+                    .await?;
+                print_execution_result(result, command.json, command.receipt.as_deref())?;
+            }
         }
         Commands::Bundle(command) => match command.command {
             BundleCommands::Create {
+                path,
                 workload,
                 output,
+                runtime,
+                deps,
                 json,
             } => {
                 if output.exists() {
@@ -377,7 +493,42 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                         output.display()
                     )));
                 }
-                let inspection = compute.create_bundle(&workload, &output)?;
+                let inspection = if let Some(workload) = workload {
+                    if runtime.is_some() {
+                        return Err(compute_core::ComputeError::InvalidWorkload(
+                            "--runtime cannot override --workload".into(),
+                        ));
+                    }
+                    match deps.as_deref().map(DependencyCapsule::read).transpose()? {
+                        Some(capsule) => {
+                            compute.create_bundle_with_dependencies(&workload, &output, capsule)?
+                        }
+                        None => compute.create_bundle(&workload, &output)?,
+                    }
+                } else {
+                    let resolved = direct::resolve(direct::DirectOptions {
+                        path: path.expect("required by clap"),
+                        runtime,
+                        args: vec![],
+                        env: vec![],
+                        env_file: None,
+                        inputs: vec![],
+                        outputs: vec![],
+                        cwd: None,
+                        entrypoint: None,
+                        deps,
+                        network: None,
+                        isolation: None,
+                        memory: None,
+                        timeout: None,
+                    })?;
+                    compute.create_generated_bundle_with_dependencies(
+                        &resolved.root,
+                        resolved.workload,
+                        &output,
+                        resolved.dependency_capsule,
+                    )?
+                };
                 let size_bytes = std::fs::metadata(&output)?.len();
                 if json {
                     println!(
@@ -410,6 +561,9 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     println!("Entrypoint: {}", inspection.entrypoint.display());
                     println!("Inputs: {}", inspection.inputs.len());
                     println!("Outputs: {}", inspection.outputs.len());
+                    if let Some(dependencies) = inspection.dependencies {
+                        println!("Dependency capsule: {}", dependencies.capsule_id);
+                    }
                 }
             }
             BundleCommands::Verify {
@@ -451,6 +605,67 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 }
             },
         },
+        Commands::Deps(command) => match command.command {
+            DepsCommands::Create {
+                runtime,
+                runtime_version,
+                resolved,
+                lock,
+                platform,
+                packages,
+                output,
+                json,
+            } => {
+                if output.exists() {
+                    return Err(compute_core::ComputeError::InvalidDependencyCapsule(
+                        format!(
+                            "refusing to overwrite existing capsule: {}",
+                            output.display()
+                        ),
+                    ));
+                }
+                let runtime = runtime.parse::<RuntimeKind>()?;
+                let runtime_version = match runtime_version {
+                    Some(version) => Some(version),
+                    None => compute.runtime(runtime, None).await?.version,
+                };
+                let capsule = DependencyCapsule::create(
+                    &resolved,
+                    runtime,
+                    runtime_version,
+                    platform.unwrap_or_else(PlatformIdentity::current),
+                    packages,
+                    lock.as_deref(),
+                )?;
+                capsule.write(&output)?;
+                print_dependency_inspection(&capsule.inspection()?, json);
+            }
+            DepsCommands::Inspect { capsule, json } => {
+                let capsule = DependencyCapsule::read(&capsule)?;
+                print_dependency_inspection(&capsule.inspection()?, json);
+            }
+            DepsCommands::Verify { capsule, json } => {
+                let capsule = DependencyCapsule::read(&capsule)?;
+                capsule.require_compatible(capsule.runtime)?;
+                let required = capsule
+                    .runtime_version
+                    .as_deref()
+                    .expect("validated capsule runtime version");
+                let runtime = compute.runtime(capsule.runtime, Some(required)).await?;
+                if !runtime.available
+                    || !runtime.compatible
+                    || runtime.version.as_deref() != Some(required)
+                {
+                    return Err(compute_core::ComputeError::InvalidDependencyCapsule(
+                        format!(
+                            "dependency capsule runtime {}@{required} is unavailable in this Compute distribution",
+                            capsule.runtime
+                        ),
+                    ));
+                }
+                print_dependency_inspection(&capsule.inspection()?, json);
+            }
+        },
         Commands::Inspect(command) => {
             if let Some(workload) = command.workload {
                 if command.runtime.is_some() {
@@ -465,9 +680,38 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 print_workload_plan(&plan, command.json);
                 return Ok(());
             }
+            let path = command.path.expect("required by clap");
+            if path.exists() {
+                let resolved = direct::resolve(direct::DirectOptions {
+                    path,
+                    runtime: command.runtime,
+                    args: vec![],
+                    env: vec![],
+                    env_file: None,
+                    inputs: vec![],
+                    outputs: vec![],
+                    cwd: None,
+                    entrypoint: None,
+                    deps: None,
+                    network: None,
+                    isolation: None,
+                    memory: None,
+                    timeout: None,
+                });
+                match resolved {
+                    Ok(resolved) => print_generated_workload(&resolved, command.json)?,
+                    Err(error)
+                        if error.to_string().contains("multiple entrypoints detected")
+                            || error.to_string().contains("Cannot resolve runtime") =>
+                    {
+                        print_ambiguous_inspection(&error, command.json);
+                    }
+                    Err(error) => return Err(error),
+                }
+                return Ok(());
+            }
             let runtime = parse_runtime_spec(command.runtime)?;
-            let inspection =
-                compute.inspect_path(&command.path.expect("required by clap"), runtime)?;
+            let inspection = compute.inspect_path(&path, runtime)?;
             if command.json {
                 println!("{}", serde_json::to_string_pretty(&inspection).unwrap());
             } else {
@@ -799,6 +1043,84 @@ fn print_execution_result(
     Ok(())
 }
 
+fn print_generated_workload(
+    resolved: &direct::ResolvedDirect,
+    json: bool,
+) -> compute_core::Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "source": "direct",
+                "configuration": resolved.config.as_ref().map(|path| {
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                }),
+                "workload": resolved.workload,
+                "workload_id": resolved.workload.workload_id()?,
+            }))
+            .unwrap()
+        );
+        return Ok(());
+    }
+    println!("Resolved Workload");
+    println!("Runtime: {}", resolved.workload.runtime);
+    println!("Entrypoint: {}", resolved.workload.entrypoint.display());
+    println!("Arguments: {}", resolved.workload.args.len());
+    println!("Isolation: {}", resolved.workload.isolation.profile);
+    println!("Network: {}", resolved.workload.network);
+    println!("Inputs: {}", resolved.workload.inputs.len());
+    println!("Outputs: {}", resolved.workload.outputs.len());
+    println!("Workload ID: {}", resolved.workload.workload_id()?);
+    Ok(())
+}
+
+fn print_dependency_inspection(inspection: &compute_core::DependencyCapsuleInspection, json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(inspection).unwrap());
+        return;
+    }
+    println!("Dependency Capsule");
+    println!("ID: {}", inspection.capsule_id);
+    println!("Runtime: {}", inspection.runtime);
+    if let Some(version) = &inspection.runtime_version {
+        println!("Runtime version: {version}");
+    }
+    println!("Platform: {}", inspection.platform.label());
+    println!("Files: {}", inspection.file_count);
+    println!("Size: {} bytes", inspection.size_bytes);
+    println!("Dependencies: {}", inspection.dependency_count);
+    if let Some(lock) = &inspection.lock_identity {
+        println!("Lock identity: {lock}");
+    }
+    println!("Valid: {}", if inspection.valid { "yes" } else { "no" });
+}
+
+fn print_ambiguous_inspection(error: &compute_core::ComputeError, json: bool) {
+    if json {
+        let candidates = if error.to_string().contains("Cannot resolve runtime") {
+            vec!["node", "bun", "deno"]
+        } else {
+            Vec::new()
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "source": "direct",
+                "project": { "type": "unknown" },
+                "resolution": "ambiguous",
+                "candidates": candidates,
+                "diagnostic": error.to_string(),
+            }))
+            .unwrap()
+        );
+    } else {
+        println!("Project");
+        println!("  Type: unknown");
+        println!("Resolution: ambiguous");
+        println!("{error}");
+    }
+}
+
 fn print_workload_plan(plan: &compute_core::WorkloadPlan, json: bool) {
     if json {
         println!("{}", serde_json::to_string_pretty(plan).unwrap());
@@ -816,6 +1138,11 @@ fn print_workload_plan(plan: &compute_core::WorkloadPlan, json: bool) {
     println!("  Network: {}", plan.workload.network);
     println!("  Inputs: {}", plan.input_preparation.len());
     println!("  Output root: {}", plan.output_root.display());
+    println!("  Dependencies required: {}", plan.dependencies.required);
+    if let Some(capsule) = &plan.dependencies.capsule_id {
+        println!("  Dependency capsule: {capsule}");
+        println!("  Dependency available: {}", plan.dependencies.available);
+    }
     println!("  Resolved runtime: {}", plan.resolved_runtime.kind);
     println!("  Capability compatible: {}", plan.capability_compatible);
     println!("  Requested isolation: {}", plan.isolation.requested);
@@ -1026,11 +1353,42 @@ fn parse_mount(value: &str) -> Result<Mount, String> {
 
 fn parse_network(value: &str) -> Result<NetworkPolicy, String> {
     match value {
-        "none" => Ok(NetworkPolicy::None),
+        "none" | "disabled" => Ok(NetworkPolicy::None),
         "localhost" => Ok(NetworkPolicy::Localhost),
         "network" => Ok(NetworkPolicy::Network),
         _ => Err("expected one of: none, localhost, network".to_string()),
     }
+}
+
+fn parse_platform(value: &str) -> Result<PlatformIdentity, String> {
+    let (os, architecture) = value
+        .split_once('-')
+        .ok_or_else(|| "expected platform like linux-x86_64".to_string())?;
+    if os.is_empty() || architecture.is_empty() {
+        return Err("expected platform like linux-x86_64".into());
+    }
+    Ok(PlatformIdentity {
+        os: os.into(),
+        architecture: architecture.into(),
+        runtime_abi: None,
+    })
+}
+
+fn parse_dependency_entry(value: &str) -> Result<DependencyEntry, String> {
+    let (name, version) = value
+        .split_once('=')
+        .ok_or_else(|| "expected dependency metadata NAME=VERSION".to_string())?;
+    if name.is_empty() || version.is_empty() {
+        return Err("dependency name and version must be non-empty".into());
+    }
+    Ok(DependencyEntry {
+        name: name.into(),
+        version: version.into(),
+        source: "resolved".into(),
+        file_count: 0,
+        sha256: compute_core::sha256_identity(value.as_bytes()),
+        license: None,
+    })
 }
 
 fn parse_isolation(value: &str) -> Result<IsolationProfile, String> {
@@ -1041,6 +1399,14 @@ fn parse_isolation(value: &str) -> Result<IsolationProfile, String> {
 
 fn parse_memory(value: &str) -> Result<u64, String> {
     let normalized = value.trim().to_ascii_lowercase();
+    if let Some(raw) = normalized.strip_suffix("mb") {
+        let mib = raw.parse::<u64>().map_err(|error| error.to_string())?;
+        return Ok(mib * 1024 * 1024);
+    }
+    if let Some(raw) = normalized.strip_suffix("gb") {
+        let gib = raw.parse::<u64>().map_err(|error| error.to_string())?;
+        return Ok(gib * 1024 * 1024 * 1024);
+    }
     if let Some(raw) = normalized.strip_suffix('m') {
         let mib = raw.parse::<u64>().map_err(|error| error.to_string())?;
         return Ok(mib * 1024 * 1024);
