@@ -363,6 +363,7 @@ dependencies = [
  "clap",
  "compute-core",
  "compute-placement",
+ "compute-policy",
  "compute-provider",
  "compute-runtime",
  "predicates",

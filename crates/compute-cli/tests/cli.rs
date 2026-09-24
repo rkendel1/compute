@@ -1337,7 +1337,12 @@ fn workload_network_policy_cannot_be_silently_broadened() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("unsupported capability"))
-        .stdout(predicate::str::is_empty());
+        .stderr(predicate::str::contains("nothing was executed"))
+        // The denial is structured evidence attributed to capability, not
+        // an execution result.
+        .stdout(predicate::str::contains("\"capability_mismatch\""))
+        .stdout(predicate::str::contains("\"admitted\": false"))
+        .stdout(predicate::str::contains("execution_id").not());
 }
 
 #[test]

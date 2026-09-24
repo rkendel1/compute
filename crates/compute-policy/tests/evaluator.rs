@@ -521,9 +521,13 @@ fn composition_is_an_intersection_and_never_widens() {
     assert!(!codes(&server, &networked).is_empty());
     assert!(codes(composed, &networked).contains(&"network_denied".to_string()));
 
+    // With no other source, the effective policy is the (unnamed) baseline.
     assert_eq!(
-        EffectivePolicy::compose(&[]).policy_id,
-        Policy::baseline().policy_id()
+        EffectivePolicy::compose(&[]).policy,
+        Policy {
+            name: None,
+            ..Policy::baseline()
+        }
     );
 }
 

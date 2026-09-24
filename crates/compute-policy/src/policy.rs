@@ -511,13 +511,10 @@ impl EffectivePolicy {
                 label: source.name.as_ref().map(|_| source.label()),
             });
         }
-        // A single named source keeps its name, so explanations can say
-        // `production-policy@1` rather than only a digest.
-        if sorted.len() == 1 {
-            policy.name = sorted[0].1.name.clone();
-        } else if sorted.is_empty() {
-            policy.name = baseline.name.clone();
-        }
+        // Effective policies are unnamed so that the same intersection has
+        // the same identity however it was composed. Source labels remain
+        // in `sources`.
+        policy.name = None;
         Self {
             policy_id: policy.policy_id(),
             policy,

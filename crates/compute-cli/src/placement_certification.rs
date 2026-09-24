@@ -15,10 +15,10 @@ use compute_core::{
     IsolationProfile, ProviderIdentity, RuntimeKind, SelectionMode, WorkloadBundle,
 };
 use compute_placement::{
-    CapabilityCache, DiscoveryMode, DiscoveryRecord, DiscoveryStatus, DispatchErrorCode,
-    EvaluationStatus, PlacementOutcome, PlacementReport, PlacementRequirements, PoolPolicy,
-    ProviderConfig, ProviderKind, ProviderPool, ReasonCode, RequirementOptions, SubmissionMode,
-    dispatch, place,
+    AdmissionContext, CapabilityCache, DiscoveryMode, DiscoveryRecord, DiscoveryStatus,
+    DispatchErrorCode, EvaluationStatus, PlacementOutcome, PlacementReport, PlacementRequirements,
+    PoolPolicy, ProviderConfig, ProviderKind, ProviderPool, ReasonCode, RequirementOptions,
+    SubmissionMode, dispatch, place,
 };
 use compute_provider::{
     ComputeProvider, ExecuteResponse, InspectResponse, LocalProvider, ProviderCapabilities,
@@ -155,7 +155,7 @@ impl PlacementHarness {
         &self,
         bundle: &WorkloadBundle,
         submission: SubmissionMode,
-    ) -> Result<(ProviderRequest, PlacementRequirements), String> {
+    ) -> Result<(ProviderRequest, PlacementRequirements, AdmissionContext), String> {
         let mut request =
             ProviderRequest::bundle(bundle.to_bytes().map_err(|error| error.to_string())?);
         request.expected.workload_id = Some(bundle.workload_id().map_err(|e| e.to_string())?);
@@ -173,13 +173,16 @@ impl PlacementHarness {
             },
         )
         .map_err(|error| error.to_string())?;
-        Ok((request, requirements))
+        let contract = compute_policy::ExecutionContract::from_bundle(bundle, None)
+            .map_err(|error| error.to_string())?;
+        Ok((request, requirements, AdmissionContext::new(&[], contract)))
     }
 
     fn place(
         &self,
         records: &[DiscoveryRecord],
         requirements: &PlacementRequirements,
+        admission: &AdmissionContext,
         explicit: Option<&str>,
     ) -> PlacementReport {
         place(
@@ -187,6 +190,7 @@ impl PlacementHarness {
             self.pool.policy(),
             records,
             requirements,
+            admission,
             explicit,
         )
     }
@@ -200,7 +204,8 @@ impl PlacementHarness {
         bundle_path: &Path,
     ) -> Result<(), String> {
         let bundle = WorkloadBundle::read(bundle_path).map_err(|error| error.to_string())?;
-        let (request, requirements) = self.requirements(&bundle, SubmissionMode::Synchronous)?;
+        let (request, requirements, admission) =
+            self.requirements(&bundle, SubmissionMode::Synchronous)?;
         let records = self.discover(None).await;
         if let Some(record) = records
             .iter()
@@ -211,7 +216,7 @@ impl PlacementHarness {
                 record.provider_id, record.error
             ));
         }
-        let report = self.place(&records, &requirements, None);
+        let report = self.place(&records, &requirements, &admission, None);
         let expected: &[&str] = if kind == RuntimeKind::Wasm {
             &["restricted", "remote", "local"]
         } else {
@@ -236,7 +241,7 @@ impl PlacementHarness {
                 return Err("priority-100 incompatible provider was not excluded".into());
             }
         }
-        let again = self.place(&self.discover(None).await, &requirements, None);
+        let again = self.place(&self.discover(None).await, &requirements, &admission, None);
         if again.placement_id != report.placement_id
             || again.selected != report.selected
             || again.explanation != report.explanation
@@ -279,7 +284,7 @@ impl PlacementHarness {
 
         if kind != RuntimeKind::Wasm {
             let only = self.discover(Some("restricted")).await;
-            let explicit = self.place(&only, &requirements, Some("restricted"));
+            let explicit = self.place(&only, &requirements, &admission, Some("restricted"));
             if explicit.outcome != PlacementOutcome::PlacementFailed
                 || explicit
                     .failure
@@ -300,7 +305,8 @@ impl PlacementHarness {
     /// Negative placement cases: nothing executes and nothing is redirected.
     pub async fn certify_failures(&self, bundle_path: &Path) -> Result<String, String> {
         let bundle = WorkloadBundle::read(bundle_path).map_err(|error| error.to_string())?;
-        let (request, requirements) = self.requirements(&bundle, SubmissionMode::Synchronous)?;
+        let (request, requirements, admission) =
+            self.requirements(&bundle, SubmissionMode::Synchronous)?;
         let executions = self.local_executions.load(Ordering::SeqCst);
 
         // All providers incompatible.
@@ -309,7 +315,7 @@ impl PlacementHarness {
             id: format!("sha256:{}", "0".repeat(64)),
         });
         let records = self.discover(None).await;
-        let report = self.place(&records, &impossible, None);
+        let report = self.place(&records, &impossible, &admission, None);
         if report.failure.as_ref().map(|failure| failure.code.as_str())
             != Some("no_compatible_provider")
             || report.incompatible_providers.len() != 3
@@ -370,6 +376,7 @@ impl PlacementHarness {
             hostile.policy(),
             &records,
             &requirements,
+            &admission,
             None,
         );
         if report.compatible_providers != ["doomed"] {
@@ -393,6 +400,7 @@ impl PlacementHarness {
             hostile.policy(),
             &stale,
             &requirements,
+            &admission,
             None,
         );
         if stale.first().map(|record| record.status) != Some(DiscoveryStatus::Stale)

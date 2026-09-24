@@ -43,6 +43,7 @@ fn only_compatible_providers_are_candidates_and_high_priority_incompatible_is_ex
         &config.pool,
         &records,
         &wasm_strict(),
+        &baseline(&wasm_strict()),
         None,
     );
     assert_eq!(report.outcome, PlacementOutcome::Placed);
@@ -70,6 +71,7 @@ fn priority_orders_compatible_providers() {
         &config.pool,
         &records,
         &requirements(RuntimeKind::Python),
+        &baseline(&requirements(RuntimeKind::Python)),
         None,
     );
     assert_eq!(report.compatible_providers, ["a", "b"]);
@@ -94,6 +96,7 @@ fn provider_id_breaks_priority_ties_deterministically() {
         &config.pool,
         &records,
         &requirements(RuntimeKind::Python),
+        &baseline(&requirements(RuntimeKind::Python)),
         None,
     );
     records.reverse();
@@ -102,6 +105,7 @@ fn provider_id_breaks_priority_ties_deterministically() {
         &config.pool,
         &records,
         &requirements(RuntimeKind::Python),
+        &baseline(&requirements(RuntimeKind::Python)),
         None,
     );
     assert_eq!(first.compatible_providers, ["alpha", "mid", "zeta"]);
@@ -117,6 +121,7 @@ fn explicit_provider_is_validated_and_never_falls_back() {
         &config.pool,
         &records,
         &wasm_strict(),
+        &baseline(&wasm_strict()),
         Some("a"),
     );
     assert_eq!(report.outcome, PlacementOutcome::PlacementFailed);
@@ -139,6 +144,7 @@ fn explicit_provider_is_validated_and_never_falls_back() {
         &config.pool,
         &records,
         &wasm_strict(),
+        &baseline(&wasm_strict()),
         Some("b"),
     );
     assert_eq!(explicit.outcome, PlacementOutcome::Placed);
@@ -151,6 +157,7 @@ fn explicit_provider_is_validated_and_never_falls_back() {
         &config.pool,
         &records,
         &wasm_strict(),
+        &baseline(&wasm_strict()),
         Some("nope"),
     );
     assert_eq!(unknown.failure.unwrap().code, "provider_not_configured");
@@ -166,6 +173,7 @@ fn empty_compatible_set_is_a_structured_failure() {
         &config.pool,
         &records,
         &requirements,
+        &baseline(&requirements),
         None,
     );
     assert_eq!(report.outcome, PlacementOutcome::PlacementFailed);
@@ -196,6 +204,7 @@ fn placement_is_deterministic() {
         &config.pool,
         &records,
         &wasm_strict(),
+        &baseline(&wasm_strict()),
         None,
     );
     for _ in 0..32 {
@@ -205,6 +214,7 @@ fn placement_is_deterministic() {
             &config.pool,
             &records,
             &wasm_strict(),
+            &baseline(&wasm_strict()),
             None,
         );
         assert_eq!(again.placement_id, first.placement_id);
@@ -225,6 +235,7 @@ fn placement_identity_ignores_observation_time_but_tracks_inputs() {
         &config.pool,
         &records,
         &wasm_strict(),
+        &baseline(&wasm_strict()),
         None,
     );
     for record in &mut records {
@@ -238,6 +249,7 @@ fn placement_identity_ignores_observation_time_but_tracks_inputs() {
         &config.pool,
         &records,
         &wasm_strict(),
+        &baseline(&wasm_strict()),
         None,
     );
     assert_eq!(first.placement_id, later.placement_id);
@@ -249,6 +261,7 @@ fn placement_identity_ignores_observation_time_but_tracks_inputs() {
         &config.pool,
         &records,
         &wasm_strict(),
+        &baseline(&wasm_strict()),
         None,
     );
     assert_ne!(first.placement_id, changed.placement_id);
@@ -257,13 +270,22 @@ fn placement_identity_ignores_observation_time_but_tracks_inputs() {
     other.resources.timeout_ms = Some(1000);
     assert_ne!(
         first.placement_id,
-        place(&config.providers, &config.pool, &records, &other, None).placement_id
+        place(
+            &config.providers,
+            &config.pool,
+            &records,
+            &other,
+            &baseline(&other),
+            None,
+        )
+        .placement_id
     );
     let explicit = place(
         &config.providers,
         &config.pool,
         &records,
         &wasm_strict(),
+        &baseline(&wasm_strict()),
         Some("b"),
     );
     assert_ne!(first.placement_id, explicit.placement_id);
@@ -278,6 +300,7 @@ fn health_is_observational_unless_explicitly_required() {
         &config.pool,
         &records,
         &requirements(RuntimeKind::Python),
+        &baseline(&requirements(RuntimeKind::Python)),
         None,
     );
     assert_eq!(
@@ -293,6 +316,7 @@ fn health_is_observational_unless_explicitly_required() {
         &strict.pool,
         &records,
         &requirements(RuntimeKind::Python),
+        &baseline(&requirements(RuntimeKind::Python)),
         None,
     );
     assert_eq!(report.selected.as_ref().unwrap().provider_id, "b");
@@ -309,6 +333,7 @@ fn health_is_observational_unless_explicitly_required() {
         &strict.pool,
         &records,
         &wasm_strict(),
+        &baseline(&wasm_strict()),
         None,
     );
     assert_eq!(report.selected.unwrap().provider_id, "b");
@@ -324,6 +349,7 @@ fn stale_capabilities_are_unknown_not_valid() {
         &config.pool,
         &records,
         &wasm_strict(),
+        &baseline(&wasm_strict()),
         None,
     );
     assert_eq!(report.outcome, PlacementOutcome::PlacementFailed);
@@ -345,6 +371,7 @@ fn stale_capabilities_are_unknown_not_valid() {
         &permissive.pool,
         &records,
         &wasm_strict(),
+        &baseline(&wasm_strict()),
         None,
     );
     assert_eq!(report.selected.unwrap().provider_id, "b");
@@ -377,6 +404,7 @@ fn unavailable_and_invalid_providers_are_excluded_with_their_own_status() {
         &config.pool,
         &records,
         &requirements(RuntimeKind::Python),
+        &baseline(&requirements(RuntimeKind::Python)),
         None,
     );
     assert_eq!(report.selected.unwrap().provider_id, "b");
@@ -402,6 +430,7 @@ fn explanation_answers_the_four_questions() {
         &config.pool,
         &records,
         &wasm_strict(),
+        &baseline(&wasm_strict()),
         None,
     );
     let explanation = &report.explanation;
@@ -425,7 +454,7 @@ fn explanation_answers_the_four_questions() {
     );
     assert_eq!(explanation.considered.len(), 3);
     assert!(explanation.considered[0].starts_with(
-        "a (remote, priority 100, health healthy): incompatible: runtime_unsupported"
+        "a (remote, priority 100, health healthy): incompatible (policy would admit): runtime_unsupported"
     ));
     assert!(
         explanation
@@ -433,11 +462,9 @@ fn explanation_answers_the_four_questions() {
             .iter()
             .any(|line| line.starts_with("b ") && line.ends_with(": compatible"))
     );
-    assert!(
-        explanation
-            .selection
-            .starts_with("selected provider b: compatible with selection priority 50")
-    );
+    assert!(explanation.selection.starts_with(
+        "selected provider b: compatible and admitted by policy, with selection priority 50"
+    ));
     let text = serde_json::to_string(&report).unwrap();
     for subjective in ["best", "optimal"] {
         assert!(
@@ -638,4 +665,205 @@ token_env = "COMPUTE_PRODUCTION_TOKEN"
         );
     }
     let _ = PoolPolicy::default();
+}
+
+fn policy(json: serde_json::Value) -> compute_policy::Policy {
+    compute_policy::Policy::from_json(json.to_string().as_bytes()).unwrap()
+}
+
+/// Capability and admission are independent: all four combinations are
+/// distinguishable, and only capable + admitted providers are candidates.
+#[test]
+fn capability_and_admission_matrix() {
+    let config = config(&[
+        ("capable_admitted", ProviderKind::Remote, 10),
+        ("capable_denied", ProviderKind::Remote, 40),
+        ("incapable_admitted", ProviderKind::Remote, 30),
+        ("incapable_denied", ProviderKind::Remote, 20),
+    ]);
+    // The workload needs sandboxed WASM. "incapable" providers offer only
+    // process isolation; "denying" providers run on aarch64, which the
+    // caller's policy does not allow.
+    let wasm = |isolation: Vec<IsolationProfile>, platform: &str| {
+        let mut synthetic = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Wasm]);
+        synthetic.isolation = isolation;
+        synthetic.platform = platform.into();
+        synthetic
+    };
+    let records = vec![
+        wasm(IsolationProfile::ALL.to_vec(), "linux-x86_64").record("capable_admitted"),
+        wasm(IsolationProfile::ALL.to_vec(), "linux-aarch64").record("capable_denied"),
+        wasm(vec![IsolationProfile::Process], "linux-x86_64").record("incapable_admitted"),
+        wasm(vec![IsolationProfile::Process], "linux-aarch64").record("incapable_denied"),
+    ];
+    let mut sandboxed = requirements(RuntimeKind::Wasm);
+    sandboxed.isolation = IsolationProfile::Sandboxed;
+    let caller = policy(serde_json::json!({"version": 1, "allowed_architectures": ["x86_64"]}));
+    let context = with_policy(&sandboxed, caller);
+    let report = place(
+        &config.providers,
+        &config.pool,
+        &records,
+        &sandboxed,
+        &context,
+        None,
+    );
+
+    let status = |id: &str| {
+        report
+            .providers
+            .iter()
+            .find(|p| p.provider_id == id)
+            .unwrap()
+    };
+    assert_eq!(
+        status("capable_admitted").status,
+        EvaluationStatus::Compatible
+    );
+    assert_eq!(
+        status("capable_denied").status,
+        EvaluationStatus::PolicyDenied
+    );
+    assert_eq!(
+        status("incapable_admitted").status,
+        EvaluationStatus::Incompatible
+    );
+    assert_eq!(
+        status("incapable_denied").status,
+        EvaluationStatus::Incompatible
+    );
+
+    // Only the capable, admitted provider is a candidate, even though it
+    // has the lowest priority.
+    assert_eq!(report.compatible_providers, ["capable_admitted"]);
+    assert_eq!(
+        report.selected.as_ref().unwrap().provider_id,
+        "capable_admitted"
+    );
+
+    // Policy denial is not reported as a capability problem.
+    let denied = status("capable_denied");
+    assert!(denied.reasons.is_empty());
+    let decision = denied.admission.as_ref().unwrap();
+    assert_eq!(decision.codes(), ["architecture_denied"]);
+
+    // Capability mismatch is not reported as a policy problem.
+    let incapable_only = status("incapable_admitted");
+    assert!(!incapable_only.reasons.is_empty());
+    let decision = incapable_only.admission.as_ref().unwrap();
+    assert!(decision.has(compute_policy::ReasonKind::Capability));
+    assert!(!decision.has(compute_policy::ReasonKind::Policy));
+
+    // Both facts are preserved when both fail.
+    let both = status("incapable_denied");
+    assert!(!both.reasons.is_empty());
+    let decision = both.admission.as_ref().unwrap();
+    assert!(decision.has(compute_policy::ReasonKind::Capability));
+    assert_eq!(
+        decision
+            .reasons
+            .iter()
+            .filter(|reason| reason.kind == compute_policy::ReasonKind::Policy)
+            .map(|reason| reason.code.as_str())
+            .collect::<Vec<_>>(),
+        ["architecture_denied"]
+    );
+    assert!(
+        report
+            .explanation
+            .considered
+            .iter()
+            .any(|line| line.starts_with("capable_denied")
+                && line.contains("capable, but policy denied"))
+    );
+    assert!(report.explanation.considered.iter().any(
+        |line| line.starts_with("incapable_denied") && line.contains("policy would also deny")
+    ));
+    assert!(
+        report
+            .explanation
+            .considered
+            .iter()
+            .any(|line| line.starts_with("incapable_admitted")
+                && line.contains("policy would admit"))
+    );
+
+    // Explicit selection never bypasses policy.
+    let explicit = place(
+        &config.providers,
+        &config.pool,
+        &records,
+        &sandboxed,
+        &context,
+        Some("capable_denied"),
+    );
+    assert_eq!(
+        explicit.failure.as_ref().unwrap().code,
+        "explicit_provider_denied"
+    );
+    assert!(explicit.receipt_binding().is_none());
+    let explicit = place(
+        &config.providers,
+        &config.pool,
+        &records,
+        &sandboxed,
+        &context,
+        Some("capable_admitted"),
+    );
+    assert_eq!(explicit.outcome, PlacementOutcome::Placed);
+}
+
+#[test]
+fn provider_advertised_policy_is_intersected_and_changes_identity() {
+    let config = config(&[("a", ProviderKind::Remote, 10)]);
+    let open = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Python]);
+    let mut restricted = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Python]);
+    restricted.policy = Some(policy(
+        serde_json::json!({"version": 1, "allowed_networks": ["none"]}),
+    ));
+    let requirements = requirements(RuntimeKind::Python);
+    let context = baseline(&requirements);
+    let admitted = place(
+        &config.providers,
+        &config.pool,
+        &[open.record("a")],
+        &requirements,
+        &context,
+        None,
+    );
+    assert_eq!(admitted.outcome, PlacementOutcome::Placed);
+    let denied = place(
+        &config.providers,
+        &config.pool,
+        &[restricted.record("a")],
+        &requirements,
+        &context,
+        None,
+    );
+    assert_eq!(denied.providers[0].status, EvaluationStatus::PolicyDenied);
+    assert_eq!(
+        denied.providers[0].admission.as_ref().unwrap().codes(),
+        ["network_denied"]
+    );
+    assert_ne!(admitted.placement_id, denied.placement_id);
+
+    // Changing only the caller policy changes placement and admission identity.
+    let stricter = with_policy(
+        &requirements,
+        policy(serde_json::json!({"version": 1, "allowed_runtimes": ["python"]})),
+    );
+    let again = place(
+        &config.providers,
+        &config.pool,
+        &[open.record("a")],
+        &requirements,
+        &stricter,
+        None,
+    );
+    assert_eq!(again.outcome, PlacementOutcome::Placed);
+    assert_ne!(again.placement_id, admitted.placement_id);
+    assert_ne!(
+        again.selected.unwrap().admission_id,
+        admitted.selected.unwrap().admission_id
+    );
 }

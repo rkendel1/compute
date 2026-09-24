@@ -87,7 +87,13 @@ fn bundle(fixture: &Fixture, capsule: &DependencyCapsule, embed: bool) -> Worklo
         .unwrap()
 }
 
-fn prepare(bundle: &WorkloadBundle) -> (ProviderRequest, PlacementRequirements) {
+fn prepare(
+    bundle: &WorkloadBundle,
+) -> (
+    ProviderRequest,
+    PlacementRequirements,
+    compute_placement::AdmissionContext,
+) {
     let mut request = ProviderRequest::bundle(bundle.to_bytes().unwrap());
     request.expected.workload_id = Some(bundle.workload_id().unwrap());
     request.expected.bundle_id = Some(bundle.bundle_id().unwrap());
@@ -99,7 +105,11 @@ fn prepare(bundle: &WorkloadBundle) -> (ProviderRequest, PlacementRequirements) 
         &RequirementOptions::default(),
     )
     .unwrap();
-    (request, requirements)
+    let admission = compute_placement::AdmissionContext::new(
+        &[],
+        compute_policy::ExecutionContract::from_bundle(bundle, None).unwrap(),
+    );
+    (request, requirements, admission)
 }
 
 async fn discover(pool: &ProviderPool) -> Vec<compute_placement::DiscoveryRecord> {
@@ -175,7 +185,7 @@ async fn dependency_capsule_matrix() {
         let wrong = capsule(&fixture, &version, "impostor");
         // Present in transfer: embedded capsules are sent and verified.
         let embedded = bundle(&fixture, &wanted, true);
-        let (request, requirements) = prepare(&embedded);
+        let (request, requirements, admission) = prepare(&embedded);
         assert!(requirements.dependencies.as_ref().unwrap().embedded);
         let records = discover(&pool).await;
         let report = place(
@@ -183,6 +193,7 @@ async fn dependency_capsule_matrix() {
             pool.policy(),
             &records,
             &requirements,
+            &admission,
             None,
         );
         assert_eq!(
@@ -202,13 +213,14 @@ async fn dependency_capsule_matrix() {
 
         // Absent: referenced but neither embedded nor resident.
         let referenced = bundle(&fixture, &wanted, false);
-        let (request, requirements) = prepare(&referenced);
+        let (request, requirements, admission) = prepare(&referenced);
         let records = discover(&pool).await;
         let report = place(
             &pool.configs(),
             pool.policy(),
             &records,
             &requirements,
+            &admission,
             None,
         );
         assert_eq!(
@@ -237,6 +249,7 @@ async fn dependency_capsule_matrix() {
             pool.policy(),
             &records,
             &requirements,
+            &admission,
             None,
         );
         assert!(
@@ -254,6 +267,7 @@ async fn dependency_capsule_matrix() {
             pool.policy(),
             &records,
             &requirements,
+            &admission,
             None,
         );
         assert_eq!(report.selected.as_ref().unwrap().provider_id, "remote");

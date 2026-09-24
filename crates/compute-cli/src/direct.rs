@@ -26,6 +26,9 @@ pub struct DirectOptions {
     pub isolation: Option<IsolationProfile>,
     pub memory: Option<u64>,
     pub timeout: Option<Duration>,
+    /// Policy defaults for values neither the caller nor project
+    /// configuration chose. They never override a stated value.
+    pub defaults: compute_policy::PolicyDefaults,
 }
 
 #[derive(Debug)]
@@ -43,6 +46,10 @@ struct ProjectConfig {
     resources: ResourceConfig,
     network: NetworkConfig,
     dependencies: DependenciesConfig,
+    /// Local execution policy reference; read by the policy loader.
+    policy: Option<toml::Value>,
+    /// Server configuration; read by `compute serve`.
+    server: Option<toml::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -151,6 +158,7 @@ pub fn resolve(options: DirectOptions) -> compute_core::Result<ResolvedDirect> {
     let isolation = options
         .isolation
         .or(configured_isolation)
+        .or(options.defaults.isolation)
         .unwrap_or_default();
 
     let network = match options.network {
@@ -162,6 +170,7 @@ pub fn resolve(options: DirectOptions) -> compute_core::Result<ResolvedDirect> {
             .map(super::parse_network)
             .transpose()
             .map_err(ComputeError::InvalidWorkload)?
+            .or_else(|| options.defaults.network.clone())
             .unwrap_or_default(),
     };
     let timeout = match options.timeout {

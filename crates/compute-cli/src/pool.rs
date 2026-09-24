@@ -128,6 +128,8 @@ pub struct PlacementCommand {
     pub command: PlacementCommands,
     #[command(flatten)]
     pub location: PoolLocation,
+    #[command(flatten)]
+    pub policy: crate::admission::PolicyLocation,
 }
 
 #[derive(Subcommand, Debug)]
@@ -145,6 +147,8 @@ pub struct PoolCommand {
     pub command: PoolCommands,
     #[command(flatten)]
     pub location: PoolLocation,
+    #[command(flatten)]
+    pub policy: crate::admission::PolicyLocation,
 }
 
 #[derive(Subcommand, Debug)]
@@ -521,8 +525,9 @@ fn enum_label(value: &impl serde::Serialize) -> String {
 }
 
 /// Build the canonical bundle and provider request for a placement command.
-fn prepare(
+pub(crate) fn prepare(
     artifact: &PlacementArtifact,
+    policy: &crate::admission::PolicyLocation,
 ) -> compute_core::Result<(WorkloadBundle, ProviderRequest)> {
     let bundle = if let Some(path) = &artifact.bundle {
         if artifact.runtime.is_some()
@@ -559,6 +564,7 @@ fn prepare(
             isolation: artifact.isolation,
             memory: artifact.memory,
             timeout: artifact.timeout,
+            defaults: policy.defaults()?,
         })?;
         WorkloadBundle::create_from_with_capsule(
             resolved.workload,
@@ -577,12 +583,13 @@ fn prepare(
     Ok((bundle, request))
 }
 
-async fn evaluate(
+pub(crate) async fn evaluate(
     location: &PoolLocation,
+    policy: &crate::admission::PolicyLocation,
     artifact: &PlacementArtifact,
     submission: SubmissionMode,
 ) -> compute_core::Result<(ProviderPool, PlacementReport, ProviderRequest)> {
-    let (bundle, mut request) = prepare(artifact)?;
+    let (bundle, mut request) = prepare(artifact, policy)?;
     // Placement pins these identities, so they are part of the request whose
     // exact size the requirements record.
     request.expected.distribution_id = artifact.distribution.clone();
@@ -604,6 +611,10 @@ async fn evaluate(
         },
     )
     .map_err(placement_error)?;
+    let contract =
+        compute_policy::ExecutionContract::from_bundle(&bundle, Some(requirements.isolation))
+            .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
+    let admission = compute_placement::AdmissionContext::new(&policy.sources()?, contract);
     let pool = location.pool()?;
     let explicit = artifact.provider.as_deref();
     let only = explicit.filter(|id| pool.member(id).is_some());
@@ -617,6 +628,7 @@ async fn evaluate(
         pool.policy(),
         &records,
         &requirements,
+        &admission,
         explicit,
     );
     if let Some(path) = &artifact.placement_output {
@@ -627,6 +639,7 @@ async fn evaluate(
 
 pub async fn placement(command: PlacementCommand) -> compute_core::Result<()> {
     let location = command.location;
+    let policy = command.policy;
     let (artifact, explain) = match command.command {
         PlacementCommands::Inspect(artifact) => (artifact, false),
         PlacementCommands::Explain(artifact) => (artifact, true),
@@ -637,7 +650,7 @@ pub async fn placement(command: PlacementCommand) -> compute_core::Result<()> {
     } else {
         SubmissionMode::Synchronous
     };
-    let (_, report, _) = evaluate(&location, &artifact, submission).await?;
+    let (_, report, _) = evaluate(&location, &policy, &artifact, submission).await?;
     match (explain, artifact.json) {
         (false, true) => print_json(&report),
         (false, false) => print_summary(&report),
@@ -735,6 +748,7 @@ fn print_explanation(report: &PlacementReport) {
 
 pub async fn pool(command: PoolCommand) -> compute_core::Result<()> {
     let location = command.location;
+    let policy = command.policy;
     match command.command {
         PoolCommands::Run(artifact) => {
             if artifact.idempotency_key.is_some() {
@@ -743,7 +757,7 @@ pub async fn pool(command: PoolCommand) -> compute_core::Result<()> {
                 ));
             }
             let (pool, report, request) =
-                evaluate(&location, &artifact, SubmissionMode::Synchronous).await?;
+                evaluate(&location, &policy, &artifact, SubmissionMode::Synchronous).await?;
             if !placed(&report, artifact.json) {
                 std::process::exit(PLACEMENT_FAILED_EXIT);
             }
@@ -782,7 +796,7 @@ pub async fn pool(command: PoolCommand) -> compute_core::Result<()> {
                 ));
             }
             let (pool, report, request) =
-                evaluate(&location, &artifact, SubmissionMode::Job).await?;
+                evaluate(&location, &policy, &artifact, SubmissionMode::Job).await?;
             if !placed(&report, artifact.json) {
                 std::process::exit(PLACEMENT_FAILED_EXIT);
             }

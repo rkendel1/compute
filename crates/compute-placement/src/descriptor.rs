@@ -164,6 +164,9 @@ pub struct ProviderDescriptor {
     pub resource_capabilities: ResourceCapabilities,
     pub dependency_capsules: DependencyCapsuleSupport,
     pub artifact_limits: ArtifactLimits,
+    /// The provider's advertised execution policy, validated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<compute_policy::Policy>,
     pub availability: Availability,
 }
 
@@ -343,6 +346,11 @@ impl ProviderDescriptor {
         runtimes.sort_by_key(|runtime| runtime.kind);
         unavailable_runtimes.sort();
 
+        if let Some(policy) = &capabilities.policy {
+            policy
+                .validate()
+                .map_err(|error| invalid("policy", error.to_string()))?;
+        }
         let formats = capabilities.dependency_capsule_formats.clone();
         let mut descriptor = Self {
             descriptor_version: DESCRIPTOR_VERSION.into(),
@@ -380,6 +388,10 @@ impl ProviderDescriptor {
                 max_output_bytes: capabilities.max_output_bytes,
                 jobs: capabilities.max_concurrent_jobs.is_some(),
             },
+            policy: capabilities
+                .policy
+                .clone()
+                .map(compute_policy::Policy::canonical),
             availability,
         };
         descriptor.capability_version = descriptor.compute_capability_version();
@@ -404,6 +416,8 @@ impl ProviderDescriptor {
             resource_capabilities: &'a ResourceCapabilities,
             dependency_capsules: &'a DependencyCapsuleSupport,
             artifact_limits: &'a ArtifactLimits,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            policy: &'a Option<compute_policy::Policy>,
         }
         canonical_identity(&Body {
             descriptor_version: &self.descriptor_version,
@@ -419,6 +433,7 @@ impl ProviderDescriptor {
             resource_capabilities: &self.resource_capabilities,
             dependency_capsules: &self.dependency_capsules,
             artifact_limits: &self.artifact_limits,
+            policy: &self.policy,
         })
     }
 

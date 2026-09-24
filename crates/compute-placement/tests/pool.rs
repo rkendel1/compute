@@ -176,7 +176,11 @@ fn shell_bundle() -> WorkloadBundle {
 fn prepare(
     bundle: &WorkloadBundle,
     submission: SubmissionMode,
-) -> (ProviderRequest, PlacementRequirements) {
+) -> (
+    ProviderRequest,
+    PlacementRequirements,
+    compute_placement::AdmissionContext,
+) {
     let mut request = ProviderRequest::bundle(bundle.to_bytes().unwrap());
     request.expected.workload_id = Some(bundle.workload_id().unwrap());
     request.expected.bundle_id = Some(bundle.bundle_id().unwrap());
@@ -188,7 +192,11 @@ fn prepare(
         &RequirementOptions::default(),
     )
     .unwrap();
-    (request, requirements)
+    let admission = compute_placement::AdmissionContext::new(
+        &[],
+        compute_policy::ExecutionContract::from_bundle(bundle, None).unwrap(),
+    );
+    (request, requirements, admission)
 }
 
 fn restricted(runtimes: &[RuntimeKind], isolation: &[IsolationProfile]) -> ProviderPolicy {
@@ -273,12 +281,13 @@ async fn placement_selects_only_providers_that_satisfy_each_workload() {
     // Strict WASM: the priority-100 process provider cannot satisfy strict
     // isolation and must never win. `strict` (50) beats `local` (10).
     let bundle = wasm_bundle(IsolationProfile::Strict);
-    let (request, requirements) = prepare(&bundle, SubmissionMode::Synchronous);
+    let (request, requirements, admission) = prepare(&bundle, SubmissionMode::Synchronous);
     let report = place(
         &matrix.pool.configs(),
         matrix.pool.policy(),
         &records,
         &requirements,
+        &admission,
         None,
     );
     assert_eq!(report.compatible_providers, ["strict", "local"]);
@@ -334,12 +343,13 @@ async fn placement_selects_only_providers_that_satisfy_each_workload() {
 
     // Process-isolated shell: the priority-100 process provider wins.
     let bundle = shell_bundle();
-    let (request, requirements) = prepare(&bundle, SubmissionMode::Synchronous);
+    let (request, requirements, admission) = prepare(&bundle, SubmissionMode::Synchronous);
     let report = place(
         &matrix.pool.configs(),
         matrix.pool.policy(),
         &records,
         &requirements,
+        &admission,
         None,
     );
     assert_eq!(report.compatible_providers, ["process", "strict", "local"]);
@@ -356,7 +366,7 @@ async fn placement_selects_only_providers_that_satisfy_each_workload() {
 async fn explicit_provider_executes_there_or_fails_without_fallback() {
     let matrix = matrix().await;
     let bundle = wasm_bundle(IsolationProfile::Strict);
-    let (request, requirements) = prepare(&bundle, SubmissionMode::Synchronous);
+    let (request, requirements, admission) = prepare(&bundle, SubmissionMode::Synchronous);
 
     let mut cache = CapabilityCache::default();
     let only = matrix
@@ -374,6 +384,7 @@ async fn explicit_provider_executes_there_or_fails_without_fallback() {
         matrix.pool.policy(),
         &only,
         &requirements,
+        &admission,
         Some("process"),
     );
     assert_eq!(report.outcome, PlacementOutcome::PlacementFailed);
@@ -402,6 +413,7 @@ async fn explicit_provider_executes_there_or_fails_without_fallback() {
         matrix.pool.policy(),
         &only,
         &requirements,
+        &admission,
         Some("local"),
     );
     let response = dispatch::execute(&matrix.pool, &report, request)
@@ -426,12 +438,13 @@ async fn pool_submission_places_jobs_on_job_capable_providers() {
     let matrix = matrix().await;
     let records = discover(&matrix.pool).await;
     let bundle = wasm_bundle(IsolationProfile::Process);
-    let (request, requirements) = prepare(&bundle, SubmissionMode::Job);
+    let (request, requirements, admission) = prepare(&bundle, SubmissionMode::Job);
     let report = place(
         &matrix.pool.configs(),
         matrix.pool.policy(),
         &records,
         &requirements,
+        &admission,
         None,
     );
     let local = report
@@ -530,12 +543,13 @@ async fn failure_certification() {
     // Malformed, contradictory, and vanished providers are excluded; the
     // placement is still structured and deterministic.
     let bundle = wasm_bundle(IsolationProfile::Strict);
-    let (request, requirements) = prepare(&bundle, SubmissionMode::Synchronous);
+    let (request, requirements, admission) = prepare(&bundle, SubmissionMode::Synchronous);
     let report = place(
         &pool.configs(),
         pool.policy(),
         &records,
         &requirements,
+        &admission,
         None,
     );
     assert_eq!(report.compatible_providers, ["strict"]);
@@ -566,7 +580,14 @@ async fn failure_certification() {
         requirements.runtime.kind = RuntimeKind::Ruby;
         ((), requirements)
     };
-    let failed = place(&pool.configs(), pool.policy(), &records, &ruby, None);
+    let failed = place(
+        &pool.configs(),
+        pool.policy(),
+        &records,
+        &ruby,
+        &admission,
+        None,
+    );
     assert_eq!(
         failed.failure.as_ref().unwrap().code,
         "no_compatible_provider"
@@ -591,7 +612,14 @@ async fn failure_certification() {
         )
         .await;
     assert_eq!(stale[0].status, DiscoveryStatus::Stale);
-    let report = place(&pool.configs(), pool.policy(), &stale, &requirements, None);
+    let report = place(
+        &pool.configs(),
+        pool.policy(),
+        &stale,
+        &requirements,
+        &admission,
+        None,
+    );
     assert_eq!(report.outcome, PlacementOutcome::PlacementFailed);
     assert_eq!(
         report.providers[0].status,
@@ -609,6 +637,7 @@ async fn failure_certification() {
         pool.policy(),
         &records,
         &requirements,
+        &admission,
         None,
     );
     assert_eq!(report.selected.as_ref().unwrap().provider_id, "strict");
@@ -653,12 +682,13 @@ async fn restricted_provider_enforces_what_it_withholds() {
 async fn repeated_discovery_and_placement_is_deterministic() {
     let matrix = matrix().await;
     let bundle = wasm_bundle(IsolationProfile::Strict);
-    let (_, requirements) = prepare(&bundle, SubmissionMode::Synchronous);
+    let (_, requirements, admission) = prepare(&bundle, SubmissionMode::Synchronous);
     let first = place(
         &matrix.pool.configs(),
         matrix.pool.policy(),
         &discover(&matrix.pool).await,
         &requirements,
+        &admission,
         None,
     );
     for _ in 0..3 {
@@ -667,10 +697,123 @@ async fn repeated_discovery_and_placement_is_deterministic() {
             matrix.pool.policy(),
             &discover(&matrix.pool).await,
             &requirements,
+            &admission,
             None,
         );
         assert_eq!(again.placement_id, first.placement_id);
         assert_eq!(again.selected, first.selected);
         assert_eq!(again.explanation, first.explanation);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_denied_providers_are_excluded_and_never_execute() {
+    let locked_policy = compute_policy::Policy::from_json(
+        br#"{"version": 1, "name": "locked", "allowed_runtimes": ["shell"]}"#,
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let jobs = tempfile::tempdir().unwrap();
+    let locked = Arc::new(
+        LocalProvider::with_identity(ProviderIdentity::Remote {
+            id: endpoint.clone(),
+            endpoint: endpoint.clone(),
+        })
+        .with_execution_policy(Some(locked_policy.clone())),
+    );
+    let mut config = ServerConfig::local(endpoint.clone());
+    config.provider = locked.clone();
+    config.job_store = jobs.path().to_path_buf();
+    let handle = tokio::spawn(async move {
+        let _ = compute_provider::serve_listener(listener, config).await;
+    });
+    let open = serve(ProviderPolicy::default()).await;
+
+    let mut pool = ProviderPool::new(PoolPolicy::default());
+    pool.add_remote(
+        "locked",
+        remote(&endpoint, 100),
+        Arc::new(RemoteProvider::new(endpoint.clone())),
+    )
+    .unwrap();
+    pool.add_remote(
+        "open",
+        remote(&open.endpoint, 10),
+        Arc::new(RemoteProvider::new(open.endpoint.clone())),
+    )
+    .unwrap();
+    let records = discover(&pool).await;
+    let locked_record = records.iter().find(|r| r.provider_id == "locked").unwrap();
+    assert_eq!(
+        locked_record
+            .descriptor
+            .as_ref()
+            .unwrap()
+            .policy
+            .as_ref()
+            .map(|p| p.policy_id()),
+        Some(locked_policy.policy_id())
+    );
+
+    let bundle = wasm_bundle(IsolationProfile::Process);
+    let (request, requirements, admission) = prepare(&bundle, SubmissionMode::Synchronous);
+    let report = place(
+        &pool.configs(),
+        pool.policy(),
+        &records,
+        &requirements,
+        &admission,
+        None,
+    );
+    let locked_eval = report
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "locked")
+        .unwrap();
+    assert_eq!(locked_eval.status, EvaluationStatus::PolicyDenied);
+    assert!(locked_eval.reasons.is_empty(), "capable");
+    assert_eq!(
+        locked_eval.admission.as_ref().unwrap().codes(),
+        ["runtime_denied"]
+    );
+    assert_eq!(report.selected.as_ref().unwrap().provider_id, "open");
+    let response = dispatch::execute(&pool, &report, request.clone())
+        .await
+        .unwrap();
+    report
+        .verify_receipt(response.result.receipt.as_ref().unwrap())
+        .unwrap();
+
+    // Explicit selection of the denied provider fails without execution.
+    let explicit = place(
+        &pool.configs(),
+        pool.policy(),
+        &records,
+        &requirements,
+        &admission,
+        Some("locked"),
+    );
+    assert_eq!(
+        explicit.failure.as_ref().unwrap().code,
+        "explicit_provider_denied"
+    );
+    let error = dispatch::execute(&pool, &explicit, request.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, DispatchErrorCode::PlacementFailed);
+
+    // Even bypassing placement, the provider's own admission refuses, with
+    // evidence, before any runtime starts.
+    let bypass = RemoteProvider::new(endpoint.clone())
+        .execute(request)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        bypass.kind,
+        compute_provider::ProviderErrorKind::AdmissionDenied
+    );
+    assert_eq!(bypass.admission.unwrap().codes(), ["runtime_denied"]);
+    assert_eq!(locked.executions_started(), 0);
+    handle.abort();
 }

@@ -11,6 +11,7 @@ use compute_provider::{
 };
 use compute_runtime::Compute;
 
+mod admission;
 mod certification;
 mod direct;
 mod distribution;
@@ -90,6 +91,10 @@ struct ServeCommand {
     /// Largest memory limit a workload may request.
     #[arg(long, value_parser = parse_memory)]
     max_memory: Option<u64>,
+    /// Execution policy this server enforces: `--policy FILE`, or
+    /// `[server.policy] path` in `--config`/compute.toml.
+    #[command(flatten)]
+    execution_policy: admission::PolicyLocation,
 }
 
 #[derive(Args, Debug)]
@@ -443,6 +448,8 @@ struct RunCommand {
     /// Refuse to execute a bundle whose deterministic identity differs.
     #[arg(long, requires = "bundle")]
     expected_bundle_id: Option<String>,
+    #[command(flatten)]
+    policy: admission::PolicyLocation,
     #[arg(last = true)]
     args: Vec<String>,
 }
@@ -496,6 +503,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 .map(DependencyCapsule::read)
                 .transpose()?;
             let _offline = command.offline;
+            let policy_sources = command.policy.sources()?;
             if let Some(bundle) = command.bundle {
                 if command.runtime.is_some()
                     || !command.env.is_empty()
@@ -526,7 +534,22 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     )?;
                     print_bundle_plan(&plan, command.json);
                 } else {
-                    let result = compute
+                    let loaded = compute.load_bundle(&bundle)?;
+                    loaded.require_ids(
+                        command.expected_workload_id.as_deref(),
+                        command.expected_bundle_id.as_deref(),
+                    )?;
+                    let admitted = admission::admit_locally(
+                        &loaded,
+                        dependency_capsule.as_ref(),
+                        command.isolation,
+                        &policy_sources,
+                    )
+                    .await?;
+                    if !admitted.decision.admitted {
+                        admission::deny(&admitted, command.json);
+                    }
+                    let mut result = compute
                         .run_bundle_with_dependencies(
                             &bundle,
                             command.expected_workload_id.as_deref(),
@@ -535,6 +558,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                             dependency_capsule,
                         )
                         .await?;
+                    admission::bind(&mut result, &admitted)?;
                     print_execution_result(result, command.json, command.receipt.as_deref())?;
                 }
                 return Ok(());
@@ -575,7 +599,21 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                         .await?;
                     print_workload_plan(&plan, command.json);
                 } else {
-                    let result = compute
+                    let loaded = compute_core::WorkloadBundle::create(&workload)?;
+                    if let Some(expected) = command.expected_workload_id.as_deref() {
+                        loaded.workload.require_id(expected)?;
+                    }
+                    let admitted = admission::admit_locally(
+                        &loaded,
+                        dependency_capsule.as_ref(),
+                        command.isolation,
+                        &policy_sources,
+                    )
+                    .await?;
+                    if !admitted.decision.admitted {
+                        admission::deny(&admitted, command.json);
+                    }
+                    let mut result = compute
                         .run_workload_with_dependencies(
                             &workload,
                             command.expected_workload_id.as_deref(),
@@ -583,6 +621,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                             dependency_capsule,
                         )
                         .await?;
+                    admission::bind(&mut result, &admitted)?;
                     print_execution_result(result, command.json, command.receipt.as_deref())?;
                 }
                 return Ok(());
@@ -613,6 +652,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 isolation: command.isolation,
                 memory: command.memory,
                 timeout: command.timeout,
+                defaults: command.policy.defaults()?,
             })?;
             if command.explain {
                 print_generated_workload(&resolved, command.json)?;
@@ -624,7 +664,17 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 )?;
                 print_workload_plan(&plan, command.json);
             } else {
-                let result = compute
+                let bundle = compute_core::WorkloadBundle::create_from_with_capsule(
+                    resolved.workload.clone(),
+                    &resolved.root,
+                    resolved.dependency_capsule.clone(),
+                )?;
+                let admitted =
+                    admission::admit_locally(&bundle, None, None, &policy_sources).await?;
+                if !admitted.decision.admitted {
+                    admission::deny(&admitted, command.json);
+                }
+                let mut result = compute
                     .run_generated_workload_with_dependencies(
                         &resolved.root,
                         resolved.workload,
@@ -632,6 +682,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                         resolved.dependency_capsule,
                     )
                     .await?;
+                admission::bind(&mut result, &admitted)?;
                 print_execution_result(result, command.json, command.receipt.as_deref())?;
             }
         }
@@ -678,6 +729,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                         isolation: None,
                         memory: None,
                         timeout: None,
+                        defaults: admission::PolicyLocation::default().defaults()?,
                     })?;
                     compute.create_generated_bundle_with_dependencies(
                         &resolved.root,
@@ -854,6 +906,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     isolation: None,
                     memory: None,
                     timeout: None,
+                    defaults: admission::PolicyLocation::default().defaults()?,
                 });
                 match resolved {
                     Ok(resolved) => print_generated_workload(&resolved, command.json)?,
@@ -1123,7 +1176,15 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX)),
                 max_memory_bytes: command.max_memory,
             };
-            let mut config = ServerConfig::local_with_policy(endpoint, policy);
+            let execution_policy = command.execution_policy.server_policy()?;
+            if let Some(policy) = &execution_policy {
+                eprintln!(
+                    "Execution policy: {} ({})",
+                    policy.label(),
+                    policy.policy_id()
+                );
+            }
+            let mut config = ServerConfig::local_with_policies(endpoint, policy, execution_policy);
             config.job_store = command.job_store;
             config.job_retention = command.job_retention;
             config.max_concurrent_jobs = command.max_concurrent_jobs;
@@ -1382,6 +1443,7 @@ fn remote_request(command: RemoteArtifactCommand) -> compute_core::Result<Remote
             isolation,
             memory,
             timeout,
+            defaults: admission::PolicyLocation::default().defaults()?,
         })?;
         let bundle = compute_core::WorkloadBundle::create_from_with_capsule(
             resolved.workload.clone(),

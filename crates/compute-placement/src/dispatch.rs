@@ -22,6 +22,8 @@ pub enum DispatchErrorCode {
     ProviderUnavailable,
     /// The selected provider refused or failed the request.
     ProviderRejected,
+    /// The selected provider's admission denied the execution; nothing ran.
+    AdmissionDenied,
     /// The selected provider does not accept durable jobs.
     JobsUnsupported,
     /// Returned evidence does not prove execution at the selected provider.
@@ -40,6 +42,9 @@ pub struct DispatchError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_error: Option<ProviderErrorKind>,
     pub message: String,
+    /// Admission evidence when the provider denied the execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<Box<compute_policy::AdmissionDecision>>,
     pub retried: bool,
 }
 
@@ -77,6 +82,7 @@ fn prepare<'a>(
         provider_id,
         provider_error: None,
         message,
+        admission: None,
         retried: false,
     };
     let (PlacementOutcome::Placed, Some(selected), Some(binding)) =
@@ -112,6 +118,7 @@ fn prepare<'a>(
     }
     request.execution.isolation = Some(report.requirements.isolation);
     request.execution.placement = Some(binding);
+    request.execution.policy = report.admission.request_policy.clone();
     Ok((member, request))
 }
 
@@ -127,6 +134,8 @@ fn provider_failure(
     DispatchError {
         code: if unreachable {
             DispatchErrorCode::ProviderUnavailable
+        } else if error.kind == ProviderErrorKind::AdmissionDenied {
+            DispatchErrorCode::AdmissionDenied
         } else {
             DispatchErrorCode::ProviderRejected
         },
@@ -134,6 +143,7 @@ fn provider_failure(
         provider_id: Some(provider_id.into()),
         provider_error: Some(error.kind),
         message: error.message,
+        admission: error.admission,
         retried: false,
     }
 }
@@ -156,6 +166,7 @@ pub async fn execute(
         provider_id: Some(member.id.clone()),
         provider_error: None,
         message,
+        admission: None,
         retried: false,
     };
     let receipt = response
@@ -187,6 +198,7 @@ pub async fn submit(
             provider_id: Some(member.id.clone()),
             provider_error: None,
             message: "the selected provider does not accept durable jobs".into(),
+            admission: None,
             retried: false,
         });
     };

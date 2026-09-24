@@ -31,8 +31,9 @@ pub use matching::{
     CapabilityMatch, IncompatibilityReason, ReasonCode, match_provider, runtime_version_matches,
 };
 pub use placement::{
-    EvaluationStatus, PLACEMENT_VERSION, PlacementExplanation, PlacementFailure, PlacementOutcome,
-    PlacementReport, ProviderEvaluation, SelectedProvider, SelectionPolicy, place,
+    AdmissionContext, EvaluationStatus, PLACEMENT_VERSION, PlacementExplanation, PlacementFailure,
+    PlacementOutcome, PlacementReport, ProviderEvaluation, SelectedProvider, SelectionPolicy,
+    place,
 };
 pub use pool::{
     CAPABILITY_CACHE_VERSION, CacheEntry, CapabilityCache, DEFAULT_CAPABILITY_TTL_SECONDS,

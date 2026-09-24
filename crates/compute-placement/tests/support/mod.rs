@@ -62,6 +62,7 @@ pub struct Synthetic {
     pub jobs: bool,
     pub artifacts: BTreeMap<RuntimeKind, String>,
     pub unavailable: Vec<RuntimeKind>,
+    pub policy: Option<compute_policy::Policy>,
 }
 
 impl Synthetic {
@@ -85,6 +86,27 @@ impl Synthetic {
             jobs: kind == ProviderKind::Remote,
             artifacts: BTreeMap::new(),
             unavailable: vec![],
+            policy: None,
+        }
+    }
+
+    pub fn clone_for_test(&self) -> Self {
+        Self {
+            kind: self.kind,
+            runtimes: self.runtimes.clone(),
+            isolation: self.isolation.clone(),
+            network: self.network.clone(),
+            distribution: self.distribution.clone(),
+            platform: self.platform.clone(),
+            resident: self.resident.clone(),
+            max_timeout_ms: self.max_timeout_ms,
+            max_memory_bytes: self.max_memory_bytes,
+            max_request_bytes: self.max_request_bytes,
+            max_output_bytes: self.max_output_bytes,
+            jobs: self.jobs,
+            artifacts: self.artifacts.clone(),
+            unavailable: self.unavailable.clone(),
+            policy: self.policy.clone(),
         }
     }
 
@@ -141,7 +163,7 @@ impl Synthetic {
             runtime_artifacts: self.artifacts.clone(),
             max_timeout_ms: self.max_timeout_ms,
             max_memory_bytes: self.max_memory_bytes,
-            policy: None,
+            policy: self.policy.clone(),
             inventory: RuntimeInventory {
                 compute_version: "0.1.0".into(),
                 platform: self.platform.clone(),
@@ -219,4 +241,52 @@ pub fn config(entries: &[(&str, ProviderKind, i64)]) -> PoolConfig {
             })
             .collect(),
     }
+}
+
+/// The canonical contract a workload with `requirements` would carry.
+pub fn contract_for(requirements: &PlacementRequirements) -> compute_policy::ExecutionContract {
+    let resources = &requirements.resources;
+    compute_policy::ExecutionContract {
+        contract_version: compute_policy::CONTRACT_VERSION.into(),
+        workload_id: format!("sha256:{}", "c".repeat(64)),
+        bundle_id: format!("sha256:{}", "d".repeat(64)),
+        runtime: compute_policy::ContractRuntime {
+            kind: requirements.runtime.kind,
+            version: requirements.runtime.version.clone(),
+        },
+        dependency_id: requirements
+            .dependencies
+            .as_ref()
+            .map(|dependency| dependency.id.clone()),
+        isolation: requirements.isolation,
+        network: requirements.network.clone(),
+        resources: compute_policy::ContractResources {
+            timeout_ms: resources.timeout_ms,
+            memory_bytes: resources.memory_bytes,
+            cpu_time_ms: resources.cpu_time_ms,
+            process_count: resources.process_count,
+            stdout_bytes: resources.stdout_bytes,
+            stderr_bytes: resources.stderr_bytes,
+        },
+        platform: requirements.platform.clone(),
+        input_bytes: 0,
+        artifact_bytes: requirements.artifact.request_bytes,
+        output_classes: vec![compute_policy::OutputClass::Stdio],
+    }
+}
+
+/// Admission under the baseline policy alone.
+pub fn baseline(requirements: &PlacementRequirements) -> compute_placement::AdmissionContext {
+    compute_placement::AdmissionContext::new(&[], contract_for(requirements))
+}
+
+/// Admission under a caller policy.
+pub fn with_policy(
+    requirements: &PlacementRequirements,
+    policy: compute_policy::Policy,
+) -> compute_placement::AdmissionContext {
+    compute_placement::AdmissionContext::new(
+        &[(compute_policy::PolicySourceKind::Explicit, policy)],
+        contract_for(requirements),
+    )
 }

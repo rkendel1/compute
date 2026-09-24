@@ -7,8 +7,13 @@ use compute_core::{
 };
 use serde::{Deserialize, Serialize};
 
+use compute_policy::{
+    AdmissionDecision, CapabilityStatus, EffectivePolicy, ExecutionContract, Policy,
+    PolicySourceKind, ProviderFacts, admit,
+};
+
 use crate::canonical_identity;
-use crate::descriptor::{Health, ProviderKind};
+use crate::descriptor::{Health, ProviderDescriptor, ProviderKind};
 use crate::matching::{IncompatibilityReason, match_provider};
 use crate::pool::{DiscoveryError, DiscoveryRecord, DiscoveryStatus, PoolPolicy, ProviderConfig};
 use crate::requirements::PlacementRequirements;
@@ -54,6 +59,8 @@ pub enum EvaluationStatus {
     ProviderUnavailable,
     /// Compatible, but excluded by `require_healthy`.
     ExcludedUnhealthy,
+    /// Capable, but the effective execution policy does not admit it.
+    PolicyDenied,
 }
 
 impl EvaluationStatus {
@@ -65,6 +72,7 @@ impl EvaluationStatus {
             Self::CapabilitiesInvalid => "provider_capabilities_invalid",
             Self::ProviderUnavailable => "provider_unavailable",
             Self::ExcludedUnhealthy => "excluded_unhealthy",
+            Self::PolicyDenied => "policy_denied",
         }
     }
 }
@@ -83,7 +91,12 @@ pub struct ProviderEvaluation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_identity: Option<ProviderIdentity>,
     pub status: EvaluationStatus,
+    /// Capability incompatibilities.
     pub reasons: Vec<IncompatibilityReason>,
+    /// Admission under this provider's effective policy, evaluated
+    /// independently of capability so both facts are preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<AdmissionDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<DiscoveryError>,
 }
@@ -95,7 +108,43 @@ pub struct SelectedProvider {
     pub provider_identity: ProviderIdentity,
     pub provider_protocol: String,
     pub capability_version: String,
+    pub policy_id: String,
+    pub admission_id: String,
     pub selection_reason: SelectionReason,
+}
+
+/// What admission evaluates during placement: the caller's effective policy
+/// and the canonical execution contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionContext {
+    /// Baseline ∩ local ∩ explicit policy. Each provider's advertised
+    /// policy is intersected with it.
+    pub policy: EffectivePolicy,
+    /// The caller's own restrictions (local ∩ explicit), sent with the
+    /// request so the provider enforces them too. `None` when the caller
+    /// adds nothing to the baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_policy: Option<Policy>,
+    pub contract: ExecutionContract,
+}
+
+impl AdmissionContext {
+    /// Compose caller policy sources with the baseline.
+    pub fn new(sources: &[(PolicySourceKind, Policy)], contract: ExecutionContract) -> Self {
+        let request_policy = sources
+            .iter()
+            .map(|(_, policy)| policy.clone())
+            .reduce(|left, right| left.intersect(&right))
+            .map(|mut policy| {
+                policy.name = None;
+                policy
+            });
+        Self {
+            policy: EffectivePolicy::compose(sources),
+            request_policy,
+            contract,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +183,9 @@ pub struct PlacementReport {
     pub requested_provider: Option<String>,
     pub requirements: PlacementRequirements,
     pub selection_policy: SelectionPolicy,
+    /// The caller's effective policy (before provider policies).
+    pub policy_id: String,
+    pub admission: AdmissionContext,
     /// Every evaluated provider, in selection order.
     pub providers: Vec<ProviderEvaluation>,
     pub compatible_providers: Vec<String>,
@@ -195,6 +247,12 @@ impl PlacementReport {
         if receipt.isolation.effective != self.requirements.isolation {
             return Err("receipt isolation differs from the required isolation".into());
         }
+        if receipt.admission_status.as_deref() != Some("admitted")
+            || receipt.admission_id.as_ref() != Some(&selected.admission_id)
+            || receipt.policy_id.as_ref() != Some(&selected.policy_id)
+        {
+            return Err("receipt admission differs from the admission placement evaluated".into());
+        }
         Ok(())
     }
 }
@@ -208,6 +266,7 @@ pub fn place(
     policy: &PoolPolicy,
     records: &[DiscoveryRecord],
     requirements: &PlacementRequirements,
+    admission: &AdmissionContext,
     explicit: Option<&str>,
 ) -> PlacementReport {
     let selection_mode = if explicit.is_some() {
@@ -224,7 +283,7 @@ pub fn place(
         let Some(config) = configs.get(&record.provider_id) else {
             continue;
         };
-        providers.push(evaluate(record, config, policy, requirements));
+        providers.push(evaluate(record, config, policy, requirements, admission));
     }
     providers.sort_by(|left, right| {
         right
@@ -246,6 +305,7 @@ pub fn place(
             .collect::<Vec<_>>()
     };
     let incompatible_providers = with_status(|status| status == EvaluationStatus::Incompatible);
+    let policy_denied_providers = with_status(|status| status == EvaluationStatus::PolicyDenied);
     let excluded_providers = with_status(|status| {
         !matches!(
             status,
@@ -270,6 +330,16 @@ pub fn place(
                     .capability_version
                     .clone()
                     .expect("compatible providers have descriptors"),
+                policy_id: provider
+                    .admission
+                    .as_ref()
+                    .map(|decision| decision.policy_id.clone())
+                    .expect("compatible providers are admitted"),
+                admission_id: provider
+                    .admission
+                    .as_ref()
+                    .map(|decision| decision.admission_id.clone())
+                    .expect("compatible providers are admitted"),
                 selection_reason: SelectionReason {
                     compatibility_result: "compatible".into(),
                     selection_priority: provider.priority,
@@ -294,10 +364,21 @@ pub fn place(
         (None, Some(id)) => (
             None,
             Some(PlacementFailure {
-                code: "explicit_provider_incompatible".into(),
-                message: format!(
-                    "explicitly selected provider {id} cannot satisfy this workload; no other provider is substituted"
-                ),
+                code: if policy_denied_providers.iter().any(|denied| denied == id) {
+                    "explicit_provider_denied"
+                } else {
+                    "explicit_provider_incompatible"
+                }
+                .into(),
+                message: if policy_denied_providers.iter().any(|denied| denied == id) {
+                    format!(
+                        "explicitly selected provider {id} is capable, but policy does not admit this execution; explicit selection never bypasses policy"
+                    )
+                } else {
+                    format!(
+                        "explicitly selected provider {id} cannot satisfy this workload; no other provider is substituted"
+                    )
+                },
             }),
         ),
         (None, None) => (
@@ -305,10 +386,11 @@ pub fn place(
             Some(PlacementFailure {
                 code: "no_compatible_provider".into(),
                 message: format!(
-                    "no provider proved it satisfies this workload contract ({} evaluated: {} incompatible, {} excluded)",
+                    "no provider proved it satisfies this workload contract and is admitted by policy ({} evaluated: {} incompatible, {} policy-denied, {} excluded)",
                     providers.len(),
                     incompatible_providers.len(),
-                    excluded_providers.len()
+                    policy_denied_providers.len(),
+                    excluded_providers.len() - policy_denied_providers.len()
                 ),
             }),
         ),
@@ -316,6 +398,7 @@ pub fn place(
 
     let placement_id = placement_identity(
         requirements,
+        admission,
         &selection_policy,
         selection_mode,
         explicit,
@@ -339,6 +422,8 @@ pub fn place(
         requested_provider: explicit.map(str::to_owned),
         requirements: requirements.clone(),
         selection_policy,
+        policy_id: admission.policy.policy_id.clone(),
+        admission: admission.clone(),
         providers,
         compatible_providers,
         incompatible_providers,
@@ -354,6 +439,7 @@ fn evaluate(
     config: &ProviderConfig,
     policy: &PoolPolicy,
     requirements: &PlacementRequirements,
+    context: &AdmissionContext,
 ) -> ProviderEvaluation {
     let descriptor = record.descriptor.as_ref();
     let usable = match record.status {
@@ -362,11 +448,17 @@ fn evaluate(
         _ => None,
     };
     let health = record.health();
+    let mut admission = None;
     let (status, reasons) = match (record.status, usable) {
         (_, Some(descriptor)) => {
             let matched = match_provider(requirements, descriptor);
+            let decision = admit_on(descriptor, &matched, context);
+            let admitted = decision.admitted;
+            admission = Some(decision);
             if !matched.compatible {
                 (EvaluationStatus::Incompatible, matched.reasons)
+            } else if !admitted {
+                (EvaluationStatus::PolicyDenied, vec![])
             } else if policy.require_healthy && health != Health::Healthy {
                 (EvaluationStatus::ExcludedUnhealthy, vec![])
             } else {
@@ -400,8 +492,45 @@ fn evaluate(
         provider_identity: descriptor.map(|descriptor| descriptor.provider_identity.clone()),
         status,
         reasons,
+        admission,
         error,
     }
+}
+
+/// Admission on one provider: the caller's policy intersected with the
+/// provider's advertised policy, over the provider's facts. Capability is
+/// supplied as a separate input and never decides policy reasons.
+fn admit_on(
+    descriptor: &ProviderDescriptor,
+    matched: &crate::CapabilityMatch,
+    context: &AdmissionContext,
+) -> AdmissionDecision {
+    let effective = match &descriptor.policy {
+        Some(provider_policy) => context
+            .policy
+            .with(PolicySourceKind::Provider, provider_policy),
+        None => context.policy.clone(),
+    };
+    let facts = ProviderFacts {
+        identity: descriptor.provider_identity.clone(),
+        distribution_id: descriptor.distribution.id.clone(),
+        platform: Some(descriptor.distribution.platform.clone()),
+        runtime_version: descriptor
+            .runtime(context.contract.runtime.kind)
+            .map(|offer| offer.effective_version().to_string()),
+    };
+    let capability = if matched.compatible {
+        CapabilityStatus::Compatible
+    } else {
+        CapabilityStatus::Incompatible {
+            codes: matched
+                .codes()
+                .into_iter()
+                .map(|code| code.as_str())
+                .collect(),
+        }
+    };
+    admit(&effective.policy, &context.contract, &facts, &capability)
 }
 
 /// Deterministic placement identity. It covers requirements, the pool
@@ -410,6 +539,7 @@ fn evaluate(
 /// or transient transport metadata.
 fn placement_identity(
     requirements: &PlacementRequirements,
+    admission: &AdmissionContext,
     policy: &SelectionPolicy,
     mode: SelectionMode,
     explicit: Option<&str>,
@@ -424,12 +554,16 @@ fn placement_identity(
         capability_version: &'a Option<String>,
         status: EvaluationStatus,
         #[serde(skip_serializing_if = "Option::is_none")]
+        admission_id: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         health: Option<Health>,
     }
     #[derive(Serialize)]
     struct Material<'a> {
         placement_version: &'a str,
         requirements: &'a PlacementRequirements,
+        policy_id: &'a str,
+        contract: &'a ExecutionContract,
         selection_policy: &'a SelectionPolicy,
         selection_mode: SelectionMode,
         requested_provider: Option<&'a str>,
@@ -438,6 +572,8 @@ fn placement_identity(
     canonical_identity(&Material {
         placement_version: PLACEMENT_VERSION,
         requirements,
+        policy_id: &admission.policy.policy_id,
+        contract: &admission.contract,
         selection_policy: policy,
         selection_mode: mode,
         requested_provider: explicit,
@@ -450,10 +586,25 @@ fn placement_identity(
                 priority: provider.priority,
                 capability_version: &provider.capability_version,
                 status: provider.status,
+                admission_id: provider
+                    .admission
+                    .as_ref()
+                    .map(|decision| decision.admission_id.as_str()),
                 health: policy.require_healthy.then_some(provider.health),
             })
             .collect(),
     })
+}
+
+fn policy_reasons(provider: &ProviderEvaluation) -> String {
+    provider
+        .admission
+        .iter()
+        .flat_map(|decision| decision.reasons.iter())
+        .filter(|reason| reason.kind != compute_policy::ReasonKind::Capability)
+        .map(|reason| reason.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn explain(
@@ -538,8 +689,21 @@ fn explain(
             );
             match provider.status {
                 EvaluationStatus::Compatible => format!("{head}: compatible"),
+                EvaluationStatus::PolicyDenied => format!(
+                    "{head}: capable, but policy denied: {}",
+                    policy_reasons(provider)
+                ),
                 EvaluationStatus::Incompatible => format!(
-                    "{head}: incompatible: {}",
+                    "{head}: incompatible{}: {}",
+                    if provider
+                        .admission
+                        .as_ref()
+                        .is_some_and(|decision| decision.has(compute_policy::ReasonKind::Policy))
+                    {
+                        format!(" (policy would also deny: {})", policy_reasons(provider))
+                    } else {
+                        " (policy would admit)".into()
+                    },
                     provider
                         .reasons
                         .iter()
@@ -572,11 +736,11 @@ fn explain(
 
     let selection = match (selected, failure) {
         (Some(selected), _) if selected.selection_reason.ordering == EXPLICIT_ORDERING => format!(
-            "selected provider {}: explicitly requested and compatible",
+            "selected provider {}: explicitly requested, compatible, and admitted by policy",
             selected.provider_id
         ),
         (Some(selected), _) => format!(
-            "selected provider {}: compatible with selection priority {}, first among {} compatible provider(s) ordered by priority (descending) then provider ID (ascending)",
+            "selected provider {}: compatible and admitted by policy, with selection priority {}, first among {} candidate(s) ordered by priority (descending) then provider ID (ascending)",
             selected.provider_id,
             selected.selection_reason.selection_priority,
             selected.selection_reason.compatible_candidates

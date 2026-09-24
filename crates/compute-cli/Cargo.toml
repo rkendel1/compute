@@ -13,6 +13,7 @@ path = "src/main.rs"
 async-trait.workspace = true
 compute-core = { path = "../compute-core" }
 compute-placement = { path = "../compute-placement" }
+compute-policy = { path = "../compute-policy" }
 compute-provider = { path = "../compute-provider" }
 compute-runtime = { path = "../compute-runtime" }
 chrono.workspace = true
