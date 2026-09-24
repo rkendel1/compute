@@ -6,6 +6,7 @@ members = [
   "crates/compute-runtime-wasm",
   "crates/compute-runtime-conformance",
   "crates/compute-provider",
+  "crates/compute-policy",
   "crates/compute-placement",
   "crates/compute-cli",
 ]

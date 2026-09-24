@@ -1328,11 +1328,25 @@ pub struct ExecutionResult {
     /// not set this; provider implementations bind it before returning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderIdentity>,
+    /// Admission under which this execution ran. Present whenever policy
+    /// admission preceded execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<ExecutionAdmission>,
     /// Verifiable evidence attached by the orchestration layer. Runtime
     /// adapters leave this empty because they do not own distribution or
     /// portable workload identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<ExecutionReceipt>,
+}
+
+/// The admission decision an execution ran under: the policy snapshot's
+/// identity, the decision's identity, and its status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionAdmission {
+    pub policy_id: String,
+    pub admission_id: String,
+    pub admission_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3059,6 +3073,7 @@ mod tests {
             isolation: None,
             dependencies: None,
             provider: None,
+            admission: None,
             receipt: None,
         }
     }

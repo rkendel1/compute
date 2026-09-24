@@ -187,6 +187,14 @@ pub struct ExecutionReceipt {
     /// for executions that were not placed through a provider pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<ReceiptPlacement>,
+    /// Identity of the exact policy snapshot admission evaluated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_id: Option<String>,
+    /// Always `admitted` on an execution receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_status: Option<String>,
     pub distribution: DistributionIdentity,
     pub runtime: RuntimeIdentity,
     pub request: ExecutionRequestSummary,
@@ -266,6 +274,12 @@ struct ReceiptBody<'a> {
     provider_protocol: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     placement: &'a Option<ReceiptPlacement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_id: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    admission_id: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    admission_status: &'a Option<String>,
     distribution: &'a DistributionIdentity,
     runtime: &'a RuntimeIdentity,
     request: &'a ExecutionRequestSummary,
@@ -281,6 +295,13 @@ struct ReceiptBody<'a> {
 }
 
 impl ExecutionReceipt {
+    /// Bind admission evidence. The caller reseals the receipt.
+    pub fn bind_admission(&mut self, admission: &crate::ExecutionAdmission) {
+        self.policy_id = Some(admission.policy_id.clone());
+        self.admission_id = Some(admission.admission_id.clone());
+        self.admission_status = Some(admission.admission_status.clone());
+    }
+
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
         serde_json::to_vec(&self.body()).map_err(Into::into)
     }
@@ -357,6 +378,19 @@ impl ExecutionReceipt {
                 return Err(invalid("placement selected an incompatible provider"));
             }
         }
+        match (&self.policy_id, &self.admission_id, &self.admission_status) {
+            (None, None, None) => {}
+            (Some(policy), Some(admission), Some(status)) => {
+                validate_sha256_identity(policy)?;
+                validate_sha256_identity(admission)?;
+                if status != "admitted" {
+                    return Err(invalid(
+                        "an execution receipt requires an admitted decision",
+                    ));
+                }
+            }
+            _ => return Err(invalid("incomplete admission evidence")),
+        }
         validate_sha256_identity(&self.distribution.id)?;
         validate_sha256_identity(&self.runtime.distribution_runtime_id)?;
         validate_sha256_identity(&self.runtime.executable_identity)?;
@@ -423,6 +457,9 @@ impl ExecutionReceipt {
             provider: &self.provider,
             provider_protocol: &self.provider_protocol,
             placement: &self.placement,
+            policy_id: &self.policy_id,
+            admission_id: &self.admission_id,
+            admission_status: &self.admission_status,
             distribution: &self.distribution,
             runtime: &self.runtime,
             request: &self.request,
@@ -541,6 +578,9 @@ pub fn create_execution_receipt(
         provider: None,
         provider_protocol: None,
         placement: None,
+        policy_id: None,
+        admission_id: None,
+        admission_status: None,
         distribution: environment.distribution.clone(),
         runtime: RuntimeIdentity {
             declared: request.runtime.kind,
@@ -695,6 +735,7 @@ mod tests {
             }),
             dependencies: None,
             provider: None,
+            admission: None,
             receipt: None,
         };
         let environment = ReceiptEnvironment {

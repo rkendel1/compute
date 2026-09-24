@@ -141,6 +141,7 @@ impl Synthetic {
             runtime_artifacts: self.artifacts.clone(),
             max_timeout_ms: self.max_timeout_ms,
             max_memory_bytes: self.max_memory_bytes,
+            policy: None,
             inventory: RuntimeInventory {
                 compute_version: "0.1.0".into(),
                 platform: self.platform.clone(),

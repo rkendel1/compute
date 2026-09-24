@@ -399,6 +399,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "compute-core",
+ "compute-policy",
  "compute-provider",
  "compute-runtime",
  "serde",
@@ -412,12 +413,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "compute-policy"
+version = "0.1.0"
+dependencies = [
+ "compute-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "compute-provider"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
  "compute-core",
+ "compute-policy",
  "compute-runtime",
  "serde",
  "serde_json",

@@ -264,6 +264,7 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
                 isolation: None,
                 dependencies: None,
                 provider: None,
+                admission: None,
                 receipt: None,
             },
             workload,
@@ -300,6 +301,7 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
                         isolation: None,
                         dependencies: None,
                         provider: None,
+                        admission: None,
                         receipt: None,
                     },
                     workload,
@@ -353,6 +355,7 @@ fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
                     isolation: None,
                     dependencies: None,
                     provider: None,
+                    admission: None,
                     receipt: None,
                 },
                 workload,
@@ -406,6 +409,7 @@ fn failure_result(
         isolation: None,
         dependencies: None,
         provider: None,
+        admission: None,
         receipt: None,
     }
 }

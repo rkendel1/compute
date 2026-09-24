@@ -115,6 +115,16 @@ pub struct ExecutionJob {
     pub request: JobRequest,
     pub status: JobStatus,
     pub provider: ProviderIdentity,
+    /// Pool placement that routed the job here, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_id: Option<String>,
+    /// Pool identifier of this provider in that placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// The admitted decision this job executes under. A job is only ever
+    /// created from an admitted decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<crate::ExecutionAdmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

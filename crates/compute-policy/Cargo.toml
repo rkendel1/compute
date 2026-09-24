@@ -1,21 +1,17 @@
 [package]
-name = "compute-provider"
+name = "compute-policy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Deterministic execution policy and admission control for Compute"
 
 [dependencies]
-async-trait.workspace = true
-chrono.workspace = true
 compute-core = { path = "../compute-core" }
-compute-policy = { path = "../compute-policy" }
-compute-runtime = { path = "../compute-runtime" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tempfile.workspace = true
-tokio.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-wat.workspace = true
+tempfile.workspace = true

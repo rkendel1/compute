@@ -638,10 +638,15 @@ async fn restricted_provider_enforces_what_it_withholds() {
         .execute(request)
         .await
         .unwrap_err();
+    // Refused at admission, with the refusal attributed to capability.
     assert_eq!(
         error.kind,
-        compute_provider::ProviderErrorKind::CapabilityMismatch
+        compute_provider::ProviderErrorKind::AdmissionDenied
     );
+    let decision = error.admission.expect("denials carry evidence");
+    assert!(!decision.admitted);
+    assert!(decision.has(compute_policy::ReasonKind::Capability));
+    assert!(!decision.has(compute_policy::ReasonKind::Policy));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

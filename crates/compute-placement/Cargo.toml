@@ -9,6 +9,7 @@ description = "Provider pools and capability-aware placement for Compute"
 [dependencies]
 chrono.workspace = true
 compute-core = { path = "../compute-core" }
+compute-policy = { path = "../compute-policy" }
 compute-provider = { path = "../compute-provider" }
 serde.workspace = true
 serde_json.workspace = true

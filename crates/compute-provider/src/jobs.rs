@@ -14,7 +14,7 @@ use tempfile::NamedTempFile;
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::{
-    ComputeProvider, ProviderError, ProviderErrorKind, ProviderRequest, artifact_error,
+    Admission, ComputeProvider, ProviderError, ProviderErrorKind, ProviderRequest, artifact_error,
     transport_error,
 };
 
@@ -25,6 +25,11 @@ struct StoredRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     idempotency_key_hash: Option<String>,
     request: ProviderRequest,
+    /// The admitted decision and the exact policy snapshot it was
+    /// evaluated against. Execution uses this snapshot even if the server's
+    /// policy changes later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admission: Option<Admission>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +179,13 @@ impl JobManager {
                 status: job.status,
             });
         }
+        // Admission precedes acceptance (after idempotent replay, which
+        // returns the job already admitted): a denied request never becomes a
+        // job, and the error carries the complete decision as evidence.
+        let admission = self.provider.admit(request.clone()).await?;
+        if !admission.decision.admitted {
+            return Err(ProviderError::denied(admission.decision));
+        }
         let job_id = JobId::generate();
         let directory = self.directory(&job_id);
         let dependency_id = bundle
@@ -206,6 +218,17 @@ impl JobManager {
             },
             status: JobStatus::Accepted,
             provider: self.provider.identity(),
+            placement_id: request
+                .execution
+                .placement
+                .as_ref()
+                .map(|placement| placement.placement_id.clone()),
+            provider_id: request
+                .execution
+                .placement
+                .as_ref()
+                .map(|placement| placement.provider_id.clone()),
+            admission: Some(admission.summary()),
             execution_id: None,
             result_digest: None,
             cancellation: JobCancellation::default(),
@@ -223,6 +246,7 @@ impl JobManager {
                 owner,
                 idempotency_key_hash: key_hash,
                 request,
+                admission: Some(admission),
             },
         )?;
         self.write_json(&staging.path().join("status.json"), &job)?;
@@ -295,7 +319,24 @@ impl JobManager {
         {
             return;
         }
-        let response = self.provider.execute(stored.request).await;
+        // A job never executes without an admitted decision.
+        let Some(admission) = stored
+            .admission
+            .filter(|admission| admission.decision.admitted)
+        else {
+            let _ = self
+                .transition(
+                    &job_id,
+                    JobStatus::Rejected,
+                    Some("admission_missing: the job has no admitted decision".into()),
+                )
+                .await;
+            return;
+        };
+        let response = self
+            .provider
+            .execute_admitted(stored.request, admission)
+            .await;
         drop(permit);
         match response {
             Ok(response) => {
