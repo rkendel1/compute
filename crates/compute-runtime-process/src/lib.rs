@@ -662,7 +662,7 @@ impl ProcessRuntime {
             let (stdout, stderr, status) = tokio::join!(stdout_read, stderr_read, child.wait());
             stdout?;
             stderr?;
-            Ok::<_, std::io::Error>(status?)
+            status
         };
         let deadline = async {
             match workload.resources.wall_time {
