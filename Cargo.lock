@@ -394,6 +394,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "compute-environment"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "compute-core",
+ "compute-placement",
+ "compute-policy",
+ "compute-provider",
+ "compute-runtime",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml",
+ "walkdir",
+ "wat",
+]
+
+[[package]]
 name = "compute-placement"
 version = "0.1.0"
 dependencies = [

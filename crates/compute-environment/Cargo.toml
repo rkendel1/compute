@@ -1,0 +1,29 @@
+[package]
+name = "compute-environment"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Persistent environments and the Compute daemon"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+compute-core = { path = "../compute-core" }
+compute-placement = { path = "../compute-placement" }
+compute-policy = { path = "../compute-policy" }
+compute-provider = { path = "../compute-provider" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+compute-runtime = { path = "../compute-runtime" }
+compute-core = { path = "../compute-core" }
+tempfile.workspace = true
+wat.workspace = true

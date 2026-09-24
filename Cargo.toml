@@ -8,6 +8,7 @@ members = [
   "crates/compute-provider",
   "crates/compute-policy",
   "crates/compute-placement",
+  "crates/compute-environment",
   "crates/compute-cli",
 ]
 resolver = "2"

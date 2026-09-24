@@ -465,6 +465,8 @@ pub enum PolicySourceKind {
     Local,
     Server,
     Provider,
+    /// The execution policy of a Compute environment.
+    Environment,
     Explicit,
 }
 

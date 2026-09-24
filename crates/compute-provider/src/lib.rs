@@ -1150,6 +1150,10 @@ fn identity_protocol(identity: &ProviderIdentity) -> &'static str {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderOperation {
+    /// Read environment, project, workload, or daemon state.
+    EnvironmentRead,
+    /// Change environment, project, or workload state.
+    EnvironmentMutate,
     Inspect,
     /// Admission without execution; authorized like inspection.
     Admission,
@@ -1326,6 +1330,12 @@ async fn handle_connection(
         Err(error) => return write_error(&mut stream, 401, error).await,
     };
     let result = match operation {
+        ProviderOperation::EnvironmentRead | ProviderOperation::EnvironmentMutate => {
+            Err(ProviderError::new(
+                ProviderErrorKind::ProtocolUnsupported,
+                "environment operations are served by the Compute daemon",
+            ))
+        }
         ProviderOperation::Health => encode_result(state.config.provider.health().await),
         ProviderOperation::Capabilities => {
             let capabilities = state.config.provider.capabilities().await.map(|mut value| {
