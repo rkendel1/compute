@@ -272,7 +272,10 @@ pub fn resolve(options: DirectOptions) -> compute_core::Result<ResolvedDirect> {
             ..ResourceLimits::default()
         },
         network,
-        isolation: IsolationRequirement { profile: isolation },
+        isolation: IsolationRequirement {
+            profile: isolation,
+            host: Default::default(),
+        },
         dependencies,
     };
     workload.validate()?;

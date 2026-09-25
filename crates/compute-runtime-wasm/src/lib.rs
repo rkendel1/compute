@@ -439,6 +439,7 @@ mod tests {
             network: NetworkPolicy::None,
             resources: ResourceLimits::default(),
             isolation: compute_core::IsolationProfile::Process,
+            host_isolation: compute_core::HostProfile::Trusted,
             dependencies: None,
         };
         let adapter = WasmRuntime;

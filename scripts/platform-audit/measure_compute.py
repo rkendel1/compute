@@ -276,7 +276,7 @@ class Daemon:
         if self.process and self.process.poll() is None:
             self.process.send_signal(signal.SIGINT)
             try:
-                self.process.wait(30)
+                self.process.wait(300)
             except subprocess.TimeoutExpired:
                 self.process.kill()
 
@@ -564,23 +564,30 @@ def measure_remote(work):
 def measure_capacity(work, steps):
     daemon = Daemon(work, "capacity")
     daemon.start()
-    results = {"steps": []}
+    # Services run on the node's supervisor, not in the controller.
+    info = daemon.get("/info")
+    supervisor = (info.get("data_plane", {}).get("info") or {}).get("pid")
+    processes = [pid for pid in (daemon.process.pid, supervisor) if pid]
+    results = {"steps": [], "data_plane": info.get("data_plane", {}).get("info", {}).get("kind", "in_process")}
     try:
         daemon.request("POST", "/environments", {"name": "capacity"})
         service = bundle(os.path.join(work, "capacity-bundle"), "python", "main.py", HTTP_SERVICE.format(version="ok", prelude=""))
         count = 0
         for target in steps:
             started = time.perf_counter()
-            cpu_before = cpu_seconds(daemon.process.pid)
+            cpu_before = sum(cpu_seconds(pid) for pid in processes)
+            adds = []
             while count < target:
+                add_started = time.perf_counter()
                 daemon.request("POST", "/environments/capacity/projects", {
                     "name": f"svc{count}", "revision": "r1",
                     "workloads": [{"name": "web", "kind": "service", "bundle": service,
                                    "ports": [{"name": "http", "port": 8080}]}]})
+                adds.append((time.perf_counter() - add_started) * 1000)
                 count += 1
             added = time.perf_counter() - started
             status = daemon.get("/status")
-            children = descendants(daemon.process.pid)
+            children = [pid for parent in processes for pid in descendants(parent) if pid not in processes]
             child_rss = sum(rss_kib(pid) for pid in children)
             # Every endpoint answers.
             env = daemon.get("/environments/capacity")
@@ -591,33 +598,48 @@ def measure_capacity(work, steps):
                     answered += 1
                 except Exception:  # noqa: BLE001
                     pass
-            list_ms = percentiles([daemon.timed("GET", "/environments/capacity")[0] for _ in range(5)])
+            list_ms = percentiles([daemon.timed("GET", "/environments/capacity")[0] for _ in range(20)])
             load1, _, _ = os.getloadavg()
             step = {
                 "services": count,
                 "running_services": status["running_services"],
                 "endpoints_answering": answered,
                 "seconds_to_add_step": round(added, 2),
+                "add_service_ms": percentiles(adds),
                 "daemon_rss_mib": round(rss_kib(daemon.process.pid) / 1024, 1),
+                "supervisor_rss_mib": round(rss_kib(supervisor) / 1024, 1) if supervisor else None,
                 "service_processes": len(children),
                 "service_rss_mib_total": round(child_rss / 1024, 1),
-                "daemon_cpu_seconds_during_step": round(cpu_seconds(daemon.process.pid) - cpu_before, 2),
+                "daemon_cpu_seconds_during_step": round(sum(cpu_seconds(pid) for pid in processes) - cpu_before, 2),
                 "environment_view_ms": list_ms,
                 "load_average_1m": round(load1, 2),
                 "memory_available_mib": int(open("/proc/meminfo").read().split("MemAvailable:")[1].split()[0]) // 1024,
             }
             results["steps"].append(step)
-            print(f"  capacity {count}: running {status['running_services']} answering {answered} rss {step['service_rss_mib_total']} MiB", flush=True)
+            print(f"  capacity {count}: running {status['running_services']} answering {answered} add p50 {step['add_service_ms']['p50']} ms view p95 {list_ms['p95']} ms", flush=True)
             if step["memory_available_mib"] < 1500:
                 results["stopped_because"] = "less than 1.5 GiB of memory left"
                 break
         # Idle cost at the largest step.
-        cpu_before = cpu_seconds(daemon.process.pid)
+        cpu_before = sum(cpu_seconds(pid) for pid in processes)
         time.sleep(10)
-        results["daemon_idle_cpu_percent_at_max"] = round((cpu_seconds(daemon.process.pid) - cpu_before) / 10 * 100, 2)
+        results["daemon_idle_cpu_percent_at_max"] = round((sum(cpu_seconds(pid) for pid in processes) - cpu_before) / 10 * 100, 2)
+        try:
+            results["reconcile"] = daemon.get("/info").get("reconcile")
+        except Exception:  # noqa: BLE001
+            pass
     finally:
         stopped = time.perf_counter()
         daemon.stop()
+        # Stopped means every service and the supervisor are gone.
+        deadline = time.time() + 300
+        while supervisor and os.path.exists(f"/proc/{supervisor}") and time.time() < deadline:
+            try:
+                if open(f"/proc/{supervisor}/stat").read().split(")")[-1].split()[0] == "Z":
+                    break
+            except OSError:
+                break
+            time.sleep(0.05)
         results["shutdown_seconds"] = round(time.perf_counter() - stopped, 2)
     return results
 

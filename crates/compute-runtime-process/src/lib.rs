@@ -15,6 +15,9 @@ use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
+#[cfg(target_os = "linux")]
+mod sandbox;
+
 #[derive(Debug, Clone)]
 pub struct ProcessRuntime {
     kind: RuntimeKind,
@@ -322,6 +325,33 @@ fn discover_executable(
     }
     let output = match probe.output() {
         Ok(output) if output.status.success() => output,
+        // A POSIX shell without `--help` (dash is /bin/sh on Debian and
+        // Ubuntu) is identified by the shell it resolves to.
+        Ok(_) if definition.invocation == Invocation::Shell => {
+            match std::process::Command::new(path)
+                .args(["-c", "echo posix-sh"])
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+                    let name = resolved
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "sh".into());
+                    std::process::Output {
+                        status: output.status,
+                        stdout: format!("POSIX shell ({name})").into_bytes(),
+                        stderr: vec![],
+                    }
+                }
+                _ => {
+                    return DiscoveredRuntime::unavailable(
+                        source,
+                        format!("{} is not a working POSIX shell", path.display()),
+                    );
+                }
+            }
+        }
         Ok(output) => {
             return DiscoveredRuntime::unavailable(
                 source,
@@ -605,6 +635,26 @@ impl ProcessRuntime {
             .env("COMPUTE_WORK_DIR", &staged.work_dir)
             .env("COMPUTE_TMP_DIR", &staged.tmp_dir)
             .env("COMPUTE_OUTPUT_DIR", &staged.output_dir);
+
+        // A restricted or isolated host profile is enforced by the kernel,
+        // or the execution does not start: never a silent downgrade.
+        #[cfg(target_os = "linux")]
+        let _sandbox = match self.capabilities().host_plan(self.kind, workload)? {
+            Some(plan) => {
+                let sandbox = sandbox::Sandbox::prepare(
+                    &plan,
+                    compute_core::host::host_capabilities(),
+                    workload,
+                    staged.root.path(),
+                    runtime.executable.as_deref(),
+                    staged.dependencies_dir.as_deref(),
+                )?;
+                sandbox.install(&mut command);
+                command.env("TMPDIR", &staged.tmp_dir);
+                Some(sandbox)
+            }
+            None => None,
+        };
 
         let started = Instant::now();
         let mut child = match command.spawn() {

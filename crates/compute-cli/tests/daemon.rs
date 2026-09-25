@@ -46,9 +46,14 @@ impl Drop for Daemon {
     }
 }
 
+/// Every request to this daemon, reads included, carries its token unless
+/// a test removes it.
 fn compute(daemon: &Daemon, args: &[&str]) -> Command {
     let mut command = Command::cargo_bin("compute").unwrap();
-    command.args(args).args(["--daemon", &daemon.endpoint]);
+    command
+        .args(args)
+        .args(["--daemon", &daemon.endpoint])
+        .env("COMPUTE_DAEMON_TOKEN", "secret");
     command
 }
 
@@ -80,12 +85,17 @@ fn cli_operates_environments_through_the_daemon_api() {
         endpoint: format!("http://{listen}"),
     };
 
-    // Mutations require the token; reads do not.
+    // Every request requires the token, reads included.
     compute(&daemon, &["environment", "create", "staging"])
         .env_remove("COMPUTE_DAEMON_TOKEN")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("unauthorized"));
+        .stderr(predicates::str::contains("authentication failed"));
+    compute(&daemon, &["environment", "list"])
+        .env_remove("COMPUTE_DAEMON_TOKEN")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("authentication failed"));
     let created = json(
         compute(&daemon, &["environment", "create", "staging", "--json"])
             .env("COMPUTE_DAEMON_TOKEN", "secret"),

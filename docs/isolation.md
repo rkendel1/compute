@@ -55,6 +55,51 @@ compute runtime python --json
 Conditional means compatibility depends on the requested network and resource
 policy; the execution plan is authoritative.
 
+## Host profiles for process runtimes
+
+Process runtimes (Python, Node, Bun, Ruby, PHP, JVM, .NET, native Linux,
+shell) can additionally declare an operating-system boundary, enforced by
+the kernel:
+
+```json
+{ "runtime": "python", "entrypoint": "main.py", "network": "none",
+  "isolation": { "host": "isolated" } }
+```
+
+| Host profile | For | Filesystem | Network | Memory, CPU, processes |
+| --- | --- | --- | --- | --- |
+| `trusted` (default) | Operator-controlled code | Unrestricted | Unrestricted (`network` only) | Declared limits only |
+| `restricted` | Normal application workloads | Reads the host, writes only its workspace (Landlock) | `none` or `localhost`: its own network namespace (loopback only for `localhost`), and for `none` TCP denied by Landlock too; `network`: the host's | Declared limits (cgroups, rlimits) |
+| `isolated` | Untrusted workloads | Reads only its runtime, system libraries, certificates, and its workspace; writes only its workspace (Landlock) | As `restricted` | Always limited: 1 GiB memory, 100% of one CPU, 256 processes unless declared lower (cgroups) |
+
+Both confined profiles also set `no_new_privs`, disable core dumps, and,
+through Landlock, prevent the workload from inspecting processes outside
+its domain (for example another process's environment).
+
+**A profile is enforced or refused, never downgraded.** Compute detects
+what the host can enforce (Landlock ABI, network namespaces, cgroup v1 or
+v2 controllers, rlimits) and, for each profile, reports every dimension
+as `enforced`, `restricted`, `unrestricted`, `not_requested`, or
+`unsupported`:
+
+```sh
+compute isolation            # the table, with this host's capabilities
+compute isolation --json     # .host.capabilities and .host.profiles
+compute doctor               # the same, as the controller sees it
+```
+
+A workload that asks for a profile, or a dimension, this host cannot
+enforce is refused before it starts, with the reason. `trusted` cannot
+honour `network: none` or `localhost` and says so; it never runs such a
+workload with the host's network. Receipts and execution results carry
+the enforcement that applied under `isolation.host`, per dimension, with
+the mechanisms used. A host profile does not make a runtime `sandboxed` or
+`strict` in the model above: those remain runtime-enforced profiles, and
+a process runtime is only ever labelled with what the kernel enforced.
+
+Landlock and cgroups are Linux features. On other hosts, `restricted` and
+`isolated` are reported `unsupported` and refused.
+
 ## Workloads, bundles, and overrides
 
 The optional WorkloadSpec field participates in workload and bundle identity:

@@ -42,3 +42,7 @@ wat = "1.0"
 which = "8.0"
 wasmtime = "36.0.10"
 wasmtime-wasi = "36.0.10"
+
+# Hashing executables and bundles dominates debug-build tests otherwise.
+[profile.dev.package.sha2]
+opt-level = 3

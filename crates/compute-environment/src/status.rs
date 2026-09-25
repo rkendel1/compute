@@ -58,6 +58,109 @@ pub struct DaemonStatus {
     pub running_services: usize,
 }
 
+/// Which controller is running, how its API is secured, and what it can
+/// run: `GET /info`, `compute node info`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControllerInfo {
+    pub api: String,
+    pub controller: crate::identity::ControllerIdentity,
+    pub instance_id: String,
+    pub node_id: String,
+    pub pid: u32,
+    pub started_at: DateTime<Utc>,
+    pub security: SecurityView,
+    pub control_plane: ControlPlaneView,
+    /// Where workloads run and endpoints listen.
+    pub data_plane: DataPlaneView,
+    pub reconcile: ReconcileMetrics,
+    /// Runtimes this node can execute, as its provider reports them.
+    pub runtimes: serde_json::Value,
+    /// What each host isolation profile enforces on this node, per
+    /// dimension, or why it is unsupported.
+    #[serde(default)]
+    pub isolation: Option<compute_core::host::HostIsolationReport>,
+    /// Workloads and endpoints on this node, as last observed.
+    #[serde(default)]
+    pub workloads: WorkloadSummary,
+    /// The upgrade this node last ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade: Option<crate::upgrade::UpgradeRecord>,
+}
+
+/// Counts for `compute doctor`: what runs here and what is not well.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WorkloadSummary {
+    pub total: usize,
+    pub running: usize,
+    pub failed: usize,
+    /// `environment/project/workload` of each running workload whose
+    /// health check fails.
+    pub unhealthy: Vec<String>,
+    /// Host ports routed to a workload.
+    pub endpoints: usize,
+    /// Host ports that could not listen, with why.
+    pub endpoint_errors: std::collections::BTreeMap<u16, String>,
+}
+
+/// Reconciliation, measured: the last cycle and totals since start.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ReconcileMetrics {
+    pub cycles: u64,
+    pub errors_total: u64,
+    pub duration_seconds_total: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<ReconcileCycle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReconcileCycle {
+    pub started_at: DateTime<Utc>,
+    pub duration_ms: f64,
+    /// Workloads, instances, releases, and endpoints the cycle looked at.
+    pub resources_examined: usize,
+    /// What it changed: units started or stopped, release steps, status
+    /// records written, routes assigned.
+    pub resources_changed: usize,
+    pub errors: usize,
+    /// Milliseconds per phase.
+    pub phases_ms: std::collections::BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataPlaneView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<crate::dataplane::DataPlaneInfo>,
+    /// Whether workloads outlive this controller.
+    pub independent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// What this controller found when it started.
+    pub recovery: crate::daemon::Recovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityView {
+    pub mode: crate::auth::SecurityMode,
+    pub reason: String,
+    /// Whether requests without a credential are refused.
+    pub authentication_required: bool,
+    pub tls: crate::tls::TlsStatus,
+    pub active_credentials: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlPlaneView {
+    pub state: BackendInfo,
+    /// `normal`, or `degraded_control_plane` while durable control state is
+    /// unreachable: workloads keep running, reads are served from the last
+    /// snapshot, and mutations are refused with `state_unavailable`.
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reconciled_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Evidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]

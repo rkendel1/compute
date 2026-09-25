@@ -16,6 +16,8 @@ use walkdir::WalkDir;
 
 mod receipt;
 pub use receipt::*;
+pub mod host;
+pub use host::{HostEnforcement, HostProfile};
 mod dependencies;
 pub use dependencies::*;
 mod jobs;
@@ -210,11 +212,15 @@ impl std::str::FromStr for IsolationProfile {
 pub struct IsolationRequirement {
     #[serde(default)]
     pub profile: IsolationProfile,
+    /// For process runtimes: the operating-system boundary. Omitted means
+    /// `trusted`, and keeps existing workload identities unchanged.
+    #[serde(default, skip_serializing_if = "HostProfile::is_trusted")]
+    pub host: HostProfile,
 }
 
 impl IsolationRequirement {
     fn is_process(&self) -> bool {
-        self.profile == IsolationProfile::Process
+        self.profile == IsolationProfile::Process && self.host.is_trusted()
     }
 }
 
@@ -248,6 +254,46 @@ pub struct IsolationEvidence {
     pub network: BoundaryStatus,
     pub environment: BoundaryStatus,
     pub resources: BoundaryStatus,
+    /// What the host enforced on a process runtime under a restricted or
+    /// isolated host profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostEnforcement>,
+}
+
+impl IsolationEvidence {
+    /// The boundaries as the host enforces them under a host profile: the
+    /// network is disabled by a namespace, the filesystem is enforced
+    /// only when reads are confined too, and requested limits are
+    /// enforced by the kernel.
+    fn with_host_enforcement(mut self, workload: &ExecutionRequest) -> Self {
+        let Some(host) = &self.host else {
+            return self;
+        };
+        if host.network == host::Enforcement::Enforced {
+            self.network = if workload.network == NetworkPolicy::None {
+                BoundaryStatus::Disabled
+            } else {
+                BoundaryStatus::Enforced
+            };
+        }
+        if host.filesystem == host::Enforcement::Enforced {
+            self.filesystem = BoundaryStatus::Enforced;
+        }
+        let requested = |value: bool, dimension: host::Enforcement| {
+            !value || dimension == host::Enforcement::Enforced
+        };
+        let limits = workload.resources.memory_bytes.is_some()
+            || workload.resources.cpu_time.is_some()
+            || workload.resources.process_count.is_some();
+        if limits
+            && requested(workload.resources.memory_bytes.is_some(), host.memory)
+            && requested(workload.resources.cpu_time.is_some(), host.cpu)
+            && requested(workload.resources.process_count.is_some(), host.process)
+        {
+            self.resources = BoundaryStatus::Enforced;
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +358,9 @@ pub struct ExecutionRequest {
     pub resources: ResourceLimits,
     #[serde(default)]
     pub isolation: IsolationProfile,
+    /// The operating-system boundary a process runtime runs under.
+    #[serde(default, skip_serializing_if = "HostProfile::is_trusted")]
+    pub host_isolation: HostProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<DependencyCapsule>,
 }
@@ -541,6 +590,7 @@ impl WorkloadSpec {
             network: self.network.clone(),
             resources: self.resources.clone(),
             isolation: self.isolation.profile,
+            host_isolation: self.isolation.host,
             dependencies: None,
         })
     }
@@ -1076,6 +1126,7 @@ impl WorkloadBundle {
                 network: self.workload.network.clone(),
                 resources: self.workload.resources.clone(),
                 isolation: self.workload.isolation.profile,
+                host_isolation: self.workload.isolation.host,
                 dependencies: self.dependency_capsule.clone(),
             },
             _source: source,
@@ -1431,6 +1482,11 @@ pub struct RuntimeCapabilities {
     pub process_limit: Capability,
     pub network: std::collections::BTreeMap<NetworkPolicy, Capability>,
     pub isolation: IsolationCapabilities,
+    /// Host profiles this node can enforce for this runtime, beyond
+    /// `trusted`. Empty for runtimes with their own sandbox, and on hosts
+    /// that cannot enforce them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_profiles: Vec<HostProfile>,
 }
 
 impl RuntimeCapabilities {
@@ -1469,6 +1525,11 @@ impl RuntimeCapabilities {
                 cpu_enforcement: false,
                 process_enforcement: false,
             },
+            host_profiles: host::profile_matrix(host::host_capabilities())
+                .into_iter()
+                .filter(|(profile, plan)| !profile.is_trusted() && plan.is_ok())
+                .map(|(profile, _)| profile)
+                .collect(),
         }
     }
 
@@ -1505,6 +1566,7 @@ impl RuntimeCapabilities {
                 cpu_enforcement: false,
                 process_enforcement: false,
             },
+            host_profiles: vec![],
         }
     }
 
@@ -1615,7 +1677,9 @@ impl RuntimeCapabilities {
                 "a requested resource boundary is unavailable",
             ));
         }
+        let host = self.host_plan(runtime, workload).ok().flatten();
         Ok(IsolationEvidence {
+            host,
             profile: workload.isolation,
             requested: workload.isolation,
             effective: workload.isolation,
@@ -1649,7 +1713,8 @@ impl RuntimeCapabilities {
             } else {
                 BoundaryStatus::NotRequested
             },
-        })
+        }
+        .with_host_enforcement(workload))
     }
 
     /// Reject a request whenever satisfying it would require silently
@@ -1669,10 +1734,18 @@ impl RuntimeCapabilities {
         if !workload.stdin.is_empty() {
             require(self.stdin.supported, "stdin")?;
         }
+        // Under a restricted or isolated host profile the operating system
+        // enforces what a process runtime cannot.
+        let host = self.host_plan(runtime, workload)?;
+        let enforced = |dimension: fn(&HostEnforcement) -> host::Enforcement| {
+            host.as_ref()
+                .is_some_and(|plan| dimension(plan) == host::Enforcement::Enforced)
+        };
         let network = self
             .network
             .get(&workload.network)
-            .is_some_and(|c| c.supported);
+            .is_some_and(|c| c.supported)
+            || enforced(|plan| plan.network);
         require(network, &format!("network policy {}", workload.network))?;
         if workload.resources.wall_time.is_some() {
             require(self.timeout.supported, "wall-time limit")?;
@@ -1684,15 +1757,58 @@ impl RuntimeCapabilities {
             require(self.stderr_limit.supported, "stderr limit")?;
         }
         if workload.resources.memory_bytes.is_some() {
-            require(self.memory_limit.supported, "memory limit")?;
+            require(
+                self.memory_limit.supported || enforced(|plan| plan.memory),
+                "memory limit",
+            )?;
         }
         if workload.resources.cpu_time.is_some() {
-            require(self.cpu_limit.supported, "CPU-time limit")?;
+            require(
+                self.cpu_limit.supported || enforced(|plan| plan.cpu),
+                "CPU-time limit",
+            )?;
         }
         if workload.resources.process_count.is_some() {
-            require(self.process_limit.supported, "process-count limit")?;
+            require(
+                self.process_limit.supported || enforced(|plan| plan.process),
+                "process-count limit",
+            )?;
         }
         Ok(())
+    }
+
+    /// What a host profile enforces for this workload on this host, when
+    /// it asks for more than `trusted`. Only process runtimes take one:
+    /// WASM's boundary is its own runtime's. Refused, never weakened, when
+    /// the host cannot enforce it.
+    pub fn host_plan(
+        &self,
+        runtime: RuntimeKind,
+        workload: &Workload,
+    ) -> Result<Option<HostEnforcement>> {
+        if workload.host_isolation.is_trusted() {
+            return Ok(None);
+        }
+        if self.isolation.filesystem_boundary {
+            return Err(ComputeError::UnsupportedCapability {
+                runtime,
+                capability: format!(
+                    "host isolation {} (only process runtimes take a host profile; {runtime} is sandboxed by its runtime, use the sandboxed or strict isolation profile)",
+                    workload.host_isolation
+                ),
+            });
+        }
+        host::plan(
+            workload.host_isolation,
+            &workload.network,
+            &workload.resources,
+            host::host_capabilities(),
+        )
+        .map(Some)
+        .map_err(|refusal| ComputeError::UnsupportedCapability {
+            runtime,
+            capability: format!("{} ({})", refusal.message, refusal.code),
+        })
     }
 }
 
@@ -2430,6 +2546,7 @@ mod tests {
             network: NetworkPolicy::Network,
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
+            host_isolation: HostProfile::Trusted,
             dependencies: None,
         })
         .unwrap();
@@ -2464,6 +2581,7 @@ mod tests {
             network: NetworkPolicy::Network,
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
+            host_isolation: HostProfile::Trusted,
             dependencies: None,
         };
 
@@ -2503,6 +2621,7 @@ mod tests {
             network: NetworkPolicy::None,
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
+            host_isolation: HostProfile::Trusted,
             dependencies: None,
         };
 
@@ -2549,6 +2668,7 @@ mod tests {
                 ..ResourceLimits::default()
             },
             isolation: IsolationProfile::Strict,
+            host_isolation: HostProfile::Trusted,
             dependencies: None,
         };
         let strict = RuntimeCapabilities::wasm()
@@ -3231,6 +3351,7 @@ mod tests {
             network: NetworkPolicy::Network,
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
+            host_isolation: HostProfile::Trusted,
             dependencies: None,
         };
         let first = stage_workload(&request).unwrap();

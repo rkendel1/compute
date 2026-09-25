@@ -550,6 +550,23 @@ pub(crate) fn probe(
     network: NetworkPolicy,
     resources: ResourceLimits,
 ) -> compute_core::ExecutionRequest {
+    probe_on_host(
+        kind,
+        isolation,
+        compute_core::HostProfile::Trusted,
+        network,
+        resources,
+    )
+}
+
+/// A probe under a host profile.
+pub(crate) fn probe_on_host(
+    kind: RuntimeKind,
+    isolation: IsolationProfile,
+    host_isolation: compute_core::HostProfile,
+    network: NetworkPolicy,
+    resources: ResourceLimits,
+) -> compute_core::ExecutionRequest {
     compute_core::ExecutionRequest {
         runtime: compute_core::RuntimeSpec {
             kind,
@@ -565,6 +582,7 @@ pub(crate) fn probe(
         network,
         resources,
         isolation,
+        host_isolation,
         dependencies: None,
     }
 }

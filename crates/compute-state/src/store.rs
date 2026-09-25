@@ -33,10 +33,12 @@ pub enum Collection {
     Domain,
     DnsRecord,
     Certificate,
+    OperatorCredential,
+    Audit,
 }
 
 impl Collection {
-    pub const ALL: [Collection; 19] = [
+    pub const ALL: [Collection; 21] = [
         Self::Project,
         Self::ProjectRevision,
         Self::Environment,
@@ -56,6 +58,8 @@ impl Collection {
         Self::Domain,
         Self::DnsRecord,
         Self::Certificate,
+        Self::OperatorCredential,
+        Self::Audit,
     ];
 
     /// The collection's name in every backend, and in `compute.flow`.
@@ -80,6 +84,8 @@ impl Collection {
             Self::Domain => "Domain",
             Self::DnsRecord => "DnsRecord",
             Self::Certificate => "Certificate",
+            Self::OperatorCredential => "OperatorCredential",
+            Self::Audit => "Audit",
         }
     }
 
@@ -344,61 +350,85 @@ pub fn apply_in_memory(
     writes: Vec<Write>,
     next_version: &mut u64,
 ) -> Result<(), StateError> {
-    let mut staged = tables.clone();
-    for write in writes {
-        let collection = write.collection();
-        let table = staged.entry(collection).or_default();
-        let current = table.get(write.id()).map(|(version, _)| *version);
-        let fence = |expected: Option<u64>, id: &str| match (expected, current) {
-            (_, None) => Err(StateError::NotFound {
-                collection,
-                id: id.into(),
-            }),
-            (Some(expected), Some(actual)) if expected != actual => Err(StateError::Precondition {
-                collection,
-                id: id.into(),
-                expected,
-                actual: Some(actual),
-            }),
-            _ => Ok(()),
-        };
-        match write {
-            Write::Create { id, value, .. } => {
-                if current.is_some() {
-                    return Err(StateError::Conflict { collection, id });
+    // Writes apply in place, each remembering what it replaced, so a batch
+    // costs what it writes, not the size of the state. A refused write
+    // undoes the ones before it: every write or none.
+    let mut undo: Vec<(Collection, String, Option<(u64, Map<String, Value>)>)> = vec![];
+    let result = (|| {
+        for write in writes {
+            let collection = write.collection();
+            let table = tables.entry(collection).or_default();
+            let current = table.get(write.id()).map(|(version, _)| *version);
+            let fence = |expected: Option<u64>, id: &str| match (expected, current) {
+                (_, None) => Err(StateError::NotFound {
+                    collection,
+                    id: id.into(),
+                }),
+                (Some(expected), Some(actual)) if expected != actual => {
+                    Err(StateError::Precondition {
+                        collection,
+                        id: id.into(),
+                        expected,
+                        actual: Some(actual),
+                    })
                 }
-                *next_version += 1;
-                table.insert(id, (*next_version, value));
+                _ => Ok(()),
+            };
+            match write {
+                Write::Create { id, value, .. } => {
+                    if current.is_some() {
+                        return Err(StateError::Conflict { collection, id });
+                    }
+                    *next_version += 1;
+                    undo.push((collection, id.clone(), None));
+                    table.insert(id, (*next_version, value));
+                }
+                Write::Replace {
+                    id,
+                    value,
+                    expected,
+                    ..
+                } => {
+                    fence(expected, &id)?;
+                    *next_version += 1;
+                    let previous = table.insert(id.clone(), (*next_version, value));
+                    undo.push((collection, id, previous));
+                }
+                Write::Update {
+                    id,
+                    fields,
+                    expected,
+                    ..
+                } => {
+                    fence(expected, &id)?;
+                    *next_version += 1;
+                    let (version, document) = table.get(&id).cloned().expect("fenced");
+                    let mut updated = document.clone();
+                    updated.extend(fields);
+                    table.insert(id.clone(), (*next_version, updated));
+                    undo.push((collection, id, Some((version, document))));
+                }
+                Write::Delete { id, expected, .. } => {
+                    fence(expected, &id)?;
+                    let previous = table.remove(&id);
+                    undo.push((collection, id, previous));
+                }
             }
-            Write::Replace {
-                id,
-                value,
-                expected,
-                ..
-            } => {
-                fence(expected, &id)?;
-                *next_version += 1;
-                table.insert(id, (*next_version, value));
-            }
-            Write::Update {
-                id,
-                fields,
-                expected,
-                ..
-            } => {
-                fence(expected, &id)?;
-                *next_version += 1;
-                let (_, document) = table.get(&id).cloned().expect("fenced");
-                let mut document = document;
-                document.extend(fields);
-                table.insert(id, (*next_version, document));
-            }
-            Write::Delete { id, expected, .. } => {
-                fence(expected, &id)?;
-                table.remove(&id);
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        for (collection, id, previous) in undo.into_iter().rev() {
+            let table = tables.entry(collection).or_default();
+            match previous {
+                Some(previous) => {
+                    table.insert(id, previous);
+                }
+                None => {
+                    table.remove(&id);
+                }
             }
         }
     }
-    *tables = staged;
-    Ok(())
+    result
 }

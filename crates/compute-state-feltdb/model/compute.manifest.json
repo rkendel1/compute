@@ -496,6 +496,11 @@
           "name": "error",
           "type": "text",
           "required": false
+        },
+        {
+          "name": "failure",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -1171,6 +1176,121 @@
           "required": false
         }
       ]
+    },
+    {
+      "name": "OperatorCredential",
+      "fields": [
+        {
+          "name": "credential_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "operator_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "scopes",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "verifier",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "expires_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "revoked_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "rotated_from",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "Audit",
+      "fields": [
+        {
+          "name": "request_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "operator_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "credential_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "operation",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "resource",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "resource_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "result",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "status",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "error_kind",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "detail",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
     }
   ],
   "indexes": [
@@ -1413,6 +1533,22 @@
         "domain"
       ],
       "unique": false
+    },
+    {
+      "name": "OperatorCredential.operator_id",
+      "collection": "OperatorCredential",
+      "fields": [
+        "operator_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Audit.operator_id",
+      "collection": "Audit",
+      "fields": [
+        "operator_id"
+      ],
+      "unique": false
     }
   ],
   "references": [],
@@ -1555,6 +1691,20 @@
     {
       "name": "Certificate",
       "resource": "Certificate",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "OperatorCredential",
+      "resource": "OperatorCredential",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Audit",
+      "resource": "Audit",
       "read": "authenticated",
       "write": "authenticated",
       "capabilities": []

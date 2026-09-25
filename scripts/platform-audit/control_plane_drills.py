@@ -119,17 +119,17 @@ class Daemon:
         self.node, self.config, self.token_env = node, config, token_env
         self.process = None
 
-    def start(self, env):
+    def start(self, env, extra=()):
         os.makedirs(self.node, exist_ok=True)
         self.log = open(os.path.join(self.node, "daemon.out"), "a")
         self.process = subprocess.Popen([COMPUTE, "start", "--listen", f"127.0.0.1:{self.port}", "--state-dir", self.node,
                                          "--config", self.config, "--reconcile-interval-ms", "500",
-                                         "--require-token-env", self.token_env],
+                                         "--require-token-env", self.token_env, *extra],
                                         env=env, stdout=self.log, stderr=self.log)
         started = time.perf_counter()
         api = Api(self.endpoint)
         while True:
-            status, _, _ = api.call("GET", "/status", token=False, timeout=2)
+            status, _, _ = api.call("GET", "/health", token=False, timeout=2)
             if status == 200:
                 return (time.perf_counter() - started) * 1000
             if self.process.poll() is not None:
@@ -240,8 +240,8 @@ def main():
         status, _, _ = anonymous.call("POST", "/environments", {"name": "intruder"}, token=False)
         remote["mutation without token"] = {"status": status, "ok": status == 401}
         status, _, _ = anonymous.call("GET", "/environments", token=False)
-        remote["read without token"] = {"status": status, "ok": status == 200,
-                                        "note": "reads are open to anyone who can reach the API"}
+        remote["read without token"] = {"status": status, "ok": status == 401,
+                                        "note": "reads need a credential too"}
         status, value, _ = api.call("POST", "/environments", {"name": "preprod"})
         remote["environment create repeated"] = {"status": status, "ok": status == 409, "kind": (value or {}).get("kind")}
         status, value, _ = api.call("POST", "/projects/site/revisions", {"revision": "v1", "workloads": [
@@ -258,7 +258,7 @@ def main():
         outage = {}
         status, value, _ = api.call("POST", "/environments", {"name": "during-outage"})
         outage["mutation during outage"] = {"status": status, "kind": (value or {}).get("kind") if isinstance(value, dict) else value}
-        status, value, _ = api.call("GET", "/status", token=False)
+        status, value, _ = api.call("GET", "/status")
         outage["status reports"] = {"state_available": (value or {}).get("state_available"), "state_error": ((value or {}).get("state_error") or "")[:160]}
         time.sleep(2)
         outage["service still answers"] = http_get(endpoint)
@@ -267,7 +267,7 @@ def main():
         restart_ms = feltdb.start()
         recovered = wait(lambda: api.call("POST", "/environments", {"name": "after-outage"})[0] == 201, 60)
         drills["feltdb_restart"] = {"restart_ms": round(restart_ms, 1), "mutations_recovered": bool(recovered),
-                                    "status_available": api.call("GET", "/status", token=False)[1].get("state_available")}
+                                    "status_available": api.call("GET", "/status")[1].get("state_available")}
 
         # ---- Compute dies (SIGKILL) and restarts -------------------------------------------
         before = http_get(endpoint)
@@ -284,12 +284,29 @@ def main():
         })
         drills["compute_sigkill"] = down
 
-        # ---- Compute cannot start without FeltDB ------------------------------------------
+        # ---- Compute starts without FeltDB: degraded, not down -------------------------
         daemon.stop()
         feltdb.kill()
-        refused = Daemon(os.path.join(work, "node-refused"), config, "COMPUTE_DAEMON_TOKEN")
-        refused_ms = refused.start(env)
+        degraded = Daemon(os.path.join(work, "node-degraded"), config, "COMPUTE_DAEMON_TOKEN")
+        degraded_ms = degraded.start(env)
+        degraded_api = Api(degraded.endpoint, "drill-operator-token")
+        info, mutation = {}, (None, None, 0)
+        if degraded_ms is not None:
+            info = degraded_api.call("GET", "/info")[1] or {}
+            mutation = degraded_api.call("POST", "/environments", {"name": "while-degraded"})
         drills["compute_start_without_feltdb"] = {
+            "started": degraded_ms is not None,
+            "start_ms": round(degraded_ms, 1) if degraded_ms else None,
+            "control_plane_mode": (info.get("control_plane") or {}).get("mode"),
+            "mutation_status": mutation[0],
+            "mutation_kind": (mutation[1] or {}).get("kind") if isinstance(mutation[1], dict) else None,
+        }
+        if degraded.process.poll() is None:
+            degraded.stop()
+        # An operator can still insist on durable state at start.
+        refused = Daemon(os.path.join(work, "node-refused"), config, "COMPUTE_DAEMON_TOKEN")
+        refused_ms = refused.start(env, ["--require-state-at-start"])
+        drills["compute_start_without_feltdb_required"] = {
             "started": refused_ms is not None,
             "exit_code": refused.process.poll(),
             "log_tail": open(os.path.join(refused.node, "daemon.out")).read()[-240:],

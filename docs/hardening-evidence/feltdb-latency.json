@@ -1,0 +1,109 @@
+{
+  "format": "compute.feltdb-latency@1",
+  "measured_at": "2026-09-25T14:15:18Z",
+  "git": "f68ce7f",
+  "backend": "feltdb-server on this host",
+  "samples": 40,
+  "reads": {
+    "status": {
+      "n": 40,
+      "p50": 0.21,
+      "p95": 0.46,
+      "p99": 0.74,
+      "max": 0.74
+    },
+    "environments list": {
+      "n": 40,
+      "p50": 0.31,
+      "p95": 0.81,
+      "p99": 85.34,
+      "max": 85.34
+    },
+    "environment inspect": {
+      "n": 40,
+      "p50": 0.48,
+      "p95": 0.86,
+      "p99": 0.89,
+      "max": 0.89
+    },
+    "project status": {
+      "n": 40,
+      "p50": 0.29,
+      "p95": 0.47,
+      "p99": 0.92,
+      "max": 0.92
+    },
+    "projects list": {
+      "n": 40,
+      "p50": 13.96,
+      "p95": 16.04,
+      "p99": 19.67,
+      "max": 19.67
+    },
+    "deployments list": {
+      "n": 40,
+      "p50": 13.72,
+      "p95": 20.11,
+      "p99": 45.53,
+      "max": 45.53
+    },
+    "events": {
+      "n": 40,
+      "p50": 14.86,
+      "p95": 21.19,
+      "p99": 59.8,
+      "max": 59.8
+    },
+    "network": {
+      "n": 40,
+      "p50": 0.59,
+      "p95": 1.18,
+      "p99": 2.29,
+      "max": 2.29
+    }
+  },
+  "mutations": {
+    "environment create": {
+      "n": 40,
+      "p50": 212.44,
+      "p95": 258.37,
+      "p99": 425.03,
+      "max": 425.03
+    },
+    "environment stop": {
+      "n": 40,
+      "p50": 302.6,
+      "p95": 388.48,
+      "p99": 542.48,
+      "max": 542.48
+    },
+    "environment start": {
+      "n": 40,
+      "p50": 404.35,
+      "p95": 616.32,
+      "p99": 734.36,
+      "max": 734.36
+    },
+    "project restart": {
+      "n": 5,
+      "p50": 1620.39,
+      "p95": 2160.85,
+      "p99": 2160.85,
+      "max": 2160.85
+    }
+  },
+  "feltdb_requests_per_call": {
+    "status": 0.0,
+    "environments list": 0.8,
+    "environment inspect": 0.0,
+    "project status": 0.0,
+    "projects list": 2.0,
+    "deployments list": 2.0,
+    "events": 2.0,
+    "network": 0.0,
+    "environment create": 43.8,
+    "environment stop": 43.8,
+    "environment start": 44.6,
+    "project restart": 150.0
+  }
+}

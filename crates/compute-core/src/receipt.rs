@@ -697,6 +697,205 @@ pub fn sha256_file_identity(path: &Path) -> Result<String> {
     Ok(sha256_identity(&std::fs::read(path)?))
 }
 
+/// What must stay the same for a file's cached identity to be reused: a
+/// file that is replaced, rewritten, or touched is hashed again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn fingerprint(path: &Path) -> Result<FileFingerprint> {
+    let metadata = std::fs::metadata(path)?;
+    #[cfg(unix)]
+    let (device, inode) = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let (device, inode) = (0, 0);
+    Ok(FileFingerprint {
+        device,
+        inode,
+        size: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+/// A file's SHA-256 identity, hashed once per process for as long as the
+/// file's device, inode, size, and modification time stay the same. Runtime
+/// executables are tens of megabytes; hashing them on every execution
+/// dominated short workloads.
+pub fn sha256_file_identity_cached(path: &Path) -> Result<String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, (FileFingerprint, String)>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let before = fingerprint(path)?;
+    if let Some((cached, identity)) = cache.lock().expect("identity cache").get(path)
+        && *cached == before
+    {
+        return Ok(identity.clone());
+    }
+    let identity = match identity_cache::read(path) {
+        Some(identity) => identity,
+        None => {
+            let identity = sha256_file_identity(path)?;
+            // Cache only what was hashed from an unchanged file.
+            if fingerprint(path)? != before {
+                return Ok(identity);
+            }
+            identity_cache::write(path, &before, &identity);
+            identity
+        }
+    };
+    cache
+        .lock()
+        .expect("identity cache")
+        .insert(path.to_path_buf(), (before, identity.clone()));
+    Ok(identity)
+}
+
+/// The identity of the running Compute executable, established once per
+/// process and reused by every execution and receipt.
+pub fn compute_executable_identity() -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static IDENTITY: OnceLock<Option<String>> = OnceLock::new();
+    IDENTITY
+        .get_or_init(|| {
+            let path = std::env::current_exe().ok()?;
+            if let Some(identity) = identity_cache::read(&path) {
+                return Some(identity);
+            }
+            let before = fingerprint(&path).ok()?;
+            let identity = sha256_file_identity(&path).ok()?;
+            if fingerprint(&path).ok()? == before {
+                identity_cache::write(&path, &before, &identity);
+            }
+            Some(identity)
+        })
+        .as_deref()
+}
+
+/// Short-lived Compute processes (one `compute run`) would otherwise hash
+/// the Compute executable and the runtime executable on every invocation.
+/// Their identities are kept in a per-user cache keyed by the executable's path, device, inode, size, and
+/// modification time. The cache is trusted only when this user owns it and
+/// nobody else can write it: anyone who could forge it could equally
+/// replace the executable it describes.
+mod identity_cache {
+    use super::{FileFingerprint, fingerprint};
+    use std::path::{Path, PathBuf};
+
+    fn location() -> Option<PathBuf> {
+        if let Some(dir) = std::env::var_os("COMPUTE_CACHE_DIR") {
+            return Some(PathBuf::from(dir).join("executable-identities.json"));
+        }
+        let base = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+        Some(base.join("compute").join("executable-identities.json"))
+    }
+
+    fn key(path: &Path, print: &FileFingerprint) -> String {
+        format!(
+            "{}|{}|{}|{}|{:?}",
+            path.display(),
+            print.device,
+            print.inode,
+            print.size,
+            print.modified
+        )
+    }
+
+    #[cfg(unix)]
+    fn trusted(file: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(metadata) = std::fs::symlink_metadata(file) else {
+            return false;
+        };
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        metadata.is_file() && metadata.uid() == uid && metadata.mode() & 0o022 == 0
+    }
+
+    #[cfg(not(unix))]
+    fn trusted(_: &Path) -> bool {
+        false
+    }
+
+    /// Entries kept: one per executable path, at most this many.
+    const CAPACITY: usize = 64;
+
+    fn entries(file: &Path) -> serde_json::Map<String, serde_json::Value> {
+        if !trusted(file) {
+            return serde_json::Map::new();
+        }
+        std::fs::read(file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn read(executable: &Path) -> Option<String> {
+        let file = location()?;
+        let print = fingerprint(executable).ok()?;
+        let identity = entries(&file)
+            .get(&key(executable, &print))?
+            .as_str()?
+            .to_owned();
+        super::validate_sha256_identity(&identity).ok()?;
+        Some(identity)
+    }
+
+    pub fn write(executable: &Path, print: &FileFingerprint, identity: &str) {
+        let Some(file) = location() else { return };
+        let Some(parent) = file.parent() else { return };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        // One entry per path: a replaced executable's stale entry goes.
+        let prefix = format!("{}|", executable.display());
+        let mut entries = entries(&file);
+        entries.retain(|name, _| !name.starts_with(&prefix));
+        while entries.len() >= CAPACITY {
+            let Some(name) = entries.keys().next().cloned() else {
+                break;
+            };
+            entries.remove(&name);
+        }
+        entries.insert(key(executable, print), identity.into());
+        let value = serde_json::Value::Object(entries);
+        let temporary = parent.join(format!(".executable-identity.{}", std::process::id()));
+        let written = {
+            #[cfg(unix)]
+            {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&temporary)
+                    .and_then(|mut handle| handle.write_all(value.to_string().as_bytes()))
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::write(&temporary, value.to_string())
+            }
+        };
+        if written.is_ok() {
+            let _ = std::fs::rename(&temporary, &file);
+        } else {
+            let _ = std::fs::remove_file(&temporary);
+        }
+    }
+}
+
 pub fn sha256_identity(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
@@ -729,6 +928,58 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn cached_file_identities_follow_the_file_and_ignore_an_untrusted_cache() {
+        let cache = tempfile::tempdir().unwrap();
+        // SAFETY: only this test reads COMPUTE_CACHE_DIR in this process.
+        unsafe { std::env::set_var("COMPUTE_CACHE_DIR", cache.path()) };
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("runtime");
+        std::fs::write(&file, b"one").unwrap();
+        assert_eq!(
+            sha256_file_identity_cached(&file).unwrap(),
+            sha256_identity(b"one")
+        );
+        // A rewritten file is hashed again, whatever the caches hold.
+        std::fs::write(&file, b"two, longer").unwrap();
+        assert_eq!(
+            sha256_file_identity_cached(&file).unwrap(),
+            sha256_identity(b"two, longer")
+        );
+        // A cache anyone else could write is never believed.
+        let stored = cache.path().join("executable-identities.json");
+        assert!(stored.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let forged = serde_json::json!({
+                identity_cache_key_for_test(&file): sha256_identity(b"forged")
+            });
+            std::fs::write(&stored, forged.to_string()).unwrap();
+            std::fs::set_permissions(&stored, std::fs::Permissions::from_mode(0o666)).unwrap();
+            assert_eq!(identity_cache::read(&file), None);
+            std::fs::set_permissions(&stored, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(
+                identity_cache::read(&file).as_deref(),
+                Some(sha256_identity(b"forged").as_str()),
+                "the key matches, so a trusted entry would be used"
+            );
+        }
+        assert!(compute_executable_identity().is_some());
+    }
+
+    fn identity_cache_key_for_test(path: &std::path::Path) -> String {
+        let print = fingerprint(path).unwrap();
+        format!(
+            "{}|{}|{}|{}|{:?}",
+            path.display(),
+            print.device,
+            print.inode,
+            print.size,
+            print.modified
+        )
+    }
+
+    #[test]
     fn identities_are_algorithm_explicit_and_validated() {
         let identity = WorkloadIdentity::sha256(b"workload");
         assert_eq!(identity.algorithm(), "sha256");
@@ -755,6 +1006,7 @@ mod tests {
             network: NetworkPolicy::Network,
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
+            host_isolation: crate::HostProfile::Trusted,
             dependencies: None,
         };
         let resolved = ResolvedRuntime {
@@ -786,6 +1038,7 @@ mod tests {
                 network: BoundaryStatus::NotRequested,
                 environment: BoundaryStatus::Enforced,
                 resources: BoundaryStatus::NotRequested,
+                host: None,
             }),
             dependencies: None,
             provider: None,

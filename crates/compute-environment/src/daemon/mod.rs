@@ -16,9 +16,14 @@ mod deploy;
 mod execute;
 mod lifecycle;
 pub(crate) mod network;
+mod operators;
 mod processes;
 mod reconcile;
 mod release;
+mod supervision;
+mod upgrades;
+
+pub use supervision::Recovery;
 mod views;
 
 pub use views::EventFilter;
@@ -88,6 +93,21 @@ pub struct DaemonConfig {
     pub restart_delay: Duration,
     /// How often the reconciler rereads desired state.
     pub reconcile_interval: Duration,
+    /// How the API authenticates operators.
+    pub security: crate::auth::SecurityConfig,
+    /// The API's TLS, when it terminates TLS.
+    pub api_tls: Option<Arc<crate::tls::ApiTls>>,
+    /// Where services run and endpoints listen. `None` runs them in this
+    /// process, sharing its fate; the CLI uses the node's supervisor
+    /// process, which outlives controller restarts and upgrades.
+    pub data_plane: Option<Arc<dyn crate::dataplane::DataPlane>>,
+    /// How old desired state a read may be served from. The cache is
+    /// dropped by every write this controller makes, so it never hides a
+    /// change made here; changes made elsewhere show within this bound.
+    pub read_cache: Duration,
+    /// Refuse to start while durable control state is unreachable,
+    /// instead of starting with a degraded control plane.
+    pub require_state_at_start: bool,
 }
 
 impl DaemonConfig {
@@ -110,6 +130,11 @@ impl DaemonConfig {
             network: NetworkConfig::default(),
             restart_delay: Duration::from_secs(1),
             reconcile_interval: Duration::from_secs(5),
+            security: crate::auth::SecurityConfig::default(),
+            api_tls: None,
+            data_plane: None,
+            read_cache: Duration::from_millis(1000),
+            require_state_at_start: false,
         }
     }
 }
@@ -213,6 +238,9 @@ pub(crate) struct WorkloadRuntime {
     pub health: Option<Health>,
     /// When the process was last seen running, for process readiness.
     pub running_since: Option<DateTime<Utc>>,
+    /// The data-plane unit running it, and its process.
+    pub unit_id: Option<String>,
+    pub pid: Option<u32>,
 }
 
 /// Desired state as last read from control state.
@@ -233,6 +261,9 @@ pub(crate) struct Desired {
     pub dns_records: BTreeMap<String, Stored<DnsRecordRecord>>,
     /// Certificates by domain.
     pub certificates: BTreeMap<String, Stored<CertificateRecord>>,
+    /// Instance IDs by workload and deployment, so finding a unit's
+    /// instance does not scan every instance.
+    pub instance_index: BTreeMap<(Key, String), String>,
 }
 
 impl Desired {
@@ -305,12 +336,26 @@ impl Desired {
         key: &Key,
         deployment_id: &str,
     ) -> Option<&Stored<WorkloadInstanceRecord>> {
-        self.instances.values().find(|instance| {
-            instance.value.deployment_id == deployment_id
-                && instance.value.environment == key.0
-                && instance.value.project == key.1
-                && instance.value.workload == key.2
-        })
+        self.instance_index
+            .get(&(key.clone(), deployment_id.to_string()))
+            .and_then(|id| self.instances.get(id))
+    }
+
+    /// Rebuild the indexes after the maps changed.
+    pub fn reindex(&mut self) {
+        self.instance_index = self
+            .instances
+            .values()
+            .map(|instance| {
+                (
+                    (
+                        Self::instance_key(&instance.value),
+                        instance.value.deployment_id.clone(),
+                    ),
+                    instance.id.clone(),
+                )
+            })
+            .collect();
     }
 
     pub fn revision_of(&self, deployment_id: &str) -> Option<&ProjectRevisionRecord> {
@@ -339,7 +384,9 @@ impl Desired {
 }
 
 pub(crate) struct Inner {
-    pub desired: Desired,
+    /// The last read of desired state. Shared, never mutated in place: a
+    /// refresh replaces it, so taking a snapshot costs nothing.
+    pub desired: Arc<Desired>,
     pub runtime: BTreeMap<Unit, WorkloadRuntime>,
     /// Output of recent executions, which control state does not keep.
     pub outputs: BTreeMap<String, (String, String)>,
@@ -350,6 +397,66 @@ pub(crate) struct Inner {
     /// Whether a release is in flight: the reconciler then runs often.
     pub releasing: bool,
     pub network: network::NetworkRuntime,
+    /// Executions terminalized recently, so terminalizing one again is a
+    /// no-op.
+    pub terminal: TerminalLog,
+    /// Execution records whose evidence could not be written yet because
+    /// control state was unreachable; written once it is.
+    pub pending_evidence: Vec<execute::PendingEvidence>,
+    /// Audit records not yet written to control state.
+    pub pending_audit: Vec<compute_state::AuditRecord>,
+    /// Refused requests recorded as events this minute: (minute, count).
+    pub refusals: (i64, u32),
+    /// When desired state was last read, and how many writes this
+    /// controller had made by then.
+    pub loaded: Option<Loaded>,
+    /// Since when durable control state has been unreachable.
+    pub degraded_since: Option<DateTime<Utc>>,
+    /// An outage that ended, to be recorded: when it began.
+    pub recovered_from: Option<DateTime<Utc>>,
+    /// Whether the current outage has been announced.
+    pub outage_announced: bool,
+    pub reconcile: ReconcileMetrics,
+    /// What the current cycle changed, counted by the phases.
+    pub cycle_changes: usize,
+}
+
+/// When desired state was read.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Loaded {
+    pub writes: u64,
+    pub at: std::time::Instant,
+    pub as_of: DateTime<Utc>,
+}
+
+/// The most recently terminalized executions, by execution ID.
+#[derive(Default)]
+pub(crate) struct TerminalLog {
+    records: std::collections::HashMap<String, ExecutionRecord>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl TerminalLog {
+    const CAPACITY: usize = 4096;
+
+    pub fn get(&self, execution_id: &str) -> Option<&ExecutionRecord> {
+        self.records.get(execution_id)
+    }
+
+    pub fn insert(&mut self, record: ExecutionRecord) {
+        if self
+            .records
+            .insert(record.execution_id.clone(), record.clone())
+            .is_none()
+        {
+            self.order.push_back(record.execution_id);
+        }
+        while self.order.len() > Self::CAPACITY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.records.remove(&oldest);
+            }
+        }
+    }
 }
 
 pub struct Daemon {
@@ -363,8 +470,19 @@ pub struct Daemon {
     pool: ProviderPool,
     cache: Mutex<CapabilityCache>,
     sequence: AtomicU64,
+    /// Writes this controller has committed: the read cache's generation.
+    writes: AtomicU64,
+    /// Documents this controller wrote since desired state was last read,
+    /// for a targeted refresh.
+    dirty: std::sync::Mutex<Vec<(Collection, String)>>,
+    /// What each bundle declares, by bundle identity.
+    declared:
+        std::sync::Mutex<std::collections::HashMap<String, (Option<u64>, Option<u64>, String)>>,
     events: broadcast::Sender<EventRecord>,
-    endpoints: Endpoints,
+    data_plane: Arc<dyn crate::dataplane::DataPlane>,
+    /// The routes this controller assigned, mirrored so a reconcile that
+    /// changes nothing sends nothing to the data plane.
+    routes: std::sync::Mutex<BTreeMap<u16, compute_network::Route>>,
     ingress: Option<Arc<Ingress>>,
     ingress_http: Option<SocketAddr>,
     ingress_https: Option<SocketAddr>,
@@ -373,12 +491,26 @@ pub struct Daemon {
     dns: BTreeMap<String, Result<Arc<dyn DnsProvider>, String>>,
     wake: Notify,
     shutdown: tokio::sync::watch::Sender<bool>,
-    _lock: std::fs::File,
+    /// Set once a shutdown or detach has finished its work.
+    stopped: tokio::sync::watch::Sender<bool>,
+    authority: crate::auth::Authority,
+    /// What this controller found on the data plane when it started.
+    recovery: std::sync::Mutex<Recovery>,
+    /// A hand-over this controller agreed to.
+    upgrade: std::sync::Mutex<Option<crate::upgrade::UpgradeRecord>>,
+    /// The node lock: held until the controller hands the node over.
+    lock: std::sync::Mutex<Option<std::fs::File>>,
 }
 
 pub(crate) enum Outcome {
     Denied(String, Option<Box<compute_policy::AdmissionDecision>>),
-    Failed(String),
+    /// Nothing executed. The error says why: a workload's own failure is
+    /// never reported as an infrastructure failure, or the reverse.
+    Failed(EnvironmentError),
+    /// The data plane lost it (its supervisor died): its result is
+    /// unknown, and it is started again whatever its restart policy,
+    /// because the failure was Compute's, not the workload's.
+    Lost(String),
     Executed(
         Box<compute_core::ExecutionResult>,
         Option<String>,
@@ -453,11 +585,22 @@ impl Daemon {
     pub async fn start(config: DaemonConfig) -> Result<Arc<Self>, EnvironmentError> {
         std::fs::create_dir_all(&config.state_dir)?;
         let lock = lock_state_dir(&config.state_dir)?;
-        // Services a killed predecessor left running on this node would
-        // otherwise run twice.
-        let reaped = processes::reap(&config.state_dir).await;
+        // Services a killed in-process predecessor left running on this
+        // node would otherwise run twice. A supervisor keeps its own.
+        let reaped = if config
+            .data_plane
+            .as_ref()
+            .is_some_and(|plane| plane.independent())
+        {
+            vec![]
+        } else {
+            processes::reap(&config.state_dir).await
+        };
         let control = ControlState::new(config.state.clone());
         // The first read proves the control state is reachable and ours.
+        // Without it the controller still starts — its data plane keeps
+        // serving and it reattaches to its workloads — with a degraded
+        // control plane: nothing changes until durable state answers.
         let last = control
             .query::<EventRecord>(
                 Query::all(Collection::Event)
@@ -470,8 +613,12 @@ impl Daemon {
                     "cannot read control state at {}: {error}",
                     config.state.backend().location
                 ))
-            })?;
-        let sequence = last.first().map_or(0, |event| event.value.sequence);
+            });
+        let (sequence, degraded) = match last {
+            Ok(last) => (last.first().map_or(0, |event| event.value.sequence), None),
+            Err(error) if !config.require_state_at_start => (0, Some(error)),
+            Err(error) => return Err(error),
+        };
         let pool = build_pool(&config)?;
         let started_at = Utc::now();
         let instance_id = format!(
@@ -509,8 +656,42 @@ impl Daemon {
                 )
             })
             .collect();
-        let endpoints = Endpoints::new(config.network.endpoint_address);
+        let data_plane: Arc<dyn crate::dataplane::DataPlane> = match &config.data_plane {
+            Some(plane) => plane.clone(),
+            None => Arc::new(crate::dataplane::LocalDataPlane::in_process(
+                config.provider.clone(),
+                Endpoints::new(config.network.endpoint_address),
+            )),
+        };
+        // The data plane's current routes: after a controller restart they
+        // are still being served.
+        let routes = data_plane
+            .routes()
+            .await?
+            .into_iter()
+            .map(|route| {
+                (
+                    route.port,
+                    compute_network::Route {
+                        instance_id: route.instance_id,
+                        target_port: route.target_port,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        if config.security.mode == crate::auth::SecurityMode::Production
+            && config.security.legacy_token.is_some()
+        {
+            return Err(EnvironmentError::Invalid(
+                "a shared token is not a production credential; issue operator credentials with `compute auth create`".into(),
+            ));
+        }
+        let authority = crate::auth::Authority::new(
+            config.security.clone(),
+            config.state_dir.join("credentials.json"),
+        );
         let (shutdown, _) = tokio::sync::watch::channel(false);
+        let (stopped, _) = tokio::sync::watch::channel(false);
         let (events, _) = broadcast::channel(1024);
         let daemon = Arc::new(Self {
             config,
@@ -518,7 +699,7 @@ impl Daemon {
             instance_id,
             started_at,
             inner: Mutex::new(Inner {
-                desired: Desired::default(),
+                desired: Arc::new(Desired::default()),
                 runtime: BTreeMap::new(),
                 outputs: BTreeMap::new(),
                 state_error: None,
@@ -526,13 +707,27 @@ impl Daemon {
                 endpoint_errors: BTreeMap::new(),
                 releasing: false,
                 network: network::NetworkRuntime::default(),
+                terminal: TerminalLog::default(),
+                pending_evidence: Vec::new(),
+                pending_audit: Vec::new(),
+                refusals: (0, 0),
+                loaded: None,
+                degraded_since: None,
+                recovered_from: None,
+                outage_announced: false,
+                reconcile: ReconcileMetrics::default(),
+                cycle_changes: 0,
             }),
             reconciling: Mutex::new(()),
             pool,
             cache: Mutex::new(CapabilityCache::default()),
             sequence: AtomicU64::new(sequence),
+            writes: AtomicU64::new(0),
+            dirty: std::sync::Mutex::new(Vec::new()),
+            declared: std::sync::Mutex::new(std::collections::HashMap::new()),
             events,
-            endpoints,
+            data_plane,
+            routes: std::sync::Mutex::new(routes),
             ingress,
             ingress_http,
             ingress_https,
@@ -541,9 +736,25 @@ impl Daemon {
             dns,
             wake: Notify::new(),
             shutdown,
-            _lock: lock,
+            stopped,
+            authority,
+            recovery: std::sync::Mutex::new(Recovery::default()),
+            upgrade: std::sync::Mutex::new(None),
+            lock: std::sync::Mutex::new(Some(lock)),
         });
-        daemon.register_providers().await?;
+        if let Some(error) = &degraded {
+            let mut inner = daemon.inner.lock().await;
+            inner.state_error = Some(error.message());
+            inner.degraded_since = Some(Utc::now());
+        }
+        if degraded.is_none() {
+            daemon.register_providers().await?;
+            daemon.load_credentials().await?;
+            daemon.bootstrap_admin().await?;
+        } else {
+            // Verifiers from this node's last snapshot; nothing new.
+            let _ = daemon.load_credentials().await;
+        }
         let started = Change::new();
         let started = daemon.event(
             started,
@@ -556,8 +767,55 @@ impl Daemon {
                 "reaped": reaped,
             }),
         );
-        daemon.apply(started).await?;
+        if degraded.is_none() {
+            daemon.apply(started).await?;
+        }
+        // Supervise again whatever the data plane still runs before
+        // reconciling, so nothing healthy is started twice or restarted.
+        let _ = daemon.refresh().await;
+        let recovery = daemon.reattach().await?;
+        let plane = daemon.data_plane().info().await?;
+        let change = daemon.event(
+            Change::new(),
+            compute_state::events::CONTROLLER_STARTED,
+            Scope::default(),
+            format!(
+                "Compute controller {} started ({} data plane, pid {}); reattached {}, collected {}, orphaned {}",
+                daemon.instance_id,
+                plane.kind,
+                plane.pid,
+                recovery.reattached.len(),
+                recovery.collected.len(),
+                recovery.orphaned.len()
+            ),
+            serde_json::json!({
+                "controller": crate::identity::ControllerIdentity::current(),
+                "data_plane": plane,
+                "recovery": recovery,
+            }),
+        );
+        let _ = daemon.apply(change).await;
+        *daemon.recovery.lock().expect("recovery") = recovery;
+        // Part of an upgrade: take over only with every workload accounted
+        // for.
+        if let Err(error) = daemon.resume_upgrade().await {
+            for runtime in daemon.inner.lock().await.runtime.values_mut() {
+                if let Some(handle) = runtime.handle.take() {
+                    handle.abort();
+                }
+            }
+            daemon.release_node();
+            return Err(error);
+        }
         daemon.reconcile().await;
+        let change = daemon.event(
+            Change::new(),
+            compute_state::events::CONTROLLER_READY,
+            Scope::default(),
+            format!("Compute controller {} is ready", daemon.instance_id),
+            serde_json::json!({}),
+        );
+        let _ = daemon.apply(change).await;
         daemon.spawn_reconciler();
         Ok(daemon)
     }
@@ -585,6 +843,23 @@ impl Daemon {
         }
     }
 
+    /// Resolves once a shutdown (or detach) has finished: workloads are
+    /// stopped (or left running), and the final events are written. A
+    /// process hosting the daemon waits for this before it exits.
+    pub async fn wait_stopped(&self) {
+        let mut receiver = self.stopped.subscribe();
+        while !*receiver.borrow_and_update() {
+            if receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Whether a shutdown or detach has begun.
+    pub fn is_stopping(&self) -> bool {
+        self.is_shutting_down()
+    }
+
     fn is_shutting_down(&self) -> bool {
         *self.shutdown.borrow()
     }
@@ -604,6 +879,10 @@ impl Daemon {
             .collect::<Vec<_>>();
         self.stop_units(&units).await;
         let _ = self.observe().await;
+        // Everything stopped: the supervisor process goes too.
+        if self.data_plane().independent() {
+            let _ = self.data_plane().shutdown().await;
+        }
         let change = self.event(
             Change::new(),
             compute_state::events::DAEMON_STOPPED,
@@ -612,6 +891,10 @@ impl Daemon {
             Value::Null,
         );
         let _ = self.apply(change).await;
+        // Nothing runs under this controller any more: the node is free
+        // for the next one, whoever still holds a reference to this one.
+        self.release_node();
+        let _ = self.stopped.send(true);
     }
 
     pub async fn status(&self) -> DaemonStatus {
@@ -638,7 +921,221 @@ impl Daemon {
         }
     }
 
+    /// Metrics in the Prometheus text format: reconciliation, workloads,
+    /// the control plane's availability, and evidence not yet written.
+    pub async fn metrics(&self) -> String {
+        use std::fmt::Write;
+        let inner = self.inner.lock().await;
+        let metrics = &inner.reconcile;
+        let last = metrics.last.as_ref();
+        let running = inner
+            .runtime
+            .values()
+            .filter(|runtime| runtime.state == Some(ActualState::Running))
+            .count();
+        let unhealthy = inner
+            .runtime
+            .values()
+            .filter(|runtime| runtime.health == Some(Health::Unhealthy))
+            .count();
+        let mut out = String::new();
+        let mut metric = |name: &str, kind: &str, help: &str, value: f64| {
+            let _ = writeln!(out, "# HELP {name} {help}");
+            let _ = writeln!(out, "# TYPE {name} {kind}");
+            let _ = writeln!(out, "{name} {value}");
+        };
+        metric(
+            "compute_reconcile_cycles_total",
+            "counter",
+            "Reconciliation cycles run.",
+            metrics.cycles as f64,
+        );
+        metric(
+            "compute_reconcile_errors_total",
+            "counter",
+            "Cycles that could not complete.",
+            metrics.errors_total as f64,
+        );
+        metric(
+            "compute_reconcile_duration_seconds_total",
+            "counter",
+            "Time spent reconciling.",
+            metrics.duration_seconds_total,
+        );
+        metric(
+            "compute_reconcile_duration_seconds",
+            "gauge",
+            "The last cycle's duration.",
+            last.map_or(0.0, |cycle| cycle.duration_ms / 1000.0),
+        );
+        metric(
+            "compute_reconcile_resources_examined",
+            "gauge",
+            "Resources the last cycle examined.",
+            last.map_or(0.0, |cycle| cycle.resources_examined as f64),
+        );
+        metric(
+            "compute_reconcile_resources_changed",
+            "gauge",
+            "Resources the last cycle changed.",
+            last.map_or(0.0, |cycle| cycle.resources_changed as f64),
+        );
+        metric(
+            "compute_workloads_running",
+            "gauge",
+            "Units running on this node.",
+            running as f64,
+        );
+        metric(
+            "compute_workloads_unhealthy",
+            "gauge",
+            "Running services failing their health check.",
+            unhealthy as f64,
+        );
+        metric(
+            "compute_control_state_available",
+            "gauge",
+            "1 when durable control state answers.",
+            f64::from(u8::from(inner.state_error.is_none())),
+        );
+        metric(
+            "compute_evidence_pending",
+            "gauge",
+            "Execution evidence waiting for control state.",
+            inner.pending_evidence.len() as f64,
+        );
+        metric(
+            "compute_audit_pending",
+            "gauge",
+            "Audit records waiting for control state.",
+            inner.pending_audit.len() as f64,
+        );
+        out
+    }
+
+    /// What this controller found on the data plane when it started.
+    pub fn recovery(&self) -> Recovery {
+        self.recovery.lock().expect("recovery").clone()
+    }
+
+    /// The API's TLS acceptor, when it terminates TLS.
+    pub fn api_tls(&self) -> Option<Arc<crate::tls::ApiTls>> {
+        self.config.api_tls.clone()
+    }
+
+    /// Liveness without authentication: whether this controller answers,
+    /// and whether its control plane is degraded. Nothing else.
+    pub async fn health(&self) -> Value {
+        let inner = self.inner.lock().await;
+        serde_json::json!({
+            "status": if self.is_shutting_down() {
+                "stopping"
+            } else if inner.state_error.is_none() {
+                "ok"
+            } else {
+                "degraded_control_plane"
+            },
+            "instance_id": self.instance_id,
+            "pid": std::process::id(),
+        })
+    }
+
+    pub async fn info(&self) -> ControllerInfo {
+        let runtimes =
+            match compute_provider::ComputeProvider::capabilities(self.config.provider.as_ref())
+                .await
+            {
+                Ok(capabilities) => {
+                    serde_json::to_value(&capabilities.inventory).unwrap_or_default()
+                }
+                Err(error) => serde_json::json!({ "error": error.to_string() }),
+            };
+        let plane = self.data_plane.info().await;
+        let data_plane = DataPlaneView {
+            independent: self.data_plane.independent(),
+            error: plane.as_ref().err().map(|error| error.message()),
+            info: plane.ok(),
+            recovery: self.recovery(),
+        };
+        let endpoints = self.routes_snapshot().len();
+        let inner = self.inner.lock().await;
+        let workloads = {
+            let mut summary = crate::status::WorkloadSummary {
+                endpoints,
+                endpoint_errors: inner.endpoint_errors.clone(),
+                ..Default::default()
+            };
+            let mut seen = std::collections::BTreeSet::new();
+            for (unit, runtime) in &inner.runtime {
+                seen.insert(unit.key.clone());
+                match runtime.state {
+                    Some(ActualState::Running) => {
+                        summary.running += 1;
+                        if runtime.health == Some(crate::status::Health::Unhealthy) {
+                            let (environment, project, workload) = &unit.key;
+                            summary
+                                .unhealthy
+                                .push(format!("{environment}/{project}/{workload}"));
+                        }
+                    }
+                    Some(ActualState::Failed) => summary.failed += 1,
+                    _ => {}
+                }
+            }
+            summary.total = seen.len();
+            summary
+        };
+        let security = &self.authority.config;
+        ControllerInfo {
+            api: crate::api::API_VERSION.into(),
+            controller: crate::identity::ControllerIdentity::current(),
+            instance_id: self.instance_id.clone(),
+            node_id: self.node_id.clone(),
+            pid: std::process::id(),
+            started_at: self.started_at,
+            security: SecurityView {
+                mode: security.mode,
+                reason: security.reason.clone(),
+                authentication_required: security.mode == crate::auth::SecurityMode::Production
+                    || security.legacy_token.is_some(),
+                tls: self
+                    .config
+                    .api_tls
+                    .as_ref()
+                    .map_or_else(crate::tls::TlsStatus::disabled, |tls| tls.status()),
+                active_credentials: self
+                    .authority
+                    .records()
+                    .iter()
+                    .filter(|record| {
+                        crate::auth::CredentialView::of(record, Utc::now()).status == "active"
+                    })
+                    .count(),
+            },
+            control_plane: ControlPlaneView {
+                state: self.config.state.backend(),
+                mode: if inner.state_error.is_none() {
+                    "normal".into()
+                } else {
+                    "degraded_control_plane".into()
+                },
+                error: inner.state_error.clone(),
+                last_reconciled_at: inner.last_reconciled_at,
+            },
+            data_plane,
+            reconcile: inner.reconcile.clone(),
+            runtimes,
+            isolation: Some(compute_core::host::host_isolation_report()),
+            workloads,
+            upgrade: self.upgrade_record(),
+        }
+    }
+
     // ---- Control-state changes --------------------------------------------
+
+    pub(crate) fn next_sequence(&self) -> u64 {
+        self.sequence.fetch_add(1, Ordering::SeqCst) + 1
+    }
 
     /// Add an event to a change. Sequences increase across daemon restarts.
     pub(crate) fn event(
@@ -650,6 +1147,24 @@ impl Daemon {
         data: Value,
     ) -> Change {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        // Who asked for it, when a request caused it.
+        let data = match (crate::auth::RequestContext::current(), data) {
+            (Some(request), Value::Object(mut map)) => {
+                map.entry("request_id")
+                    .or_insert_with(|| request.request_id.clone().into());
+                map.entry("operator_id")
+                    .or_insert_with(|| request.operator_id.clone().into());
+                if let Some(credential) = request.credential_id {
+                    map.entry("credential_id").or_insert(credential.into());
+                }
+                Value::Object(map)
+            }
+            (Some(request), Value::Null) => serde_json::json!({
+                "request_id": request.request_id,
+                "operator_id": request.operator_id,
+            }),
+            (_, data) => data,
+        };
         let record = EventRecord {
             sequence,
             kind: kind.into(),
@@ -674,7 +1189,21 @@ impl Daemon {
     /// Commit a change, then publish its events. Nothing is published for
     /// a change that did not commit.
     pub(crate) async fn apply(&self, change: Change) -> Result<(), EnvironmentError> {
-        self.control.transaction(change.batch).await?;
+        let targets = change.batch.targets();
+        let result = self.control.transaction(change.batch).await;
+        if result.is_ok() {
+            self.dirty.lock().expect("dirty").extend(targets);
+        } else {
+            // Unknown what landed: the next refresh reads everything.
+            self.dirty
+                .lock()
+                .expect("dirty")
+                .push((Collection::Environment, String::new()));
+        }
+        // Whatever the outcome, a write was attempted: cached reads must
+        // look again.
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        result?;
         for event in change.events {
             let _ = self.events.send(event);
         }
@@ -684,32 +1213,376 @@ impl Daemon {
     /// Read desired state. On failure, the snapshot is kept and the error
     /// is reported; nothing is started or stopped from stale intent.
     pub(crate) async fn refresh(&self) -> Result<(), EnvironmentError> {
+        let writes = self.writes.load(Ordering::SeqCst);
+        let dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty"));
         let loaded = self.load_desired().await;
+        if loaded.is_err() {
+            self.dirty.lock().expect("dirty").extend(dirty);
+        }
         let mut inner = self.inner.lock().await;
         match loaded {
             Ok(desired) => {
-                inner.desired = desired;
+                inner.desired = Arc::new(desired);
                 inner.state_error = None;
+                inner.loaded = Some(Loaded {
+                    writes,
+                    at: std::time::Instant::now(),
+                    as_of: Utc::now(),
+                });
+                if let Some(since) = inner.degraded_since.take() {
+                    inner.recovered_from = Some(since);
+                    inner.outage_announced = false;
+                }
                 Ok(())
             }
             Err(error) => {
+                inner.state_error = Some(error.to_string());
+                if inner.degraded_since.is_none() {
+                    inner.degraded_since = Some(Utc::now());
+                }
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Desired state for a read: this controller's last read when it is
+    /// recent and nothing was written since, otherwise a fresh read. When
+    /// durable state is unreachable, the last read is served and the
+    /// response says how old it is; with no read at all, the request
+    /// fails with `state_unavailable`.
+    pub(crate) async fn refresh_for_read(&self) -> Result<(), EnvironmentError> {
+        let (cached, degraded) = {
+            let inner = self.inner.lock().await;
+            (inner.loaded, inner.state_error.is_some())
+        };
+        if let Some(loaded) = cached
+            && !degraded
+            && loaded.writes == self.writes.load(Ordering::SeqCst)
+            && loaded.at.elapsed() < self.config.read_cache
+        {
+            crate::auth::set_freshness("cached", loaded.as_of);
+            return Ok(());
+        }
+        match self.refresh().await {
+            Ok(()) => {
+                crate::auth::set_freshness("live", Utc::now());
+                Ok(())
+            }
+            Err(EnvironmentError::Unavailable(message)) => match cached {
+                Some(loaded) => {
+                    crate::auth::set_freshness("stale", loaded.as_of);
+                    Ok(())
+                }
+                None => Err(EnvironmentError::Unavailable(format!(
+                    "{message}; this controller has no earlier read to serve"
+                ))),
+            },
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Re-read only what this controller wrote since the last read: the
+    /// records themselves, and deployments and revisions they now name.
+    /// Changes made elsewhere are picked up by the next full refresh,
+    /// which every reconciliation cycle begins with.
+    pub(crate) async fn refresh_targeted(&self) -> Result<(), EnvironmentError> {
+        let writes = self.writes.load(Ordering::SeqCst);
+        let dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty"));
+        let relevant = dirty
+            .iter()
+            .filter(|(collection, _)| {
+                matches!(
+                    collection,
+                    Collection::Environment
+                        | Collection::Project
+                        | Collection::EnvironmentProject
+                        | Collection::Workload
+                        | Collection::WorkloadInstance
+                        | Collection::TrafficAssignment
+                        | Collection::Domain
+                        | Collection::DnsRecord
+                        | Collection::Certificate
+                        | Collection::Deployment
+                )
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if relevant.is_empty() {
+            return Ok(());
+        }
+        // An unknown write, or too many to be worth it: read everything.
+        if relevant.iter().any(|(_, id)| id.is_empty()) || relevant.len() > 64 {
+            return self.refresh().await;
+        }
+        let result = self.apply_targets(&relevant).await;
+        match result {
+            Ok(desired) => {
+                let mut inner = self.inner.lock().await;
+                inner.desired = Arc::new(desired);
+                inner.loaded = Some(Loaded {
+                    writes,
+                    at: std::time::Instant::now(),
+                    as_of: Utc::now(),
+                });
+                Ok(())
+            }
+            Err(error) => {
+                self.dirty.lock().expect("dirty").extend(dirty);
+                let mut inner = self.inner.lock().await;
                 inner.state_error = Some(error.to_string());
                 Err(error.into())
             }
         }
     }
 
+    async fn apply_targets(
+        &self,
+        targets: &BTreeSet<(Collection, String)>,
+    ) -> Result<Desired, compute_state::StateError> {
+        let control = &self.control;
+        let mut desired = (*self.inner.lock().await.desired).clone();
+        let mut reads = tokio::task::JoinSet::new();
+        for (collection, id) in targets.iter().cloned() {
+            let control = control.clone();
+            reads.spawn(async move {
+                let record = control.store().get(collection, &id).await?;
+                Ok::<_, compute_state::StateError>((collection, id, record))
+            });
+        }
+        let mut read = vec![];
+        while let Some(result) = reads.join_next().await {
+            read.push(
+                result
+                    .map_err(|error| compute_state::StateError::Unavailable(error.to_string()))??,
+            );
+        }
+        fn decode<T: Document>(
+            id: &str,
+            record: Option<compute_state::Record>,
+        ) -> Result<Option<Stored<T>>, compute_state::StateError> {
+            record
+                .map(|record| {
+                    Ok(Stored {
+                        id: id.to_string(),
+                        version: record.version,
+                        value: serde_json::from_value(serde_json::Value::Object(record.value))
+                            .map_err(|error| {
+                                compute_state::StateError::Invalid(error.to_string())
+                            })?,
+                    })
+                })
+                .transpose()
+        }
+        for (collection, id, record) in read {
+            match collection {
+                Collection::Environment => {
+                    desired.environments.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<EnvironmentRecord>(&id, record)? {
+                        desired
+                            .environments
+                            .insert(stored.value.name.clone(), stored);
+                    }
+                }
+                Collection::Project => {
+                    desired.projects.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<ProjectRecord>(&id, record)? {
+                        desired.projects.insert(stored.value.name.clone(), stored);
+                    }
+                }
+                Collection::EnvironmentProject => {
+                    desired.memberships.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<EnvironmentProjectRecord>(&id, record)? {
+                        desired.memberships.insert(
+                            (
+                                stored.value.environment.clone(),
+                                stored.value.project.clone(),
+                            ),
+                            stored,
+                        );
+                    }
+                }
+                Collection::Workload => {
+                    desired.workloads.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<WorkloadRecord>(&id, record)? {
+                        desired.workloads.insert(
+                            (
+                                stored.value.environment.clone(),
+                                stored.value.project.clone(),
+                                stored.value.name.clone(),
+                            ),
+                            stored,
+                        );
+                    }
+                }
+                Collection::WorkloadInstance => {
+                    desired.instances.remove(&id);
+                    if let Some(stored) = decode::<WorkloadInstanceRecord>(&id, record)? {
+                        desired.instances.insert(id.clone(), stored);
+                    }
+                }
+                Collection::TrafficAssignment => {
+                    desired.traffic.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<TrafficAssignmentRecord>(&id, record)? {
+                        desired
+                            .traffic
+                            .insert(stored.value.endpoint.clone(), stored);
+                    }
+                }
+                Collection::Domain => {
+                    desired.domains.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<DomainRecord>(&id, record)? {
+                        desired.domains.insert(stored.value.name.clone(), stored);
+                    }
+                }
+                Collection::DnsRecord => {
+                    desired.dns_records.remove(&id);
+                    if let Some(stored) = decode::<DnsRecordRecord>(&id, record)? {
+                        desired.dns_records.insert(id.clone(), stored);
+                    }
+                }
+                Collection::Certificate => {
+                    desired.certificates.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<CertificateRecord>(&id, record)? {
+                        desired
+                            .certificates
+                            .insert(stored.value.domain.clone(), stored);
+                    }
+                }
+                Collection::Deployment => {
+                    desired.deployments.remove(&id);
+                    if let Some(stored) = decode::<DeploymentRecord>(&id, record)? {
+                        desired.deployments.insert(id.clone(), stored);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Keep exactly the deployments a full read keeps: in flight, or
+        // named by a membership or an instance.
+        let wanted = desired
+            .memberships
+            .values()
+            .filter_map(|membership| membership.value.deployment_id.clone())
+            .chain(
+                desired
+                    .instances
+                    .values()
+                    .map(|instance| instance.value.deployment_id.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        desired.deployments.retain(|id, deployment| {
+            wanted.contains(id) || IN_FLIGHT.contains(&deployment.value.status)
+        });
+        let mut gets = tokio::task::JoinSet::new();
+        for id in wanted
+            .iter()
+            .filter(|id| !desired.deployments.contains_key(*id))
+            .cloned()
+        {
+            let control = control.clone();
+            gets.spawn(async move { control.get::<DeploymentRecord>(&id).await });
+        }
+        while let Some(result) = gets.join_next().await {
+            if let Some(deployment) = result
+                .map_err(|error| compute_state::StateError::Unavailable(error.to_string()))??
+            {
+                desired
+                    .deployments
+                    .insert(deployment.id.clone(), deployment);
+            }
+        }
+        let missing = desired
+            .deployments
+            .values()
+            .map(|deployment| deployment.value.revision_id.clone())
+            .filter(|id| !desired.revisions.contains_key(id))
+            .collect::<BTreeSet<_>>();
+        for revision_id in missing {
+            if let Some(revision) = control.get::<ProjectRevisionRecord>(&revision_id).await? {
+                desired.revisions.insert(revision_id, revision.value);
+            }
+        }
+        desired.reindex();
+        Ok(desired)
+    }
+
+    /// Mutations need durable state: while it is unreachable they fail
+    /// with `state_unavailable` before anything is attempted.
+    pub(crate) async fn require_state(&self) -> Result<(), EnvironmentError> {
+        let degraded = self.inner.lock().await.state_error.is_some();
+        if degraded {
+            self.refresh().await?;
+        }
+        Ok(())
+    }
+
+    /// Whether the control plane is degraded, and since when.
+    pub fn degraded_since(&self) -> Option<DateTime<Utc>> {
+        self.inner
+            .try_lock()
+            .ok()
+            .and_then(|inner| inner.degraded_since)
+    }
+
+    /// Read desired state. The reads are independent, so they are issued
+    /// together: a refresh costs about one round trip per phase (every
+    /// collection and in-flight release; then the deployments they name;
+    /// then revisions not already known), not one per collection.
     async fn load_desired(&self) -> Result<Desired, compute_state::StateError> {
+        let control = &self.control;
+        let in_flight = async {
+            let mut queries = tokio::task::JoinSet::new();
+            for status in IN_FLIGHT {
+                let control = control.clone();
+                queries.spawn(async move {
+                    control
+                        .query::<DeploymentRecord>(
+                            Query::all(Collection::Deployment).eq("status", status.as_str()),
+                        )
+                        .await
+                });
+            }
+            let mut deployments = vec![];
+            while let Some(result) = queries.join_next().await {
+                deployments.extend(result.map_err(|error| {
+                    compute_state::StateError::Unavailable(error.to_string())
+                })??);
+            }
+            Ok::<_, compute_state::StateError>(deployments)
+        };
+        let (
+            environments,
+            projects,
+            memberships,
+            workloads,
+            instances,
+            traffic,
+            domains,
+            dns_records,
+            certificates,
+            in_flight,
+        ) = tokio::try_join!(
+            control.list::<EnvironmentRecord>(),
+            control.list::<ProjectRecord>(),
+            control.list::<EnvironmentProjectRecord>(),
+            control.list::<WorkloadRecord>(),
+            control.list::<WorkloadInstanceRecord>(),
+            control.list::<TrafficAssignmentRecord>(),
+            control.list::<DomainRecord>(),
+            control.list::<DnsRecordRecord>(),
+            control.list::<CertificateRecord>(),
+            in_flight,
+        )?;
         let mut desired = Desired::default();
-        for environment in self.control.list::<EnvironmentRecord>().await? {
+        for environment in environments {
             desired
                 .environments
                 .insert(environment.value.name.clone(), environment);
         }
-        for project in self.control.list::<ProjectRecord>().await? {
+        for project in projects {
             desired.projects.insert(project.value.name.clone(), project);
         }
-        for membership in self.control.list::<EnvironmentProjectRecord>().await? {
+        for membership in memberships {
             desired.memberships.insert(
                 (
                     membership.value.environment.clone(),
@@ -718,7 +1591,7 @@ impl Daemon {
                 membership,
             );
         }
-        for workload in self.control.list::<WorkloadRecord>().await? {
+        for workload in workloads {
             desired.workloads.insert(
                 (
                     workload.value.environment.clone(),
@@ -728,21 +1601,21 @@ impl Daemon {
                 workload,
             );
         }
-        for instance in self.control.list::<WorkloadInstanceRecord>().await? {
+        for instance in instances {
             desired.instances.insert(instance.id.clone(), instance);
         }
-        for assignment in self.control.list::<TrafficAssignmentRecord>().await? {
+        for assignment in traffic {
             desired
                 .traffic
                 .insert(assignment.value.endpoint.clone(), assignment);
         }
-        for domain in self.control.list::<DomainRecord>().await? {
+        for domain in domains {
             desired.domains.insert(domain.value.name.clone(), domain);
         }
-        for record in self.control.list::<DnsRecordRecord>().await? {
+        for record in dns_records {
             desired.dns_records.insert(record.id.clone(), record);
         }
-        for certificate in self.control.list::<CertificateRecord>().await? {
+        for certificate in certificates {
             desired
                 .certificates
                 .insert(certificate.value.domain.clone(), certificate);
@@ -760,23 +1633,24 @@ impl Daemon {
                     .map(|instance| instance.value.deployment_id.clone()),
             )
             .collect::<BTreeSet<_>>();
-        for status in IN_FLIGHT {
-            for deployment in self
-                .control
-                .query::<DeploymentRecord>(
-                    Query::all(Collection::Deployment).eq("status", status.as_str()),
-                )
-                .await?
+        for deployment in in_flight {
+            wanted.remove(&deployment.id);
+            desired
+                .deployments
+                .insert(deployment.id.clone(), deployment);
+        }
+        let mut gets = tokio::task::JoinSet::new();
+        for deployment_id in wanted {
+            let control = control.clone();
+            gets.spawn(async move { control.get::<DeploymentRecord>(&deployment_id).await });
+        }
+        while let Some(result) = gets.join_next().await {
+            if let Some(deployment) = result
+                .map_err(|error| compute_state::StateError::Unavailable(error.to_string()))??
             {
-                wanted.remove(&deployment.id);
                 desired
                     .deployments
                     .insert(deployment.id.clone(), deployment);
-            }
-        }
-        for deployment_id in wanted {
-            if let Some(deployment) = self.control.get::<DeploymentRecord>(&deployment_id).await? {
-                desired.deployments.insert(deployment_id, deployment);
             }
         }
         // Revisions are immutable: reuse ones already read.
@@ -786,24 +1660,37 @@ impl Daemon {
             .values()
             .map(|deployment| deployment.value.revision_id.clone())
             .collect::<BTreeSet<_>>();
+        let mut gets = tokio::task::JoinSet::new();
         for revision_id in revision_ids {
             if let Some(revision) = known.get(&revision_id) {
                 desired.revisions.insert(revision_id, revision.clone());
-            } else if let Some(revision) = self
-                .control
-                .get::<ProjectRevisionRecord>(&revision_id)
-                .await?
+            } else {
+                let control = control.clone();
+                gets.spawn(async move {
+                    control
+                        .get::<ProjectRevisionRecord>(&revision_id)
+                        .await
+                        .map(|revision| (revision_id, revision))
+                });
+            }
+        }
+        while let Some(result) = gets.join_next().await {
+            if let (revision_id, Some(revision)) = result
+                .map_err(|error| compute_state::StateError::Unavailable(error.to_string()))??
             {
                 desired.revisions.insert(revision_id, revision.value);
             }
         }
+        desired.reindex();
         Ok(desired)
     }
 
     /// Read-your-writes: refresh desired state after a change, then
     /// reconcile.
+    /// Act on a change this controller just made to desired state, which
+    /// it read in full before making it.
     pub(crate) async fn changed(self: &Arc<Self>) {
-        self.reconcile().await;
+        self.reconcile_targeted().await;
     }
 
     async fn register_providers(&self) -> Result<(), EnvironmentError> {
@@ -849,8 +1736,34 @@ impl Daemon {
             .join(&key.2)
     }
 
-    pub(crate) fn endpoints(&self) -> &Endpoints {
-        &self.endpoints
+    /// Whether this controller's workloads outlive it.
+    pub fn data_plane_independent(&self) -> bool {
+        self.data_plane.independent()
+    }
+
+    pub(crate) fn data_plane(&self) -> &Arc<dyn crate::dataplane::DataPlane> {
+        &self.data_plane
+    }
+
+    /// Where an endpoint sends new connections, as this controller last
+    /// assigned it.
+    pub(crate) fn route(&self, host_port: u16) -> Option<compute_network::Route> {
+        self.routes.lock().expect("routes").get(&host_port).cloned()
+    }
+
+    pub(crate) fn routes_snapshot(&self) -> BTreeMap<u16, compute_network::Route> {
+        self.routes.lock().expect("routes").clone()
+    }
+
+    /// Connections open to an instance through any endpoint. Unknown when
+    /// the data plane does not answer: treated as open, so nothing that
+    /// may still serve traffic is stopped.
+    pub(crate) async fn open_connections(&self, instance_id: &str) -> usize {
+        self.data_plane
+            .connections(instance_id)
+            .await
+            .map(|(open, _)| open)
+            .unwrap_or(usize::MAX)
     }
 
     fn cache_path(&self, digest: &str) -> PathBuf {

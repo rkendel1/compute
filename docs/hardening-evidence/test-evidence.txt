@@ -1,0 +1,59 @@
+# Test evidence at f68ce7f, 2026-09-25T14:16:42Z, debug build, 4 vCPU host
+
+## cargo test -p compute-environment --test executions -- --nocapture
+test a_failing_run_is_a_workload_failure_not_a_denial ... ok
+test a_thousand_concurrent_runs_lose_no_evidence ... ok
+test eighty_concurrent_runs_of_one_task_each_produce_one_receipt ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.66s
+
+## cargo test -p compute-environment --test security -- --nocapture
+test credentials_expire_revoke_and_rotate ... ok
+test development_mode_is_explicit ... ok
+test production_requires_tls_and_a_credential_for_every_request ... ok
+test scopes_are_enforced_and_every_mutation_is_audited ... ok
+test the_certificate_reloads_without_a_restart ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.74s
+
+## cargo test -p compute-environment --test availability -- --nocapture
+test a_controller_starts_degraded_and_converges_when_state_returns ... ok
+test reads_say_how_fresh_they_are ... ok
+test workloads_keep_running_and_changes_are_refused_while_state_is_unreachable ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.09s
+
+## cargo test -p compute-environment --test scale -- --nocapture
+test three_hundred_projects ... last cycle: {"started_at":"2026-09-25T14:18:12.669666230Z","duration_ms":75.11962899999999,"resources_examined":301,"resources_changed":1,"errors":0,"phases_ms":{"converge":1.00735,"data_plane":0.0010890000000000001,"endpoints":0.031844000000000004,"network":0.0059359999999999994,"observe":7.042863,"pending":0.021935,"refresh":4.876939,"releases":62.040347000000004}}
+add phases: register 2.739687ms, deploy 146.939484ms, release 552.02µs, view 85.309009ms
+last cycle: {"started_at":"2026-09-25T14:18:13.035283124Z","duration_ms":63.590998,"resources_examined":302,"resources_changed":1,"errors":0,"phases_ms":{"converge":0.8736250000000001,"data_plane":0.0007549999999999999,"endpoints":0.024428000000000002,"network":0.005711,"observe":6.198793,"pending":0.021124999999999998,"refresh":4.357992,"releases":52.025776}}
+add phases: register 3.150285ms, deploy 142.587106ms, release 452.137µs, view 78.186448ms
+last cycle: {"started_at":"2026-09-25T14:18:13.366495356Z","duration_ms":74.730766,"resources_examined":303,"resources_changed":1,"errors":0,"phases_ms":{"converge":1.491552,"data_plane":0.000917,"endpoints":0.030687,"network":0.015576000000000001,"observe":9.826099,"pending":0.08022299999999999,"refresh":4.423108,"releases":58.758516}}
+add phases: register 3.067671ms, deploy 145.936894ms, release 470.692µs, view 80.528673ms
+last cycle: {"started_at":"2026-09-25T14:18:13.735820532Z","duration_ms":65.46758799999999,"resources_examined":304,"resources_changed":1,"errors":0,"phases_ms":{"converge":0.932087,"data_plane":0.00092,"endpoints":0.025822,"network":0.006802,"observe":5.889759,"pending":0.021043000000000003,"refresh":5.0418330000000005,"releases":53.467683}}
+add phases: register 4.360784ms, deploy 166.574106ms, release 472.058µs, view 75.937871ms
+last cycle: {"started_at":"2026-09-25T14:18:14.078074068Z","duration_ms":71.980007,"resources_examined":305,"resources_changed":1,"errors":0,"phases_ms":{"converge":2.035389,"data_plane":0.000875,"endpoints":0.028496999999999998,"network":0.007031,"observe":6.759186000000001,"pending":0.027736,"refresh":5.090148,"releases":57.895532}}
+add phases: register 3.668831ms, deploy 154.182382ms, release 493.695µs, view 72.637538ms
+300 projects: add (last 50) p50 194.8 ms p95 237.8 ms; environment view p50 13.2 ms p95 14.6 ms; full reconcile p50 80.0 ms
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 36.13s
+
+## cargo test -p compute-cli --test upgrade -- --nocapture
+test a_new_build_that_fails_or_hangs_is_rolled_back ... Compute daemon daemon_36384f0b61d785ce3b1886ea started (pid 18187) at http://127.0.0.1:44977
+test the_controller_upgrades_and_rolls_back_under_traffic_without_touching_workloads ... Compute daemon daemon_968340521bbdd9c44d80cd13 started (pid 19612) at http://127.0.0.1:33513
+upgrade 5.36s, rollback 3.40s, 849 requests, 0 failed
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.10s
+
+## cargo test -p compute-cli --test isolation -- --nocapture
+test a_host_profile_is_refused_where_it_cannot_apply ... ok
+test isolated_cannot_read_outside_its_workspace ... ok
+test isolated_enforces_its_memory_limit_and_keeps_localhost ... ok
+test restricted_writes_only_its_workspace_and_has_no_network ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+
+## cargo test -p compute-cli --test recovery -- --nocapture
+test a_controller_stopped_for_an_upgrade_keeps_its_workloads ... Compute daemon daemon_024294a6e7620bb1e86a2d34 started (pid 21116) at http://127.0.0.1:35609
+test a_killed_controller_leaves_its_workloads_serving ... Compute daemon daemon_87f1293db6145f90008cf2d3 started (pid 21331) at http://127.0.0.1:33547
+controller restart: 398 requests, 0 failed, controller back after 2.581857006s
+test a_lost_supervisor_is_replaced_and_its_orphans_are_cleaned_up ... Compute daemon daemon_5b52a1061d833acfc15b0d88 started (pid 21554) at http://127.0.0.1:41229
+test a_release_interrupted_by_a_killed_daemon_completes_after_restart ... Compute daemon daemon_56fe8ec5d7d0dcc5bee45ee6 started (pid 21742) at http://127.0.0.1:39221
+test an_execution_that_ends_while_the_controller_is_down_is_recorded_after_recovery ... Compute daemon daemon_fe36a22bf7d37d2af089dbcf started (pid 21975) at http://127.0.0.1:32939
+test an_in_process_data_plane_is_reaped_not_duplicated ... Compute daemon daemon_666aaa88601ca9e230d6a213 started (pid 22225) at http://127.0.0.1:33721
+test managed_feltdb_is_the_durable_authority ... ignored, requires FELTDB_SERVER_BIN
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 37.43s

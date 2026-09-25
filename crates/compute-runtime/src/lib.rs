@@ -10,7 +10,7 @@ use compute_core::{
     ReceiptEnvironment, Result, RuntimeAdapter, RuntimeAvailability, RuntimeKind, RuntimeSpec,
     Workload, WorkloadBundle, WorkloadIdentity, WorkloadPlan, WorkloadSpec,
     WorkloadValidationStatus, create_execution_receipt, input_receipts, request_workload_identity,
-    sha256_file_identity, sha256_identity,
+    sha256_identity,
 };
 use compute_runtime_process::{
     BunRuntime, DenoRuntime, DotnetRuntime, JvmRuntime, NativeRuntime, NodeRuntime, PhpRuntime,
@@ -753,6 +753,7 @@ impl Compute {
             network,
             resources,
             isolation,
+            host_isolation: compute_core::HostProfile::Trusted,
             dependencies: None,
         })
     }
@@ -850,12 +851,13 @@ fn receipt_environment(
         .executable
         .as_deref()
         .filter(|path| path.is_file())
-        .map(sha256_file_identity)
+        .map(compute_core::sha256_file_identity_cached)
         .transpose()?
         .unwrap_or_else(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|path| sha256_file_identity(&path).ok())
+            // Embedded runtimes run inside Compute itself: the executable is
+            // Compute, identified once per process.
+            compute_core::compute_executable_identity()
+                .map(str::to_owned)
                 .unwrap_or_else(|| sha256_identity(adapter.descriptor().id.as_str().as_bytes()))
         });
 
@@ -924,7 +926,8 @@ fn receipt_environment(
             })?;
         let runtime_manifest = runtimes.get(runtime.kind.as_str()).expect("checked above");
         if !runtime_manifest.executable.starts_with('<') {
-            let actual_payload = hash_tree(&root.join("runtimes").join(runtime.kind.as_str()))?;
+            let actual_payload =
+                hash_tree_cached(&root.join("runtimes").join(runtime.kind.as_str()))?;
             if actual_payload != runtime_manifest.payload_sha256 {
                 return Err(ComputeError::InvalidReceipt(format!(
                     "runtime payload identity mismatch for {}",
@@ -988,6 +991,51 @@ fn distribution_root() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
     let root = executable.parent()?.parent()?.to_path_buf();
     root.join("runtime-manifest.json").is_file().then_some(root)
+}
+
+/// A payload tree's identity, hashed again only when any entry's path,
+/// type, size, inode, or modification time changed since it was last
+/// hashed in this process. Walking metadata is cheap; reading every byte of
+/// a runtime payload on each execution is not.
+fn hash_tree_cached(root: &Path) -> Result<String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (String, String)>>> = OnceLock::new();
+    let tree_fingerprint = || -> Result<String> {
+        let mut digest = Sha256::new();
+        for entry in WalkDir::new(root).follow_links(false).sort_by_file_name() {
+            let entry = entry.map_err(|error| ComputeError::InvalidReceipt(error.to_string()))?;
+            let metadata = entry
+                .metadata()
+                .map_err(|error| ComputeError::InvalidReceipt(error.to_string()))?;
+            digest.update(entry.path().to_string_lossy().as_bytes());
+            digest.update(format!("{:?}{}", metadata.file_type(), metadata.len()).as_bytes());
+            if let Ok(modified) = metadata.modified() {
+                digest.update(format!("{modified:?}").as_bytes());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                digest.update(metadata.ino().to_le_bytes());
+            }
+        }
+        Ok(format!("{:x}", digest.finalize()))
+    };
+    let cache = CACHE.get_or_init(Default::default);
+    let before = tree_fingerprint()?;
+    if let Some((cached, identity)) = cache.lock().expect("payload cache").get(root)
+        && *cached == before
+    {
+        return Ok(identity.clone());
+    }
+    let identity = hash_tree(root)?;
+    if tree_fingerprint()? == before {
+        cache
+            .lock()
+            .expect("payload cache")
+            .insert(root.to_path_buf(), (before, identity.clone()));
+    }
+    Ok(identity)
 }
 
 fn hash_tree(root: &Path) -> Result<String> {

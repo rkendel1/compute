@@ -18,6 +18,7 @@ mod direct;
 mod distribution;
 mod environment_cmd;
 mod network_cmd;
+mod node_cmd;
 mod placement_certification;
 mod policy_certification;
 mod policy_cmd;
@@ -48,7 +49,8 @@ enum Commands {
     /// Show the versioned isolation profiles and runtime support matrix.
     Isolation(JsonFlag),
     Exec(ExecCommand),
-    Doctor(JsonFlag),
+    /// Diagnose this host's runtimes and, when one runs, its controller.
+    Doctor(DoctorCommand),
     Certify(CertifyCommand),
     /// Build, inspect, or verify a portable Compute distribution.
     Distribution(DistributionCommand),
@@ -71,7 +73,7 @@ enum Commands {
     /// Run the persistent Compute daemon (environments and services).
     Start(environment_cmd::StartCommand),
     /// Stop the Compute daemon. Desired state is kept.
-    Stop(environment_cmd::DaemonCommand),
+    Stop(environment_cmd::StopCommand),
     /// Show the Compute daemon's status.
     Status(environment_cmd::DaemonCommand),
     /// Create, inspect, and operate environments.
@@ -104,6 +106,13 @@ enum Commands {
     ControlPlane(control_state::ControlPlaneCommand),
     /// Serve compute.remote@1 with durable filesystem-backed jobs.
     Serve(ServeCommand),
+    /// Operator credentials and the audit trail
+    Auth(node_cmd::AuthCommand),
+    /// The Compute controller on this node: identity, health, upgrades
+    Node(node_cmd::NodeCommand),
+    /// The node's supervisor: service processes and endpoints that outlive
+    /// the controller. `compute start` runs it.
+    Supervisor(environment_cmd::SupervisorCommand),
 }
 
 #[derive(Args, Debug)]
@@ -294,6 +303,17 @@ enum DistributionCommands {
 struct JsonFlag {
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args, Debug)]
+struct DoctorCommand {
+    #[arg(long)]
+    json: bool,
+    /// Only the runtimes of this host; do not contact a controller.
+    #[arg(long)]
+    runtimes_only: bool,
+    #[command(flatten)]
+    daemon: environment_cmd::DaemonLocation,
 }
 
 #[derive(Args, Debug)]
@@ -1055,16 +1075,31 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         }
         Commands::Isolation(json_flag) => print_isolation_profiles(&compute, json_flag.json),
         Commands::Version(json_flag) => {
+            let identity = compute_environment::identity::ControllerIdentity::current();
             if json_flag.json {
                 println!(
                     "{}",
                     serde_json::json!({
                         "name": "compute",
-                        "version": env!("CARGO_PKG_VERSION"),
+                        "version": identity.version,
+                        "git_commit": identity.git_commit,
+                        "build_id": identity.build_id,
+                        "build_profile": identity.build_profile,
+                        "platform": identity.platform,
+                        "api": compute_environment::api::API_VERSION,
+                        "supervisor_protocol": compute_environment::dataplane::SUPERVISOR_PROTOCOL,
+                        "runtimes": RuntimeKind::ALL.iter().map(|kind| kind.as_str()).collect::<Vec<_>>(),
+                        "isolation_profiles": compute_core::IsolationProfile::ALL
+                            .iter()
+                            .map(|profile| profile.as_str())
+                            .collect::<Vec<_>>(),
                     })
                 );
             } else {
-                println!("compute {}", env!("CARGO_PKG_VERSION"));
+                println!("compute {}", identity.version);
+                println!("commit {}", identity.git_commit);
+                println!("build {}", identity.build_id);
+                println!("platform {}", identity.platform);
             }
         }
         Commands::Exec(command) => {
@@ -1090,6 +1125,11 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Doctor(json_flag) => {
             let reports = compute.doctor().await;
             let provenance = distribution::doctor_provenance();
+            let controller = if json_flag.runtimes_only {
+                None
+            } else {
+                Some(node_cmd::controller_diagnosis(&json_flag.daemon).await)
+            };
             if json_flag.json {
                 let reports = reports
                     .into_iter()
@@ -1104,8 +1144,11 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     .collect::<Vec<_>>();
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({ "runtimes": reports }))
-                        .unwrap()
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "runtimes": reports,
+                        "controller": controller,
+                    }))
+                    .unwrap()
                 );
             } else {
                 println!("Compute runtime capabilities");
@@ -1139,6 +1182,9 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                         );
                     }
                     print_capabilities(&report.capabilities, "  ");
+                }
+                if let Some(controller) = &controller {
+                    node_cmd::print_diagnosis(controller);
                 }
             }
         }
@@ -1256,6 +1302,9 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Certificate(command) => network_cmd::certificate(command).await?,
         Commands::Network(command) => network_cmd::network(command).await?,
         Commands::Events(command) => environment_cmd::events(command).await?,
+        Commands::Auth(command) => node_cmd::auth(command).await?,
+        Commands::Node(command) => node_cmd::node(command).await?,
+        Commands::Supervisor(command) => environment_cmd::supervisor(command).await?,
         Commands::Service(command) => environment_cmd::service(command).await?,
         Commands::ControlPlane(command) => control_state::control_plane(command).await?,
         Commands::Remote(command) => match command.command {
@@ -1868,6 +1917,7 @@ fn print_isolation_profiles(compute: &Compute, json: bool) {
             })
         })
         .collect::<Vec<_>>();
+    let host = compute_core::host::host_isolation_report();
     if json {
         println!(
             "{}",
@@ -1875,6 +1925,7 @@ fn print_isolation_profiles(compute: &Compute, json: bool) {
                 "version": compute_core::ISOLATION_MODEL_VERSION,
                 "profiles": profiles,
                 "runtimes": runtimes,
+                "host": host,
             }))
             .unwrap()
         );
@@ -1896,6 +1947,45 @@ fn print_isolation_profiles(compute: &Compute, json: bool) {
             item["sandboxed"].as_str().unwrap_or("no"),
             item["strict"].as_str().unwrap_or("no"),
         );
+    }
+    println!(
+        "\nHost profiles for process runtimes (landlock ABI {}, network namespaces {}, cgroups {})",
+        host.capabilities.landlock_abi,
+        yes_no(host.capabilities.network_namespaces),
+        host.capabilities
+            .cgroups
+            .as_ref()
+            .map_or("none".to_string(), |cgroups| cgroups.version.clone())
+    );
+    println!("Profile\tFilesystem\tNetwork\tMemory\tCPU\tProcess");
+    for support in &host.profiles {
+        match &support.enforcement {
+            Some(plan) => {
+                let text = |value: compute_core::host::Enforcement| {
+                    serde_json::to_value(value)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_string))
+                        .unwrap_or_default()
+                };
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    support.profile,
+                    text(plan.filesystem),
+                    text(plan.network),
+                    text(plan.memory),
+                    text(plan.cpu),
+                    text(plan.process)
+                );
+            }
+            None => println!(
+                "{}\tunsupported: {}",
+                support.profile,
+                support
+                    .refusal
+                    .as_ref()
+                    .map_or("", |refusal| refusal.message.as_str())
+            ),
+        }
     }
 }
 

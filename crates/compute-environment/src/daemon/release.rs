@@ -83,7 +83,8 @@ impl Daemon {
                 break;
             }
             changed = true;
-            if self.refresh().await.is_err() {
+            // Only what the steps wrote needs reading back.
+            if self.refresh_targeted().await.is_err() {
                 break;
             }
         }
@@ -745,7 +746,7 @@ impl Daemon {
             };
             for binding in resolved_endpoints(desired, &key, workload) {
                 let endpoint = ids::endpoint(&key.0, &key.1, &key.2, &binding.name);
-                let listening = self.endpoints().route(binding.host).is_some();
+                let listening = self.route(binding.host).is_some();
                 if let Some(error) = endpoint_errors.get(&binding.host) {
                     return self.fail(release, "network", error.clone()).await;
                 }
@@ -1108,7 +1109,7 @@ impl Daemon {
                 assignment.project.clone(),
                 assignment.workload.clone(),
             );
-            let route = self.endpoints().route(assignment.host_port);
+            let route = self.route(assignment.host_port);
             if route
                 .as_ref()
                 .map(|route| (&route.instance_id, route.target_port))
@@ -1482,17 +1483,15 @@ impl Daemon {
         let now = Utc::now();
         for instance in draining {
             // Never stop what an endpoint still routes to.
-            let routed = instance.value.ports.iter().any(|_| {
-                self.endpoints()
-                    .ports()
-                    .into_iter()
-                    .filter_map(|port| self.endpoints().route(port))
-                    .any(|route| route.instance_id == instance.id)
-            });
+            let routed = !instance.value.ports.is_empty()
+                && self
+                    .routes_snapshot()
+                    .values()
+                    .any(|route| route.instance_id == instance.id);
             if routed {
                 continue;
             }
-            let open = self.endpoints().open_connections(&instance.id);
+            let open = self.open_connections(&instance.id).await;
             let waited = (now - instance.value.updated_at)
                 .to_std()
                 .unwrap_or_default();

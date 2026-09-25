@@ -450,6 +450,7 @@ dependencies = [
  "clap",
  "compute-core",
  "compute-environment",
+ "compute-network",
  "compute-placement",
  "compute-policy",
  "compute-provider",
@@ -477,6 +478,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
@@ -502,6 +504,7 @@ dependencies = [
  "compute-state-file",
  "compute-state-memory",
  "libc",
+ "rcgen",
  "reqwest",
  "rustls",
  "serde",
@@ -514,6 +517,7 @@ dependencies = [
  "toml",
  "walkdir",
  "wat",
+ "webpki-roots",
 ]
 
 [[package]]

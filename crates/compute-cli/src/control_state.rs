@@ -70,6 +70,21 @@ struct ConfigFile {
     network: Option<NetworkSection>,
     #[serde(default)]
     release: Option<ReleaseSection>,
+    #[serde(default)]
+    api: Option<ApiSection>,
+}
+
+/// `[api]`: how the Compute API is secured.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiSection {
+    /// `production` requires TLS and operator credentials.
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub tls_cert: Option<PathBuf>,
+    #[serde(default)]
+    pub tls_key: Option<PathBuf>,
 }
 
 /// `[network]`: endpoints, ingress, DNS providers, and certificates.
@@ -214,6 +229,23 @@ impl StateOptions {
         Ok((network, file.release.unwrap_or_default()))
     }
 
+    /// The `[api]` section, with paths resolved against the file.
+    pub fn api(&self) -> compute_core::Result<ApiSection> {
+        let (path, file) = self.file()?;
+        let mut api = file.api.unwrap_or_default();
+        let base = path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        for path in [&mut api.tls_cert, &mut api.tls_key].into_iter().flatten() {
+            if path.is_relative() {
+                *path = base.join(&*path);
+            }
+        }
+        Ok(api)
+    }
+
     /// The FeltDB CA certificate, when one is configured.
     pub fn feltdb_ca(&self) -> compute_core::Result<Option<Vec<u8>>> {
         let (config_path, section) = self.section()?;
@@ -283,8 +315,11 @@ impl StateOptions {
         arguments
     }
 
-    /// Open the configured backend. Fails closed.
-    pub async fn open(&self, state_dir: &Path) -> compute_core::Result<Backend> {
+    /// Open the configured backend. Fails closed: a misconfigured backend
+    /// is refused. An unreachable FeltDB is refused only when `required`;
+    /// otherwise the backend connects when FeltDB answers, and the
+    /// controller starts in `degraded_control_plane` until then.
+    pub async fn open(&self, state_dir: &Path, required: bool) -> compute_core::Result<Backend> {
         let (config_path, section) = self.section()?;
         let relative = |path: PathBuf| match &config_path {
             Some(config) if path.is_relative() => config
@@ -336,21 +371,29 @@ impl StateOptions {
                 })?;
                 let token = std::env::var(&token_env)
                     .map_err(|_| invalid(format!("{token_env} must hold the FeltDB API key")))?;
-                let state: Arc<dyn StateStore> = Arc::new(
-                    FeltDbState::connect(FeltDbConfig {
-                        url,
-                        token,
-                        application_id: application,
-                        environment,
-                        ca_certificate: self.feltdb_ca()?,
-                    })
-                    .await
-                    .map_err(|error| {
-                        ComputeError::Runtime(format!(
-                            "refusing to start without the configured control state: {error}"
-                        ))
-                    })?,
-                );
+                let config = FeltDbConfig {
+                    url,
+                    token,
+                    application_id: application,
+                    environment,
+                    ca_certificate: self.feltdb_ca()?,
+                };
+                let refused = |error: compute_state::StateError| {
+                    ComputeError::Runtime(format!(
+                        "refusing to start without the configured control state: {error}"
+                    ))
+                };
+                let state: Arc<dyn StateStore> = if required {
+                    Arc::new(FeltDbState::connect(config).await.map_err(refused)?)
+                } else {
+                    // Unreachable, not wrong: connect when it answers.
+                    Arc::new(
+                        FeltDbState::connect_or_defer(config)
+                            .await
+                            .map_err(refused)?
+                            .0,
+                    )
+                };
                 Ok(Backend {
                     artifacts: Arc::new(StateArtifacts::new(ControlState::new(state.clone()))),
                     state,

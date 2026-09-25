@@ -28,7 +28,7 @@ pub struct EventFilter {
 
 impl Daemon {
     pub async fn environments(&self) -> Result<Vec<EnvironmentSummary>, EnvironmentError> {
-        self.refresh().await?;
+        self.refresh_for_read().await?;
         let names = self
             .inner
             .lock()
@@ -57,7 +57,7 @@ impl Daemon {
     }
 
     pub async fn environment(&self, name: &str) -> Result<EnvironmentView, EnvironmentError> {
-        self.refresh().await?;
+        self.refresh_for_read().await?;
         self.environment_view(name).await
     }
 
@@ -115,7 +115,7 @@ impl Daemon {
         environment: &str,
         project: &str,
     ) -> Result<ProjectView, EnvironmentError> {
-        self.refresh().await?;
+        self.refresh_for_read().await?;
         let name = self
             .inner
             .lock()
@@ -279,6 +279,7 @@ impl Daemon {
                         .log_directory
                         .as_ref()
                         .map(|path| path.display().to_string()),
+                    runtime.health,
                 )
             });
             (record, artifact, runtime, serving_ports)
@@ -294,21 +295,21 @@ impl Daemon {
             placement,
             evidence,
             log_directory,
+            observed_health,
         ) = runtime_view.unwrap_or_default();
         let state = state.unwrap_or(match record.value.kind {
             WorkloadKind::Task => ActualState::Pending,
             WorkloadKind::Service => ActualState::Stopped,
         });
-        let health = workload_health(record.value.kind, state, &serving_ports).await;
-        let bundle = match &artifact {
-            Some(digest) => std::fs::read(
-                self.config
-                    .state_dir
-                    .join("cache")
-                    .join(digest.trim_start_matches("sha256:")),
-            )
-            .ok()
-            .and_then(|bytes| WorkloadBundle::from_bytes(&bytes).ok()),
+        // The health the reconciler last observed; probed here only when
+        // it has not observed this run yet.
+        let health = match (record.value.kind, state, observed_health) {
+            (WorkloadKind::Service, ActualState::Running, Some(health)) => health,
+            _ => workload_health(record.value.kind, state, &serving_ports).await,
+        };
+        // What the bundle declares, read from it once per bundle identity.
+        let declared = match &artifact {
+            Some(digest) => self.declared_resources(digest),
             None => None,
         };
         Ok(WorkloadView {
@@ -333,24 +334,46 @@ impl Daemon {
             evidence,
             resources: ResourceView {
                 cpu: "not_measured".into(),
-                memory_limit_bytes: bundle
-                    .as_ref()
-                    .and_then(|bundle| bundle.workload.resources.memory_bytes),
-                timeout_ms: bundle.as_ref().and_then(|bundle| {
-                    bundle
-                        .workload
-                        .resources
-                        .wall_time
-                        .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX))
-                }),
+                memory_limit_bytes: declared.as_ref().and_then(|declared| declared.0),
+                timeout_ms: declared.as_ref().and_then(|declared| declared.1),
                 disk_bytes: directory_size(&self.logs_dir(key)),
-                network: bundle
+                network: declared
                     .as_ref()
-                    .map(|bundle| bundle.workload.network.to_string())
+                    .map(|declared| declared.2.clone())
                     .unwrap_or_default(),
             },
             log_directory,
         })
+    }
+
+    /// A bundle's declared memory limit, wall-time limit, and network
+    /// policy. Bundles are immutable, so each is parsed once.
+    fn declared_resources(&self, digest: &str) -> Option<(Option<u64>, Option<u64>, String)> {
+        if let Some(declared) = self.declared.lock().expect("declared").get(digest) {
+            return Some(declared.clone());
+        }
+        let bundle = std::fs::read(
+            self.config
+                .state_dir
+                .join("cache")
+                .join(digest.trim_start_matches("sha256:")),
+        )
+        .ok()
+        .and_then(|bytes| WorkloadBundle::from_bytes(&bytes).ok())?;
+        let declared = (
+            bundle.workload.resources.memory_bytes,
+            bundle
+                .workload
+                .resources
+                .wall_time
+                .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX)),
+            bundle.workload.network.to_string(),
+        );
+        self.declared
+            .lock()
+            .expect("declared")
+            .insert(digest.to_string(), declared.clone());
+        Some(declared)
     }
 
     /// The most recent log output of a workload on this node.
@@ -384,7 +407,7 @@ impl Daemon {
     // ---- Projects across environments ---------------------------------
 
     pub async fn projects(&self) -> Result<Vec<ProjectSummary>, EnvironmentError> {
-        self.refresh().await?;
+        self.refresh_for_read().await?;
         let names = self
             .inner
             .lock()
@@ -445,7 +468,7 @@ impl Daemon {
     }
 
     pub async fn project_detail(&self, name: &str) -> Result<ProjectDetail, EnvironmentError> {
-        self.refresh().await?;
+        self.refresh_for_read().await?;
         let summary = self.project_summary(name).await?;
         let revisions = self.revisions(name).await?;
         let deployments = self
@@ -518,6 +541,17 @@ impl Daemon {
                 Query::all(Collection::WorkloadInstance).eq("deployment_id", id.to_string()),
             )
             .await?;
+        let mut connections = std::collections::BTreeMap::new();
+        for instance in &instances {
+            connections.insert(
+                instance.id.clone(),
+                self.data_plane()
+                    .connections(&instance.id)
+                    .await
+                    .map(|(open, _)| open)
+                    .unwrap_or(0),
+            );
+        }
         let inner = self.inner.lock().await;
         let instances = instances
             .into_iter()
@@ -528,7 +562,7 @@ impl Daemon {
                 );
                 InstanceView {
                     actual_state: inner.runtime.get(&unit).and_then(|runtime| runtime.state),
-                    open_connections: self.endpoints().open_connections(&instance.id),
+                    open_connections: connections.get(&instance.id).copied().unwrap_or(0),
                     instance_id: instance.id,
                     record: instance.value,
                 }
@@ -542,9 +576,30 @@ impl Daemon {
     }
 
     pub async fn execution(&self, execution_id: &str) -> Result<ExecutionView, EnvironmentError> {
-        let record = self
+        // Durable state first; then evidence this controller holds but has
+        // not written yet (control state was down when it ended).
+        let record = match self
             .get_required::<ExecutionRecord>(&ids::execution(execution_id))
-            .await?;
+            .await
+        {
+            Ok(record) => record.value,
+            Err(failure) => {
+                let inner = self.inner.lock().await;
+                inner
+                    .terminal
+                    .get(execution_id)
+                    .cloned()
+                    .or_else(|| {
+                        inner
+                            .pending_evidence
+                            .iter()
+                            .filter_map(|pending| pending.record.as_ref())
+                            .find(|record| record.execution_id == execution_id)
+                            .cloned()
+                    })
+                    .ok_or(failure)?
+            }
+        };
         let (stdout, stderr) = self
             .inner
             .lock()
@@ -554,7 +609,7 @@ impl Daemon {
             .cloned()
             .unwrap_or_default();
         Ok(ExecutionView {
-            record: record.value,
+            record,
             stdout,
             stderr,
         })

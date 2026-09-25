@@ -90,10 +90,26 @@ pub struct StartCommand {
     /// Host ports available for logical port bindings, as LOW-HIGH.
     #[arg(long, default_value = "20000-29999")]
     pub port_range: String,
-    /// Environment variable holding the token required for mutations.
-    /// Without it, the API accepts every request; bind to localhost.
+    /// Development only: environment variable holding a shared token that
+    /// every request must carry. Production uses operator credentials
+    /// (`compute auth create`) instead and refuses this.
     #[arg(long)]
     pub require_token_env: Option<String>,
+    /// Explicit development mode: plaintext HTTP, and requests without a
+    /// credential are admitted as the `development` operator.
+    #[arg(long, conflicts_with = "production")]
+    pub insecure: bool,
+    /// Production mode: TLS and an operator credential on every request,
+    /// reads included. Implied by --tls-cert. Defaults to `[api] mode`.
+    #[arg(long)]
+    pub production: bool,
+    /// PEM certificate chain for the API. Reloaded when the file changes.
+    /// Defaults to `[api] tls_cert`.
+    #[arg(long, requires = "tls_key")]
+    pub tls_cert: Option<PathBuf>,
+    /// PEM private key for the API. Defaults to `[api] tls_key`.
+    #[arg(long, requires = "tls_cert")]
+    pub tls_key: Option<PathBuf>,
     /// How often the reconciler rereads desired state, in milliseconds.
     #[arg(long, default_value_t = 5000)]
     pub reconcile_interval_ms: u64,
@@ -118,9 +134,31 @@ pub struct StartCommand {
     pub endpoint_address: Option<std::net::IpAddr>,
     #[command(flatten)]
     pub state: crate::control_state::StateOptions,
+    /// Where services run and endpoints listen: `supervisor` (default on
+    /// Unix) runs them in the node's supervisor process, which outlives
+    /// controller restarts and upgrades; `in-process` runs them inside
+    /// this controller, and they stop with it.
+    #[arg(long, default_value = "supervisor", value_parser = ["supervisor", "in-process"])]
+    pub data_plane: String,
+    /// Refuse to start while durable control state is unreachable,
+    /// instead of starting with a degraded control plane.
+    #[arg(long)]
+    pub require_state_at_start: bool,
     /// Run in the background and return once the API answers.
     #[arg(long)]
     pub detach: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct StopCommand {
+    /// Stop only the controller: services and their endpoints keep running
+    /// on the supervisor, and the next controller reattaches to them.
+    #[arg(long)]
+    pub keep_workloads: bool,
+    #[command(flatten)]
+    pub daemon: DaemonLocation,
     #[arg(long)]
     pub json: bool,
 }
@@ -133,30 +171,230 @@ pub struct DaemonCommand {
     pub json: bool,
 }
 
-/// Mutations require the configured token; reads are open to anyone who
-/// can reach the API.
-struct TokenAuthorizer {
-    token: String,
+/// Carry out a hand-over this controller agreed to: start the new build
+/// with this controller's own arguments and environment, and wait for it
+/// to report itself ready. If it refuses, dies, or is not ready in time,
+/// stop it and start the previous build again. Workloads keep running on
+/// the supervisor throughout; only the API pauses.
+async fn hand_over(
+    record: compute_environment::upgrade::UpgradeRecord,
+    state_dir: &std::path::Path,
+) -> compute_core::Result<()> {
+    use compute_environment::upgrade::{read_record, write_record};
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let launch = |program: &str| -> std::io::Result<std::process::Child> {
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(state_dir.join("daemon.log"))?;
+        let mut child = std::process::Command::new(program);
+        child
+            .args(&arguments)
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: setsid in the child before exec only detaches it
+            // from this session.
+            unsafe {
+                child.pre_exec(|| {
+                    if libc::setsid() < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        child.spawn()
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(record.timeout_seconds);
+    let failure = match launch(&record.to.path) {
+        Err(error) => format!("the new controller did not start: {error}"),
+        Ok(mut child) => loop {
+            if let Some(current) = read_record(state_dir) {
+                match current.status.as_str() {
+                    "completed" => {
+                        eprintln!(
+                            "{} {} completed: controller pid {} serves {} ({})",
+                            record.kind,
+                            record.upgrade_id,
+                            child.id(),
+                            record.to.version,
+                            record.to.build_id
+                        );
+                        return Ok(());
+                    }
+                    "refused" => {
+                        let _ = child.wait();
+                        break current
+                            .reason
+                            .unwrap_or_else(|| "the new controller refused".into());
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                break format!("the new controller exited ({status}) before it was ready");
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break format!(
+                    "the new controller was not ready within {}s",
+                    record.timeout_seconds
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        },
+    };
+    eprintln!(
+        "{} {} failed: {failure}; restoring {}",
+        record.kind, record.upgrade_id, record.from.build_id
+    );
+    let mut restoring = read_record(state_dir).unwrap_or(record.clone());
+    restoring.status = "rolling_back".into();
+    restoring.reason = Some(failure.clone());
+    write_record(state_dir, &restoring).map_err(error)?;
+    let mut restored = launch(&record.from.path)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        if read_record(state_dir).is_some_and(|current| current.status == "rolled_back") {
+            eprintln!("previous controller restored (pid {})", restored.id());
+            return Ok(());
+        }
+        if let Ok(Some(status)) = restored.try_wait() {
+            return Err(ComputeError::Runtime(format!(
+                "the previous controller exited ({status}) while being restored; workloads keep running on the supervisor; start a controller"
+            )));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(ComputeError::Runtime(
+                "the previous controller did not report itself restored".into(),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
-#[async_trait::async_trait]
-impl compute_provider::ProviderAuthorizer for TokenAuthorizer {
-    async fn authorize(
-        &self,
-        operation: compute_provider::ProviderOperation,
-        authorization: Option<&str>,
-    ) -> Result<(), compute_provider::ProviderError> {
-        if operation == compute_provider::ProviderOperation::EnvironmentRead
-            || authorization == Some(format!("Bearer {}", self.token).as_str())
-        {
-            Ok(())
-        } else {
-            Err(compute_provider::ProviderError::new(
-                compute_provider::ProviderErrorKind::Unauthorized,
-                "this daemon requires a bearer token for changes",
-            ))
+/// Decide how the API is secured, failing closed. Plaintext without
+/// credentials is allowed only when asked for (`--insecure`) or on a
+/// loopback listener; a reachable listener needs TLS.
+pub(crate) fn security_mode(
+    listen: std::net::SocketAddr,
+    insecure: bool,
+    production: bool,
+    tls: bool,
+) -> compute_core::Result<(compute_environment::auth::SecurityMode, String)> {
+    use compute_environment::auth::SecurityMode;
+    if production && !tls {
+        return Err(ComputeError::InvalidWorkload(
+            "production mode requires TLS: pass --tls-cert and --tls-key (or [api] tls_cert and tls_key); Compute does not downgrade to plaintext".into(),
+        ));
+    }
+    if insecure {
+        return Ok((SecurityMode::Development, "--insecure".into()));
+    }
+    if tls {
+        return Ok((SecurityMode::Production, "TLS is configured".into()));
+    }
+    if listen.ip().is_loopback() {
+        return Ok((
+            SecurityMode::Development,
+            format!(
+                "loopback listener {listen} without TLS; pass --production with TLS for a reachable node"
+            ),
+        ));
+    }
+    Err(ComputeError::InvalidWorkload(format!(
+        "refusing to serve plaintext without credentials on {listen}: configure TLS (--tls-cert, --tls-key) for production, or pass --insecure for development"
+    )))
+}
+
+/// The node's supervisor: the running one when it answers, otherwise a
+/// new one started from this executable in its own session, so it
+/// outlives this controller.
+pub(crate) async fn ensure_supervisor(
+    state_dir: &std::path::Path,
+    endpoint_address: std::net::IpAddr,
+) -> compute_core::Result<std::sync::Arc<dyn compute_environment::dataplane::DataPlane>> {
+    use compute_environment::dataplane::{Launcher, SupervisorClient};
+    let (client, info, started) = SupervisorClient::ensure(Launcher {
+        executable: std::env::current_exe()?,
+        state_dir: state_dir.to_path_buf(),
+        endpoint_address,
+    })
+    .await
+    .map_err(error)?;
+    if started {
+        eprintln!("Data plane: started supervisor pid {}", info.pid);
+    } else {
+        eprintln!(
+            "Data plane: supervisor pid {} (running since {}, {} units, {} endpoints)",
+            info.pid,
+            info.started_at.to_rfc3339(),
+            info.units,
+            info.routes
+        );
+    }
+    Ok(std::sync::Arc::new(client))
+}
+
+#[derive(Args, Debug)]
+pub struct SupervisorCommand {
+    /// The node directory of the controller it serves.
+    #[arg(long, default_value = ".compute/daemon")]
+    pub state_dir: PathBuf,
+    /// The address endpoints listen on.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub endpoint_address: std::net::IpAddr,
+}
+
+/// Run the node's supervisor: service processes and endpoint listeners,
+/// behind a node-local socket. `compute start` starts it when needed.
+pub async fn supervisor(command: SupervisorCommand) -> compute_core::Result<()> {
+    use compute_environment::dataplane::{LocalDataPlane, serve_supervisor, socket_path};
+    std::fs::create_dir_all(&command.state_dir)?;
+    // One supervisor per node directory.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(command.state_dir.join("supervisor.lock"))?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: an advisory lock on a file this process holds open.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(ComputeError::Runtime(format!(
+                "another supervisor runs for {}",
+                command.state_dir.display()
+            )));
         }
     }
+    let plane = LocalDataPlane::supervisor(
+        std::sync::Arc::new(compute_provider::LocalProvider::new()),
+        compute_network::Endpoints::new(command.endpoint_address),
+        command.state_dir.join("supervisor"),
+    )
+    .await
+    .map_err(error)?;
+    let info = compute_environment::dataplane::DataPlane::info(&plane)
+        .await
+        .map_err(error)?;
+    eprintln!(
+        "Compute supervisor pid {} serving {} ({} endpoints restored, {} orphans stopped)",
+        info.pid,
+        socket_path(&command.state_dir).display(),
+        info.routes,
+        info.orphans_stopped
+    );
+    let result = serve_supervisor(std::sync::Arc::new(plane), socket_path(&command.state_dir))
+        .await
+        .map_err(error);
+    drop(lock);
+    result
 }
 
 fn port_range(value: &str, what: &str) -> compute_core::Result<(u16, u16)> {
@@ -181,7 +419,10 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
             .unwrap_or("30000-39999"),
         "the instance port range",
     )?;
-    let backend = command.state.open(&command.state_dir).await?;
+    let backend = command
+        .state
+        .open(&command.state_dir, command.require_state_at_start)
+        .await?;
     let mut config = compute_environment::DaemonConfig::new(
         &command.state_dir,
         backend.state,
@@ -225,33 +466,96 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
         .map(compute_placement::PoolConfig::load)
         .transpose()
         .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
-    let authorizer: std::sync::Arc<dyn compute_provider::ProviderAuthorizer> =
-        match &command.require_token_env {
-            Some(name) => std::sync::Arc::new(TokenAuthorizer {
-                token: std::env::var(name)
-                    .map_err(|_| ComputeError::InvalidWorkload(format!("{name} is not set")))?,
-            }),
-            None => std::sync::Arc::new(compute_provider::AllowAllAuthorizer),
-        };
+    let api = command.state.api()?;
+    let production =
+        command.production || (!command.insecure && api.mode.as_deref() == Some("production"));
+    if let Some(mode) = api.mode.as_deref()
+        && !matches!(mode, "production" | "development")
+    {
+        return Err(ComputeError::InvalidWorkload(format!(
+            "[api] mode must be production or development, not {mode}"
+        )));
+    }
+    let tls = match (
+        command.tls_cert.clone().or(api.tls_cert),
+        command.tls_key.clone().or(api.tls_key),
+    ) {
+        (Some(certificate), Some(key)) => {
+            Some(compute_environment::tls::ApiTls::load(certificate, key).map_err(error)?)
+        }
+        (None, None) => None,
+        _ => {
+            return Err(ComputeError::InvalidWorkload(
+                "TLS needs both a certificate and a key".into(),
+            ));
+        }
+    };
+    let (mode, reason) =
+        security_mode(command.listen, command.insecure, production, tls.is_some())?;
+    config.security = compute_environment::auth::SecurityConfig {
+        mode,
+        reason,
+        tls: tls.is_some(),
+        legacy_token: command
+            .require_token_env
+            .as_deref()
+            .map(|name| {
+                std::env::var(name)
+                    .map_err(|_| ComputeError::InvalidWorkload(format!("{name} is not set")))
+            })
+            .transpose()?,
+    };
+    config.api_tls = tls.clone();
+    config.require_state_at_start = command.require_state_at_start;
+    if command.data_plane == "supervisor" {
+        config.data_plane =
+            Some(ensure_supervisor(&command.state_dir, config.network.endpoint_address).await?);
+    }
     let listener = tokio::net::TcpListener::bind(command.listen).await?;
     let daemon = compute_environment::Daemon::start(config)
         .await
         .map_err(error)?;
     let status = daemon.status().await;
+    let scheme = if tls.is_some() { "https" } else { "http" };
     if command.json {
         print_json(&status);
     } else {
         eprintln!(
-            "Compute daemon {} listening on http://{} (control state: {} {}; UI: http://{}/ui/)",
+            "Compute daemon {} listening on {scheme}://{} (control state: {} {}; UI: {scheme}://{}/ui/)",
             status.instance_id,
             command.listen,
             status.state.kind,
             status.state.location,
             command.listen
         );
+        match mode {
+            compute_environment::auth::SecurityMode::Production => {
+                let bootstrap = command.state_dir.join("bootstrap-admin.token");
+                if bootstrap.is_file() {
+                    eprintln!(
+                        "Production mode: every request needs an operator credential. The bootstrap admin token is in {}; create operator credentials with it and revoke it.",
+                        bootstrap.display()
+                    );
+                } else {
+                    eprintln!("Production mode: every request needs an operator credential.");
+                }
+            }
+            compute_environment::auth::SecurityMode::Development => {
+                let security = daemon.info().await.security;
+                eprintln!(
+                    "WARNING: development mode ({}): {}. Never expose this listener.",
+                    security.reason,
+                    if security.authentication_required {
+                        "requests need the development token"
+                    } else {
+                        "requests without a credential are admitted"
+                    }
+                )
+            }
+        }
     }
     let server: tokio::task::JoinHandle<std::io::Result<()>> = tokio::spawn(
-        compute_environment::api::serve(listener, daemon.clone(), authorizer),
+        compute_environment::api::serve(listener, daemon.clone(), tls),
     );
     tokio::select! {
         result = server => match result {
@@ -261,8 +565,43 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
         _ = tokio::signal::ctrl_c() => {
             daemon.shutdown().await;
         }
+        // A service manager restarting the controller (SIGTERM) leaves the
+        // workloads serving when they run on the supervisor; SIGINT and
+        // `compute stop` stop them.
+        _ = terminated() => {
+            if daemon.data_plane_independent() {
+                if let Err(failure) = daemon.detach().await {
+                    eprintln!("could not detach ({failure}); stopping workloads");
+                    daemon.shutdown().await;
+                }
+            } else {
+                daemon.shutdown().await;
+            }
+        }
+    }
+    // The API stops answering as soon as a shutdown begins; the process
+    // stays until the shutdown has stopped (or detached from) everything.
+    let _ = tokio::time::timeout(Duration::from_secs(300), daemon.wait_stopped()).await;
+    if let Some(record) = daemon.take_upgrade() {
+        daemon.release_node();
+        drop(daemon);
+        return hand_over(record, &command.state_dir).await;
     }
     Ok(())
+}
+
+async fn terminated() {
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    }
+    #[cfg(not(unix))]
+    std::future::pending::<()>().await;
 }
 
 /// Start the daemon as a background process of this executable and wait
@@ -291,6 +630,23 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
     if let Some(name) = &command.require_token_env {
         child.arg("--require-token-env").arg(name);
     }
+    if command.insecure {
+        child.arg("--insecure");
+    }
+    child.arg("--data-plane").arg(&command.data_plane);
+    if command.require_state_at_start {
+        child.arg("--require-state-at-start");
+    }
+    if command.production {
+        child.arg("--production");
+    }
+    if let (Some(certificate), Some(key)) = (&command.tls_cert, &command.tls_key) {
+        child
+            .arg("--tls-cert")
+            .arg(certificate)
+            .arg("--tls-key")
+            .arg(key);
+    }
     if let Some(range) = &command.instance_port_range {
         child.arg("--instance-port-range").arg(range);
     }
@@ -316,20 +672,33 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
         child.process_group(0);
     }
     let spawned = child.spawn()?;
-    let endpoint = format!("http://{}", command.listen);
-    let client = DaemonClient::new(&endpoint).map_err(error)?;
+    // Readiness is `/health`: it needs no credential, so a production
+    // daemon can be detached too. The daemon's own certificate is trusted
+    // for this check.
+    let tls = command.tls_cert.is_some();
+    let endpoint = format!(
+        "{}://{}",
+        if tls { "https" } else { "http" },
+        command.listen
+    );
+    let mut client = DaemonClient::new(&endpoint).map_err(error)?;
+    if let Some(certificate) = &command.tls_cert {
+        client = client
+            .trusting_pem(&std::fs::read(certificate)?)
+            .map_err(error)?;
+    }
     let runtime = tokio::runtime::Handle::current();
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
-        let status: Result<DaemonStatus, _> =
-            tokio::task::block_in_place(|| runtime.block_on(client.get("/status")));
-        if let Ok(status) = status {
+        let health: Result<serde_json::Value, _> =
+            tokio::task::block_in_place(|| runtime.block_on(client.get("/health")));
+        if let Ok(health) = health {
             if command.json {
-                print_json(&status);
+                print_json(&health);
             } else {
                 println!(
                     "Compute daemon {} started (pid {}) at {endpoint}",
-                    status.instance_id,
+                    health["instance_id"].as_str().unwrap_or_default(),
                     spawned.id()
                 );
             }
@@ -345,21 +714,35 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
     }
 }
 
-pub async fn stop(command: DaemonCommand) -> compute_core::Result<()> {
+pub async fn stop(command: StopCommand) -> compute_core::Result<()> {
     let client = command.daemon.client()?;
     let _: serde_json::Value = client
-        .post::<(), _>("/shutdown", None)
+        .post(
+            "/shutdown",
+            Some(&serde_json::json!({
+                "workloads": if command.keep_workloads { "keep" } else { "stop" },
+            })),
+        )
         .await
         .map_err(error)?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    while client.get::<DaemonStatus>("/status").await.is_ok() {
+    // Stopped when nothing answers any more: the controller keeps /health
+    // until its workloads are stopped (or left running) and its last
+    // events are written.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    while client.get::<serde_json::Value>("/health").await.is_ok() {
         if tokio::time::Instant::now() >= deadline {
             return Err(ComputeError::Runtime("the daemon did not stop".into()));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     if command.json {
-        print_json(&serde_json::json!({ "stopped": true }));
+        print_json(
+            &serde_json::json!({ "stopped": true, "workloads_kept": command.keep_workloads }),
+        );
+    } else if command.keep_workloads {
+        println!(
+            "Compute controller stopped; workloads and endpoints keep running for the next controller"
+        );
     } else {
         println!("Compute daemon stopped; desired state is kept for the next start");
     }
@@ -1813,24 +2196,10 @@ pub async fn events(command: EventsCommand) -> compute_core::Result<()> {
         return Ok(());
     }
     // Follow the event stream the UI uses.
-    let endpoint = command.daemon.endpoint();
-    let authority = endpoint
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-    let mut stream = tokio::net::TcpStream::connect(&authority).await?;
-    stream
-        .write_all(
-            format!(
-                "GET /events/stream?after={last}&{query} HTTP/1.1\r\nHost: {authority}\r\nAccept: text/event-stream\r\n\r\n"
-            )
-            .as_bytes(),
-        )
-        .await?;
-    let mut lines = tokio::io::BufReader::new(stream).lines();
+    let mut lines = client
+        .stream_lines(&format!("/events/stream?after={last}&{query}"))
+        .await
+        .map_err(error)?;
     while let Some(line) = lines.next_line().await? {
         if let Some(data) = line.strip_prefix("data: ")
             && let Ok(event) = serde_json::from_str::<EventRecord>(data)
@@ -1970,4 +2339,34 @@ pub async fn service(command: ServiceCommand) -> compute_core::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::security_mode;
+    use compute_environment::auth::SecurityMode;
+
+    #[test]
+    fn the_api_fails_closed_rather_than_downgrading() {
+        let loopback = "127.0.0.1:8787".parse().unwrap();
+        let reachable = "0.0.0.0:8787".parse().unwrap();
+        // Production without TLS material never starts.
+        assert!(security_mode(loopback, false, true, false).is_err());
+        assert!(security_mode(reachable, false, true, false).is_err());
+        // A reachable listener needs TLS unless development is explicit.
+        assert!(security_mode(reachable, false, false, false).is_err());
+        assert_eq!(
+            security_mode(reachable, true, false, false).unwrap().0,
+            SecurityMode::Development
+        );
+        // TLS means production.
+        assert_eq!(
+            security_mode(reachable, false, false, true).unwrap().0,
+            SecurityMode::Production
+        );
+        // Loopback without TLS is development, and says why.
+        let (mode, reason) = security_mode(loopback, false, false, false).unwrap();
+        assert_eq!(mode, SecurityMode::Development);
+        assert!(reason.contains("loopback"));
+    }
 }

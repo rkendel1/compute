@@ -91,6 +91,15 @@ DNS records at their provider and ACME certificates. See
 [docs/control-plane.md](docs/control-plane.md), [docs/releases.md](docs/releases.md),
 and [docs/networking.md](docs/networking.md).
 
+Workloads run on the node's supervisor, so they keep serving while the
+controller restarts, crashes, or is upgraded (`compute node upgrade`, with
+automatic rollback). A controller whose FeltDB is unreachable keeps
+everything running and refuses changes until it returns. The remote API
+needs TLS and scoped operator credentials in production (`compute auth`),
+and `compute doctor` diagnoses the whole node. See
+[docs/architecture.md](docs/architecture.md) for the invariants, and
+[docs/hardening-audit.md](docs/hardening-audit.md) for what was measured.
+
 ```sh
 compute start --detach
 compute environment apply compute.environment.toml

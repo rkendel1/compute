@@ -140,7 +140,10 @@ fn wasm_bundle(isolation: IsolationProfile) -> WorkloadBundle {
             ..ResourceLimits::default()
         },
         network: NetworkPolicy::None,
-        isolation: IsolationRequirement { profile: isolation },
+        isolation: IsolationRequirement {
+            profile: isolation,
+            host: Default::default(),
+        },
         dependencies: None,
     };
     WorkloadBundle::create_from(spec, root.path()).unwrap()
