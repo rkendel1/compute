@@ -22,6 +22,8 @@ pub struct ProvisionRequest {
     pub tenant_name: String,
     /// The FeltDB environment to promote the model to.
     pub environment: String,
+    /// A PEM certificate authority to trust, as in `FeltDbConfig`.
+    pub ca_certificate: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +67,7 @@ pub async fn provision_manifest(
         token: request.token.clone(),
         application_id: request.application_id.clone().unwrap_or_default(),
         environment: request.environment.clone(),
+        ca_certificate: request.ca_certificate.clone(),
     })?;
     let post = |path: String, body: Value| {
         let client = &client;

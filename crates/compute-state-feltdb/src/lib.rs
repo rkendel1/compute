@@ -43,6 +43,10 @@ pub struct FeltDbConfig {
     pub application_id: String,
     /// The FeltDB environment that holds this control plane's state.
     pub environment: String,
+    /// A PEM certificate authority to trust in addition to the public
+    /// roots, for a FeltDB served under a private CA. Verification is never
+    /// disabled.
+    pub ca_certificate: Option<Vec<u8>>,
 }
 
 pub struct FeltDbState {
@@ -63,8 +67,16 @@ struct Refusal {
 
 impl FeltDbState {
     pub fn new(config: FeltDbConfig) -> Result<Self, StateError> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
+        if let Some(pem) = &config.ca_certificate {
+            let certificate = reqwest::Certificate::from_pem(pem).map_err(|error| {
+                StateError::Invalid(format!(
+                    "the FeltDB CA certificate is not valid PEM: {error}"
+                ))
+            })?;
+            builder = builder.add_root_certificate(certificate);
+        }
+        let http = builder
             .build()
             .map_err(|error| StateError::Unavailable(error.to_string()))?;
         Ok(Self {

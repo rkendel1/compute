@@ -113,6 +113,7 @@ async fn feltdb_is_a_conforming_durable_authority() {
         tenant_id: None,
         tenant_name: "compute-certification".into(),
         environment: "production".into(),
+        ca_certificate: None,
     })
     .await
     .expect("provision the Compute model");
@@ -128,6 +129,7 @@ async fn feltdb_is_a_conforming_durable_authority() {
             tenant_id: None,
             tenant_name: "compute-certification".into(),
             environment: "production".into(),
+            ca_certificate: None,
         })
         .await
         .expect("provision again");
@@ -145,6 +147,7 @@ async fn feltdb_is_a_conforming_durable_authority() {
         token: token.clone(),
         application_id: provisioned.application_id.clone(),
         environment: "production".into(),
+        ca_certificate: None,
     };
     let store = Arc::new(FeltDbState::connect(config.clone()).await.expect("connect"));
     assert_eq!(store.backend().kind, "feltdb");
@@ -198,6 +201,7 @@ async fn an_older_compute_model_is_upgraded_in_place() {
         tenant_id: None,
         tenant_name: "compute-upgrade".into(),
         environment: "production".into(),
+        ca_certificate: None,
     };
     let first = compute_state_feltdb::provision_manifest(request(), &older.to_string())
         .await
@@ -207,6 +211,7 @@ async fn an_older_compute_model_is_upgraded_in_place() {
         token: token.clone(),
         application_id: first.application_id.clone(),
         environment: "production".into(),
+        ca_certificate: None,
     };
     let state = ControlState::new(Arc::new(
         FeltDbState::connect(config.clone()).await.unwrap(),
@@ -292,4 +297,219 @@ fn tempfile_dir() -> PathBuf {
     ));
     std::fs::create_dir_all(&directory).unwrap();
     directory
+}
+
+/// A TLS terminator in front of the FeltDB authority, with a certificate
+/// from a throwaway private CA.
+struct Tls {
+    child: Child,
+    port: u16,
+    ca: Vec<u8>,
+}
+
+impl Drop for Tls {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+const TLS_PROXY: &str = r#"
+import socket, ssl, sys, threading
+target, cert, key = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(cert, key)
+server = socket.socket()
+server.bind(("127.0.0.1", 0))
+server.listen()
+print(server.getsockname()[1], flush=True)
+def pipe(source, sink):
+    try:
+        while True:
+            data = source.recv(65536)
+            if not data:
+                break
+            sink.sendall(data)
+    except Exception:
+        pass
+    for end in (source, sink):
+        try:
+            end.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+def handle(client):
+    try:
+        secure = context.wrap_socket(client, server_side=True)
+    except Exception:
+        client.close()
+        return
+    upstream = socket.create_connection(("127.0.0.1", target))
+    threading.Thread(target=pipe, args=(secure, upstream), daemon=True).start()
+    pipe(upstream, secure)
+while True:
+    client, _ = server.accept()
+    threading.Thread(target=handle, args=(client,), daemon=True).start()
+"#;
+
+fn tls_in_front_of(url: &str, directory: &Path) -> Tls {
+    let openssl = |args: &[&str]| {
+        let output = Command::new("openssl")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .expect("openssl runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    openssl(&[
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-days",
+        "2",
+        "-subj",
+        "/CN=Compute test CA",
+        "-keyout",
+        "ca.key",
+        "-out",
+        "ca.pem",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,cRLSign",
+    ]);
+    openssl(&[
+        "req",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-subj",
+        "/CN=localhost",
+        "-keyout",
+        "server.key",
+        "-out",
+        "server.csr",
+    ]);
+    std::fs::write(
+        directory.join("server.ext"),
+        "subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n",
+    )
+    .unwrap();
+    openssl(&[
+        "x509",
+        "-req",
+        "-in",
+        "server.csr",
+        "-CA",
+        "ca.pem",
+        "-CAkey",
+        "ca.key",
+        "-CAcreateserial",
+        "-days",
+        "2",
+        "-extfile",
+        "server.ext",
+        "-out",
+        "server.pem",
+    ]);
+    let target = url
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .trim_end_matches('/')
+        .to_string();
+    let mut child = Command::new("python3")
+        .arg("-c")
+        .arg(TLS_PROXY)
+        .arg(&target)
+        .arg(directory.join("server.pem"))
+        .arg(directory.join("server.key"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("python3 runs");
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    Tls {
+        child,
+        port: line.trim().parse().unwrap(),
+        ca: std::fs::read(directory.join("ca.pem")).unwrap(),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires FELTDB_SERVER_BIN, openssl, and python3"]
+async fn compute_speaks_to_feltdb_over_verified_https() {
+    use compute_state::{Batch, ControlState, EnvironmentRecord};
+
+    let data = tempfile_dir();
+    let token = create_key(&data);
+    let server = start(&data);
+    let tls = tls_in_front_of(&server.url, &data);
+    let https = format!("https://localhost:{}", tls.port);
+
+    let provisioned = provision(ProvisionRequest {
+        url: https.clone(),
+        token: token.clone(),
+        application_id: None,
+        tenant_id: None,
+        tenant_name: "compute-tls".into(),
+        environment: "production".into(),
+        ca_certificate: Some(tls.ca.clone()),
+    })
+    .await
+    .expect("provision over HTTPS");
+    let config = FeltDbConfig {
+        url: https.clone(),
+        token: token.clone(),
+        application_id: provisioned.application_id.clone(),
+        environment: "production".into(),
+        ca_certificate: Some(tls.ca.clone()),
+    };
+    let state = ControlState::new(Arc::new(
+        FeltDbState::connect(config.clone()).await.unwrap(),
+    ));
+    let environment = EnvironmentRecord {
+        name: "production".into(),
+        desired_state: compute_state::DesiredState::Running,
+        config: Default::default(),
+        policy: None,
+        provider: None,
+        created_at: chrono::Utc::now(),
+    };
+    state
+        .transaction(Batch::new().create("env_tls", &environment))
+        .await
+        .expect("a transaction over HTTPS");
+    assert_eq!(
+        state
+            .get::<EnvironmentRecord>("env_tls")
+            .await
+            .unwrap()
+            .unwrap()
+            .value,
+        environment
+    );
+
+    // Verification is not optional: without the CA, the same endpoint is
+    // refused.
+    let untrusted = FeltDbState::connect(FeltDbConfig {
+        ca_certificate: None,
+        ..config
+    })
+    .await;
+    assert!(
+        matches!(untrusted, Err(compute_state::StateError::Unavailable(_))),
+        "an unverified certificate is refused"
+    );
+    drop(tls);
+    drop(server);
+    let _ = std::fs::remove_dir_all(data);
 }

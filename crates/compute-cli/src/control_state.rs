@@ -10,6 +10,7 @@
 //! application = "app_..."       # from `compute control-plane provision`
 //! environment = "production"
 //! token_env = "COMPUTE_FELTDB_TOKEN"
+//! ca_file = "/etc/compute/feltdb-ca.pem"   # optional: a private CA
 //!
 //! [state.file]
 //! path = "/var/lib/compute/control-state.json"
@@ -51,6 +52,10 @@ pub struct StateOptions {
     /// `[state.feltdb] token_env`, then COMPUTE_FELTDB_TOKEN.
     #[arg(long)]
     pub feltdb_token_env: Option<String>,
+    /// PEM certificate authority for a FeltDB under a private CA. Defaults
+    /// to `[state.feltdb] ca_file`.
+    #[arg(long)]
+    pub feltdb_ca_file: Option<PathBuf>,
     /// Configuration file with a `[state]` section. Defaults to
     /// $COMPUTE_CONFIG, then ./compute.toml when present.
     #[arg(long = "config")]
@@ -94,6 +99,8 @@ struct FeltDbSection {
     environment: Option<String>,
     #[serde(default)]
     token_env: Option<String>,
+    #[serde(default)]
+    ca_file: Option<PathBuf>,
 }
 
 /// A resolved backend, ready for the daemon.
@@ -129,6 +136,29 @@ impl StateOptions {
         Ok((Some(path), file.state.unwrap_or_default()))
     }
 
+    /// The FeltDB CA certificate, when one is configured.
+    pub fn feltdb_ca(&self) -> compute_core::Result<Option<Vec<u8>>> {
+        let (config_path, section) = self.section()?;
+        let path = self.feltdb_ca_file.clone().or_else(|| {
+            section
+                .feltdb
+                .and_then(|feltdb| feltdb.ca_file)
+                .map(|path| match &config_path {
+                    Some(config) if path.is_relative() => config
+                        .parent()
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(path),
+                    _ => path,
+                })
+        });
+        path.map(|path| {
+            std::fs::read(&path)
+                .map_err(|error| invalid(format!("cannot read {}: {error}", path.display())))
+        })
+        .transpose()
+    }
+
     /// The FeltDB connection settings: flags, then configuration.
     pub fn feltdb(&self) -> compute_core::Result<(Option<String>, Option<String>, String, String)> {
         let (_, section) = self.section()?;
@@ -161,6 +191,13 @@ impl StateOptions {
         push("--feltdb-application", &self.feltdb_application);
         push("--feltdb-environment", &self.feltdb_environment);
         push("--feltdb-token-env", &self.feltdb_token_env);
+        push(
+            "--feltdb-ca-file",
+            &self
+                .feltdb_ca_file
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        );
         if let Some(config) = &self.config {
             arguments.push("--config".into());
             arguments.push(config.display().to_string());
@@ -227,6 +264,7 @@ impl StateOptions {
                         token,
                         application_id: application,
                         environment,
+                        ca_certificate: self.feltdb_ca()?,
                     })
                     .await
                     .map_err(|error| {
@@ -306,6 +344,7 @@ pub async fn control_plane(command: ControlPlaneCommand) -> compute_core::Result
         tenant_id: tenant,
         tenant_name,
         environment: environment.clone(),
+        ca_certificate: state.feltdb_ca()?,
     })
     .await
     .map_err(|error| ComputeError::Runtime(error.to_string()))?;
