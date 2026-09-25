@@ -1600,8 +1600,12 @@ pub enum DeploymentCommands {
         #[arg(long)]
         json: bool,
     },
-    /// The deployment receipt.
-    Receipt { deployment: String },
+    /// The deployment receipt (always JSON).
+    Receipt {
+        deployment: String,
+        #[arg(long, hide = true)]
+        json: bool,
+    },
 }
 
 /// The release lifecycle, with the current status marked.
@@ -1726,7 +1730,7 @@ pub async fn deployment(command: DeploymentCommand) -> compute_core::Result<()> 
                 finish_deployment(&client, view, wait, json).await?;
             }
         }
-        DeploymentCommands::Receipt { deployment } => {
+        DeploymentCommands::Receipt { deployment, .. } => {
             let receipt: serde_json::Value = client
                 .get(&format!("/deployments/{deployment}/receipt"))
                 .await

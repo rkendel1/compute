@@ -69,6 +69,13 @@ fn project(root: &Path) -> PathBuf {
 struct Cli {
     endpoint: String,
     env: Vec<(String, String)>,
+    /// This test's own port windows: tests run their daemons concurrently.
+    window: u16,
+}
+
+fn window() -> u16 {
+    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    23000 + NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) * 100
 }
 
 impl Cli {
@@ -103,6 +110,10 @@ impl Cli {
                 listen,
                 "--reconcile-interval-ms",
                 "300",
+                "--port-range",
+                &format!("{}-{}", self.window, self.window + 99),
+                "--instance-port-range",
+                &format!("{}-{}", self.window + 20000, self.window + 20099),
             ])
             .arg("--state-dir")
             .arg(node)
@@ -210,6 +221,7 @@ fn a_killed_daemon_is_replaced_without_duplicating_its_services() {
     let cli = Cli {
         endpoint: format!("http://127.0.0.1:{}", free_port()),
         env: vec![],
+        window: window(),
     };
     let node = root.path().join("node");
     cli.start(&node, &[]);
@@ -244,6 +256,105 @@ fn a_killed_daemon_is_replaced_without_duplicating_its_services() {
         "the orphan was reaped, not duplicated"
     );
     assert_eq!(cli.host_port("production"), port, "the same host port");
+    cli.stop();
+}
+
+/// A daemon killed in the middle of a release: the next daemon reloads the
+/// release from control state, inspects the node, and finishes it — one
+/// switch, no duplicated instance, the endpoint unchanged.
+#[test]
+fn a_release_interrupted_by_a_killed_daemon_completes_after_restart() {
+    if !python_available() {
+        eprintln!("skipping: python3 is unavailable");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let source = project(root.path());
+    let cli = Cli {
+        endpoint: format!("http://127.0.0.1:{}", free_port()),
+        env: vec![],
+        window: window(),
+    };
+    let node = root.path().join("node");
+    cli.start(&node, &[]);
+    cli.run(&["environment", "create", "production"]);
+    let first = cli.run(&[
+        "deploy",
+        "app",
+        "--environment",
+        "production",
+        "--source",
+        source.to_str().unwrap(),
+        "--revision",
+        "v1",
+        "--set",
+        "REVISION=v1",
+        "--wait",
+    ]);
+    assert_eq!(first["status"], "complete", "{first}");
+    let port = cli.host_port("production");
+    let v1 = answer(port);
+    assert!(v1.starts_with("revision=v1"), "{v1}");
+
+    // v2 takes seconds to become ready.
+    std::fs::write(
+        source.join("api/main.py"),
+        format!("import time\ntime.sleep(4)\n{SERVICE}"),
+    )
+    .unwrap();
+    let second = cli.run(&[
+        "deploy",
+        "app",
+        "--environment",
+        "production",
+        "--source",
+        source.to_str().unwrap(),
+        "--revision",
+        "v2",
+        "--set",
+        "REVISION=v2",
+    ]);
+    let release = second["deployment_id"].as_str().unwrap().to_string();
+    assert_eq!(second["status"], "starting", "{second}");
+
+    cli.kill();
+    cli.start(&node, &[]);
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let settled = loop {
+        let view = cli.run(&["deployment", "inspect", &release]);
+        let status = view["status"].as_str().unwrap().to_string();
+        if status == "complete" || status == "failed" || status == "rolled_back" {
+            break view;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the release never finished: {view}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(settled["status"], "complete", "{settled}");
+    let v2 = answer(port);
+    assert!(v2.starts_with("revision=v2"), "{v2}");
+    assert_eq!(
+        cli.host_port("production"),
+        port,
+        "the endpoint is unchanged"
+    );
+    assert!(!alive(pid_of(&v1)), "v1 was stopped");
+    let instances = settled["instances"].as_array().unwrap();
+    assert_eq!(instances.len(), 1, "{settled}");
+    assert_eq!(instances[0]["state"], "serving");
+    let events = cli.run(&["events", "--deployment", &release]);
+    let switches = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "deployment.switched")
+        .count();
+    assert_eq!(switches, 1, "{events}");
+    let receipt = cli.run(&["deployment", "receipt", &release]);
+    assert_eq!(receipt["format"], "compute.deployment-receipt@1");
+    assert!(!receipt.to_string().contains("REVISION=v2"));
     cli.stop();
 }
 
@@ -373,6 +484,7 @@ fn managed_feltdb_is_the_durable_authority() {
     let cli = Cli {
         endpoint: format!("http://127.0.0.1:{}", free_port()),
         env: env.clone(),
+        window: window(),
     };
     let node = root.path().join("node-1");
     cli.start(&node, &config_arg);
