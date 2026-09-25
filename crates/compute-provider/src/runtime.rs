@@ -220,6 +220,17 @@ impl RuntimeManager {
         &self.root
     }
 
+    /// Another manager over the same store and catalog. The store's file
+    /// lock, not this process's mutex, keeps the two coherent.
+    pub(crate) fn sharing(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            lock: self.lock.clone(),
+            catalog: self.catalog.clone(),
+            mutation: Mutex::new(()),
+        }
+    }
+
     pub(crate) fn resolve(
         &self,
         requirement: ProviderRuntimeRequirement,

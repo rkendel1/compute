@@ -142,6 +142,19 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/applications/{application}/logs"),
     ("GET", "/compute/capabilities"),
     ("GET", "/compute/health"),
+    ("GET", "/compute/capacity"),
+    ("POST", "/compute/execute"),
+    ("POST", "/compute/admission"),
+    ("POST", "/compute/runtimes/resolve"),
+    ("POST", "/compute/runtimes/prepare"),
+    ("POST", "/compute/runtimes/status"),
+    ("POST", "/compute/jobs"),
+    ("GET", "/compute/jobs"),
+    ("GET", "/compute/jobs/{job}"),
+    ("GET", "/compute/jobs/{job}/result"),
+    ("GET", "/compute/jobs/{job}/receipt"),
+    ("GET", "/compute/jobs/{job}/logs"),
+    ("POST", "/compute/jobs/{job}/cancel"),
     ("POST", "/services"),
     ("DELETE", "/services/{service}"),
 ];
@@ -191,6 +204,8 @@ struct Request {
     path: String,
     query: BTreeMap<String, String>,
     authorization: Option<String>,
+    /// Every header, for requests handed to another protocol unchanged.
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -250,9 +265,11 @@ async fn read_request(stream: &mut Stream) -> Result<Request, EnvironmentError> 
         .collect();
     let mut content_length = 0_usize;
     let mut authorization = None;
+    let mut headers = vec![];
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
             let value = value.trim();
+            headers.push((name.trim().to_string(), value.to_string()));
             match name.trim().to_ascii_lowercase().as_str() {
                 "content-length" => {
                     content_length = value
@@ -281,6 +298,7 @@ async fn read_request(stream: &mut Stream) -> Result<Request, EnvironmentError> 
         path: path.to_string(),
         query,
         authorization,
+        headers,
         body,
     })
 }
@@ -344,6 +362,8 @@ enum Response {
     Text(&'static str, String),
     /// Stored bytes served unchanged, such as a canonical receipt.
     Bytes(&'static str, Vec<u8>),
+    /// A `compute.remote@1` response: its own status and JSON body.
+    Remote(u16, Vec<u8>),
     Redirect(&'static str),
     Stream(EventFilter),
 }
@@ -351,8 +371,10 @@ enum Response {
 async fn handle(mut stream: Stream, daemon: Arc<Daemon>) -> std::io::Result<()> {
     let request_id = crate::auth::request_id();
     let freshness = Arc::new(std::sync::Mutex::new(None));
+    let mut remote_protocol = false;
     let result = match read_request(&mut stream).await {
         Ok(request) => {
+            remote_protocol = compute_provider::RemoteService::serves(&request.path);
             crate::auth::FRESHNESS
                 .scope(freshness.clone(), dispatch(&daemon, request, &request_id))
                 .await
@@ -391,6 +413,9 @@ async fn handle(mut stream: Stream, daemon: Arc<Daemon>) -> std::io::Result<()> 
         Ok(Response::Bytes(content_type, body)) => {
             write_response(&mut stream, 200, content_type, &body, &request_id).await
         }
+        Ok(Response::Remote(status, body)) => {
+            write_response(&mut stream, status, "application/json", &body, &request_id).await
+        }
         Ok(Response::Redirect(location)) => {
             let head = format!(
                 "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -399,6 +424,33 @@ async fn handle(mut stream: Stream, daemon: Arc<Daemon>) -> std::io::Result<()> 
             stream.shutdown().await
         }
         Ok(Response::Stream(filter)) => stream_events(stream, daemon, filter).await,
+        // A `compute.remote@1` client reads errors in its own protocol's
+        // shape, whoever refused the request.
+        Err(error) if remote_protocol => {
+            use compute_provider::{ProviderError, ProviderErrorKind};
+            let kind = match &error {
+                EnvironmentError::Unauthorized(_) | EnvironmentError::Forbidden(_) => {
+                    ProviderErrorKind::Unauthorized
+                }
+                EnvironmentError::Unavailable(_) | EnvironmentError::ControllerUnavailable(_) => {
+                    ProviderErrorKind::ProviderUnavailable
+                }
+                EnvironmentError::NoRoute(_) | EnvironmentError::Invalid(_) => {
+                    ProviderErrorKind::ProtocolUnsupported
+                }
+                _ => ProviderErrorKind::RemoteExecutionFailure,
+            };
+            let body =
+                serde_json::to_vec(&ProviderError::new(kind, error.message())).unwrap_or_default();
+            write_response(
+                &mut stream,
+                error.status(),
+                "application/json",
+                &body,
+                &request_id,
+            )
+            .await
+        }
         Err(error) => {
             write_json(
                 &mut stream,
@@ -1073,12 +1125,24 @@ async fn route(
             ok(serde_json::json!({ "stdout": stdout, "stderr": stderr }))
         }
 
-        // This node as a provider in a caller's pool (`compute.remote@1`
-        // discovery only: work arrives as application deployments).
-        ("GET", ["compute", "capabilities"]) => {
-            ok(to_value(Box::pin(daemon.provider_capabilities()).await?)?)
-        }
-        ("GET", ["compute", "health"]) => ok(to_value(Box::pin(daemon.provider_health()).await?)?),
+        // This node as a provider in a caller's pool: `compute.remote@1`,
+        // served by the same provider its deployments run on.
+        (_, ["compute", ..]) => match daemon.remote_service() {
+            Some(service) => {
+                let (status, body) = Box::pin(service.handle(
+                    &method,
+                    &request.path,
+                    &request.headers,
+                    &request.body,
+                ))
+                .await;
+                Ok(Response::Remote(status, body))
+            }
+            None => Err(EnvironmentError::Invalid(
+                "this node has no public URL; start it with --public-url to serve as a provider"
+                    .into(),
+            )),
+        },
 
         // Pool and shared services.
         ("GET", ["providers"]) => ok(to_value(Box::pin(daemon.providers()).await?)?),

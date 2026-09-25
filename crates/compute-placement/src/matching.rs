@@ -41,6 +41,7 @@ pub enum ReasonCode {
     OutputExceedsLimit,
     JobsUnsupported,
     DeploymentUnsupported,
+    RunUnsupported,
 }
 
 impl ReasonCode {
@@ -70,10 +71,8 @@ impl ReasonCode {
             | CpuLimitUnenforceable
             | ProcessLimitUnenforceable
             | OutputLimitUnenforceable => "resources",
-            ArtifactModeUnsupported | ArtifactTooLarge | OutputExceedsLimit | JobsUnsupported => {
-                "artifact"
-            }
-            DeploymentUnsupported => "deployment",
+            ArtifactModeUnsupported | ArtifactTooLarge | OutputExceedsLimit => "artifact",
+            DeploymentUnsupported | RunUnsupported | JobsUnsupported => "execution",
         }
     }
 
@@ -530,25 +529,35 @@ pub fn match_provider(
             None,
         );
     }
-    if artifact.submission == SubmissionMode::Job && !transport.jobs {
-        reasons.push(
+    // Execution mode: each submission needs exactly the mode that serves it.
+    let offered = [
+        (transport.run, "run"),
+        (transport.jobs, "jobs"),
+        (transport.deployments, "deployments"),
+    ]
+    .into_iter()
+    .filter_map(|(offered, mode)| offered.then_some(mode))
+    .collect::<Vec<_>>();
+    let missing = match artifact.submission {
+        SubmissionMode::Synchronous if !transport.run => Some((
+            ReasonCode::RunUnsupported,
+            "run",
+            "the provider does not run workloads on request",
+        )),
+        SubmissionMode::Job if !transport.jobs => Some((
             ReasonCode::JobsUnsupported,
-            json!("job"),
-            json!("synchronous"),
-            Some("the provider does not accept durable asynchronous jobs".into()),
-        );
-    }
-    if artifact.submission == SubmissionMode::Deployment && !transport.deployments {
-        reasons.push(
+            "jobs",
+            "the provider does not accept durable asynchronous jobs",
+        )),
+        SubmissionMode::Deployment if !transport.deployments => Some((
             ReasonCode::DeploymentUnsupported,
-            json!("deployment"),
-            json!(if transport.jobs {
-                "jobs"
-            } else {
-                "synchronous"
-            }),
-            Some("the provider runs workloads but does not host application deployments".into()),
-        );
+            "deployments",
+            "the provider does not host application deployments",
+        )),
+        _ => None,
+    };
+    if let Some((code, required, detail)) = missing {
+        reasons.push(code, json!(required), json!(offered), Some(detail.into()));
     }
 
     let mut reasons = reasons.0;

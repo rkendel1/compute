@@ -137,11 +137,20 @@ pub struct ArtifactLimits {
     pub modes: Vec<String>,
     pub max_request_bytes: u64,
     pub max_output_bytes: u64,
+    /// Whether the provider runs a workload on request.
+    #[serde(default = "accepts", skip_serializing_if = "Clone::clone")]
+    pub run: bool,
     /// Whether the provider accepts durable asynchronous jobs.
     pub jobs: bool,
     /// Whether the provider hosts durable application deployments.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deployments: bool,
+}
+
+/// Descriptors cached before `run` was recorded described providers that
+/// ran workloads on request.
+fn accepts() -> bool {
+    true
 }
 
 /// When the capability data was observed and until when it is valid.
@@ -489,8 +498,9 @@ impl ProviderDescriptor {
                 },
                 max_request_bytes: capabilities.max_request_bytes,
                 max_output_bytes: capabilities.max_output_bytes,
-                jobs: capabilities.max_concurrent_jobs.is_some(),
-                deployments: capabilities.application_deployments,
+                run: capabilities.execution_modes().run,
+                jobs: capabilities.execution_modes().jobs,
+                deployments: capabilities.execution_modes().deployments,
             },
             policy: capabilities
                 .policy

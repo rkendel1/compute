@@ -15,7 +15,6 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use compute_core::{ApplicationIdentity, WorkloadBundle};
-use compute_provider::{ComputeProvider, ProviderCapabilities, ProviderHealth};
 
 use super::Daemon;
 use crate::EnvironmentError;
@@ -193,6 +192,11 @@ impl Daemon {
         name: &str,
         request: ApplicationDeployRequest,
     ) -> Result<ApplicationDeploymentView, EnvironmentError> {
+        if !self.config.execution.deployments {
+            return Err(EnvironmentError::Invalid(
+                "this node does not host application deployments".into(),
+            ));
+        }
         ApplicationIdentity::new(name, Some(request.port))?;
         if request.port == 0 {
             return Err(EnvironmentError::Invalid(
@@ -346,47 +350,10 @@ impl Daemon {
         }
     }
 
-    /// This node as a provider in a caller's pool: what it can run, and
-    /// that it hosts application deployments. `compute.remote@1`
-    /// capabilities, so a caller discovers it like any provider.
-    pub async fn provider_capabilities(&self) -> Result<ProviderCapabilities, EnvironmentError> {
-        let url = self.public_url()?;
-        let mut capabilities = self
-            .config
-            .provider
-            .capabilities()
-            .await
-            .map_err(|error| EnvironmentError::RuntimeUnavailable(error.to_string()))?;
-        capabilities.protocol = "compute.remote@1".into();
-        capabilities.provider = compute_core::ProviderIdentity::Remote {
-            id: url.clone(),
-            endpoint: url,
-        };
-        capabilities.application_deployments = true;
-        Ok(capabilities)
-    }
-
-    pub async fn provider_health(&self) -> Result<ProviderHealth, EnvironmentError> {
-        let url = self.public_url()?;
-        let status = self.status().await;
-        Ok(ProviderHealth {
-            protocol: "compute.remote@1".into(),
-            provider: compute_core::ProviderIdentity::Remote {
-                id: url.clone(),
-                endpoint: url,
-            },
-            healthy: status.state_available,
-            executions_started: Some(self.config.provider.executions_started()),
-        })
-    }
-
-    fn public_url(&self) -> Result<String, EnvironmentError> {
-        self.config.public_url.clone().ok_or_else(|| {
-            EnvironmentError::Invalid(
-                "this node has no public URL; start it with --public-url to serve as a provider"
-                    .into(),
-            )
-        })
+    /// This node as a `compute.remote@1` provider: capabilities, health,
+    /// runs, and jobs, on the provider its deployments use.
+    pub fn remote_service(&self) -> Option<Arc<compute_provider::RemoteService>> {
+        self.remote.clone()
     }
 
     fn node_url(&self) -> String {

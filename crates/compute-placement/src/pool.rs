@@ -268,7 +268,13 @@ impl ProviderPool {
                     pool.add(
                         id.clone(),
                         provider.clone(),
-                        Arc::new(LocalProvider::new().with_application_deployments(true)),
+                        Arc::new(LocalProvider::new().with_execution_modes(
+                            compute_provider::ExecutionModes {
+                                run: true,
+                                jobs: false,
+                                deployments: true,
+                            },
+                        )),
                     )?;
                 }
                 ProviderKind::Remote => {
