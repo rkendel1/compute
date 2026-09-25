@@ -50,13 +50,15 @@ check resolved-version "" node scripts/feltdb/verify-version.mjs --json
 check model-compiles "" bash -c "cd packages/compute-state-model && npm run check && npm test"
 check workspace-tests "" cargo test --workspace --no-fail-fast
 check adapter-real-server FELTDB_SERVER_BIN \
-  cargo test -p compute-state-feltdb -- --include-ignored --test-threads 1 --skip state_written_by_the_previous_server
+  cargo test -p compute-state-feltdb -- --include-ignored --test-threads 1 --skip state_written_by_the_previous_server --skip feltdb_request_cost
 check previous-server-compatibility "FELTDB_SERVER_BIN FELTDB_PREVIOUS_SERVER_BIN" \
   cargo test -p compute-state-feltdb --test consumer state_written_by_the_previous_server -- --ignored
 check controller-real-server FELTDB_SERVER_BIN \
   cargo test -p compute-environment --test feltdb_consumer -- --ignored --test-threads 1 --skip benchmark
 check end-to-end-real-server FELTDB_SERVER_BIN \
   cargo test -p compute-cli --test recovery managed_feltdb -- --ignored
+check feltdb-request-cost FELTDB_SERVER_BIN \
+  env COMPUTE_CERTIFICATION_OUT="$out" cargo test --release -p compute-state-feltdb --test consumer feltdb_request_cost -- --ignored --nocapture
 check benchmark FELTDB_SERVER_BIN \
   env COMPUTE_CERTIFICATION_OUT="$out" cargo test --release -p compute-environment --test feltdb_consumer benchmark -- --ignored --nocapture
 echo "" >> "$results"
