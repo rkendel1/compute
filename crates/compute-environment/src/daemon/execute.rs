@@ -252,15 +252,24 @@ impl Daemon {
                         None,
                     );
                 }
-                let binding = report.receipt_binding().expect("placed");
-                request.expected.distribution_id = report
-                    .requirements
-                    .distribution
-                    .as_ref()
-                    .map(|distribution| distribution.id.clone());
-                request.execution.isolation = Some(report.requirements.isolation);
-                request.execution.placement = Some(binding);
-                request.execution.policy = report.admission.request_policy.clone();
+                // A catalog runtime the node advertises as `available` is
+                // acquired and verified here, exactly as for a task.
+                let request = match compute_placement::dispatch::prepare_runtime(
+                    &self.pool, &report, request,
+                )
+                .await
+                {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return (
+                            Outcome::Failed(EnvironmentError::RuntimeUnavailable(
+                                error.to_string(),
+                            )),
+                            deployment,
+                            None,
+                        );
+                    }
+                };
                 let admission = match self.config.provider.admit(request.clone()).await {
                     Ok(admission) => admission,
                     Err(error) => {
