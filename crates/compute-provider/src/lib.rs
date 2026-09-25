@@ -1210,6 +1210,11 @@ impl ComputeProvider for LocalProvider {
     }
 
     async fn capabilities(&self) -> Result<ProviderCapabilities, ProviderError> {
+        // One coherent view of the runtime store: the distribution
+        // identity, inventory, lifecycle, and artifact identities below
+        // all describe the same prepared state, even while another
+        // process prepares a runtime in it.
+        let _snapshot = self.runtimes.read_snapshot();
         let distribution = self
             .compute
             .installed_distribution_identity()
@@ -1387,6 +1392,7 @@ impl ComputeProvider for LocalProvider {
     }
 }
 
+#[derive(Clone)]
 pub struct RemoteProvider {
     endpoint: String,
     authorization: Option<String>,
