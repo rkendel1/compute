@@ -118,7 +118,7 @@ compute deployment rollback dep_…              # if it must be undone
 | The host is replaced | Install and configure a new host (steps 1 and 3). It restores everything from FeltDB, bundles included. |
 | FeltDB is unreachable | Running services keep running. Reads are served from the last snapshot (`X-Compute-State: stale`); changes return `503 state_unavailable` until FeltDB is back, then the controller reconciles. |
 | The controller restarts mid-release | The next controller reloads the release from FeltDB and finishes it. |
-| A credential leaks | `compute auth revoke <id>` (or `rotate`); it is refused on the next request. Every change is in `compute audit`. |
+| A credential leaks | `compute auth revoke <id>` (or `rotate`); it is refused on the next request. Every change is in `compute auth audit`. |
 | A release fails or never becomes ready | It fails; the current revision keeps serving. |
 | A DNS record is changed at Hetzner | Compute restores it within `dns_interval_seconds` and records `network.dns.drifted`. |
 | A certificate nears expiry | Compute renews it 30 days before expiry; the valid one keeps serving if renewal fails. |

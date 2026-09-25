@@ -448,6 +448,7 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             placement_id: Some("sha256:l".into()),
             provider: Some("local".into()),
             error: None,
+            failure: None,
         },
     )
     .await;

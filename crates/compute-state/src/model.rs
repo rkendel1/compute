@@ -466,6 +466,10 @@ pub struct ExecutionRecord {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Why it did not succeed, as a failure kind: `workload_failed` when
+    /// the workload itself failed, never for a failure of Compute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 document!(ExecutionRecord, Execution);
 
@@ -910,6 +914,7 @@ pub mod events {
     pub const UPGRADE_COMPLETED: &str = "upgrade.completed";
     pub const UPGRADE_FAILED: &str = "upgrade.failed";
     pub const UPGRADE_ROLLED_BACK: &str = "upgrade.rolled_back";
+    pub const ENDPOINT_UNAVAILABLE: &str = "endpoint.unavailable";
     pub const FELTDB_UNAVAILABLE: &str = "feltdb.unavailable";
     pub const FELTDB_RECOVERED: &str = "feltdb.recovered";
     // Operators.

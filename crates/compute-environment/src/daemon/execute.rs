@@ -702,7 +702,7 @@ impl Daemon {
                             "{} in {}/{} was lost with its supervisor: {message}",
                             key.2, key.0, key.1
                         ),
-                        json!({}),
+                        json!({ "failure": "runtime_unavailable" }),
                     );
                     execution = Err(EnvironmentError::RuntimeUnavailable(message));
                 }
@@ -785,6 +785,7 @@ impl Daemon {
                         placement_id: placement.placement_id.clone(),
                         provider: placement.provider.clone(),
                         error: error.clone(),
+                        failure: (!succeeded && !stopping).then(|| "workload_failed".into()),
                     };
                     let kind = match (service, stopping, succeeded) {
                         (true, true, _) => events::SERVICE_STOPPED,
@@ -813,7 +814,11 @@ impl Daemon {
                         kind,
                         scope.execution(&result.execution_id),
                         message,
-                        json!({ "exit_code": result.exit_code, "receipt_id": receipt_id }),
+                        json!({
+                            "exit_code": result.exit_code,
+                            "receipt_id": receipt_id,
+                            "failure": record.failure,
+                        }),
                     );
                     inner.outputs.insert(
                         result.execution_id.clone(),
@@ -1173,6 +1178,7 @@ mod tests {
             placement_id: None,
             provider: None,
             error: None,
+            failure: None,
         }
     }
 

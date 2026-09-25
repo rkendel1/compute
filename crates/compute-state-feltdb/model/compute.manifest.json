@@ -496,6 +496,11 @@
           "name": "error",
           "type": "text",
           "required": false
+        },
+        {
+          "name": "failure",
+          "type": "text",
+          "required": false
         }
       ]
     },

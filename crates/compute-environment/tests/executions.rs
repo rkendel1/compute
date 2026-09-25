@@ -194,6 +194,8 @@ async fn a_failing_run_is_a_workload_failure_not_a_denial() {
     for result in results {
         let view = result.expect("the task executed; its failure is its own");
         assert_eq!(view.record.exit_code, Some(7));
+        // The workload failed, not Compute: the kinds stay distinct.
+        assert_eq!(view.record.failure.as_deref(), Some("workload_failed"));
         assert!(view.record.receipt_id.is_some());
     }
     tokio::time::sleep(Duration::from_millis(10)).await;

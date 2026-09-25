@@ -70,14 +70,40 @@ impl Daemon {
         metrics.errors_total += errors as u64;
         metrics.duration_seconds_total += duration;
         let changed = inner.cycle_changes;
-        inner.reconcile.last = Some(ReconcileCycle {
+        let first = inner.reconcile.cycles == 1;
+        let cycle = ReconcileCycle {
             started_at,
             duration_ms: duration * 1000.0,
             resources_examined: examined,
             resources_changed: changed,
             errors,
             phases_ms: phases,
-        });
+        };
+        inner.reconcile.last = Some(cycle.clone());
+        let recordable = inner.state_error.is_none();
+        drop(inner);
+        // Full cycles that did something are recorded; idle ones are only
+        // counted, so a quiet node writes nothing.
+        if full && recordable && (first || changed > 0 || errors > 0) {
+            let mut change = self.event(
+                Change::new(),
+                events::RECONCILE_STARTED,
+                Scope::default(),
+                format!("reconciliation started at {}", started_at.to_rfc3339()),
+                json!({ "started_at": started_at }),
+            );
+            change = self.event(
+                change,
+                events::RECONCILE_FINISHED,
+                Scope::default(),
+                format!(
+                    "reconciliation finished in {:.1} ms: {examined} resources examined, {changed} changed, {errors} errors",
+                    cycle.duration_ms
+                ),
+                json!({ "cycle": cycle }),
+            );
+            let _ = self.apply(change).await;
+        }
     }
 
     async fn reconcile_phases(
@@ -467,7 +493,26 @@ impl Daemon {
                 .expect("routes")
                 .retain(|port, _| keep.contains(port));
         }
-        self.inner.lock().await.endpoint_errors = errors;
+        let appeared = {
+            let mut inner = self.inner.lock().await;
+            let appeared = errors
+                .iter()
+                .filter(|(port, _)| !inner.endpoint_errors.contains_key(port))
+                .map(|(port, error)| (*port, error.clone()))
+                .collect::<Vec<_>>();
+            inner.endpoint_errors = errors;
+            appeared
+        };
+        for (port, error) in appeared {
+            let change = self.event(
+                Change::new(),
+                events::ENDPOINT_UNAVAILABLE,
+                Scope::default(),
+                error,
+                json!({ "failure": "endpoint_unavailable", "host_port": port }),
+            );
+            let _ = self.apply(change).await;
+        }
     }
 
     /// Write observed actual state back to control state, with the events

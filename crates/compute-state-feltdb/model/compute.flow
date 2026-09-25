@@ -119,6 +119,7 @@ app compute {
     placement_id: text?
     provider: text?
     error: text?
+    failure: text?
     index workload_id using hash(workload_id)
     index environment_id using hash(environment_id)
     index deployment_id using hash(deployment_id)

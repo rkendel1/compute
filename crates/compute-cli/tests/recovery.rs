@@ -390,6 +390,10 @@ fn a_killed_controller_leaves_its_workloads_serving() {
         "{kinds:?}"
     );
     assert!(kinds.contains(&"controller.ready".to_string()), "{kinds:?}");
+    assert!(
+        kinds.contains(&"reconcile.finished".to_string()),
+        "{kinds:?}"
+    );
     eprintln!(
         "controller restart: {ok} requests, {failed} failed, controller back after {restarted_in:?}"
     );
