@@ -40,7 +40,7 @@ impl DaemonLocation {
             .unwrap_or_else(|| DEFAULT_ENDPOINT.into())
     }
 
-    fn client(&self) -> compute_core::Result<DaemonClient> {
+    pub(crate) fn client(&self) -> compute_core::Result<DaemonClient> {
         let mut client = DaemonClient::new(&self.endpoint()).map_err(error)?;
         if let Ok(token) = std::env::var(&self.token_env) {
             client = client.with_bearer_token(token);
@@ -49,11 +49,11 @@ impl DaemonLocation {
     }
 }
 
-fn error(error: EnvironmentError) -> ComputeError {
+pub(crate) fn error(error: EnvironmentError) -> ComputeError {
     ComputeError::Runtime(error.to_string())
 }
 
-fn print_json(value: &impl serde::Serialize) {
+pub(crate) fn print_json(value: &impl serde::Serialize) {
     println!(
         "{}",
         serde_json::to_string_pretty(value).expect("API values are serializable")
@@ -97,6 +97,25 @@ pub struct StartCommand {
     /// How often the reconciler rereads desired state, in milliseconds.
     #[arg(long, default_value_t = 5000)]
     pub reconcile_interval_ms: u64,
+    /// Host ports for service instances, as LOW-HIGH. Defaults to
+    /// `[release] instance_port_range`, then 30000-39999.
+    #[arg(long)]
+    pub instance_port_range: Option<String>,
+    /// How long a replaced instance may finish its connections. Defaults
+    /// to `[release] drain_timeout_ms`, then 30000.
+    #[arg(long)]
+    pub drain_timeout_ms: Option<u64>,
+    /// Public HTTP entry (ACME HTTP-01, redirects). Defaults to
+    /// `[network] ingress_http`; off otherwise.
+    #[arg(long)]
+    pub ingress_http: Option<std::net::SocketAddr>,
+    /// Public HTTPS entry. Defaults to `[network] ingress_https`.
+    #[arg(long)]
+    pub ingress_https: Option<std::net::SocketAddr>,
+    /// The address services' endpoints listen on. Defaults to
+    /// `[network] endpoint_address`, then 127.0.0.1.
+    #[arg(long)]
+    pub endpoint_address: Option<std::net::IpAddr>,
     #[command(flatten)]
     pub state: crate::control_state::StateOptions,
     /// Run in the background and return once the API answers.
@@ -140,16 +159,28 @@ impl compute_provider::ProviderAuthorizer for TokenAuthorizer {
     }
 }
 
+fn port_range(value: &str, what: &str) -> compute_core::Result<(u16, u16)> {
+    value
+        .split_once('-')
+        .and_then(|(low, high)| Some((low.parse::<u16>().ok()?, high.parse::<u16>().ok()?)))
+        .filter(|(low, high)| low <= high)
+        .ok_or_else(|| ComputeError::InvalidWorkload(format!("{what} must be LOW-HIGH")))
+}
+
 pub async fn start(command: StartCommand) -> compute_core::Result<()> {
     if command.detach {
         return detach(&command);
     }
-    let (low, high) = command
-        .port_range
-        .split_once('-')
-        .and_then(|(low, high)| Some((low.parse::<u16>().ok()?, high.parse::<u16>().ok()?)))
-        .filter(|(low, high)| low <= high)
-        .ok_or_else(|| ComputeError::InvalidWorkload("--port-range must be LOW-HIGH".into()))?;
+    let (low, high) = port_range(&command.port_range, "--port-range")?;
+    let (network, release) = command.state.node()?;
+    let instances = port_range(
+        command
+            .instance_port_range
+            .as_deref()
+            .or(release.instance_port_range.as_deref())
+            .unwrap_or("30000-39999"),
+        "the instance port range",
+    )?;
     let backend = command.state.open(&command.state_dir).await?;
     let mut config = compute_environment::DaemonConfig::new(
         &command.state_dir,
@@ -157,6 +188,35 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
         backend.artifacts,
     );
     config.port_range = (low, high);
+    config.instance_port_range = instances;
+    if instances.0 <= high && low <= instances.1 {
+        return Err(ComputeError::InvalidWorkload(
+            "the endpoint and instance port ranges overlap".into(),
+        ));
+    }
+    if let Some(drain) = command.drain_timeout_ms.or(release.drain_timeout_ms) {
+        config.drain_timeout = Duration::from_millis(drain);
+    }
+    if let Some(switch) = release.switch_timeout_ms {
+        config.switch_timeout = Duration::from_millis(switch);
+    }
+    let network_config = &mut config.network;
+    if let Some(address) = command.endpoint_address.or(network.endpoint_address) {
+        network_config.endpoint_address = address;
+    }
+    network_config.ingress_http = command.ingress_http.or(network.ingress_http);
+    network_config.ingress_https = command.ingress_https.or(network.ingress_https);
+    network_config.public_ipv4 = network.public_ipv4;
+    network_config.public_ipv6 = network.public_ipv6;
+    network_config.secrets_dir = network.secrets_dir;
+    network_config.acme = network.acme;
+    network_config.dns = network.dns;
+    if let Some(seconds) = network.dns_interval_seconds {
+        network_config.dns_interval = Duration::from_secs(seconds.max(1));
+    }
+    if let Some(seconds) = network.certificate_retry_seconds {
+        network_config.certificate_retry = Duration::from_secs(seconds.max(1));
+    }
     config.reconcile_interval = Duration::from_millis(command.reconcile_interval_ms.max(100));
     config.policy = command.policy.as_deref().map(load_policy).transpose()?;
     config.pool = command
@@ -230,6 +290,21 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
     }
     if let Some(name) = &command.require_token_env {
         child.arg("--require-token-env").arg(name);
+    }
+    if let Some(range) = &command.instance_port_range {
+        child.arg("--instance-port-range").arg(range);
+    }
+    if let Some(drain) = command.drain_timeout_ms {
+        child.arg("--drain-timeout-ms").arg(drain.to_string());
+    }
+    if let Some(address) = command.ingress_http {
+        child.arg("--ingress-http").arg(address.to_string());
+    }
+    if let Some(address) = command.ingress_https {
+        child.arg("--ingress-https").arg(address.to_string());
+    }
+    if let Some(address) = command.endpoint_address {
+        child.arg("--endpoint-address").arg(address.to_string());
     }
     child
         .stdin(std::process::Stdio::null())
@@ -1220,8 +1295,15 @@ fn print_execution(view: &ExecutionView, json: bool) {
 #[derive(Args, Debug)]
 pub struct DeployCommand {
     pub project: String,
-    #[arg(long)]
-    pub environment: String,
+    /// The environment to release to.
+    #[arg(long, required_unless_present = "from")]
+    pub environment: Option<String>,
+    /// Release the exact revision current in this environment (promotion).
+    #[arg(long, requires = "to", conflicts_with_all = ["environment", "source", "revision"])]
+    pub from: Option<String>,
+    /// With --from: the environment to release to.
+    #[arg(long, requires = "from")]
+    pub to: Option<String>,
     /// A registered revision label or ID. With --source, the revision to
     /// register. Defaults to the latest registered revision.
     #[arg(long)]
@@ -1233,7 +1315,7 @@ pub struct DeployCommand {
     /// Replace the project's configuration in this environment.
     #[arg(long = "set", value_parser = parse_pair)]
     pub env: Vec<(String, String)>,
-    /// Wait until the deployment is healthy or has failed.
+    /// Follow the release until it completes, fails, or rolls back.
     #[arg(long)]
     pub wait: bool,
     #[command(flatten)]
@@ -1243,6 +1325,23 @@ pub struct DeployCommand {
 }
 
 pub async fn deploy(command: DeployCommand) -> compute_core::Result<()> {
+    if let (Some(from), Some(to)) = (&command.from, &command.to) {
+        return promote(PromoteCommand {
+            project: command.project,
+            from: from.clone(),
+            to: to.clone(),
+            allow_unhealthy: false,
+            env: command.env,
+            wait: command.wait,
+            daemon: command.daemon,
+            json: command.json,
+        })
+        .await;
+    }
+    let environment = command
+        .environment
+        .clone()
+        .ok_or_else(|| ComputeError::Runtime("--environment or --from/--to is required".into()))?;
     let client = command.daemon.client()?;
     let mut config = None;
     let revision = match &command.source {
@@ -1273,7 +1372,7 @@ pub async fn deploy(command: DeployCommand) -> compute_core::Result<()> {
     }
     let request = DeployRequest {
         project: command.project.clone(),
-        environment: command.environment.clone(),
+        environment,
         revision,
         config,
         desired_state: None,
@@ -1340,14 +1439,7 @@ async fn finish_deployment(
                 eprintln!("{}: {}", deployment.deployment_id, status.as_str());
                 last = Some(status);
             }
-            if matches!(
-                status,
-                DeploymentStatus::Healthy
-                    | DeploymentStatus::Failed
-                    | DeploymentStatus::Stopped
-                    | DeploymentStatus::Superseded
-            ) || tokio::time::Instant::now() > deadline
-            {
+            if status.is_terminal() || tokio::time::Instant::now() > deadline {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1358,7 +1450,10 @@ async fn finish_deployment(
         }
     }
     print_deployment(&deployment, json);
-    if deployment.record.status == DeploymentStatus::Failed {
+    if matches!(
+        deployment.record.status,
+        DeploymentStatus::Failed | DeploymentStatus::RolledBack
+    ) {
         std::process::exit(1);
     }
     Ok(())
@@ -1388,8 +1483,65 @@ fn print_deployment(view: &DeploymentView, json: bool) {
     if let Some(previous) = &record.previous {
         println!("Replaces: {previous}");
     }
+    if let Some(old) = &record.old_revision {
+        println!("Replaces revision: {old}");
+    }
+    if let Some(digest) = &record.config_digest {
+        println!("Configuration: {digest}");
+    }
+    println!("Progress: {}", progress(record.status));
     if let Some(failure) = &record.failure {
         println!("Failure: {failure}");
+    }
+    if let Some(reason) = &record.rollback_reason {
+        println!("Rolled back: {reason}");
+    }
+    if let Some(receipt) = &record.receipt {
+        println!("Receipt: {receipt}");
+    }
+    if let Some(result) = &record.readiness_result
+        && let Some(workloads) = result.as_object()
+    {
+        println!("\nREADINESS");
+        for (workload, check) in workloads {
+            println!(
+                "  {workload}: {}",
+                check["detail"].as_str().unwrap_or_default()
+            );
+        }
+    }
+    if let Some(result) = &record.traffic_switch_result
+        && let Some(endpoints) = result["endpoints"].as_array()
+    {
+        println!("\nTRAFFIC");
+        for endpoint in endpoints {
+            println!(
+                "  {} (port {}): {} → {}",
+                endpoint["endpoint"].as_str().unwrap_or_default(),
+                endpoint["host_port"],
+                endpoint["from_instance"].as_str().unwrap_or("nothing"),
+                endpoint["to_instance"].as_str().unwrap_or_default()
+            );
+        }
+    }
+    if !view.instances.is_empty() {
+        println!("\nINSTANCE\tWORKLOAD\tSTATE\tPORTS\tCONNECTIONS");
+        for instance in &view.instances {
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                instance.instance_id,
+                instance.record.workload,
+                instance.record.state.as_str(),
+                instance
+                    .record
+                    .ports
+                    .iter()
+                    .map(|port| format!("{}={}", port.name, port.host))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                instance.open_connections
+            );
+        }
     }
     println!("\nWORKLOAD\tKIND\tADMITTED\tPROVIDER\tADMISSION");
     for workload in &record.workloads {
@@ -1433,6 +1585,54 @@ pub enum DeploymentCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Where a release is in its lifecycle.
+    Status {
+        deployment: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Roll a release back: before traffic moved it is abandoned; after,
+    /// traffic returns to the revision it replaced.
+    Rollback {
+        deployment: String,
+        #[arg(long)]
+        wait: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The deployment receipt.
+    Receipt { deployment: String },
+}
+
+/// The release lifecycle, with the current status marked.
+fn progress(status: DeploymentStatus) -> String {
+    const STEPS: [DeploymentStatus; 8] = [
+        DeploymentStatus::Pending,
+        DeploymentStatus::Starting,
+        DeploymentStatus::Ready,
+        DeploymentStatus::NetworkReady,
+        DeploymentStatus::Switching,
+        DeploymentStatus::Active,
+        DeploymentStatus::Draining,
+        DeploymentStatus::Complete,
+    ];
+    if matches!(
+        status,
+        DeploymentStatus::Failed | DeploymentStatus::RolledBack
+    ) {
+        return format!("[{}]", status.as_str());
+    }
+    STEPS
+        .iter()
+        .map(|step| {
+            if *step == status {
+                format!("[{}]", step.as_str())
+            } else {
+                step.as_str().to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" → ")
 }
 
 pub async fn deployment(command: DeploymentCommand) -> compute_core::Result<()> {
@@ -1476,6 +1676,62 @@ pub async fn deployment(command: DeploymentCommand) -> compute_core::Result<()> 
                 .await
                 .map_err(error)?;
             print_deployment(&view, json);
+        }
+        DeploymentCommands::Status { deployment, json } => {
+            let view: DeploymentView = client
+                .get(&format!("/deployments/{deployment}"))
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&serde_json::json!({
+                    "deployment_id": view.deployment_id,
+                    "status": view.record.status,
+                    "status_since": view.record.status_since,
+                    "revision": view.record.revision,
+                    "old_revision": view.record.old_revision,
+                    "failure": view.record.failure,
+                    "rollback_reason": view.record.rollback_reason,
+                }));
+            } else {
+                println!(
+                    "{} {} → {}: {}",
+                    view.record.project,
+                    view.record.revision,
+                    view.record.environment,
+                    progress(view.record.status)
+                );
+                if let Some(failure) = view.record.failure.or(view.record.rollback_reason) {
+                    println!("{failure}");
+                }
+            }
+        }
+        DeploymentCommands::Rollback {
+            deployment,
+            wait,
+            json,
+        } => {
+            let view: DeploymentView = client
+                .post::<(), _>(&format!("/deployments/{deployment}/rollback"), None)
+                .await
+                .map_err(error)?;
+            if view.deployment_id != deployment && !json {
+                eprintln!(
+                    "{deployment} was complete: releasing {} again as {}",
+                    view.record.revision, view.deployment_id
+                );
+            }
+            if view.deployment_id == deployment {
+                print_deployment(&view, json);
+            } else {
+                finish_deployment(&client, view, wait, json).await?;
+            }
+        }
+        DeploymentCommands::Receipt { deployment } => {
+            let receipt: serde_json::Value = client
+                .get(&format!("/deployments/{deployment}/receipt"))
+                .await
+                .map_err(error)?;
+            print_json(&receipt);
         }
     }
     Ok(())

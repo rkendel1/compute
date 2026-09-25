@@ -47,6 +47,7 @@ fn service(name: &str) -> WorkloadDefinition {
         ports: vec![],
         restart: RestartPolicy::Never,
         desired_state: DesiredState::Running,
+        readiness: None,
     }
 }
 
@@ -58,6 +59,7 @@ fn task(name: &str, script: &str) -> WorkloadDefinition {
         ports: vec![],
         restart: RestartPolicy::Never,
         desired_state: DesiredState::Running,
+        readiness: None,
     }
 }
 
@@ -82,6 +84,17 @@ fn environment(name: &str) -> EnvironmentDefinition {
     }
 }
 
+fn process_readiness() -> Readiness {
+    Readiness {
+        check: ReadinessCheck::Process,
+        port: None,
+        path: None,
+        task: None,
+        timeout_ms: 30_000,
+        interval_ms: 100,
+    }
+}
+
 struct Harness {
     daemon: Arc<Daemon>,
     provider: Arc<LocalProvider>,
@@ -94,7 +107,18 @@ fn memory_config(dir: &std::path::Path) -> DaemonConfig {
     let artifacts = Arc::new(compute_state::StateArtifacts::new(
         compute_state::ControlState::new(store.clone()),
     ));
-    DaemonConfig::new(dir, store, artifacts)
+    let mut config = DaemonConfig::new(dir, store, artifacts);
+    port_windows(&mut config);
+    config
+}
+
+/// Each daemon in this test process gets its own port windows, so daemons
+/// of concurrent tests never choose the same port.
+fn port_windows(config: &mut DaemonConfig) {
+    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    let window = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) * 100;
+    config.port_range = (20000 + window, 20099 + window);
+    config.instance_port_range = (40000 + window, 40099 + window);
 }
 
 async fn harness() -> Harness {
@@ -352,6 +376,7 @@ async fn environments_are_isolated_configuration_ports_and_state() {
             name: "http".into(),
             port: 8000,
         }];
+        api.readiness = Some(process_readiness());
         daemon
             .add_project(name, project("authboundry", vec![api]))
             .await
@@ -378,6 +403,16 @@ async fn environments_are_isolated_configuration_ports_and_state() {
     );
     assert_ne!(preprod.workload_id, prod.workload_id);
     assert_ne!(preprod.log_directory, prod.log_directory);
+    // Each instance listens on its own port behind its stable endpoint.
+    let instance_port = |deployment: String| async move {
+        daemon.deployment(&deployment).await.unwrap().instances[0]
+            .record
+            .ports[0]
+            .host
+    };
+    let preprod_instance = instance_port(preprod.deployment_id.clone()).await;
+    let prod_instance = instance_port(prod.deployment_id.clone()).await;
+    assert_ne!(preprod_instance, prod_instance);
 
     // Each environment's configuration reaches only its own workloads.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -387,8 +422,8 @@ async fn environments_are_isolated_configuration_ports_and_state() {
         if pre.contains("started") && pro.contains("started") {
             assert!(pre.contains("env=preprod") && !pre.contains("env=prod "));
             assert!(pro.contains("env=prod") && !pro.contains("env=preprod"));
-            assert!(pre.contains(&format!("port={}", preprod.ports[0].host)));
-            assert!(pro.contains(&format!("port={}", prod.ports[0].host)));
+            assert!(pre.contains(&format!("port={preprod_instance}")));
+            assert!(pro.contains(&format!("port={prod_instance}")));
             break;
         }
         assert!(tokio::time::Instant::now() < deadline, "no service output");
@@ -433,11 +468,16 @@ async fn services_survive_tasks_and_failures_stay_contained() {
         .create_environment(environment("preprod"))
         .await
         .unwrap();
+    // Both pass readiness, then fail.
     let mut flaky = service("flaky");
-    flaky.bundle = bundle(RuntimeKind::Shell, "main.sh", "echo failing; exit 3");
+    flaky.bundle = bundle(
+        RuntimeKind::Shell,
+        "main.sh",
+        "echo failing; sleep 1; exit 3",
+    );
     flaky.restart = RestartPolicy::OnFailure;
     let mut crash = service("crash");
-    crash.bundle = bundle(RuntimeKind::Shell, "main.sh", "exit 4");
+    crash.bundle = bundle(RuntimeKind::Shell, "main.sh", "sleep 1; exit 4");
     crash.restart = RestartPolicy::Never;
     daemon
         .add_project(
@@ -671,6 +711,7 @@ async fn receipts_carry_environment_project_workload_and_execution() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn desired_state_persists_across_daemon_restarts() {
     let state = tempfile::tempdir().unwrap();
+    let windows = memory_config(std::path::Path::new("/nonexistent"));
     let config = || {
         let store = Arc::new(
             compute_state_file::FileState::open(state.path().join("control-state.json")).unwrap(),
@@ -680,6 +721,8 @@ async fn desired_state_persists_across_daemon_restarts() {
         ));
         let mut config = DaemonConfig::new(state.path().join("node"), store, artifacts);
         config.restart_delay = Duration::from_millis(100);
+        config.port_range = windows.port_range;
+        config.instance_port_range = windows.instance_port_range;
         config
     };
     let first = Daemon::start(config()).await.unwrap();
@@ -888,12 +931,16 @@ async fn listening_services_are_healthy_through_their_environment_port() {
         }],
         restart: RestartPolicy::Never,
         desired_state: DesiredState::Running,
+        readiness: None,
     };
+    // A service that never listens is released on process readiness, and
+    // then reports unhealthy.
     let mut silent = service("silent");
     silent.ports = vec![PortSpec {
         name: "http".into(),
         port: 8000,
     }];
+    silent.readiness = Some(process_readiness());
     daemon
         .add_project("prod", project("appport-services", vec![web, silent]))
         .await

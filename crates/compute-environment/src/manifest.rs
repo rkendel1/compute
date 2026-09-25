@@ -32,6 +32,7 @@
 //! bundle = "dist/api.compute"   # or: workload = "api/workload.json"
 //! ports = [{ name = "http", port = 8000 }]
 //! restart = "on_failure"
+//! readiness = { check = "http", path = "/health" }   # or "port", "process", "task"
 //!
 //! [[workload]]
 //! name = "migrate"
@@ -123,6 +124,8 @@ struct WorkloadEntry {
     restart: RestartPolicy,
     #[serde(default)]
     desired_state: DesiredState,
+    #[serde(default)]
+    readiness: Option<Readiness>,
 }
 
 fn relative(base: &Path, path: &Path) -> PathBuf {
@@ -232,6 +235,7 @@ pub fn load_project(source: &Path) -> Result<ProjectDefinition, EnvironmentError
             ports: entry.ports,
             restart: entry.restart,
             desired_state: entry.desired_state,
+            readiness: entry.readiness,
         });
     }
     identities.sort();

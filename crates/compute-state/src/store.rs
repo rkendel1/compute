@@ -28,10 +28,15 @@ pub enum Collection {
     WorkloadStatus,
     Artifact,
     ArtifactChunk,
+    WorkloadInstance,
+    TrafficAssignment,
+    Domain,
+    DnsRecord,
+    Certificate,
 }
 
 impl Collection {
-    pub const ALL: [Collection; 14] = [
+    pub const ALL: [Collection; 19] = [
         Self::Project,
         Self::ProjectRevision,
         Self::Environment,
@@ -46,6 +51,11 @@ impl Collection {
         Self::WorkloadStatus,
         Self::Artifact,
         Self::ArtifactChunk,
+        Self::WorkloadInstance,
+        Self::TrafficAssignment,
+        Self::Domain,
+        Self::DnsRecord,
+        Self::Certificate,
     ];
 
     /// The collection's name in every backend, and in `compute.flow`.
@@ -65,6 +75,11 @@ impl Collection {
             Self::WorkloadStatus => "WorkloadStatus",
             Self::Artifact => "Artifact",
             Self::ArtifactChunk => "ArtifactChunk",
+            Self::WorkloadInstance => "WorkloadInstance",
+            Self::TrafficAssignment => "TrafficAssignment",
+            Self::Domain => "Domain",
+            Self::DnsRecord => "DnsRecord",
+            Self::Certificate => "Certificate",
         }
     }
 

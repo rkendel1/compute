@@ -208,12 +208,20 @@
           "type": "enum",
           "required": true,
           "enum_values": [
+            "pending",
+            "starting",
+            "ready",
+            "network_ready",
+            "switching",
+            "active",
+            "draining",
+            "complete",
+            "failed",
+            "rolled_back",
             "queued",
             "admitted",
             "placed",
-            "starting",
             "healthy",
-            "failed",
             "stopped",
             "superseded"
           ]
@@ -242,6 +250,56 @@
           "name": "receipt_ids",
           "type": "json",
           "required": true
+        },
+        {
+          "name": "old_revision",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "config_digest",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "config",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "readiness_result",
+          "type": "json",
+          "required": false
+        },
+        {
+          "name": "network_result",
+          "type": "json",
+          "required": false
+        },
+        {
+          "name": "traffic_switch_result",
+          "type": "json",
+          "required": false
+        },
+        {
+          "name": "rollback_reason",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "receipt",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "status_since",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "completed_at",
+          "type": "datetime",
+          "required": false
         },
         {
           "name": "created_at",
@@ -755,6 +813,364 @@
           "required": true
         }
       ]
+    },
+    {
+      "name": "WorkloadInstance",
+      "fields": [
+        {
+          "name": "environment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "deployment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "state",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "starting",
+            "ready",
+            "serving",
+            "draining",
+            "stopped",
+            "failed"
+          ]
+        },
+        {
+          "name": "ports",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "readiness",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "started_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "ready_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "stopped_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "error",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "updated_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "TrafficAssignment",
+      "fields": [
+        {
+          "name": "endpoint",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "port",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "host_port",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "domains",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "deployment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "instance_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "target_port",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "previous_deployment_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "previous_instance_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "switched_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Domain",
+      "fields": [
+        {
+          "name": "name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "port",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "dns_provider",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "certificate_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "dns",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "tls",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "routing",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "DnsRecord",
+      "fields": [
+        {
+          "name": "domain",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "provider",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "zone",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "record_type",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "value",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "ttl",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "provider_record_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "state",
+          "type": "json",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Certificate",
+      "fields": [
+        {
+          "name": "domain",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "issuer",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "renewal_status",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "not_before",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "expires_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "fingerprint",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "secret_reference",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "held_by",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "last_error",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "last_reconciled_at",
+          "type": "datetime",
+          "required": false
+        }
+      ]
     }
   ],
   "indexes": [
@@ -941,6 +1357,62 @@
         "digest"
       ],
       "unique": false
+    },
+    {
+      "name": "WorkloadInstance.workload_id",
+      "collection": "WorkloadInstance",
+      "fields": [
+        "workload_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "WorkloadInstance.deployment_id",
+      "collection": "WorkloadInstance",
+      "fields": [
+        "deployment_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "TrafficAssignment.endpoint",
+      "collection": "TrafficAssignment",
+      "fields": [
+        "endpoint"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Domain.name",
+      "collection": "Domain",
+      "fields": [
+        "name"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Domain.environment_id",
+      "collection": "Domain",
+      "fields": [
+        "environment_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "DnsRecord.domain",
+      "collection": "DnsRecord",
+      "fields": [
+        "domain"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Certificate.domain",
+      "collection": "Certificate",
+      "fields": [
+        "domain"
+      ],
+      "unique": false
     }
   ],
   "references": [],
@@ -1048,6 +1520,41 @@
     {
       "name": "ArtifactChunk",
       "resource": "ArtifactChunk",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "WorkloadInstance",
+      "resource": "WorkloadInstance",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "TrafficAssignment",
+      "resource": "TrafficAssignment",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Domain",
+      "resource": "Domain",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "DnsRecord",
+      "resource": "DnsRecord",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Certificate",
+      "resource": "Certificate",
       "read": "authenticated",
       "write": "authenticated",
       "capabilities": []

@@ -98,6 +98,17 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/deployments"),
     ("POST", "/deployments/promote"),
     ("GET", "/deployments/{deployment}"),
+    ("GET", "/deployments/{deployment}/receipt"),
+    ("POST", "/deployments/{deployment}/rollback"),
+    ("GET", "/domains"),
+    ("POST", "/domains"),
+    ("GET", "/domains/{domain}"),
+    ("DELETE", "/domains/{domain}"),
+    ("GET", "/dns"),
+    ("POST", "/dns/reconcile"),
+    ("GET", "/certificates"),
+    ("POST", "/certificates/{domain}/renew"),
+    ("GET", "/network"),
     ("GET", "/executions/{execution}"),
     ("GET", "/receipts/{receipt}"),
     ("GET", "/events"),
@@ -588,6 +599,26 @@ async fn route(
             created(to_value(daemon.promote(parse(body)?).await?)?)
         }
         ("GET", ["deployments", id]) => ok(to_value(daemon.deployment(id).await?)?),
+        ("GET", ["deployments", id, "receipt"]) => {
+            ok(daemon.deployment_receipt_document(id).await?)
+        }
+        ("POST", ["deployments", id, "rollback"]) => ok(to_value(daemon.rollback(id).await?)?),
+
+        // Network.
+        ("GET", ["domains"]) => ok(to_value(daemon.domains().await?)?),
+        ("POST", ["domains"]) => created(to_value(daemon.add_domain(parse(body)?).await?)?),
+        ("GET", ["domains", name]) => ok(to_value(daemon.domain(name).await?)?),
+        ("DELETE", ["domains", name]) => {
+            daemon.remove_domain(name).await?;
+            ok(serde_json::json!({ "removed": name }))
+        }
+        ("GET", ["dns"]) => ok(to_value(daemon.dns_status().await?)?),
+        ("POST", ["dns", "reconcile"]) => ok(to_value(daemon.reconcile_dns().await?)?),
+        ("GET", ["certificates"]) => ok(to_value(daemon.certificates().await?)?),
+        ("POST", ["certificates", domain, "renew"]) => {
+            ok(to_value(daemon.renew_certificate(domain).await?)?)
+        }
+        ("GET", ["network"]) => ok(to_value(daemon.network_status().await)?),
 
         // Evidence.
         ("GET", ["executions", execution]) => ok(to_value(daemon.execution(execution).await?)?),

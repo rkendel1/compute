@@ -13,7 +13,8 @@ use compute_policy::Policy;
 use serde::{Deserialize, Serialize};
 
 pub use compute_state::{
-    DeploymentStatus, DesiredState, PortBinding, PortSpec, RestartPolicy, WorkloadKind,
+    DeploymentStatus, DesiredState, InstanceState, PortBinding, PortSpec, Readiness,
+    ReadinessCheck, RestartPolicy, WorkloadKind,
 };
 
 use crate::EnvironmentError;
@@ -72,6 +73,11 @@ pub struct WorkloadDefinition {
     /// runs. Tasks run only when invoked.
     #[serde(default)]
     pub desired_state: DesiredState,
+    /// For services: what proves a new instance is ready for traffic.
+    /// Defaults to its first port accepting connections, or, without
+    /// ports, to its process staying up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<Readiness>,
 }
 
 /// Immutable project content: a revision label and its workloads.
@@ -196,6 +202,30 @@ fn local_provider() -> String {
 
 /// Names are ordinary identifiers: `preprod`, `prod`, `review-123`,
 /// `customer-acme`. Nothing is reserved.
+/// A domain routed to one workload port of one project in one
+/// environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DomainDefinition {
+    pub name: String,
+    pub environment: String,
+    pub project: String,
+    /// The service; optional when the project has exactly one with ports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<String>,
+    /// The port name; defaults to the service's first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
+    /// The configured DNS provider; defaults to the one whose zone holds
+    /// the domain. `none` leaves DNS to you.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_provider: Option<String>,
+    /// Whether to issue a certificate; defaults to whether ACME is
+    /// configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<bool>,
+}
+
 pub fn validate_name(kind: &str, name: &str) -> Result<(), EnvironmentError> {
     let valid = !name.is_empty()
         && name.len() <= 63

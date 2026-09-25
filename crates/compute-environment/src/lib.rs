@@ -23,7 +23,9 @@ pub mod manifest;
 pub mod model;
 pub mod status;
 
-pub use daemon::{Daemon, DaemonConfig, EventFilter};
+pub use compute_network::acme::AcmeConfig;
+pub use compute_network::dns::DnsProviderConfig;
+pub use daemon::{Daemon, DaemonConfig, EventFilter, NetworkConfig};
 pub use model::*;
 pub use status::*;
 

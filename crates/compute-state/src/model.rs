@@ -76,6 +76,69 @@ pub enum RestartPolicy {
     OnFailure,
 }
 
+/// Readiness: what proves a new service instance can take traffic.
+/// Process existence alone is never enough for a service with ports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Readiness {
+    pub check: ReadinessCheck,
+    /// The declared port to check. Defaults to the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
+    /// For `http`: the path to GET; 2xx and 3xx are ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// For `task`: a task of the same revision that exits 0 when ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// Give up after this long; the deployment fails and what serves keeps
+    /// serving.
+    #[serde(default = "Readiness::default_timeout")]
+    pub timeout_ms: u64,
+    #[serde(default = "Readiness::default_interval")]
+    pub interval_ms: u64,
+}
+
+impl Readiness {
+    fn default_timeout() -> u64 {
+        60_000
+    }
+
+    fn default_interval() -> u64 {
+        250
+    }
+
+    /// The default: accepting connections on the first port for a service
+    /// with ports, otherwise staying alive briefly.
+    pub fn default_for(ports: &[PortSpec]) -> Self {
+        Self {
+            check: if ports.is_empty() {
+                ReadinessCheck::Process
+            } else {
+                ReadinessCheck::Port
+            },
+            port: None,
+            path: None,
+            task: None,
+            timeout_ms: Self::default_timeout(),
+            interval_ms: Self::default_interval(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessCheck {
+    /// The process is alive and stays alive for a second.
+    Process,
+    /// The port accepts TCP connections.
+    Port,
+    /// `GET path` on the port answers 2xx or 3xx.
+    Http,
+    /// A task of the same revision exits 0.
+    Task,
+}
+
 /// A logical port a project declares.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -116,6 +179,18 @@ pub struct RevisionWorkload {
     pub artifact: String,
     pub workload_identity: String,
     pub runtime: String,
+    /// The pinned runtime version, when the workload declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
+    /// The dependency capsule, when the bundle carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency: Option<String>,
+    /// The Compute distribution the revision requires, when it pins one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<String>,
+    /// How to tell that a new instance of this service is ready to serve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<Readiness>,
     #[serde(default)]
     pub ports: Vec<PortSpec>,
     #[serde(default)]
@@ -181,44 +256,78 @@ pub struct EnvironmentProjectRecord {
 }
 document!(EnvironmentProjectRecord, EnvironmentProject);
 
+/// A release, as a durable state machine:
+///
+/// ```text
+/// pending → starting → ready → network_ready → switching → active → draining → complete
+///    ╰──────────╰────────╰───────────╰── failed (the current revision keeps serving)
+///                        active ── rolled_back (traffic returned to the previous revision)
+/// ```
+///
+/// Traffic moves to the new revision only in `switching`, and only once it
+/// is ready. Nothing currently serving is stopped before then.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentStatus {
-    /// Recorded; nothing evaluated yet.
-    Queued,
-    /// Every workload was admitted by policy.
-    Admitted,
-    /// Every workload has a provider.
-    Placed,
-    /// The revision is current; its services are starting.
+    /// Recorded; admission and placement are being evaluated. (Records
+    /// written before zero-downtime releases read `queued`, `admitted`, or
+    /// `placed`.)
+    #[serde(alias = "queued", alias = "admitted", alias = "placed")]
+    Pending,
+    /// Admitted and placed; the new revision's instances are starting next
+    /// to whatever serves now.
     Starting,
-    /// Every service is running and healthy.
-    Healthy,
-    /// Admission, placement, or startup failed. The previous deployment,
-    /// if any, stays current.
+    /// Every new service passed readiness; its endpoints, DNS, and TLS
+    /// are verified next.
+    Ready,
+    /// Endpoints, DNS, and TLS are verified; traffic may move.
+    NetworkReady,
+    /// Traffic is moving to the new revision.
+    Switching,
+    /// The new revision serves; it is verified through its endpoints.
+    Active,
+    /// The previous revision stops accepting traffic and finishes what it
+    /// has.
+    Draining,
+    /// The previous revision stopped; the release is done. (Earlier
+    /// records read `healthy`, `stopped`, or `superseded`.)
+    #[serde(alias = "healthy", alias = "stopped", alias = "superseded")]
+    Complete,
+    /// The release failed before traffic moved. What served before still
+    /// serves.
     Failed,
-    /// The project was stopped while this deployment was current.
-    Stopped,
-    /// A later deployment replaced this one.
-    Superseded,
+    /// Traffic moved, verification failed, and traffic was returned to the
+    /// previous revision.
+    RolledBack,
 }
 
 impl DeploymentStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Queued => "queued",
-            Self::Admitted => "admitted",
-            Self::Placed => "placed",
+            Self::Pending => "pending",
             Self::Starting => "starting",
-            Self::Healthy => "healthy",
+            Self::Ready => "ready",
+            Self::NetworkReady => "network_ready",
+            Self::Switching => "switching",
+            Self::Active => "active",
+            Self::Draining => "draining",
+            Self::Complete => "complete",
             Self::Failed => "failed",
-            Self::Stopped => "stopped",
-            Self::Superseded => "superseded",
+            Self::RolledBack => "rolled_back",
         }
     }
 
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Failed | Self::Superseded)
+        matches!(self, Self::Complete | Self::Failed | Self::RolledBack)
+    }
+
+    /// Whether this deployment's revision is (or is becoming) the one that
+    /// serves.
+    pub const fn serves(self) -> bool {
+        matches!(
+            self,
+            Self::Switching | Self::Active | Self::Draining | Self::Complete
+        )
     }
 }
 
@@ -239,6 +348,10 @@ pub struct DeploymentWorkload {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<String>,
+    /// A service's stable endpoints: logical ports and the host ports that
+    /// keep serving across releases.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<PortBinding>,
 }
 
 /// A revision delivered to an environment, with its evidence.
@@ -265,6 +378,37 @@ pub struct DeploymentRecord {
     /// Receipts of executions this deployment started.
     #[serde(default)]
     pub receipt_ids: Vec<String>,
+    /// The revision that served before this deployment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_revision: Option<String>,
+    /// Digest of the environment and project configuration the release
+    /// runs with. Configuration is per environment, never part of the
+    /// revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_digest: Option<String>,
+    /// The project configuration the release runs with in this
+    /// environment; it becomes the membership's configuration at switch.
+    #[serde(default)]
+    pub config: BTreeMap<String, String>,
+    /// Per-workload readiness evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_result: Option<serde_json::Value>,
+    /// Endpoint, DNS, and TLS verification evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_result: Option<serde_json::Value>,
+    /// Which endpoints moved from which instance to which, and when.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_switch_result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_reason: Option<String>,
+    /// The deployment receipt: an artifact digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<String>,
+    /// When the current status was entered; timeouts count from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_since: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -463,6 +607,184 @@ pub struct ArtifactChunkRecord {
 }
 document!(ArtifactChunkRecord, ArtifactChunk);
 
+/// The state of one running instance of a service revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceState {
+    Starting,
+    /// Passed readiness; not yet receiving traffic.
+    Ready,
+    /// The active target of its endpoints.
+    Serving,
+    /// No longer a target; finishing open connections.
+    Draining,
+    Stopped,
+    Failed,
+}
+
+impl InstanceState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Serving => "serving",
+            Self::Draining => "draining",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// One instance of a service at one deployment's revision. During a
+/// release two instances of a workload exist: the one serving and the
+/// candidate. Each binds its own host ports; the workload's stable
+/// endpoints forward to whichever is serving.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadInstanceRecord {
+    pub environment_id: String,
+    pub environment: String,
+    pub project_id: String,
+    pub project: String,
+    pub workload: String,
+    pub workload_id: String,
+    pub deployment_id: String,
+    pub revision: String,
+    pub state: InstanceState,
+    /// Logical ports and the instance's own host ports.
+    #[serde(default)]
+    pub ports: Vec<PortBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+document!(WorkloadInstanceRecord, WorkloadInstance);
+
+/// Which instance an endpoint sends traffic to. One record per endpoint,
+/// so exactly one revision serves it: switching is replacing this record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrafficAssignmentRecord {
+    /// `environment/project/workload/port`.
+    pub endpoint: String,
+    pub environment: String,
+    pub project: String,
+    pub workload: String,
+    pub port: String,
+    /// The endpoint's stable host port.
+    pub host_port: u16,
+    /// Domains routed to this endpoint.
+    #[serde(default)]
+    pub domains: Vec<String>,
+    pub deployment_id: String,
+    pub revision: String,
+    pub instance_id: String,
+    /// The serving instance's own host port.
+    pub target_port: u16,
+    /// `active`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_deployment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_instance_id: Option<String>,
+    pub switched_at: DateTime<Utc>,
+}
+document!(TrafficAssignmentRecord, TrafficAssignment);
+
+/// How a network resource stands: what is wanted, what is, and what went
+/// wrong last.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Reconciliation {
+    /// `pending`, `healthy`, `degraded`, or `failed`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reconciled_at: Option<DateTime<Utc>>,
+}
+
+/// A domain belongs to one environment and routes to one workload port of
+/// one project there. It can never route anywhere else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainRecord {
+    pub name: String,
+    pub environment_id: String,
+    pub environment: String,
+    pub project_id: String,
+    pub project: String,
+    pub workload: String,
+    pub port: String,
+    /// The DNS provider that holds its records, by configured name.
+    pub dns_provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_id: Option<String>,
+    /// `pending`, `healthy`, `degraded`, or `failed`.
+    pub status: String,
+    pub dns: Reconciliation,
+    pub tls: Reconciliation,
+    pub routing: Reconciliation,
+    pub created_at: DateTime<Utc>,
+}
+document!(DomainRecord, Domain);
+
+/// A DNS record Compute wants a provider to hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsRecordRecord {
+    pub domain: String,
+    pub provider: String,
+    pub zone: String,
+    /// The record name relative to the zone (`@` for the apex).
+    pub name: String,
+    /// `A`, `AAAA`, or `CNAME`.
+    pub record_type: String,
+    pub value: String,
+    pub ttl: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_record_id: Option<String>,
+    pub state: Reconciliation,
+}
+document!(DnsRecordRecord, DnsRecord);
+
+/// A TLS certificate. Its private key and chain never enter control state:
+/// `secret_reference` names where the node that holds them keeps them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertificateRecord {
+    pub domain: String,
+    /// The ACME directory that issues it.
+    pub issuer: String,
+    /// `pending`, `issuing`, `valid`, `renewing`, `failed`, or `expired`.
+    pub status: String,
+    /// `not_due`, `due`, `renewing`, or `failed`.
+    pub renewal_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// SHA-256 of the leaf certificate (public).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_reference: Option<String>,
+    /// The daemon instance whose node holds the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reconciled_at: Option<DateTime<Utc>>,
+}
+document!(CertificateRecord, Certificate);
+
 /// Lifecycle event kinds.
 pub mod events {
     pub const ENVIRONMENT_CREATED: &str = "environment.created";
@@ -497,6 +819,22 @@ pub mod events {
     pub const TASK_DENIED: &str = "task.denied";
     pub const SHARED_SERVICE_REGISTERED: &str = "shared_service.registered";
     pub const SHARED_SERVICE_REMOVED: &str = "shared_service.removed";
+    pub const DEPLOYMENT_READY: &str = "deployment.ready";
+    pub const DEPLOYMENT_SWITCHED: &str = "deployment.switched";
+    pub const DEPLOYMENT_DRAINING: &str = "deployment.draining";
+    pub const DEPLOYMENT_ROLLED_BACK: &str = "deployment.rolled_back";
+    pub const INSTANCE_READY: &str = "instance.ready";
+    pub const INSTANCE_FAILED: &str = "instance.failed";
+    pub const INSTANCE_STOPPED: &str = "instance.stopped";
+    pub const DOMAIN_CREATED: &str = "domain.created";
+    pub const DOMAIN_REMOVED: &str = "domain.removed";
+    pub const DNS_APPLIED: &str = "network.dns.applied";
+    pub const DNS_DRIFTED: &str = "network.dns.drifted";
+    pub const DNS_FAILED: &str = "network.dns.failed";
+    pub const CERTIFICATE_ISSUED: &str = "network.certificate.issued";
+    pub const CERTIFICATE_RENEWED: &str = "network.certificate.renewed";
+    pub const CERTIFICATE_FAILED: &str = "network.certificate.failed";
+    pub const ROUTE_SWITCHED: &str = "network.route.switched";
     pub const DAEMON_STARTED: &str = "daemon.started";
     pub const DAEMON_STOPPED: &str = "daemon.stopped";
 }
@@ -554,6 +892,30 @@ pub mod ids {
 
     pub fn workload_status(workload_id: &str) -> String {
         format!("ws_{}", workload_id.trim_start_matches("wl_"))
+    }
+
+    pub fn instance(workload_id: &str, deployment_id: &str) -> String {
+        format!("wi_{}", short_digest(&[workload_id, deployment_id]))
+    }
+
+    pub fn endpoint(environment: &str, project: &str, workload: &str, port: &str) -> String {
+        format!("{environment}/{project}/{workload}/{port}")
+    }
+
+    pub fn traffic(endpoint: &str) -> String {
+        format!("ta_{}", short_digest(&[endpoint]))
+    }
+
+    pub fn domain(name: &str) -> String {
+        format!("dom_{}", short_digest(&[name]))
+    }
+
+    pub fn dns_record(domain: &str, record_type: &str) -> String {
+        format!("dns_{}", short_digest(&[domain, record_type]))
+    }
+
+    pub fn certificate(domain: &str) -> String {
+        format!("cert_{}", short_digest(&[domain]))
     }
 
     pub fn artifact(digest: &str) -> String {

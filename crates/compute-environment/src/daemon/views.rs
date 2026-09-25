@@ -11,7 +11,7 @@ use compute_state::{
 
 use super::deploy::revision_view;
 use super::reconcile::workload_health;
-use super::{Daemon, Key};
+use super::{Daemon, Key, Unit};
 use crate::EnvironmentError;
 use crate::model::*;
 use crate::status::*;
@@ -240,7 +240,7 @@ impl Daemon {
     }
 
     async fn workload_view(&self, key: &Key) -> Result<WorkloadView, EnvironmentError> {
-        let (record, artifact, runtime_view) = {
+        let (record, artifact, runtime_view, serving_ports) = {
             let inner = self.inner.lock().await;
             let record = inner.desired.workloads.get(key).cloned().ok_or_else(|| {
                 EnvironmentError::NotFound(format!("workload {} in {}/{}", key.2, key.0, key.1))
@@ -258,7 +258,13 @@ impl Daemon {
                         .find(|workload| workload.name == key.2)
                         .map(|workload| workload.artifact.clone())
                 });
-            let runtime = inner.runtime.get(key).map(|runtime| {
+            let unit = Unit::new(key, &record.value.deployment_id);
+            let serving_ports = inner
+                .desired
+                .instance(key, &record.value.deployment_id)
+                .map(|instance| instance.value.ports.clone())
+                .unwrap_or_default();
+            let runtime = inner.runtime.get(&unit).map(|runtime| {
                 (
                     runtime.state,
                     runtime.execution_id.clone(),
@@ -275,7 +281,7 @@ impl Daemon {
                         .map(|path| path.display().to_string()),
                 )
             });
-            (record, artifact, runtime)
+            (record, artifact, runtime, serving_ports)
         };
         let (
             state,
@@ -293,7 +299,7 @@ impl Daemon {
             WorkloadKind::Task => ActualState::Pending,
             WorkloadKind::Service => ActualState::Stopped,
         });
-        let health = workload_health(record.value.kind, state, &record.value.ports).await;
+        let health = workload_health(record.value.kind, state, &serving_ports).await;
         let bundle = match &artifact {
             Some(digest) => std::fs::read(
                 self.config
@@ -499,15 +505,39 @@ impl Daemon {
             .map(|deployment| DeploymentView {
                 deployment_id: deployment.id,
                 record: deployment.value,
+                instances: vec![],
             })
             .collect())
     }
 
     pub async fn deployment(&self, id: &str) -> Result<DeploymentView, EnvironmentError> {
         let deployment = self.get_required::<DeploymentRecord>(id).await?;
+        let instances = self
+            .control()
+            .query::<compute_state::WorkloadInstanceRecord>(
+                Query::all(Collection::WorkloadInstance).eq("deployment_id", id.to_string()),
+            )
+            .await?;
+        let inner = self.inner.lock().await;
+        let instances = instances
+            .into_iter()
+            .map(|instance| {
+                let unit = Unit::new(
+                    &super::Desired::instance_key(&instance.value),
+                    &instance.value.deployment_id,
+                );
+                InstanceView {
+                    actual_state: inner.runtime.get(&unit).and_then(|runtime| runtime.state),
+                    open_connections: self.endpoints().open_connections(&instance.id),
+                    instance_id: instance.id,
+                    record: instance.value,
+                }
+            })
+            .collect();
         Ok(DeploymentView {
             deployment_id: deployment.id,
             record: deployment.value,
+            instances,
         })
     }
 
@@ -579,6 +609,26 @@ impl Daemon {
             .await?;
         let digest = reference.value.artifact_digest.ok_or_else(|| {
             EnvironmentError::NotFound(format!("the receipt document of {receipt_id}"))
+        })?;
+        let bytes = self
+            .config
+            .artifacts
+            .get(&digest)
+            .await?
+            .ok_or_else(|| EnvironmentError::NotFound(format!("receipt artifact {digest}")))?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    /// A deployment's receipt document.
+    pub async fn deployment_receipt_document(
+        &self,
+        deployment_id: &str,
+    ) -> Result<serde_json::Value, EnvironmentError> {
+        let deployment = self.get_required::<DeploymentRecord>(deployment_id).await?;
+        let digest = deployment.value.receipt.ok_or_else(|| {
+            EnvironmentError::NotFound(format!(
+                "a receipt for {deployment_id}; one is written when the release ends"
+            ))
         })?;
         let bytes = self
             .config

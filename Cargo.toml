@@ -12,6 +12,7 @@ members = [
   "crates/compute-state-memory",
   "crates/compute-state-file",
   "crates/compute-state-feltdb",
+  "crates/compute-network",
   "crates/compute-environment",
   "crates/compute-cli",
 ]

@@ -12,6 +12,7 @@ chrono.workspace = true
 compute-core = { path = "../compute-core" }
 compute-placement = { path = "../compute-placement" }
 compute-policy = { path = "../compute-policy" }
+compute-network = { path = "../compute-network" }
 compute-provider = { path = "../compute-provider" }
 compute-state = { path = "../compute-state" }
 libc.workspace = true

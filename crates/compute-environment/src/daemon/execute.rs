@@ -20,7 +20,7 @@ use compute_state::{
 use serde_json::json;
 
 use super::{
-    Change, Daemon, Key, Outcome, RECENT_EXECUTIONS, RECENT_RECEIPTS, SERVICE_OUTPUT_BYTES, Scope,
+    Change, Daemon, Outcome, RECENT_EXECUTIONS, RECENT_RECEIPTS, SERVICE_OUTPUT_BYTES, Scope, Unit,
     identity_label,
 };
 use crate::EnvironmentError;
@@ -148,9 +148,11 @@ impl Daemon {
         })
     }
 
-    /// Prepare a workload that is in desired state.
-    async fn prepare_key(&self, key: &Key) -> Result<(Prepared, String), EnvironmentError> {
-        let (environment, membership, record, revision) = {
+    /// Prepare a unit: a workload at one deployment's revision, with that
+    /// deployment's configuration and, for a service, its instance's ports.
+    async fn prepare_unit(&self, unit: &Unit) -> Result<Prepared, EnvironmentError> {
+        let key = &unit.key;
+        let (environment, deployment, revision, ports, config) = {
             let inner = self.inner.lock().await;
             let desired = &inner.desired;
             let environment = desired
@@ -158,26 +160,29 @@ impl Daemon {
                 .get(&key.0)
                 .cloned()
                 .ok_or_else(|| EnvironmentError::NotFound(format!("environment {}", key.0)))?;
-            let membership = desired
-                .memberships
-                .get(&(key.0.clone(), key.1.clone()))
-                .cloned()
-                .ok_or_else(|| EnvironmentError::NotFound(format!("project {}", key.1)))?;
-            let record = desired
-                .workloads
-                .get(key)
-                .cloned()
-                .ok_or_else(|| EnvironmentError::NotFound(format!("workload {}", key.2)))?;
-            let revision = membership
-                .value
-                .revision_id
-                .as_ref()
-                .and_then(|id| desired.revisions.get(id))
+            let deployment = desired
+                .deployments
+                .get(&unit.deployment_id)
                 .cloned()
                 .ok_or_else(|| {
-                    EnvironmentError::NotFound(format!("the revision of {}/{}", key.0, key.1))
+                    EnvironmentError::NotFound(format!("deployment {}", unit.deployment_id))
                 })?;
-            (environment, membership, record, revision)
+            let revision = desired
+                .revisions
+                .get(&deployment.value.revision_id)
+                .cloned()
+                .ok_or_else(|| {
+                    EnvironmentError::NotFound(format!("the revision of {}", unit.deployment_id))
+                })?;
+            let ports = desired
+                .instance(key, &unit.deployment_id)
+                .map(|instance| instance.value.ports.clone())
+                .unwrap_or_default();
+            let config = run_config(
+                &deployment.value,
+                desired.memberships.get(&(key.0.clone(), key.1.clone())),
+            );
+            (environment, deployment, revision, ports, config)
         };
         let workload = revision
             .workloads
@@ -190,31 +195,30 @@ impl Daemon {
                     key.2, revision.revision
                 ))
             })?;
-        let prepared = self
-            .prepare(Target {
-                environment: &environment,
-                config: &membership.value.config,
-                project_id: &membership.value.project_id,
-                revision: &revision,
-                workload: &workload,
-                workload_id: &record.id,
-                ports: &record.value.ports,
-            })
-            .await?;
-        Ok((prepared, record.value.deployment_id))
+        let workload_id = ids::workload(&environment.id, &deployment.value.project_id, &key.2);
+        self.prepare(Target {
+            environment: &environment,
+            config: &config,
+            project_id: &deployment.value.project_id,
+            revision: &revision,
+            workload: &workload,
+            workload_id: &workload_id,
+            ports: &ports,
+        })
+        .await
     }
 
     /// Admission, placement, and execution of one workload invocation.
     pub(crate) async fn execute(
         self: &Arc<Self>,
-        key: &Key,
+        unit: &Unit,
         service: Option<(u64, ExecutionControl)>,
     ) -> (Outcome, Option<String>) {
-        let (prepared, deployment_id) = match self.prepare_key(key).await {
+        let deployment = Some(unit.deployment_id.clone());
+        let prepared = match self.prepare_unit(unit).await {
             Ok(prepared) => prepared,
-            Err(error) => return (Outcome::Failed(error.to_string()), None),
+            Err(error) => return (Outcome::Failed(error.to_string()), deployment),
         };
-        let deployment = Some(deployment_id);
         let Prepared {
             request,
             report,
@@ -270,7 +274,7 @@ impl Daemon {
                 }
                 {
                     let mut inner = self.inner.lock().await;
-                    if let Some(runtime) = inner.runtime.get_mut(key)
+                    if let Some(runtime) = inner.runtime.get_mut(unit)
                         && runtime.generation == generation
                     {
                         if control.is_cancelled() {
@@ -280,6 +284,7 @@ impl Daemon {
                             );
                         }
                         runtime.state = Some(ActualState::Running);
+                        runtime.running_since = Some(Utc::now());
                         runtime.evidence.policy_id = Some(admission.decision.policy_id.clone());
                         runtime.evidence.admission_id =
                             Some(admission.decision.admission_id.clone());
@@ -329,7 +334,7 @@ impl Daemon {
     /// its evidence; and schedule a restart when the policy calls for one.
     pub(crate) async fn finish(
         self: &Arc<Self>,
-        key: &Key,
+        unit: &Unit,
         generation: u64,
         outcome: Outcome,
         deployment_id: Option<String>,
@@ -341,26 +346,34 @@ impl Daemon {
         let mut change = Change::new();
         {
             let mut inner = self.inner.lock().await;
+            let key = &unit.key;
             let (restart_policy, workload_id, environment_id, project_id) = inner
                 .desired
-                .workloads
-                .get(key)
-                .map(|record| {
+                .deployments
+                .get(&unit.deployment_id)
+                .map(|deployment| {
                     (
-                        Some(record.value.restart),
-                        record.id.clone(),
-                        record.value.environment_id.clone(),
-                        record.value.project_id.clone(),
+                        inner
+                            .desired
+                            .revision_workload(&unit.deployment_id, &key.2)
+                            .map(|workload| workload.restart),
+                        ids::workload(
+                            &deployment.value.environment_id,
+                            &deployment.value.project_id,
+                            &key.2,
+                        ),
+                        deployment.value.environment_id.clone(),
+                        deployment.value.project_id.clone(),
                     )
                 })
                 .unwrap_or_default();
             let restart_delay = self.config.restart_delay;
-            let runtime = inner.runtime.get_mut(key)?;
+            let runtime = inner.runtime.get_mut(unit)?;
             if runtime.generation != generation {
                 return None;
             }
             if service {
-                super::processes::forget(&self.config.state_dir, key);
+                super::processes::forget(&self.config.state_dir, unit);
             }
             let stopping = runtime
                 .control
@@ -373,6 +386,7 @@ impl Daemon {
                 .map(|started| now - started)
                 .unwrap_or_default();
             runtime.finished_at = Some(now);
+            runtime.running_since = None;
             runtime.control = None;
             runtime.handle = None;
             let scope = Scope::workload(key);
@@ -596,7 +610,7 @@ impl Daemon {
             self.inner.lock().await.state_error = Some(error.to_string());
         }
         if let Some(delay) = restart_after {
-            self.restart_later(key.clone(), generation, delay);
+            self.restart_later(unit.clone(), generation, delay);
         }
         self.wake();
         execution
@@ -604,7 +618,7 @@ impl Daemon {
 
     /// Release a failed service's hold after `delay`, if nothing newer
     /// happened to it, and reconcile.
-    fn restart_later(self: &Arc<Self>, key: Key, generation: u64, delay: std::time::Duration) {
+    fn restart_later(self: &Arc<Self>, unit: Unit, generation: u64, delay: std::time::Duration) {
         let daemon = Arc::downgrade(self);
         let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
             Box::pin(async move {
@@ -614,7 +628,7 @@ impl Daemon {
                 };
                 {
                     let mut inner = daemon.inner.lock().await;
-                    match inner.runtime.get_mut(&key) {
+                    match inner.runtime.get_mut(&unit) {
                         Some(runtime) if runtime.generation == generation => {
                             runtime.held = false;
                             runtime.restarts += 1;
@@ -641,18 +655,28 @@ impl Daemon {
                 "{workload} is a service; start it instead of running it"
             )));
         }
+        self.run_unit_task(Unit::new(&key, &record.value.deployment_id))
+            .await
+    }
+
+    /// Run a task at one deployment's revision: a current task, or a
+    /// candidate revision's readiness task.
+    pub(crate) async fn run_unit_task(
+        self: &Arc<Self>,
+        unit: Unit,
+    ) -> Result<ExecutionView, EnvironmentError> {
         let generation = {
             let mut inner = self.inner.lock().await;
-            let runtime = inner.runtime.entry(key.clone()).or_default();
+            let runtime = inner.runtime.entry(unit.clone()).or_default();
             runtime.generation += 1;
             runtime.state = Some(ActualState::Running);
             runtime.started_at = Some(Utc::now());
             runtime.finished_at = None;
             runtime.generation
         };
-        let (outcome, deployment_id) = self.execute(&key, None).await;
+        let (outcome, deployment_id) = self.execute(&unit, None).await;
         match self
-            .finish(&key, generation, outcome, deployment_id, false)
+            .finish(&unit, generation, outcome, deployment_id, false)
             .await
         {
             Some(record) => {
@@ -675,12 +699,26 @@ impl Daemon {
                     .lock()
                     .await
                     .runtime
-                    .get(&key)
+                    .get(&unit)
                     .and_then(|runtime| runtime.error.clone())
                     .unwrap_or_else(|| "the task did not execute".into()),
             )),
         }
     }
+}
+
+/// The project configuration a deployment runs with. Deployments made
+/// before releases recorded their configuration run with the membership's.
+pub(crate) fn run_config(
+    deployment: &DeploymentRecord,
+    membership: Option<&Stored<compute_state::EnvironmentProjectRecord>>,
+) -> BTreeMap<String, String> {
+    if !deployment.config.is_empty() || deployment.config_digest.is_some() {
+        return deployment.config.clone();
+    }
+    membership
+        .map(|membership| membership.value.config.clone())
+        .unwrap_or_default()
 }
 
 /// Exponential backoff for a failing service: the delay doubles with each

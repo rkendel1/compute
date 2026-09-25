@@ -53,6 +53,7 @@ fn service(name: &str) -> WorkloadDefinition {
         ports: vec![],
         restart: RestartPolicy::OnFailure,
         desired_state: DesiredState::Running,
+        readiness: None,
     }
 }
 
@@ -121,7 +122,17 @@ fn config(node: &std::path::Path, store: Arc<dyn StateStore>) -> DaemonConfig {
     let mut config = DaemonConfig::new(node, store, artifacts);
     config.restart_delay = Duration::from_millis(100);
     config.reconcile_interval = Duration::from_millis(200);
+    port_windows(&mut config);
     config
+}
+
+/// Each daemon in this test process gets its own port windows, so daemons
+/// of concurrent tests never choose the same port.
+fn port_windows(config: &mut DaemonConfig) {
+    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    let window = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) * 100;
+    config.port_range = (20000 + window, 20099 + window);
+    config.instance_port_range = (40000 + window, 40099 + window);
 }
 
 async fn eventually<F, Fut>(what: &str, mut condition: F)
@@ -377,7 +388,14 @@ async fn deploy_verify_and_promote_the_exact_revision() {
 
     // Deploy to preprod and verify.
     let preprod = deploy(&daemon, "preprod", "feltdb", "abc123").await;
-    assert_eq!(preprod.record.status, DeploymentStatus::Starting);
+    assert!(
+        !matches!(
+            preprod.record.status,
+            DeploymentStatus::Pending | DeploymentStatus::Failed
+        ),
+        "{:?}",
+        preprod.record
+    );
     assert!(
         preprod
             .record
@@ -387,14 +405,14 @@ async fn deploy_verify_and_promote_the_exact_revision() {
                 && workload.admission_id.is_some()
                 && workload.placement_id.is_some())
     );
-    eventually("preprod deployment healthy", || async {
+    eventually("the preprod release completes", || async {
         daemon
             .deployment(&preprod.deployment_id)
             .await
             .unwrap()
             .record
             .status
-            == DeploymentStatus::Healthy
+            == DeploymentStatus::Complete
     })
     .await;
     let kinds = daemon
@@ -412,7 +430,10 @@ async fn deploy_verify_and_promote_the_exact_revision() {
         "deployment.admitted",
         "deployment.placed",
         "project.added",
+        "deployment.ready",
+        "deployment.switched",
         "deployment.activated",
+        "deployment.draining",
         "service.started",
         "service.healthy",
         "deployment.completed",
@@ -484,18 +505,18 @@ async fn deploy_verify_and_promote_the_exact_revision() {
         production_execution,
         "stopping preprod does not affect production"
     );
-    eventually("the preprod deployment reads stopped", || async {
+    assert_eq!(
         daemon
             .deployment(&preprod.deployment_id)
             .await
             .unwrap()
             .record
-            .status
-            == DeploymentStatus::Stopped
-    })
-    .await;
+            .status,
+        DeploymentStatus::Complete,
+        "a stopped project keeps its release"
+    );
 
-    // A new revision supersedes the old one and replaces its services.
+    // A new revision is released next to the old one and replaces it.
     daemon
         .register_revision("feltdb", revision("def456", vec![service("api")]))
         .await
@@ -517,27 +538,28 @@ async fn deploy_verify_and_promote_the_exact_revision() {
             && actual(&daemon, "production", "feltdb", "api").await == ActualState::Running
     })
     .await;
+    let released = daemon.deployment(&next.deployment_id).await.unwrap().record;
     assert_eq!(
-        daemon
-            .deployment(&promoted.deployment_id)
-            .await
-            .unwrap()
-            .record
-            .status,
-        DeploymentStatus::Superseded
+        released.previous.as_deref(),
+        Some(promoted.deployment_id.as_str())
     );
+    assert_eq!(released.old_revision.as_deref(), Some("abc123"));
+    daemon
+        .create_environment(environment("staging"))
+        .await
+        .unwrap();
     assert!(
         daemon
             .promote(PromoteRequest {
                 project: "feltdb".into(),
-                from: "preprod".into(),
+                from: "staging".into(),
                 to: "production".into(),
                 allow_unhealthy: false,
                 config: None,
             })
             .await
             .is_err(),
-        "only a healthy source revision is promoted"
+        "only a revision released in the source environment is promoted"
     );
     daemon.shutdown().await;
 }

@@ -8,8 +8,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub use compute_state::{
-    BackendInfo, DeploymentRecord, DeploymentWorkload, EventRecord, ExecutionRecord,
-    ProviderRecord, ReceiptRecord, RevisionWorkload, ServiceRecord,
+    BackendInfo, CertificateRecord, DeploymentRecord, DeploymentWorkload, DnsRecordRecord,
+    DomainRecord, EventRecord, ExecutionRecord, ProviderRecord, ReceiptRecord, Reconciliation,
+    RevisionWorkload, ServiceRecord, TrafficAssignmentRecord, WorkloadInstanceRecord,
 };
 
 pub use crate::model::PortBinding;
@@ -244,11 +245,105 @@ pub struct ProjectDetail {
     pub deployments: Vec<DeploymentView>,
 }
 
+/// A release and the instances it runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploymentView {
     pub deployment_id: String,
     #[serde(flatten)]
     pub record: DeploymentRecord,
+    /// The release's instances while they exist.
+    #[serde(default)]
+    pub instances: Vec<InstanceView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceView {
+    pub instance_id: String,
+    #[serde(flatten)]
+    pub record: WorkloadInstanceRecord,
+    /// What runs on this node for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_state: Option<ActualState>,
+    /// Connections open to it through its endpoints.
+    #[serde(default)]
+    pub open_connections: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainView {
+    pub domain_id: String,
+    #[serde(flatten)]
+    pub record: DomainRecord,
+    /// `environment/project/workload/port`.
+    pub endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_deployment: Option<String>,
+    #[serde(default)]
+    pub dns_records: Vec<DnsRecordView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<CertificateView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsRecordView {
+    pub record_id: String,
+    #[serde(flatten)]
+    pub record: DnsRecordRecord,
+}
+
+/// A certificate's public facts. Its key is never in a view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertificateView {
+    pub certificate_id: String,
+    #[serde(flatten)]
+    pub record: CertificateRecord,
+    /// Whether this node holds the key.
+    pub held_here: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointView {
+    pub endpoint: String,
+    pub host_port: u16,
+    pub instance_id: String,
+    pub target_port: u16,
+    pub revision: String,
+    pub listening: bool,
+    pub open_connections: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsProviderView {
+    pub name: String,
+    pub kind: String,
+    pub zone: String,
+    /// Why the provider cannot be used, such as a missing token variable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkStatus {
+    pub node_id: String,
+    pub endpoint_address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress_http: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress_https: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_ipv4: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_ipv6: Option<String>,
+    pub dns_providers: Vec<DnsProviderView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acme_directory: Option<String>,
+    pub endpoints: Vec<EndpointView>,
 }
 
 /// An execution record joined with its output when this node still has it.

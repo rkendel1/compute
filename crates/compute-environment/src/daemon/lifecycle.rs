@@ -93,6 +93,9 @@ impl Daemon {
     /// workloads. Deployments, executions, receipts, and events remain as
     /// history.
     pub async fn destroy_environment(self: &Arc<Self>, name: &str) -> Result<(), EnvironmentError> {
+        // Changes are serialized with reconciliation: both write the
+        // records a release touches.
+        let cycle = self.reconciling.lock().await;
         self.refresh().await?;
         let (environment, memberships, workloads) = {
             let inner = self.inner.lock().await;
@@ -119,9 +122,44 @@ impl Daemon {
             (environment, memberships, workloads)
         };
         let env_name = environment.value.name.clone();
+        let (instances, traffic) = {
+            let inner = self.inner.lock().await;
+            if let Some(domain) = inner
+                .desired
+                .domains
+                .values()
+                .find(|domain| domain.value.environment == env_name)
+            {
+                return Err(EnvironmentError::Conflict(format!(
+                    "domain {} routes to {env_name}; remove it first",
+                    domain.value.name
+                )));
+            }
+            (
+                inner
+                    .desired
+                    .instances
+                    .values()
+                    .filter(|instance| instance.value.environment == env_name)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                inner
+                    .desired
+                    .traffic
+                    .values()
+                    .filter(|assignment| assignment.value.environment == env_name)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        };
         let keys = workloads
             .iter()
             .map(|(key, _)| key.clone())
+            .chain(
+                instances
+                    .iter()
+                    .map(|instance| super::Desired::instance_key(&instance.value)),
+            )
             .collect::<Vec<_>>();
         self.stop_keys(&keys).await;
         let mut change = Change::new().with(|batch| batch.delete(&environment));
@@ -131,6 +169,12 @@ impl Daemon {
         for (_, workload) in &workloads {
             change = change.with(|batch| batch.delete(workload));
             change = self.delete_status(change, &workload.id).await?;
+        }
+        for instance in &instances {
+            change = change.with(|batch| batch.delete(instance));
+        }
+        for assignment in &traffic {
+            change = change.with(|batch| batch.delete(assignment));
         }
         let change = self.event(
             change,
@@ -144,7 +188,8 @@ impl Daemon {
             .lock()
             .await
             .runtime
-            .retain(|key, _| key.0 != env_name);
+            .retain(|unit, _| unit.key.0 != env_name);
+        drop(cycle);
         self.changed().await;
         Ok(())
     }
@@ -155,6 +200,9 @@ impl Daemon {
         desired: DesiredState,
         restart: bool,
     ) -> Result<EnvironmentView, EnvironmentError> {
+        // Changes are serialized with reconciliation: both write the
+        // records a release touches.
+        let cycle = self.reconciling.lock().await;
         self.refresh().await?;
         let (environment, keys) = {
             let inner = self.inner.lock().await;
@@ -194,6 +242,7 @@ impl Daemon {
         if desired == DesiredState::Running {
             self.release_holds(&keys).await;
         }
+        drop(cycle);
         self.changed().await;
         self.environment(&env_name).await
     }
@@ -207,6 +256,9 @@ impl Daemon {
         desired: DesiredState,
         restart: bool,
     ) -> Result<ProjectView, EnvironmentError> {
+        // Changes are serialized with reconciliation: both write the
+        // records a release touches.
+        let cycle = self.reconciling.lock().await;
         let (membership, keys) = self.membership(environment, project).await?;
         let env_name = membership.value.environment.clone();
         let kind = match (desired, restart) {
@@ -238,6 +290,7 @@ impl Daemon {
         if desired == DesiredState::Running {
             self.release_holds(&keys).await;
         }
+        drop(cycle);
         self.changed().await;
         self.project(&env_name, project).await
     }
@@ -249,19 +302,65 @@ impl Daemon {
         environment: &str,
         project: &str,
     ) -> Result<(), EnvironmentError> {
+        // Changes are serialized with reconciliation: both write the
+        // records a release touches.
+        let cycle = self.reconciling.lock().await;
         let (membership, keys) = self.membership(environment, project).await?;
         let env_name = membership.value.environment.clone();
-        self.stop_keys(&keys).await;
-        let workloads = {
+        let (workloads, instances, traffic) = {
             let inner = self.inner.lock().await;
-            keys.iter()
-                .filter_map(|key| inner.desired.workloads.get(key).cloned())
-                .collect::<Vec<_>>()
+            let desired = &inner.desired;
+            if let Some(domain) = desired.domains.values().find(|domain| {
+                domain.value.environment == env_name && domain.value.project == project
+            }) {
+                return Err(EnvironmentError::Conflict(format!(
+                    "domain {} routes to {project} in {env_name}; remove it first",
+                    domain.value.name
+                )));
+            }
+            (
+                keys.iter()
+                    .filter_map(|key| desired.workloads.get(key).cloned())
+                    .collect::<Vec<_>>(),
+                desired
+                    .instances
+                    .values()
+                    .filter(|instance| {
+                        instance.value.environment == env_name && instance.value.project == project
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                desired
+                    .traffic
+                    .values()
+                    .filter(|assignment| {
+                        assignment.value.environment == env_name
+                            && assignment.value.project == project
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
         };
+        let stopping = keys
+            .iter()
+            .cloned()
+            .chain(
+                instances
+                    .iter()
+                    .map(|instance| super::Desired::instance_key(&instance.value)),
+            )
+            .collect::<Vec<_>>();
+        self.stop_keys(&stopping).await;
         let mut change = Change::new().with(|batch| batch.delete(&membership));
         for workload in &workloads {
             change = change.with(|batch| batch.delete(workload));
             change = self.delete_status(change, &workload.id).await?;
+        }
+        for instance in &instances {
+            change = change.with(|batch| batch.delete(instance));
+        }
+        for assignment in &traffic {
+            change = change.with(|batch| batch.delete(assignment));
         }
         let change = self.event(
             change,
@@ -275,7 +374,8 @@ impl Daemon {
             .lock()
             .await
             .runtime
-            .retain(|key, _| !(key.0 == env_name && key.1 == project));
+            .retain(|unit, _| !(unit.key.0 == env_name && unit.key.1 == project));
+        drop(cycle);
         self.changed().await;
         Ok(())
     }
@@ -290,6 +390,9 @@ impl Daemon {
         desired: DesiredState,
         restart: bool,
     ) -> Result<WorkloadView, EnvironmentError> {
+        // Changes are serialized with reconciliation: both write the
+        // records a release touches.
+        let cycle = self.reconciling.lock().await;
         let (key, record) = self.workload_record(environment, project, workload).await?;
         if record.value.kind == WorkloadKind::Task {
             return Err(EnvironmentError::Invalid(format!(
@@ -323,6 +426,7 @@ impl Daemon {
         if desired == DesiredState::Running {
             self.release_holds(std::slice::from_ref(&key)).await;
         }
+        drop(cycle);
         self.changed().await;
         self.workload(&key.0, &key.1, &key.2).await
     }
@@ -464,8 +568,8 @@ impl Daemon {
 
     pub(crate) async fn release_holds(&self, keys: &[Key]) {
         let mut inner = self.inner.lock().await;
-        for key in keys {
-            if let Some(runtime) = inner.runtime.get_mut(key) {
+        for (unit, runtime) in inner.runtime.iter_mut() {
+            if keys.contains(&unit.key) {
                 runtime.held = false;
                 runtime.consecutive_failures = 0;
             }

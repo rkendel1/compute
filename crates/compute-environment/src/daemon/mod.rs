@@ -15,13 +15,16 @@
 mod deploy;
 mod execute;
 mod lifecycle;
+pub(crate) mod network;
 mod processes;
 mod reconcile;
+mod release;
 mod views;
 
 pub use views::EventFilter;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,13 +32,18 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use compute_core::ExecutionControl;
+use compute_network::acme::AcmeConfig;
+use compute_network::dns::{DnsProvider, DnsProviderConfig};
+use compute_network::{Endpoints, Ingress, SecretStore};
 use compute_placement::{CapabilityCache, PoolConfig, ProviderConfig, ProviderKind, ProviderPool};
 use compute_policy::Policy;
 use compute_provider::{LocalProvider, RemoteProvider};
 use compute_state::{
-    ArtifactStore, Batch, Collection, ControlState, DeploymentRecord, Document,
-    EnvironmentProjectRecord, EnvironmentRecord, EventRecord, ProjectRecord, ProjectRevisionRecord,
-    ProviderRecord, Query, StateStore, Stored, WorkloadRecord, ids, short_digest,
+    ArtifactStore, Batch, CertificateRecord, Collection, ControlState, DeploymentRecord,
+    DeploymentStatus, DnsRecordRecord, Document, DomainRecord, EnvironmentProjectRecord,
+    EnvironmentRecord, EventRecord, InstanceState, ProjectRecord, ProjectRevisionRecord,
+    ProviderRecord, Query, StateStore, Stored, TrafficAssignmentRecord, WorkloadInstanceRecord,
+    WorkloadRecord, ids, short_digest,
 };
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify, broadcast};
@@ -63,8 +71,19 @@ pub struct DaemonConfig {
     pub pool: Option<PoolConfig>,
     /// Daemon-wide execution policy, intersected with each environment's.
     pub policy: Option<Policy>,
-    /// Host ports available for logical port bindings.
+    /// Host ports for services' stable endpoints.
     pub port_range: (u16, u16),
+    /// Host ports for individual service instances. Endpoints forward to
+    /// them; two instances of a service run side by side during a release.
+    pub instance_port_range: (u16, u16),
+    /// How long a replaced instance may finish open connections before it
+    /// is stopped.
+    pub drain_timeout: Duration,
+    /// How long traffic may take to verify on a new revision before the
+    /// release is rolled back.
+    pub switch_timeout: Duration,
+    /// Endpoints, ingress, DNS, and certificates.
+    pub network: NetworkConfig,
     /// The first restart delay of a failed service; later ones back off.
     pub restart_delay: Duration,
     /// How often the reconciler rereads desired state.
@@ -85,8 +104,57 @@ impl DaemonConfig {
             pool: None,
             policy: None,
             port_range: (20000, 29999),
+            instance_port_range: (30000, 39999),
+            drain_timeout: Duration::from_secs(30),
+            switch_timeout: Duration::from_secs(10),
+            network: NetworkConfig::default(),
             restart_delay: Duration::from_secs(1),
             reconcile_interval: Duration::from_secs(5),
+        }
+    }
+}
+
+/// The node's network: where endpoints listen, the public entry, and the
+/// providers that manage DNS and certificates.
+#[derive(Debug, Clone)]
+pub struct NetworkConfig {
+    /// The address endpoints listen on. Loopback keeps services private to
+    /// the node; ingress is the public entry.
+    pub endpoint_address: IpAddr,
+    /// Public HTTP: ACME HTTP-01, redirects, and plain routing.
+    pub ingress_http: Option<SocketAddr>,
+    /// Public HTTPS: TLS terminated by SNI.
+    pub ingress_https: Option<SocketAddr>,
+    /// The address DNS `A` records point at.
+    pub public_ipv4: Option<String>,
+    /// The address DNS `AAAA` records point at.
+    pub public_ipv6: Option<String>,
+    /// DNS providers by name.
+    pub dns: BTreeMap<String, DnsProviderConfig>,
+    /// Certificate issuance. `None` leaves domains on plain HTTP.
+    pub acme: Option<AcmeConfig>,
+    /// How often DNS records are read back to detect drift.
+    pub dns_interval: Duration,
+    /// How long to wait after a failed certificate order before retrying.
+    pub certificate_retry: Duration,
+    /// Where node-local secrets (certificate keys, the ACME account) live.
+    /// Defaults to `secrets` in the state directory.
+    pub secrets_dir: Option<PathBuf>,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            endpoint_address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ingress_http: None,
+            ingress_https: None,
+            public_ipv4: None,
+            public_ipv6: None,
+            dns: BTreeMap::new(),
+            acme: None,
+            dns_interval: Duration::from_secs(60),
+            certificate_retry: Duration::from_secs(300),
+            secrets_dir: None,
         }
     }
 }
@@ -94,8 +162,36 @@ impl DaemonConfig {
 /// (environment, project, workload) names.
 pub(crate) type Key = (String, String, String);
 
+/// What runs: a workload at one deployment's revision. A service has one
+/// unit per instance; during a release the serving instance and the
+/// candidate run side by side.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Unit {
+    pub key: Key,
+    pub deployment_id: String,
+}
+
+impl Unit {
+    pub fn new(key: &Key, deployment_id: &str) -> Self {
+        Self {
+            key: key.clone(),
+            deployment_id: deployment_id.into(),
+        }
+    }
+}
+
+/// Whether an instance should run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Want {
+    Run,
+    /// Draining: keep it while it finishes, but never start it again.
+    KeepIfRunning,
+    Stop,
+}
+
 #[derive(Default)]
 pub(crate) struct WorkloadRuntime {
+    pub service: bool,
     pub state: Option<ActualState>,
     pub generation: u64,
     /// Held down after exiting on its own, failing without a restart
@@ -115,6 +211,8 @@ pub(crate) struct WorkloadRuntime {
     pub evidence: Evidence,
     pub log_directory: Option<PathBuf>,
     pub health: Option<Health>,
+    /// When the process was last seen running, for process readiness.
+    pub running_since: Option<DateTime<Utc>>,
 }
 
 /// Desired state as last read from control state.
@@ -124,8 +222,17 @@ pub(crate) struct Desired {
     pub projects: BTreeMap<String, Stored<ProjectRecord>>,
     pub memberships: BTreeMap<(String, String), Stored<EnvironmentProjectRecord>>,
     pub workloads: BTreeMap<Key, Stored<WorkloadRecord>>,
+    /// Current deployments and every release in flight.
     pub deployments: BTreeMap<String, Stored<DeploymentRecord>>,
     pub revisions: BTreeMap<String, ProjectRevisionRecord>,
+    pub instances: BTreeMap<String, Stored<WorkloadInstanceRecord>>,
+    /// Traffic assignments by endpoint.
+    pub traffic: BTreeMap<String, Stored<TrafficAssignmentRecord>>,
+    /// Domains by name.
+    pub domains: BTreeMap<String, Stored<DomainRecord>>,
+    pub dns_records: BTreeMap<String, Stored<DnsRecordRecord>>,
+    /// Certificates by domain.
+    pub certificates: BTreeMap<String, Stored<CertificateRecord>>,
 }
 
 impl Desired {
@@ -147,36 +254,102 @@ impl Desired {
             .filter(move |(key, _)| key.0 == environment && key.1 == project)
     }
 
-    /// Whether a service should be running now: its environment, project,
-    /// and own desired state are all running.
-    pub fn should_run(&self, key: &Key) -> bool {
-        let Some(workload) = self.workloads.get(key) else {
-            return false;
-        };
-        workload.value.kind == WorkloadKind::Service
-            && workload.value.desired_state == DesiredState::Running
-            && self
-                .memberships
-                .get(&(key.0.clone(), key.1.clone()))
-                .is_some_and(|membership| {
-                    membership.value.desired_state == DesiredState::Running
-                        && membership.value.deployment_id.as_deref()
-                            == Some(workload.value.deployment_id.as_str())
-                })
+    /// Whether an environment and a project in it are running.
+    pub fn project_runs(&self, environment: &str, project: &str) -> bool {
+        self.memberships
+            .get(&(environment.to_string(), project.to_string()))
+            .is_some_and(|membership| membership.value.desired_state == DesiredState::Running)
             && self
                 .environments
-                .get(&key.0)
-                .is_some_and(|environment| environment.value.desired_state == DesiredState::Running)
+                .get(environment)
+                .is_some_and(|record| record.value.desired_state == DesiredState::Running)
+    }
+
+    /// Whether a workload's services should run: the workload's own
+    /// desired state, or, for a workload a release introduces, its
+    /// revision's.
+    pub fn workload_runs(&self, key: &Key, deployment_id: &str) -> bool {
+        let desired = match self.workloads.get(key) {
+            Some(workload) => workload.value.desired_state,
+            None => self
+                .revision_workload(deployment_id, &key.2)
+                .map_or(DesiredState::Running, |workload| workload.desired_state),
+        };
+        desired == DesiredState::Running && self.project_runs(&key.0, &key.1)
+    }
+
+    pub fn instance_key(instance: &WorkloadInstanceRecord) -> Key {
+        (
+            instance.environment.clone(),
+            instance.project.clone(),
+            instance.workload.clone(),
+        )
+    }
+
+    /// Whether an instance should run now.
+    pub fn want(&self, instance: &WorkloadInstanceRecord) -> Want {
+        let key = Self::instance_key(instance);
+        if !self.workload_runs(&key, &instance.deployment_id) {
+            return Want::Stop;
+        }
+        match instance.state {
+            InstanceState::Starting | InstanceState::Ready | InstanceState::Serving => Want::Run,
+            InstanceState::Draining => Want::KeepIfRunning,
+            InstanceState::Stopped | InstanceState::Failed => Want::Stop,
+        }
+    }
+
+    /// The instance of a workload at a deployment.
+    pub fn instance(
+        &self,
+        key: &Key,
+        deployment_id: &str,
+    ) -> Option<&Stored<WorkloadInstanceRecord>> {
+        self.instances.values().find(|instance| {
+            instance.value.deployment_id == deployment_id
+                && instance.value.environment == key.0
+                && instance.value.project == key.1
+                && instance.value.workload == key.2
+        })
+    }
+
+    pub fn revision_of(&self, deployment_id: &str) -> Option<&ProjectRevisionRecord> {
+        self.deployments
+            .get(deployment_id)
+            .and_then(|deployment| self.revisions.get(&deployment.value.revision_id))
+    }
+
+    pub fn revision_workload(
+        &self,
+        deployment_id: &str,
+        workload: &str,
+    ) -> Option<&compute_state::RevisionWorkload> {
+        self.revision_of(deployment_id)?
+            .workloads
+            .iter()
+            .find(|candidate| candidate.name == workload)
+    }
+
+    /// Releases that have not finished.
+    pub fn in_flight(&self) -> impl Iterator<Item = &Stored<DeploymentRecord>> {
+        self.deployments
+            .values()
+            .filter(|deployment| !deployment.value.status.is_terminal())
     }
 }
 
 pub(crate) struct Inner {
     pub desired: Desired,
-    pub runtime: BTreeMap<Key, WorkloadRuntime>,
+    pub runtime: BTreeMap<Unit, WorkloadRuntime>,
     /// Output of recent executions, which control state does not keep.
     pub outputs: BTreeMap<String, (String, String)>,
     pub state_error: Option<String>,
     pub last_reconciled_at: Option<DateTime<Utc>>,
+    /// Endpoints that could not listen, by host port.
+    pub endpoint_errors: BTreeMap<u16, String>,
+    /// Whether a release is in flight: the reconciler then runs often.
+    pub releasing: bool,
+    pub network: network::NetworkRuntime,
 }
 
 pub struct Daemon {
@@ -191,6 +364,13 @@ pub struct Daemon {
     cache: Mutex<CapabilityCache>,
     sequence: AtomicU64,
     events: broadcast::Sender<EventRecord>,
+    endpoints: Endpoints,
+    ingress: Option<Arc<Ingress>>,
+    ingress_http: Option<SocketAddr>,
+    ingress_https: Option<SocketAddr>,
+    secrets: SecretStore,
+    node_id: String,
+    dns: BTreeMap<String, Result<Arc<dyn DnsProvider>, String>>,
     wake: Notify,
     shutdown: tokio::sync::watch::Sender<bool>,
     _lock: std::fs::File,
@@ -304,6 +484,32 @@ impl Daemon {
                     .to_string(),
             ])
         );
+        let node_id = node_id(&config.state_dir)?;
+        let secrets = SecretStore::open(
+            config
+                .network
+                .secrets_dir
+                .clone()
+                .unwrap_or_else(|| config.state_dir.join("secrets")),
+            node_id.clone(),
+        )?;
+        let (ingress, ingress_http, ingress_https) =
+            network::start_ingress(&config.network).await?;
+        let dns = config
+            .network
+            .dns
+            .iter()
+            .map(|(name, provider)| {
+                (
+                    name.clone(),
+                    provider
+                        .build()
+                        .map(Arc::from)
+                        .map_err(|error| error.to_string()),
+                )
+            })
+            .collect();
+        let endpoints = Endpoints::new(config.network.endpoint_address);
         let (shutdown, _) = tokio::sync::watch::channel(false);
         let (events, _) = broadcast::channel(1024);
         let daemon = Arc::new(Self {
@@ -317,12 +523,22 @@ impl Daemon {
                 outputs: BTreeMap::new(),
                 state_error: None,
                 last_reconciled_at: None,
+                endpoint_errors: BTreeMap::new(),
+                releasing: false,
+                network: network::NetworkRuntime::default(),
             }),
             reconciling: Mutex::new(()),
             pool,
             cache: Mutex::new(CapabilityCache::default()),
             sequence: AtomicU64::new(sequence),
             events,
+            endpoints,
+            ingress,
+            ingress_http,
+            ingress_https,
+            secrets,
+            node_id,
+            dns,
             wake: Notify::new(),
             shutdown,
             _lock: lock,
@@ -378,7 +594,7 @@ impl Daemon {
     pub async fn shutdown(self: &Arc<Self>) {
         let _ = self.shutdown.send(true);
         let _guard = self.reconciling.lock().await;
-        let keys = self
+        let units = self
             .inner
             .lock()
             .await
@@ -386,7 +602,7 @@ impl Daemon {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        self.stop_keys(&keys).await;
+        self.stop_units(&units).await;
         let _ = self.observe().await;
         let change = self.event(
             Change::new(),
@@ -512,31 +728,73 @@ impl Daemon {
                 workload,
             );
         }
-        // Revisions are immutable: reuse ones already read.
-        let known = self.inner.lock().await.desired.revisions.clone();
-        for membership in desired.memberships.values() {
-            if let Some(deployment_id) = &membership.value.deployment_id
-                && let Some(deployment) =
-                    self.control.get::<DeploymentRecord>(deployment_id).await?
+        for instance in self.control.list::<WorkloadInstanceRecord>().await? {
+            desired.instances.insert(instance.id.clone(), instance);
+        }
+        for assignment in self.control.list::<TrafficAssignmentRecord>().await? {
+            desired
+                .traffic
+                .insert(assignment.value.endpoint.clone(), assignment);
+        }
+        for domain in self.control.list::<DomainRecord>().await? {
+            desired.domains.insert(domain.value.name.clone(), domain);
+        }
+        for record in self.control.list::<DnsRecordRecord>().await? {
+            desired.dns_records.insert(record.id.clone(), record);
+        }
+        for certificate in self.control.list::<CertificateRecord>().await? {
+            desired
+                .certificates
+                .insert(certificate.value.domain.clone(), certificate);
+        }
+        // Current deployments, the deployments instances belong to, and
+        // every release in flight.
+        let mut wanted = desired
+            .memberships
+            .values()
+            .filter_map(|membership| membership.value.deployment_id.clone())
+            .chain(
+                desired
+                    .instances
+                    .values()
+                    .map(|instance| instance.value.deployment_id.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        for status in IN_FLIGHT {
+            for deployment in self
+                .control
+                .query::<DeploymentRecord>(
+                    Query::all(Collection::Deployment).eq("status", status.as_str()),
+                )
+                .await?
             {
+                wanted.remove(&deployment.id);
                 desired
                     .deployments
-                    .insert(deployment_id.clone(), deployment);
+                    .insert(deployment.id.clone(), deployment);
             }
-            if let Some(revision_id) = &membership.value.revision_id {
-                if let Some(revision) = known.get(revision_id) {
-                    desired
-                        .revisions
-                        .insert(revision_id.clone(), revision.clone());
-                } else if let Some(revision) = self
-                    .control
-                    .get::<ProjectRevisionRecord>(revision_id)
-                    .await?
-                {
-                    desired
-                        .revisions
-                        .insert(revision_id.clone(), revision.value);
-                }
+        }
+        for deployment_id in wanted {
+            if let Some(deployment) = self.control.get::<DeploymentRecord>(&deployment_id).await? {
+                desired.deployments.insert(deployment_id, deployment);
+            }
+        }
+        // Revisions are immutable: reuse ones already read.
+        let known = self.inner.lock().await.desired.revisions.clone();
+        let revision_ids = desired
+            .deployments
+            .values()
+            .map(|deployment| deployment.value.revision_id.clone())
+            .collect::<BTreeSet<_>>();
+        for revision_id in revision_ids {
+            if let Some(revision) = known.get(&revision_id) {
+                desired.revisions.insert(revision_id, revision.clone());
+            } else if let Some(revision) = self
+                .control
+                .get::<ProjectRevisionRecord>(&revision_id)
+                .await?
+            {
+                desired.revisions.insert(revision_id, revision.value);
             }
         }
         Ok(desired)
@@ -591,6 +849,10 @@ impl Daemon {
             .join(&key.2)
     }
 
+    pub(crate) fn endpoints(&self) -> &Endpoints {
+        &self.endpoints
+    }
+
     fn cache_path(&self, digest: &str) -> PathBuf {
         self.config
             .state_dir
@@ -631,6 +893,12 @@ impl Daemon {
                 let Some(daemon) = weak.upgrade() else {
                     return;
                 };
+                // A release in flight advances every tick.
+                let interval = if daemon.inner.lock().await.releasing {
+                    interval.min(RELEASE_TICK)
+                } else {
+                    interval
+                };
                 tokio::select! {
                     () = tokio::time::sleep(interval) => {}
                     () = daemon.wake.notified() => {}
@@ -648,6 +916,43 @@ impl Daemon {
     pub(crate) fn wake(&self) {
         self.wake.notify_one();
     }
+}
+
+/// The statuses of a release in flight.
+const IN_FLIGHT: [DeploymentStatus; 7] = [
+    DeploymentStatus::Pending,
+    DeploymentStatus::Starting,
+    DeploymentStatus::Ready,
+    DeploymentStatus::NetworkReady,
+    DeploymentStatus::Switching,
+    DeploymentStatus::Active,
+    DeploymentStatus::Draining,
+];
+
+/// How often the reconciler runs while a release is in flight.
+const RELEASE_TICK: Duration = Duration::from_millis(100);
+
+/// This node's stable identity: it names the secrets the node holds.
+fn node_id(state_dir: &std::path::Path) -> Result<String, EnvironmentError> {
+    let path = state_dir.join("node-id");
+    if let Ok(id) = std::fs::read_to_string(&path)
+        && !id.trim().is_empty()
+    {
+        return Ok(id.trim().to_string());
+    }
+    let id = format!(
+        "node_{}",
+        short_digest(&[
+            &std::process::id().to_string(),
+            &Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+                .to_string(),
+            &state_dir.display().to_string(),
+        ])
+    );
+    std::fs::write(&path, &id)?;
+    Ok(id)
 }
 
 /// One daemon per node directory.

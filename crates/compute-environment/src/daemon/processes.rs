@@ -12,13 +12,15 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::Key;
+use super::Unit;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ProcessRecord {
     environment: String,
     project: String,
     workload: String,
+    #[serde(default)]
+    deployment_id: String,
     pid: u32,
     boot_id: String,
     start_time: u64,
@@ -28,10 +30,11 @@ fn directory(state_dir: &Path) -> PathBuf {
     state_dir.join("processes")
 }
 
-fn path(state_dir: &Path, key: &Key) -> PathBuf {
+fn path(state_dir: &Path, unit: &Unit) -> PathBuf {
+    let key = &unit.key;
     directory(state_dir).join(format!(
         "{}.json",
-        compute_state::short_digest(&[&key.0, &key.1, &key.2])
+        compute_state::short_digest(&[&key.0, &key.1, &key.2, &unit.deployment_id])
     ))
 }
 
@@ -61,7 +64,8 @@ fn start_time(_pid: u32) -> Option<u64> {
 }
 
 /// Record a running service's process group.
-pub(crate) fn record(state_dir: &Path, key: &Key, pid: u32) {
+pub(crate) fn record(state_dir: &Path, unit: &Unit, pid: u32) {
+    let key = &unit.key;
     let (Some(boot_id), Some(start_time)) = (boot_id(), start_time(pid)) else {
         return;
     };
@@ -69,11 +73,12 @@ pub(crate) fn record(state_dir: &Path, key: &Key, pid: u32) {
         environment: key.0.clone(),
         project: key.1.clone(),
         workload: key.2.clone(),
+        deployment_id: unit.deployment_id.clone(),
         pid,
         boot_id,
         start_time,
     };
-    let path = path(state_dir, key);
+    let path = path(state_dir, unit);
     if std::fs::create_dir_all(directory(state_dir)).is_ok()
         && let Ok(bytes) = serde_json::to_vec(&record)
     {
@@ -84,8 +89,8 @@ pub(crate) fn record(state_dir: &Path, key: &Key, pid: u32) {
     }
 }
 
-pub(crate) fn forget(state_dir: &Path, key: &Key) {
-    let _ = std::fs::remove_file(path(state_dir, key));
+pub(crate) fn forget(state_dir: &Path, unit: &Unit) {
+    let _ = std::fs::remove_file(path(state_dir, unit));
 }
 
 /// Terminate every recorded process group still led by the recorded

@@ -17,6 +17,7 @@ mod control_state;
 mod direct;
 mod distribution;
 mod environment_cmd;
+mod network_cmd;
 mod placement_certification;
 mod policy_certification;
 mod policy_cmd;
@@ -81,12 +82,20 @@ enum Commands {
     Workload(environment_cmd::WorkloadCommand),
     /// Inspect one execution recorded by the daemon.
     Execution(environment_cmd::ExecutionCommand),
-    /// Deploy a project revision to an environment
+    /// Release a project revision to an environment, with zero downtime
     Deploy(environment_cmd::DeployCommand),
     /// Deploy the exact revision current in one environment to another
     Promote(environment_cmd::PromoteCommand),
-    /// Inspect deployments and their evidence
+    /// Inspect, follow, and roll back releases
     Deployment(environment_cmd::DeploymentCommand),
+    /// Route domains to projects in environments
+    Domain(network_cmd::DomainCommand),
+    /// DNS records Compute manages at its providers
+    Dns(network_cmd::DnsCommand),
+    /// TLS certificates Compute issues and renews
+    Certificate(network_cmd::CertificateCommand),
+    /// Endpoints and ingress on this node
+    Network(network_cmd::NetworkCommand),
     /// Show lifecycle events, or follow them
     Events(environment_cmd::EventsCommand),
     /// Register shared services and list the provider pool
@@ -1242,6 +1251,10 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Deploy(command) => environment_cmd::deploy(command).await?,
         Commands::Promote(command) => environment_cmd::promote(command).await?,
         Commands::Deployment(command) => environment_cmd::deployment(command).await?,
+        Commands::Domain(command) => network_cmd::domain(command).await?,
+        Commands::Dns(command) => network_cmd::dns(command).await?,
+        Commands::Certificate(command) => network_cmd::certificate(command).await?,
+        Commands::Network(command) => network_cmd::network(command).await?,
         Commands::Events(command) => environment_cmd::events(command).await?,
         Commands::Service(command) => environment_cmd::service(command).await?,
         Commands::ControlPlane(command) => control_state::control_plane(command).await?,

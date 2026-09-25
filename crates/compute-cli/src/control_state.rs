@@ -66,6 +66,48 @@ pub struct StateOptions {
 struct ConfigFile {
     #[serde(default)]
     state: Option<StateSection>,
+    #[serde(default)]
+    network: Option<NetworkSection>,
+    #[serde(default)]
+    release: Option<ReleaseSection>,
+}
+
+/// `[network]`: endpoints, ingress, DNS providers, and certificates.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkSection {
+    #[serde(default)]
+    pub endpoint_address: Option<std::net::IpAddr>,
+    #[serde(default)]
+    pub ingress_http: Option<std::net::SocketAddr>,
+    #[serde(default)]
+    pub ingress_https: Option<std::net::SocketAddr>,
+    #[serde(default)]
+    pub public_ipv4: Option<String>,
+    #[serde(default)]
+    pub public_ipv6: Option<String>,
+    #[serde(default)]
+    pub secrets_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub dns_interval_seconds: Option<u64>,
+    #[serde(default)]
+    pub certificate_retry_seconds: Option<u64>,
+    #[serde(default)]
+    pub acme: Option<compute_environment::AcmeConfig>,
+    #[serde(default)]
+    pub dns: std::collections::BTreeMap<String, compute_environment::DnsProviderConfig>,
+}
+
+/// `[release]`: how releases move traffic.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseSection {
+    #[serde(default)]
+    pub instance_port_range: Option<String>,
+    #[serde(default)]
+    pub drain_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub switch_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -125,15 +167,51 @@ impl StateOptions {
             })
     }
 
-    fn section(&self) -> compute_core::Result<(Option<PathBuf>, StateSection)> {
+    fn file(&self) -> compute_core::Result<(Option<PathBuf>, ConfigFile)> {
         let Some(path) = self.config_path() else {
-            return Ok((None, StateSection::default()));
+            return Ok((None, ConfigFile::default()));
         };
         let text = std::fs::read_to_string(&path)
             .map_err(|error| invalid(format!("cannot read {}: {error}", path.display())))?;
         let file: ConfigFile = toml::from_str(&text)
             .map_err(|error| invalid(format!("invalid {}: {error}", path.display())))?;
-        Ok((Some(path), file.state.unwrap_or_default()))
+        Ok((Some(path), file))
+    }
+
+    fn section(&self) -> compute_core::Result<(Option<PathBuf>, StateSection)> {
+        let (path, file) = self.file()?;
+        Ok((path, file.state.unwrap_or_default()))
+    }
+
+    /// The `[network]` and `[release]` sections, with relative paths
+    /// resolved against the configuration file.
+    pub fn node(&self) -> compute_core::Result<(NetworkSection, ReleaseSection)> {
+        let (path, file) = self.file()?;
+        let mut network = file.network.unwrap_or_default();
+        let base = path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let resolve = |relative: &mut PathBuf| {
+            if relative.is_relative() {
+                *relative = base.join(&*relative);
+            }
+        };
+        if let Some(secrets) = &mut network.secrets_dir {
+            resolve(secrets);
+        }
+        if let Some(acme) = &mut network.acme
+            && let Some(ca_file) = &mut acme.ca_file
+        {
+            resolve(ca_file);
+        }
+        for provider in network.dns.values_mut() {
+            if let compute_environment::DnsProviderConfig::File { path, .. } = provider {
+                resolve(path);
+            }
+        }
+        Ok((network, file.release.unwrap_or_default()))
     }
 
     /// The FeltDB CA certificate, when one is configured.

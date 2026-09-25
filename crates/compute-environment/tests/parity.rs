@@ -130,7 +130,8 @@ async fn every_api_route_is_served() {
             .replace("{deployment}", "dep_none")
             .replace("{execution}", "exec_none")
             .replace("{receipt}", "sha256:none")
-            .replace("{service}", "none");
+            .replace("{service}", "none")
+            .replace("{domain}", "none.example.com");
         let result = match *method {
             "GET" => client.get::<serde_json::Value>(&concrete).await.map(|_| ()),
             "POST" => client

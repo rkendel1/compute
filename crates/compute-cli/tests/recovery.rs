@@ -227,7 +227,7 @@ fn a_killed_daemon_is_replaced_without_duplicating_its_services() {
         "REVISION=abc123",
         "--wait",
     ]);
-    assert_eq!(deployment["status"], "healthy", "{deployment}");
+    assert_eq!(deployment["status"], "complete", "{deployment}");
     let port = cli.host_port("production");
     let before = answer(port);
     assert!(before.starts_with("revision=abc123"), "{before}");
@@ -394,7 +394,7 @@ fn managed_feltdb_is_the_durable_authority() {
         "REVISION=abc123",
         "--wait",
     ]);
-    assert_eq!(preprod["status"], "healthy", "{preprod}");
+    assert_eq!(preprod["status"], "complete", "{preprod}");
     assert!(answer(cli.host_port("preprod")).starts_with("revision=abc123"));
     let production = cli.run(&[
         "promote",
@@ -407,7 +407,7 @@ fn managed_feltdb_is_the_durable_authority() {
         "REVISION=abc123",
         "--wait",
     ]);
-    assert_eq!(production["status"], "healthy", "{production}");
+    assert_eq!(production["status"], "complete", "{production}");
     assert_eq!(production["revision_digest"], preprod["revision_digest"]);
     assert_eq!(production["promoted_from"], preprod["deployment_id"]);
     let port = cli.host_port("production");

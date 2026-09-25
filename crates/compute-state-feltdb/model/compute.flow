@@ -57,12 +57,23 @@ app compute {
     revision_id: text
     revision: text
     revision_digest: text
-    status: enum(queued, admitted, placed, starting, healthy, failed, stopped, superseded)
+    // queued … superseded: statuses written before zero-downtime releases.
+    status: enum(pending, starting, ready, network_ready, switching, active, draining, complete, failed, rolled_back, queued, admitted, placed, healthy, stopped, superseded)
     promoted_from: text?
     previous: text?
     workloads: json
     failure: text?
     receipt_ids: json
+    old_revision: text?
+    config_digest: text?
+    config: json
+    readiness_result: json?
+    network_result: json?
+    traffic_switch_result: json?
+    rollback_reason: text?
+    receipt: text?
+    status_since: datetime?
+    completed_at: datetime?
     created_at: datetime
     updated_at: datetime
     index environment_id using hash(environment_id)
@@ -199,6 +210,93 @@ app compute {
     index digest using hash(digest)
   }
 
+  collection WorkloadInstance {
+    environment_id: text
+    environment: text
+    project_id: text
+    project: text
+    workload: text
+    workload_id: text
+    deployment_id: text
+    revision: text
+    state: enum(starting, ready, serving, draining, stopped, failed)
+    ports: json
+    readiness: text?
+    started_at: datetime?
+    ready_at: datetime?
+    stopped_at: datetime?
+    error: text?
+    updated_at: datetime
+    index workload_id using hash(workload_id)
+    index deployment_id using hash(deployment_id)
+  }
+
+  collection TrafficAssignment {
+    endpoint: text
+    environment: text
+    project: text
+    workload: text
+    port: text
+    host_port: integer
+    domains: json
+    deployment_id: text
+    revision: text
+    instance_id: text
+    target_port: integer
+    status: text
+    previous_deployment_id: text?
+    previous_instance_id: text?
+    switched_at: datetime
+    index endpoint using hash(endpoint)
+  }
+
+  collection Domain {
+    name: text
+    environment_id: text
+    environment: text
+    project_id: text
+    project: text
+    workload: text
+    port: text
+    dns_provider: text
+    certificate_id: text?
+    status: text
+    dns: json
+    tls: json
+    routing: json
+    created_at: datetime
+    index name using hash(name)
+    index environment_id using hash(environment_id)
+  }
+
+  collection DnsRecord {
+    domain: text
+    provider: text
+    zone: text
+    name: text
+    record_type: text
+    value: text
+    ttl: integer
+    provider_record_id: text?
+    state: json
+    index domain using hash(domain)
+  }
+
+  collection Certificate {
+    domain: text
+    issuer: text
+    status: text
+    renewal_status: text
+    not_before: datetime?
+    expires_at: datetime?
+    fingerprint: text?
+    secret_reference: text?
+    held_by: text?
+    last_error: text?
+    last_reconciled_at: datetime?
+    index domain using hash(domain)
+  }
+
   policy Project {
     read: authenticated
     write: authenticated
@@ -252,6 +350,26 @@ app compute {
     write: authenticated
   }
   policy ArtifactChunk {
+    read: authenticated
+    write: authenticated
+  }
+  policy WorkloadInstance {
+    read: authenticated
+    write: authenticated
+  }
+  policy TrafficAssignment {
+    read: authenticated
+    write: authenticated
+  }
+  policy Domain {
+    read: authenticated
+    write: authenticated
+  }
+  policy DnsRecord {
+    read: authenticated
+    write: authenticated
+  }
+  policy Certificate {
     read: authenticated
     write: authenticated
   }
