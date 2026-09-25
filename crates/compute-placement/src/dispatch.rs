@@ -220,6 +220,18 @@ async fn prepare_selected_runtime(
     Ok(request)
 }
 
+/// Bind the placement into the request and prepare the selected provider's
+/// runtime distribution, without executing. For a caller that admits and
+/// starts the request itself, such as a supervised service.
+pub async fn prepare_runtime(
+    pool: &ProviderPool,
+    report: &PlacementReport,
+    request: ProviderRequest,
+) -> Result<ProviderRequest, DispatchError> {
+    let (member, request) = prepare(pool, report, request)?;
+    prepare_selected_runtime(report, member, request).await
+}
+
 /// Execute synchronously on the selected provider and verify the receipt.
 pub async fn execute(
     pool: &ProviderPool,
