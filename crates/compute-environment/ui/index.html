@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Compute Control Plane</title>
+  <link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+  <header class="bar">
+    <a class="brand" href="#/">COMPUTE</a>
+    <nav>
+      <a href="#/" data-nav="environments">Environments</a>
+      <a href="#/projects" data-nav="projects">Projects</a>
+      <a href="#/domains" data-nav="domains">Domains</a>
+      <a href="#/services" data-nav="services">Services</a>
+      <a href="#/events" data-nav="events">Events</a>
+    </nav>
+    <div class="daemon" id="daemon" aria-live="polite"></div>
+    <button class="ghost" id="token" type="button" title="Bearer token for changes, when the daemon requires one">Token</button>
+  </header>
+  <main id="view" tabindex="-1"></main>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <dialog id="dialog"></dialog>
+  <script src="/ui/app.js"></script>
+</body>
+</html>

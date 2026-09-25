@@ -183,6 +183,10 @@ pub struct ExecutionOptions {
     /// Like the request ID, it is metadata and excluded from the request hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<ReceiptPlacement>,
+    /// Environment/project/workload scope the provider binds into the
+    /// receipt. Metadata: excluded from the request hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<compute_core::ReceiptScope>,
     /// Caller execution policy, intersected with the provider's own. It can
     /// only restrict; it is part of the request hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -656,6 +660,115 @@ impl LocalProvider {
     }
 }
 
+impl LocalProvider {
+    /// Execute an admitted request under host-side control, for long-lived
+    /// services: it can be cancelled and its output is logged live.
+    pub async fn execute_controlled(
+        &self,
+        request: ProviderRequest,
+        admission: Admission,
+        control: &compute_core::ExecutionControl,
+    ) -> Result<ExecuteResponse, ProviderError> {
+        self.run_admitted(request, admission, Some(control)).await
+    }
+
+    async fn run_admitted(
+        &self,
+        request: ProviderRequest,
+        admission: Admission,
+        control: Option<&compute_core::ExecutionControl>,
+    ) -> Result<ExecuteResponse, ProviderError> {
+        // Re-evaluate under the admitted snapshot, not the current policy:
+        // the decision must reproduce exactly, and must be an admission.
+        if admission.policy.policy.policy_id() != admission.policy.policy_id
+            || admission.decision.policy_id != admission.policy.policy_id
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::PolicyRejected,
+                "admission policy snapshot is inconsistent",
+            ));
+        }
+        let snapshot = self.admit_with(&request, admission.policy.clone()).await?;
+        if snapshot.decision != admission.decision {
+            return Err(ProviderError::new(
+                ProviderErrorKind::PolicyRejected,
+                "admission decision does not reproduce for this request",
+            ));
+        }
+        if !snapshot.decision.admitted {
+            return Err(ProviderError::denied(snapshot.decision));
+        }
+        let summary = snapshot.summary();
+        let (file, request_hash) = self.prepare(&request)?;
+        let inspected = self.inspect(request.clone()).await?;
+        self.executions_started.fetch_add(1, Ordering::SeqCst);
+        let mut result = match control {
+            Some(control) => {
+                self.compute
+                    .run_bundle_controlled(
+                        file.path(),
+                        request.expected.workload_id.as_deref(),
+                        request.expected.bundle_id.as_deref(),
+                        request.execution.isolation,
+                        control,
+                    )
+                    .await
+            }
+            None => {
+                self.compute
+                    .run_bundle_with_isolation(
+                        file.path(),
+                        request.expected.workload_id.as_deref(),
+                        request.expected.bundle_id.as_deref(),
+                        request.execution.isolation,
+                    )
+                    .await
+            }
+        }
+        .map_err(classify_compute_error)?;
+        if let Some(expected) = &request.expected.distribution_id {
+            let found = &result
+                .receipt
+                .as_ref()
+                .ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::RemoteExecutionFailure,
+                        "execution result is missing its receipt",
+                    )
+                })?
+                .distribution
+                .id;
+            if found != expected {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::DistributionUnavailable,
+                    format!("distribution identity mismatch: expected {expected}, found {found}"),
+                ));
+            }
+        }
+        let identity = self.identity();
+        result.provider = Some(identity.clone());
+        result.admission = Some(summary.clone());
+        if let Some(receipt) = &mut result.receipt {
+            receipt.provider = Some(identity.clone());
+            receipt.provider_protocol = Some(match &identity {
+                ProviderIdentity::Local { .. } => "compute.local@1".into(),
+                ProviderIdentity::Remote { .. } => REMOTE_PROTOCOL.into(),
+            });
+            receipt.placement = request.execution.placement.clone();
+            receipt.scope = request.execution.scope.clone();
+            receipt.bind_admission(&summary);
+            receipt.seal().map_err(classify_compute_error)?;
+        }
+        debug_assert_eq!(request_hash, inspected.request_hash);
+        Ok(ExecuteResponse {
+            protocol: identity_protocol(&identity).into(),
+            provider: identity,
+            request_hash,
+            result,
+        })
+    }
+}
+
 #[async_trait]
 impl ComputeProvider for LocalProvider {
     fn identity(&self) -> ProviderIdentity {
@@ -714,79 +827,7 @@ impl ComputeProvider for LocalProvider {
         request: ProviderRequest,
         admission: Admission,
     ) -> Result<ExecuteResponse, ProviderError> {
-        // Re-evaluate under the admitted snapshot, not the current policy:
-        // the decision must reproduce exactly, and must be an admission.
-        if admission.policy.policy.policy_id() != admission.policy.policy_id
-            || admission.decision.policy_id != admission.policy.policy_id
-        {
-            return Err(ProviderError::new(
-                ProviderErrorKind::PolicyRejected,
-                "admission policy snapshot is inconsistent",
-            ));
-        }
-        let snapshot = self.admit_with(&request, admission.policy.clone()).await?;
-        if snapshot.decision != admission.decision {
-            return Err(ProviderError::new(
-                ProviderErrorKind::PolicyRejected,
-                "admission decision does not reproduce for this request",
-            ));
-        }
-        if !snapshot.decision.admitted {
-            return Err(ProviderError::denied(snapshot.decision));
-        }
-        let summary = snapshot.summary();
-        let (file, request_hash) = self.prepare(&request)?;
-        let inspected = self.inspect(request.clone()).await?;
-        self.executions_started.fetch_add(1, Ordering::SeqCst);
-        let mut result = self
-            .compute
-            .run_bundle_with_isolation(
-                file.path(),
-                request.expected.workload_id.as_deref(),
-                request.expected.bundle_id.as_deref(),
-                request.execution.isolation,
-            )
-            .await
-            .map_err(classify_compute_error)?;
-        if let Some(expected) = &request.expected.distribution_id {
-            let found = &result
-                .receipt
-                .as_ref()
-                .ok_or_else(|| {
-                    ProviderError::new(
-                        ProviderErrorKind::RemoteExecutionFailure,
-                        "execution result is missing its receipt",
-                    )
-                })?
-                .distribution
-                .id;
-            if found != expected {
-                return Err(ProviderError::new(
-                    ProviderErrorKind::DistributionUnavailable,
-                    format!("distribution identity mismatch: expected {expected}, found {found}"),
-                ));
-            }
-        }
-        let identity = self.identity();
-        result.provider = Some(identity.clone());
-        result.admission = Some(summary.clone());
-        if let Some(receipt) = &mut result.receipt {
-            receipt.provider = Some(identity.clone());
-            receipt.provider_protocol = Some(match &identity {
-                ProviderIdentity::Local { .. } => "compute.local@1".into(),
-                ProviderIdentity::Remote { .. } => REMOTE_PROTOCOL.into(),
-            });
-            receipt.placement = request.execution.placement.clone();
-            receipt.bind_admission(&summary);
-            receipt.seal().map_err(classify_compute_error)?;
-        }
-        debug_assert_eq!(request_hash, inspected.request_hash);
-        Ok(ExecuteResponse {
-            protocol: identity_protocol(&identity).into(),
-            provider: identity,
-            request_hash,
-            result,
-        })
+        self.run_admitted(request, admission, None).await
     }
 
     async fn capabilities(&self) -> Result<ProviderCapabilities, ProviderError> {
@@ -1109,6 +1150,10 @@ fn identity_protocol(identity: &ProviderIdentity) -> &'static str {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderOperation {
+    /// Read environment, project, workload, or daemon state.
+    EnvironmentRead,
+    /// Change environment, project, or workload state.
+    EnvironmentMutate,
     Inspect,
     /// Admission without execution; authorized like inspection.
     Admission,
@@ -1285,6 +1330,12 @@ async fn handle_connection(
         Err(error) => return write_error(&mut stream, 401, error).await,
     };
     let result = match operation {
+        ProviderOperation::EnvironmentRead | ProviderOperation::EnvironmentMutate => {
+            Err(ProviderError::new(
+                ProviderErrorKind::ProtocolUnsupported,
+                "environment operations are served by the Compute daemon",
+            ))
+        }
         ProviderOperation::Health => encode_result(state.config.provider.health().await),
         ProviderOperation::Capabilities => {
             let capabilities = state.config.provider.capabilities().await.map(|mut value| {

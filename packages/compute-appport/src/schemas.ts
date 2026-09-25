@@ -477,7 +477,7 @@ export const policyInspectResultSchema = s.object({
   policy_id: digest,
   policy: s.object({}, { additionalProperties: true }),
   sources: s.array(s.object({
-    kind: s.enum(["baseline", "local", "server", "provider", "explicit"] as const),
+    kind: s.enum(["baseline", "local", "server", "provider", "environment", "explicit"] as const),
     policy_id: digest,
     label: s.optional(s.string()),
   })),
@@ -509,4 +509,399 @@ export const policyCheckResultSchema = s.object({
 export const policyExplainResultSchema = s.object({
   evidence: policyCheckResultSchema,
   explanation: s.array(s.string()),
+});
+
+// compute.environment@1: the persistent daemon's model. Compute defines
+// its semantics; these schemas describe the Compute API's JSON exactly.
+const name = s.string({ pattern: "^[a-z0-9][a-z0-9-]{0,62}$" });
+const desiredState = s.enum(["running", "stopped"] as const);
+const actualState = s.enum([
+  "pending", "starting", "running", "stopping", "stopped", "completed", "failed", "denied", "degraded",
+] as const);
+const health = s.enum(["healthy", "unhealthy", "unknown"] as const);
+const workloadKind = s.enum(["service", "task"] as const);
+const timestamp = s.string({ minLength: 1 });
+const configuration = s.record(s.string());
+const portBinding = s.object({ name: s.string(), logical: s.integer(), host: s.integer() });
+
+const workloadView = s.object({
+  workload_id: s.string({ pattern: "^wl_[0-9a-f]+$" }),
+  name,
+  kind: workloadKind,
+  desired_state: desiredState,
+  actual_state: actualState,
+  health,
+  restart: s.enum(["never", "on_failure"] as const),
+  runtime,
+  bundle_id: digest,
+  deployment_id: s.string({ pattern: "^dep_[0-9a-f]+$" }),
+  execution_id: s.optional(s.string()),
+  ports: s.array(portBinding),
+  restarts: s.integer({ minimum: 0 }),
+  started_at: s.optional(timestamp),
+  finished_at: s.optional(timestamp),
+  exit_code: s.optional(s.integer()),
+  error: s.optional(s.string()),
+  placement: s.object({
+    placement_id: s.optional(s.string()),
+    provider: s.optional(s.string()),
+    node: s.optional(s.string()),
+  }),
+  evidence: s.object({
+    policy_id: s.optional(digest),
+    admission_id: s.optional(digest),
+    receipt_ids: s.array(s.string()),
+  }),
+  resources: s.object({
+    cpu: s.string(),
+    memory_limit_bytes: s.optional(s.integer({ minimum: 0 })),
+    timeout_ms: s.optional(s.integer({ minimum: 0 })),
+    disk_bytes: s.integer({ minimum: 0 }),
+    network,
+  }),
+  log_directory: s.optional(s.string()),
+});
+
+const deploymentStatus = s.enum([
+  "pending", "starting", "ready", "network_ready", "switching", "active", "draining",
+  "complete", "failed", "rolled_back",
+] as const);
+const deploymentId = s.string({ pattern: "^dep_[0-9a-f]+$" });
+const deploymentSummary = s.object({
+  deployment_id: deploymentId,
+  status: deploymentStatus,
+  revision: s.string(),
+  created_at: timestamp,
+  updated_at: timestamp,
+  promoted_from: s.optional(deploymentId),
+});
+
+/** A project as it is in one environment. */
+export const projectViewSchema = s.object({
+  project_id: s.string({ pattern: "^prj_[0-9a-f]+$" }),
+  name,
+  environment: name,
+  environment_id: s.string({ pattern: "^env_[0-9a-f]+$" }),
+  revision: s.string(),
+  revision_id: s.string(),
+  revision_digest: s.string(),
+  source: s.optional(s.string()),
+  desired_state: desiredState,
+  actual_state: actualState,
+  health,
+  deployment: s.optional(deploymentSummary),
+  deployed_at: timestamp,
+  config: configuration,
+  workload_count: s.integer({ minimum: 0 }),
+  service_count: s.integer({ minimum: 0 }),
+  provider: s.string(),
+  workloads: s.array(workloadView),
+  disk_bytes: s.integer({ minimum: 0 }),
+});
+
+export const environmentViewSchema = s.object({
+  version: s.literal("compute.environment@1"),
+  environment_id: s.string({ pattern: "^env_[0-9a-f]+$" }),
+  name,
+  desired_state: desiredState,
+  actual_state: actualState,
+  health,
+  created_at: timestamp,
+  policy_id: digest,
+  provider: s.optional(s.string()),
+  config: configuration,
+  project_count: s.integer({ minimum: 0 }),
+  workload_count: s.integer({ minimum: 0 }),
+  service_count: s.integer({ minimum: 0 }),
+  projects: s.array(projectViewSchema),
+  disk_bytes: s.integer({ minimum: 0 }),
+});
+
+export const environmentListInputSchema = s.object({});
+export const environmentListResultSchema = s.array(s.object({
+  environment_id: s.string({ pattern: "^env_[0-9a-f]+$" }),
+  name,
+  desired_state: desiredState,
+  actual_state: actualState,
+  health,
+  project_count: s.integer({ minimum: 0 }),
+  workload_count: s.integer({ minimum: 0 }),
+  service_count: s.integer({ minimum: 0 }),
+  provider: s.string(),
+}));
+
+/** An environment name or ID. */
+export const environmentSelectorSchema = s.object({ environment: s.string({ minLength: 1 }) });
+
+export const environmentCreateInputSchema = s.object({
+  name,
+  desired_state: s.optional(desiredState),
+  env: s.optional(configuration),
+  /** compute.policy@1; it is intersected with the daemon's policy. */
+  policy: s.optional(s.object({}, { additionalProperties: true })),
+  provider: s.optional(providerId),
+});
+
+export const workloadDefinitionSchema = s.object({
+  name,
+  kind: workloadKind,
+  /** The canonical `.compute` bundle. */
+  bundle: bytes,
+  ports: s.optional(s.array(s.object({ name: s.string({ minLength: 1 }), port: s.integer({ minimum: 1, maximum: 65535 }) }))),
+  restart: s.optional(s.enum(["never", "on_failure"] as const)),
+  desired_state: s.optional(desiredState),
+  /** What proves a new instance of a service is ready for traffic. */
+  readiness: s.optional(s.object({
+    check: s.enum(["process", "port", "http", "task"] as const),
+    port: s.optional(s.string({ minLength: 1 })),
+    path: s.optional(s.string({ pattern: "^/" })),
+    task: s.optional(name),
+    timeout_ms: s.optional(s.integer({ minimum: 1 })),
+    interval_ms: s.optional(s.integer({ minimum: 1 })),
+  })),
+});
+
+export const projectAddInputSchema = s.object({
+  environment: s.string({ minLength: 1 }),
+  project: s.object({
+    name,
+    revision: s.string({ minLength: 1 }),
+    source: s.optional(s.string()),
+    desired_state: s.optional(desiredState),
+    env: s.optional(configuration),
+    workloads: s.array(workloadDefinitionSchema),
+  }),
+});
+
+export const projectRemoveInputSchema = s.object({
+  environment: s.string({ minLength: 1 }),
+  project: name,
+});
+
+export const projectRemoveResultSchema = s.object({ removed: s.string() });
+
+// Projects across environments, and deployments.
+
+const projectPlacement = s.object({
+  environment: name,
+  revision: s.string(),
+  revision_id: s.string(),
+  desired_state: desiredState,
+  actual_state: actualState,
+  health,
+  deployment: s.optional(deploymentSummary),
+});
+
+const projectSummary = {
+  project_id: s.string({ pattern: "^prj_[0-9a-f]+$" }),
+  name,
+  source: s.optional(s.string()),
+  created_at: timestamp,
+  revision_count: s.integer({ minimum: 0 }),
+  latest_revision: s.optional(s.string()),
+  environments: s.array(projectPlacement),
+};
+
+export const projectListInputSchema = s.object({});
+export const projectListResultSchema = s.array(s.object(projectSummary));
+
+const revisionView = s.object({
+  revision_id: s.string({ pattern: "^rev_[0-9a-f]+$" }),
+  project: name,
+  revision: s.string(),
+  revision_digest: digest,
+  source: s.optional(s.string()),
+  workloads: s.array(s.object({}, { additionalProperties: true })),
+  created_at: timestamp,
+});
+
+const deploymentWorkload = s.object({
+  name,
+  kind: workloadKind,
+  bundle_id: digest,
+  admitted: s.boolean(),
+  policy_id: s.optional(digest),
+  admission_id: s.optional(digest),
+  placement_id: s.optional(digest),
+  provider: s.optional(s.string()),
+  reasons: s.optional(s.array(s.string())),
+  endpoints: s.optional(s.array(portBinding)),
+});
+
+const instanceView = s.object({
+  instance_id: s.string({ pattern: "^wi_[0-9a-f]+$" }),
+  environment_id: s.string({ pattern: "^env_[0-9a-f]+$" }),
+  environment: name,
+  project_id: s.string({ pattern: "^prj_[0-9a-f]+$" }),
+  project: name,
+  workload: name,
+  workload_id: s.string(),
+  deployment_id: deploymentId,
+  revision: s.string(),
+  state: s.enum(["starting", "ready", "serving", "draining", "stopped", "failed"] as const),
+  ports: s.array(portBinding),
+  readiness: s.optional(s.string()),
+  started_at: s.optional(timestamp),
+  ready_at: s.optional(timestamp),
+  stopped_at: s.optional(timestamp),
+  error: s.optional(s.string()),
+  updated_at: timestamp,
+  actual_state: s.optional(actualState),
+  open_connections: s.integer({ minimum: 0 }),
+});
+
+const evidence = s.object({}, { additionalProperties: true });
+
+/** A compute.state@1 deployment, with its admission and placement evidence. */
+export const deploymentViewSchema = s.object({
+  deployment_id: deploymentId,
+  environment_id: s.string({ pattern: "^env_[0-9a-f]+$" }),
+  environment: name,
+  project_id: s.string({ pattern: "^prj_[0-9a-f]+$" }),
+  project: name,
+  revision_id: s.string({ pattern: "^rev_[0-9a-f]+$" }),
+  revision: s.string(),
+  revision_digest: digest,
+  status: deploymentStatus,
+  promoted_from: s.optional(deploymentId),
+  previous: s.optional(deploymentId),
+  workloads: s.array(deploymentWorkload),
+  failure: s.optional(s.string()),
+  receipt_ids: s.array(s.string()),
+  old_revision: s.optional(s.string()),
+  config_digest: s.optional(digest),
+  config: s.optional(configuration),
+  readiness_result: s.optional(evidence),
+  network_result: s.optional(evidence),
+  traffic_switch_result: s.optional(evidence),
+  rollback_reason: s.optional(s.string()),
+  receipt: s.optional(digest),
+  status_since: s.optional(timestamp),
+  completed_at: s.optional(timestamp),
+  created_at: timestamp,
+  updated_at: timestamp,
+  instances: s.optional(s.array(instanceView)),
+});
+
+export const deploymentRollbackInputSchema = s.object({ deployment: deploymentId });
+
+// Network: domains, DNS records, certificates.
+
+const reconciliation = s.object({
+  status: s.string(),
+  desired: s.optional(s.string()),
+  actual: s.optional(s.string()),
+  last_error: s.optional(s.string()),
+  last_reconciled_at: s.optional(timestamp),
+});
+
+export const dnsRecordViewSchema = s.object({
+  record_id: s.string({ pattern: "^dns_[0-9a-f]+$" }),
+  domain: s.string(),
+  provider: s.string(),
+  zone: s.string(),
+  name: s.string(),
+  record_type: s.enum(["A", "AAAA", "CNAME"] as const),
+  value: s.string(),
+  ttl: s.integer({ minimum: 0 }),
+  provider_record_id: s.optional(s.string()),
+  state: reconciliation,
+});
+
+/** Public facts only: a certificate's key never leaves its node. */
+export const certificateViewSchema = s.object({
+  certificate_id: s.string({ pattern: "^cert_[0-9a-f]+$" }),
+  domain: s.string(),
+  issuer: s.string(),
+  status: s.string(),
+  renewal_status: s.string(),
+  not_before: s.optional(timestamp),
+  expires_at: s.optional(timestamp),
+  fingerprint: s.optional(digest),
+  secret_reference: s.optional(s.string({ pattern: "^node:" })),
+  held_by: s.optional(s.string()),
+  last_error: s.optional(s.string()),
+  last_reconciled_at: s.optional(timestamp),
+  held_here: s.boolean(),
+});
+
+export const domainViewSchema = s.object({
+  domain_id: s.string({ pattern: "^dom_[0-9a-f]+$" }),
+  name: s.string(),
+  environment_id: s.string({ pattern: "^env_[0-9a-f]+$" }),
+  environment: name,
+  project_id: s.string({ pattern: "^prj_[0-9a-f]+$" }),
+  project: name,
+  workload: name,
+  port: s.string(),
+  dns_provider: s.string(),
+  certificate_id: s.optional(s.string()),
+  status: s.string(),
+  dns: reconciliation,
+  tls: reconciliation,
+  routing: reconciliation,
+  created_at: timestamp,
+  endpoint: s.string(),
+  host_port: s.optional(s.integer()),
+  serving_revision: s.optional(s.string()),
+  serving_deployment: s.optional(deploymentId),
+  dns_records: s.array(dnsRecordViewSchema),
+  certificate: s.optional(certificateViewSchema),
+});
+
+export const domainListInputSchema = s.object({});
+export const domainListResultSchema = s.array(domainViewSchema);
+export const domainSelectorSchema = s.object({ domain: s.string({ minLength: 1 }) });
+export const domainCreateInputSchema = s.object({
+  name: s.string({ minLength: 1, maxLength: 253 }),
+  environment: s.string({ minLength: 1 }),
+  project: name,
+  workload: s.optional(name),
+  port: s.optional(s.string({ minLength: 1 })),
+  /** A configured DNS provider, or `none` to manage DNS outside Compute. */
+  dns_provider: s.optional(s.string({ minLength: 1 })),
+  tls: s.optional(s.boolean()),
+});
+export const domainRemoveResultSchema = s.object({ removed: s.string() });
+export const dnsInspectInputSchema = s.object({});
+export const dnsInspectResultSchema = s.array(dnsRecordViewSchema);
+export const certificateInspectInputSchema = s.object({ domain: s.optional(s.string({ minLength: 1 })) });
+export const certificateInspectResultSchema = s.array(certificateViewSchema);
+
+/** A project in one environment, or across all of them. */
+export const projectInspectInputSchema = s.object({
+  project: name,
+  environment: s.optional(s.string({ minLength: 1 })),
+});
+export const projectInspectResultSchema = s.union([
+  projectViewSchema,
+  s.object({
+    ...projectSummary,
+    revisions: s.array(revisionView),
+    deployments: s.array(deploymentViewSchema),
+  }),
+] as const);
+
+export const projectSelectorSchema = s.object({
+  project: name,
+  environment: s.string({ minLength: 1 }),
+});
+
+export const deploymentInspectInputSchema = s.object({ deployment: deploymentId });
+
+export const deploymentCreateInputSchema = s.object({
+  project: name,
+  environment: s.string({ minLength: 1 }),
+  /** A registered revision label or rev_ ID; defaults to the latest. */
+  revision: s.optional(s.string({ minLength: 1 })),
+  config: s.optional(configuration),
+  desired_state: s.optional(desiredState),
+});
+
+export const deploymentPromoteInputSchema = s.object({
+  project: name,
+  from: s.string({ minLength: 1 }),
+  to: s.string({ minLength: 1 }),
+  allow_unhealthy: s.optional(s.boolean()),
+  config: s.optional(configuration),
 });

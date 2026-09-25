@@ -385,3 +385,336 @@ export interface PolicyCheckResult {
   effective_policy: Record<string, unknown>;
   decision: AdmissionDecision;
 }
+
+/** compute.environment@1 lifecycle states. */
+export type DesiredState = "running" | "stopped";
+export type ActualState =
+  | "pending" | "starting" | "running" | "stopping" | "stopped"
+  | "completed" | "failed" | "denied" | "degraded";
+export type Health = "healthy" | "unhealthy" | "unknown";
+export type EnvironmentWorkloadKind = "service" | "task";
+
+export interface EnvironmentWorkloadView {
+  workload_id: string;
+  name: string;
+  kind: EnvironmentWorkloadKind;
+  desired_state: DesiredState;
+  actual_state: ActualState;
+  health: Health;
+  restart: "never" | "on_failure";
+  runtime: RuntimeKind;
+  bundle_id: string;
+  deployment_id: string;
+  execution_id?: string;
+  /** Logical project ports and the host ports the environment bound them to. */
+  ports: Array<{ name: string; logical: number; host: number }>;
+  restarts: number;
+  started_at?: string;
+  finished_at?: string;
+  exit_code?: number;
+  error?: string;
+  placement: { placement_id?: string; provider?: string; node?: string };
+  evidence: { policy_id?: string; admission_id?: string; receipt_ids: string[] };
+  /** CPU usage is reported as "not_measured". */
+  resources: { cpu: string; memory_limit_bytes?: number; timeout_ms?: number; disk_bytes: number; network: NetworkPolicy };
+  log_directory?: string;
+}
+
+/**
+ * A release: pending → starting → ready → network_ready → switching →
+ * active → draining → complete, or failed (before traffic moved) or
+ * rolled_back (after).
+ */
+export type DeploymentStatus =
+  | "pending" | "starting" | "ready" | "network_ready" | "switching" | "active" | "draining"
+  | "complete" | "failed" | "rolled_back";
+
+export type InstanceState = "starting" | "ready" | "serving" | "draining" | "stopped" | "failed";
+
+/** One instance of a service at one deployment's revision. */
+export interface InstanceView {
+  instance_id: string;
+  environment_id: string;
+  environment: string;
+  project_id: string;
+  project: string;
+  workload: string;
+  workload_id: string;
+  deployment_id: string;
+  revision: string;
+  state: InstanceState;
+  /** The instance's own host ports, behind the workload's stable endpoints. */
+  ports: Array<{ name: string; logical: number; host: number }>;
+  readiness?: string;
+  started_at?: string;
+  ready_at?: string;
+  stopped_at?: string;
+  error?: string;
+  updated_at: string;
+  actual_state?: ActualState;
+  open_connections: number;
+}
+
+export interface DeploymentSummary {
+  deployment_id: string;
+  status: DeploymentStatus;
+  revision: string;
+  created_at: string;
+  updated_at: string;
+  promoted_from?: string;
+}
+
+/** A project as it is in one environment. */
+export interface ProjectView {
+  project_id: string;
+  name: string;
+  environment: string;
+  environment_id: string;
+  revision: string;
+  revision_id: string;
+  revision_digest: string;
+  source?: string;
+  desired_state: DesiredState;
+  actual_state: ActualState;
+  health: Health;
+  deployment?: DeploymentSummary;
+  deployed_at: string;
+  config: Record<string, string>;
+  workload_count: number;
+  service_count: number;
+  provider: string;
+  workloads: EnvironmentWorkloadView[];
+  disk_bytes: number;
+}
+
+export interface ProjectPlacement {
+  environment: string;
+  revision: string;
+  revision_id: string;
+  desired_state: DesiredState;
+  actual_state: ActualState;
+  health: Health;
+  deployment?: DeploymentSummary;
+}
+
+/** A project across every environment it is in. */
+export interface ProjectSummary {
+  project_id: string;
+  name: string;
+  source?: string;
+  created_at: string;
+  revision_count: number;
+  latest_revision?: string;
+  environments: ProjectPlacement[];
+}
+
+export interface RevisionView {
+  revision_id: string;
+  project: string;
+  revision: string;
+  revision_digest: string;
+  source?: string;
+  workloads: Array<Record<string, unknown>>;
+  created_at: string;
+}
+
+export interface DeploymentView {
+  deployment_id: string;
+  environment_id: string;
+  environment: string;
+  project_id: string;
+  project: string;
+  revision_id: string;
+  revision: string;
+  revision_digest: string;
+  status: DeploymentStatus;
+  promoted_from?: string;
+  previous?: string;
+  workloads: Array<{
+    name: string;
+    kind: EnvironmentWorkloadKind;
+    bundle_id: string;
+    admitted: boolean;
+    policy_id?: string;
+    admission_id?: string;
+    placement_id?: string;
+    provider?: string;
+    reasons?: string[];
+    /** A service's stable endpoints. */
+    endpoints?: Array<{ name: string; logical: number; host: number }>;
+  }>;
+  failure?: string;
+  receipt_ids: string[];
+  /** The revision this release replaces. */
+  old_revision?: string;
+  /** Digest of the configuration the release runs with. */
+  config_digest?: string;
+  config?: Record<string, string>;
+  readiness_result?: Record<string, unknown>;
+  network_result?: Record<string, unknown>;
+  traffic_switch_result?: Record<string, unknown>;
+  rollback_reason?: string;
+  /** The deployment receipt's artifact digest. */
+  receipt?: string;
+  status_since?: string;
+  completed_at?: string;
+  created_at: string;
+  updated_at: string;
+  instances?: InstanceView[];
+}
+
+/** What is wanted, what is, and what went wrong last. */
+export interface Reconciliation {
+  status: string;
+  desired?: string;
+  actual?: string;
+  last_error?: string;
+  last_reconciled_at?: string;
+}
+
+export interface DnsRecordView {
+  record_id: string;
+  domain: string;
+  provider: string;
+  zone: string;
+  name: string;
+  record_type: string;
+  value: string;
+  ttl: number;
+  provider_record_id?: string;
+  state: Reconciliation;
+}
+
+/** A certificate's public facts; its key never leaves the node that holds it. */
+export interface CertificateView {
+  certificate_id: string;
+  domain: string;
+  issuer: string;
+  status: string;
+  renewal_status: string;
+  not_before?: string;
+  expires_at?: string;
+  fingerprint?: string;
+  secret_reference?: string;
+  held_by?: string;
+  last_error?: string;
+  last_reconciled_at?: string;
+  held_here: boolean;
+}
+
+/** A domain routed to one workload port of one project in one environment. */
+export interface DomainView {
+  domain_id: string;
+  name: string;
+  environment_id: string;
+  environment: string;
+  project_id: string;
+  project: string;
+  workload: string;
+  port: string;
+  dns_provider: string;
+  certificate_id?: string;
+  status: string;
+  dns: Reconciliation;
+  tls: Reconciliation;
+  routing: Reconciliation;
+  created_at: string;
+  endpoint: string;
+  host_port?: number;
+  serving_revision?: string;
+  serving_deployment?: string;
+  dns_records: DnsRecordView[];
+  certificate?: CertificateView;
+}
+
+export interface DomainCreateInput {
+  name: string;
+  environment: string;
+  project: string;
+  workload?: string | undefined;
+  port?: string | undefined;
+  dns_provider?: string | undefined;
+  tls?: boolean | undefined;
+}
+
+export interface ProjectDetail extends ProjectSummary {
+  revisions: RevisionView[];
+  deployments: DeploymentView[];
+}
+
+export interface DeploymentCreateInput {
+  project: string;
+  environment: string;
+  revision?: string | undefined;
+  config?: Record<string, string> | undefined;
+  desired_state?: DesiredState | undefined;
+}
+
+export interface DeploymentPromoteInput {
+  project: string;
+  from: string;
+  to: string;
+  allow_unhealthy?: boolean | undefined;
+  config?: Record<string, string> | undefined;
+}
+
+export interface EnvironmentView {
+  version: "compute.environment@1";
+  environment_id: string;
+  name: string;
+  desired_state: DesiredState;
+  actual_state: ActualState;
+  health: Health;
+  created_at: string;
+  /** The environment's effective policy: daemon ∩ environment ∩ baseline. */
+  policy_id: string;
+  provider?: string;
+  config: Record<string, string>;
+  project_count: number;
+  workload_count: number;
+  service_count: number;
+  projects: ProjectView[];
+  disk_bytes: number;
+}
+
+export interface EnvironmentSummary {
+  environment_id: string;
+  name: string;
+  desired_state: DesiredState;
+  actual_state: ActualState;
+  health: Health;
+  project_count: number;
+  workload_count: number;
+  service_count: number;
+  provider: string;
+}
+
+export interface EnvironmentCreateInput {
+  name: string;
+  desired_state?: DesiredState | undefined;
+  env?: Record<string, string> | undefined;
+  policy?: Record<string, unknown> | undefined;
+  provider?: string | undefined;
+}
+
+export interface EnvironmentWorkloadDefinition {
+  name: string;
+  kind: EnvironmentWorkloadKind;
+  /** The canonical `.compute` bundle bytes. */
+  bundle: string | number[];
+  ports?: Array<{ name: string; port: number }> | undefined;
+  restart?: "never" | "on_failure" | undefined;
+  desired_state?: DesiredState | undefined;
+}
+
+export interface ProjectAddInput {
+  environment: string;
+  project: {
+    name: string;
+    revision: string;
+    source?: string | undefined;
+    desired_state?: DesiredState | undefined;
+    env?: Record<string, string> | undefined;
+    workloads: EnvironmentWorkloadDefinition[];
+  };
+}

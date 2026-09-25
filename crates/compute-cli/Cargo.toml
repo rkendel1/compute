@@ -12,6 +12,11 @@ path = "src/main.rs"
 [dependencies]
 async-trait.workspace = true
 compute-core = { path = "../compute-core" }
+compute-environment = { path = "../compute-environment" }
+compute-state = { path = "../compute-state" }
+compute-state-file = { path = "../compute-state-file" }
+compute-state-memory = { path = "../compute-state-memory" }
+compute-state-feltdb = { path = "../compute-state-feltdb" }
 compute-placement = { path = "../compute-placement" }
 compute-policy = { path = "../compute-policy" }
 compute-provider = { path = "../compute-provider" }
@@ -28,6 +33,7 @@ toml.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+libc.workspace = true
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile.workspace = true

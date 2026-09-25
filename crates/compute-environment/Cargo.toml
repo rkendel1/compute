@@ -1,0 +1,38 @@
+[package]
+name = "compute-environment"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Persistent environments and the Compute daemon"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+compute-core = { path = "../compute-core" }
+compute-placement = { path = "../compute-placement" }
+compute-policy = { path = "../compute-policy" }
+compute-network = { path = "../compute-network" }
+compute-provider = { path = "../compute-provider" }
+compute-state = { path = "../compute-state" }
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+libc.workspace = true
+compute-state-memory = { path = "../compute-state-memory" }
+compute-state-file = { path = "../compute-state-file" }
+async-trait.workspace = true
+compute-runtime = { path = "../compute-runtime" }
+compute-core = { path = "../compute-core" }
+tempfile.workspace = true
+wat.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "compute-state-feltdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Compute control state in Managed FeltDB"
+
+[dependencies]
+async-trait.workspace = true
+compute-state = { path = "../compute-state" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+compute-state-memory = { path = "../compute-state-memory" }
+chrono.workspace = true
+tokio.workspace = true
+async-trait.workspace = true

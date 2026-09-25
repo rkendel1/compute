@@ -187,6 +187,10 @@ pub struct ExecutionReceipt {
     /// for executions that were not placed through a provider pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<ReceiptPlacement>,
+    /// Environment, project, and workload this execution belongs to, when
+    /// it ran inside a Compute environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ReceiptScope>,
     /// Identity of the exact policy snapshot admission evaluated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_id: Option<String>,
@@ -243,6 +247,49 @@ pub struct SelectionReason {
     pub compatible_candidates: u64,
 }
 
+/// Where an execution sits in the environment model:
+/// environment → project → workload → execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptScope {
+    pub environment_id: String,
+    pub environment: String,
+    pub project_id: String,
+    pub project: String,
+    pub revision: String,
+    pub workload_id: String,
+    pub workload: String,
+    /// `service` or `task`.
+    pub workload_kind: String,
+}
+
+impl ReceiptScope {
+    fn validate(&self) -> Result<()> {
+        for value in [
+            &self.environment_id,
+            &self.environment,
+            &self.project_id,
+            &self.project,
+            &self.revision,
+            &self.workload_id,
+            &self.workload,
+        ] {
+            if value.is_empty()
+                || value.len() > 128
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:@".contains(&byte))
+            {
+                return Err(invalid("invalid execution scope"));
+            }
+        }
+        if !matches!(self.workload_kind.as_str(), "service" | "task") {
+            return Err(invalid("invalid workload kind in execution scope"));
+        }
+        Ok(())
+    }
+}
+
 /// Placement evidence bound into a receipt by the executing provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -274,6 +321,8 @@ struct ReceiptBody<'a> {
     provider_protocol: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     placement: &'a Option<ReceiptPlacement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: &'a Option<ReceiptScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_id: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -378,6 +427,9 @@ impl ExecutionReceipt {
                 return Err(invalid("placement selected an incompatible provider"));
             }
         }
+        if let Some(scope) = &self.scope {
+            scope.validate()?;
+        }
         match (&self.policy_id, &self.admission_id, &self.admission_status) {
             (None, None, None) => {}
             (Some(policy), Some(admission), Some(status)) => {
@@ -457,6 +509,7 @@ impl ExecutionReceipt {
             provider: &self.provider,
             provider_protocol: &self.provider_protocol,
             placement: &self.placement,
+            scope: &self.scope,
             policy_id: &self.policy_id,
             admission_id: &self.admission_id,
             admission_status: &self.admission_status,
@@ -578,6 +631,7 @@ pub fn create_execution_receipt(
         provider: None,
         provider_protocol: None,
         placement: None,
+        scope: None,
         policy_id: None,
         admission_id: None,
         admission_status: None,

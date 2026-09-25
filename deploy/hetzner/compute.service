@@ -1,0 +1,30 @@
+# systemd unit for the Compute daemon on a dedicated host (for example a
+# Hetzner server). Compute does not require systemd; this unit only keeps
+# the daemon running and restarts it after a crash. A restarted daemon
+# reaps what its predecessor left and restores desired state from Managed
+# FeltDB.
+[Unit]
+Description=Compute daemon
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=compute
+Group=compute
+EnvironmentFile=/etc/compute/compute.env
+ExecStart=/usr/local/bin/compute start --config /etc/compute/compute.toml --state-dir /var/lib/compute --listen 127.0.0.1:8787 --require-token-env COMPUTE_DAEMON_TOKEN
+# Stop services cleanly; desired state stays in FeltDB.
+KillSignal=SIGINT
+TimeoutStopSec=60
+Restart=always
+RestartSec=2
+# Services run in their own process groups; let the daemon stop them.
+KillMode=mixed
+LimitNOFILE=65536
+# Ingress binds ports 80 and 443 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

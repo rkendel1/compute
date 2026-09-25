@@ -13,8 +13,11 @@ use compute_runtime::Compute;
 
 mod admission;
 mod certification;
+mod control_state;
 mod direct;
 mod distribution;
+mod environment_cmd;
+mod network_cmd;
 mod placement_certification;
 mod policy_certification;
 mod policy_cmd;
@@ -65,6 +68,40 @@ enum Commands {
     /// Show the full decision chain for a workload: requirements,
     /// capabilities, policy, admission, and placement. Never executes.
     Explain(policy_cmd::ExplainCommand),
+    /// Run the persistent Compute daemon (environments and services).
+    Start(environment_cmd::StartCommand),
+    /// Stop the Compute daemon. Desired state is kept.
+    Stop(environment_cmd::DaemonCommand),
+    /// Show the Compute daemon's status.
+    Status(environment_cmd::DaemonCommand),
+    /// Create, inspect, and operate environments.
+    Environment(environment_cmd::EnvironmentCommand),
+    /// Add, remove, inspect, and operate projects within an environment.
+    Project(environment_cmd::ProjectCommand),
+    /// Operate one service or task within a project.
+    Workload(environment_cmd::WorkloadCommand),
+    /// Inspect one execution recorded by the daemon.
+    Execution(environment_cmd::ExecutionCommand),
+    /// Release a project revision to an environment, with zero downtime
+    Deploy(environment_cmd::DeployCommand),
+    /// Deploy the exact revision current in one environment to another
+    Promote(environment_cmd::PromoteCommand),
+    /// Inspect, follow, and roll back releases
+    Deployment(environment_cmd::DeploymentCommand),
+    /// Route domains to projects in environments
+    Domain(network_cmd::DomainCommand),
+    /// DNS records Compute manages at its providers
+    Dns(network_cmd::DnsCommand),
+    /// TLS certificates Compute issues and renews
+    Certificate(network_cmd::CertificateCommand),
+    /// Endpoints and ingress on this node
+    Network(network_cmd::NetworkCommand),
+    /// Show lifecycle events, or follow them
+    Events(environment_cmd::EventsCommand),
+    /// Register shared services and list the provider pool
+    Service(environment_cmd::ServiceCommand),
+    /// Provision or upgrade the control model in Managed FeltDB
+    ControlPlane(control_state::ControlPlaneCommand),
     /// Serve compute.remote@1 with durable filesystem-backed jobs.
     Serve(ServeCommand),
 }
@@ -1204,6 +1241,23 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Pool(command) => pool::pool(command).await?,
         Commands::Policy(command) => policy_cmd::policy(command).await?,
         Commands::Explain(command) => policy_cmd::explain(command).await?,
+        Commands::Start(command) => environment_cmd::start(command).await?,
+        Commands::Stop(command) => environment_cmd::stop(command).await?,
+        Commands::Status(command) => environment_cmd::status(command).await?,
+        Commands::Environment(command) => environment_cmd::environment(command).await?,
+        Commands::Project(command) => environment_cmd::project(command).await?,
+        Commands::Workload(command) => environment_cmd::workload(command).await?,
+        Commands::Execution(command) => environment_cmd::execution(command).await?,
+        Commands::Deploy(command) => environment_cmd::deploy(command).await?,
+        Commands::Promote(command) => environment_cmd::promote(command).await?,
+        Commands::Deployment(command) => environment_cmd::deployment(command).await?,
+        Commands::Domain(command) => network_cmd::domain(command).await?,
+        Commands::Dns(command) => network_cmd::dns(command).await?,
+        Commands::Certificate(command) => network_cmd::certificate(command).await?,
+        Commands::Network(command) => network_cmd::network(command).await?,
+        Commands::Events(command) => environment_cmd::events(command).await?,
+        Commands::Service(command) => environment_cmd::service(command).await?,
+        Commands::ControlPlane(command) => control_state::control_plane(command).await?,
         Commands::Remote(command) => match command.command {
             RemoteCommands::Capabilities(command) => {
                 let value = RemoteProvider::new(command.provider)

@@ -1,0 +1,11 @@
+writes: 500 sequential authenticated HTTP writes (one curl each): 7726 ms; status counts: 500 201
+backup create --output backup-relative (bare-relative): exit 1 in 29 ms; archive present: yes; output: Error: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+backup create --output backup-dot (./relative): exit 0 in 29 ms; archive present: yes; output: Backup created: ./backup-dot (format 1, 4 files)
+backup create --output backup-absolute (absolute): exit 0 in 29 ms; archive present: yes; output: Backup created: /tmp/tmp.u5Vukud12K/backup-absolute (format 1, 4 files)
+backup verify: exit 0
+backup restore (absolute): exit 0 in 50 ms
+backup restore --output restored-relative (bare-relative): exit 1; restored present: yes
+restored record r137: {"id":"r137","key":"records:r137","value":{"id":"r137","value":"v137"},"version_ms":0}
+restored record r500 status: 200
+the original API key still authenticates after restore: yes
+sizes: 808K original 812K backup-absolute 812K restored 

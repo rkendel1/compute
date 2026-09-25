@@ -1,0 +1,376 @@
+// compute.state@1: the durable Compute control model.
+//
+// Managed FeltDB is the durable authority for Compute control state:
+// desired state and evidence. Compute owns live process state and never
+// writes it here. Nested values are json; every other field is typed.
+
+app compute {
+  collection Project {
+    name: text
+    source: text?
+    created_at: datetime
+    index name using hash(name)
+  }
+
+  collection ProjectRevision {
+    project_id: text
+    project: text
+    revision: text
+    revision_digest: text
+    source: text?
+    workloads: json
+    created_at: datetime
+    index project_id using hash(project_id)
+    index revision using hash(revision)
+  }
+
+  collection Environment {
+    name: text
+    desired_state: enum(running, stopped)
+    config: json
+    policy: json?
+    provider: text?
+    created_at: datetime
+    index name using hash(name)
+  }
+
+  collection EnvironmentProject {
+    environment_id: text
+    environment: text
+    project_id: text
+    project: text
+    desired_state: enum(running, stopped)
+    config: json
+    revision_id: text?
+    deployment_id: text?
+    created_at: datetime
+    updated_at: datetime
+    index environment_id using hash(environment_id)
+    index project_id using hash(project_id)
+  }
+
+  collection Deployment {
+    environment_id: text
+    environment: text
+    project_id: text
+    project: text
+    revision_id: text
+    revision: text
+    revision_digest: text
+    // queued … superseded: statuses written before zero-downtime releases.
+    status: enum(pending, starting, ready, network_ready, switching, active, draining, complete, failed, rolled_back, queued, admitted, placed, healthy, stopped, superseded)
+    promoted_from: text?
+    previous: text?
+    workloads: json
+    failure: text?
+    receipt_ids: json
+    old_revision: text?
+    config_digest: text?
+    config: json
+    readiness_result: json?
+    network_result: json?
+    traffic_switch_result: json?
+    rollback_reason: text?
+    receipt: text?
+    status_since: datetime?
+    completed_at: datetime?
+    created_at: datetime
+    updated_at: datetime
+    index environment_id using hash(environment_id)
+    index project_id using hash(project_id)
+    index status using hash(status)
+  }
+
+  collection Workload {
+    environment_id: text
+    environment: text
+    project_id: text
+    project: text
+    name: text
+    kind: enum(service, task)
+    desired_state: enum(running, stopped)
+    restart: enum(never, on_failure)
+    bundle_id: text
+    workload_identity: text
+    runtime: text
+    ports: json
+    deployment_id: text
+    index environment_id using hash(environment_id)
+    index project_id using hash(project_id)
+  }
+
+  collection Execution {
+    execution_id: text
+    environment_id: text
+    environment: text
+    project_id: text
+    project: text
+    workload_id: text
+    workload: text
+    kind: enum(service, task)
+    deployment_id: text?
+    status: text
+    exit_code: integer?
+    started_at: datetime
+    finished_at: datetime?
+    receipt_id: text?
+    policy_id: text?
+    admission_id: text?
+    placement_id: text?
+    provider: text?
+    error: text?
+    index workload_id using hash(workload_id)
+    index environment_id using hash(environment_id)
+    index deployment_id using hash(deployment_id)
+  }
+
+  collection Receipt {
+    receipt_id: text
+    execution_id: text
+    environment_id: text
+    project_id: text
+    workload_id: text
+    deployment_id: text?
+    policy_id: text?
+    admission_id: text?
+    artifact_digest: text?
+    created_at: datetime
+    index execution_id using hash(execution_id)
+    index receipt_id using hash(receipt_id)
+  }
+
+  collection Service {
+    name: text
+    capabilities: json
+    provider: text
+    environment: text?
+    project: text?
+    workload: text?
+    endpoint: text?
+    description: text?
+    created_at: datetime
+    updated_at: datetime
+    index name using hash(name)
+  }
+
+  collection Provider {
+    provider_id: text
+    kind: text
+    endpoint: text?
+    priority: integer
+    registered_by: text
+    observed_at: datetime
+  }
+
+  collection Event {
+    sequence: integer
+    kind: text
+    at: datetime
+    environment: text?
+    project: text?
+    workload: text?
+    deployment_id: text?
+    execution_id: text?
+    message: text
+    data: json?
+    index sequence using sorted(sequence)
+    index kind using hash(kind)
+  }
+
+  collection WorkloadStatus {
+    workload_id: text
+    environment: text
+    project: text
+    workload: text
+    actual_state: text
+    health: text
+    deployment_id: text?
+    execution_id: text?
+    restarts: integer
+    error: text?
+    observed_by: text
+    observed_at: datetime
+    index workload_id using hash(workload_id)
+    index environment using hash(environment)
+  }
+
+  collection Artifact {
+    digest: text
+    kind: text
+    size: integer
+    chunks: integer
+    created_at: datetime
+    index digest using hash(digest)
+  }
+
+  collection ArtifactChunk {
+    digest: text
+    position: integer
+    data: text
+    index digest using hash(digest)
+  }
+
+  collection WorkloadInstance {
+    environment_id: text
+    environment: text
+    project_id: text
+    project: text
+    workload: text
+    workload_id: text
+    deployment_id: text
+    revision: text
+    state: enum(starting, ready, serving, draining, stopped, failed)
+    ports: json
+    readiness: text?
+    started_at: datetime?
+    ready_at: datetime?
+    stopped_at: datetime?
+    error: text?
+    updated_at: datetime
+    index workload_id using hash(workload_id)
+    index deployment_id using hash(deployment_id)
+  }
+
+  collection TrafficAssignment {
+    endpoint: text
+    environment: text
+    project: text
+    workload: text
+    port: text
+    host_port: integer
+    domains: json
+    deployment_id: text
+    revision: text
+    instance_id: text
+    target_port: integer
+    status: text
+    previous_deployment_id: text?
+    previous_instance_id: text?
+    switched_at: datetime
+    index endpoint using hash(endpoint)
+  }
+
+  collection Domain {
+    name: text
+    environment_id: text
+    environment: text
+    project_id: text
+    project: text
+    workload: text
+    port: text
+    dns_provider: text
+    certificate_id: text?
+    status: text
+    dns: json
+    tls: json
+    routing: json
+    created_at: datetime
+    index name using hash(name)
+    index environment_id using hash(environment_id)
+  }
+
+  collection DnsRecord {
+    domain: text
+    provider: text
+    zone: text
+    name: text
+    record_type: text
+    value: text
+    ttl: integer
+    provider_record_id: text?
+    state: json
+    index domain using hash(domain)
+  }
+
+  collection Certificate {
+    domain: text
+    issuer: text
+    status: text
+    renewal_status: text
+    not_before: datetime?
+    expires_at: datetime?
+    fingerprint: text?
+    secret_reference: text?
+    held_by: text?
+    last_error: text?
+    last_reconciled_at: datetime?
+    index domain using hash(domain)
+  }
+
+  policy Project {
+    read: authenticated
+    write: authenticated
+  }
+  policy ProjectRevision {
+    read: authenticated
+    write: authenticated
+  }
+  policy Environment {
+    read: authenticated
+    write: authenticated
+  }
+  policy EnvironmentProject {
+    read: authenticated
+    write: authenticated
+  }
+  policy Deployment {
+    read: authenticated
+    write: authenticated
+  }
+  policy Workload {
+    read: authenticated
+    write: authenticated
+  }
+  policy Execution {
+    read: authenticated
+    write: authenticated
+  }
+  policy Receipt {
+    read: authenticated
+    write: authenticated
+  }
+  policy Service {
+    read: authenticated
+    write: authenticated
+  }
+  policy Provider {
+    read: authenticated
+    write: authenticated
+  }
+  policy Event {
+    read: authenticated
+    write: authenticated
+  }
+  policy WorkloadStatus {
+    read: authenticated
+    write: authenticated
+  }
+  policy Artifact {
+    read: authenticated
+    write: authenticated
+  }
+  policy ArtifactChunk {
+    read: authenticated
+    write: authenticated
+  }
+  policy WorkloadInstance {
+    read: authenticated
+    write: authenticated
+  }
+  policy TrafficAssignment {
+    read: authenticated
+    write: authenticated
+  }
+  policy Domain {
+    read: authenticated
+    write: authenticated
+  }
+  policy DnsRecord {
+    read: authenticated
+    write: authenticated
+  }
+  policy Certificate {
+    read: authenticated
+    write: authenticated
+  }
+}

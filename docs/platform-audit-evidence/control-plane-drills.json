@@ -1,0 +1,219 @@
+{
+ "drills": {
+  "compute_sigkill": {
+   "after": "v1 pid=16978",
+   "daemon_restart_to_api_ms": 4697.3,
+   "endpoint_restored_ms": 4699.3,
+   "endpoint_while_daemon_down": null,
+   "revision_after": "v1",
+   "same_process_before": "v1 pid=16892"
+  },
+  "compute_start_without_feltdb": {
+   "exit_code": 1,
+   "log_tail": "ut the configured control state: state backend unavailable: FeltDB at http://127.0.0.1:52563 is unreachable: error sending request for url (http://127.0.0.1:52563/v1/application?application_id=app_Gh2ShpKVG2axgTvq6m&environment=production)\n",
+   "started": false
+  },
+  "daemon_start_on_feltdb_ms": 229.7,
+  "feltdb_outage": {
+   "daemon still running": true,
+   "mutation during outage": {
+    "kind": "state_unavailable",
+    "status": 503
+   },
+   "service still answers": "v1 pid=16892",
+   "status reports": {
+    "state_available": false,
+    "state_error": "state backend unavailable: state backend unavailable: FeltDB at http://127.0.0.1:52563 is unreachable: error sending request for url (http://127.0.0.1:52563/v1/"
+   }
+  },
+  "feltdb_restart": {
+   "mutations_recovered": true,
+   "restart_ms": 99.4,
+   "status_available": true
+  },
+  "feltdb_start_ms": 58.3,
+  "fresh_node_restore": {
+   "environments": [
+    "after-outage",
+    "preprod",
+    "production"
+   ],
+   "project_running": true,
+   "revision": "v1",
+   "start_ms": 1176.7
+  },
+  "remote_operation": {
+   "certificate status": {
+    "ok": true,
+    "status": 200
+   },
+   "deploy v1 to preprod": {
+    "ok": true,
+    "status": 201
+   },
+   "deploy v2 to production": {
+    "ok": true,
+    "status": 201
+   },
+   "deployment receipt": {
+    "ok": true,
+    "status": 200
+   },
+   "dns status": {
+    "ok": true,
+    "status": 200
+   },
+   "domain add (no ingress, dns none)": {
+    "ok": true,
+    "status": 201
+   },
+   "domain inspect": {
+    "ok": true,
+    "status": 200
+   },
+   "domain remove": {
+    "ok": true,
+    "status": 200
+   },
+   "environment create preprod": {
+    "ok": true,
+    "status": 201
+   },
+   "environment create production": {
+    "ok": true,
+    "status": 201
+   },
+   "environment create repeated": {
+    "kind": "conflict",
+    "ok": true,
+    "status": 409
+   },
+   "events": {
+    "ok": true,
+    "status": 200
+   },
+   "inspect deployment": {
+    "ok": true,
+    "status": 200
+   },
+   "logs": {
+    "ok": true,
+    "status": 200
+   },
+   "mutation without token": {
+    "ok": true,
+    "status": 401
+   },
+   "project status": {
+    "ok": true,
+    "status": 200
+   },
+   "promote preprod \u2192 production": {
+    "ok": true,
+    "status": 201
+   },
+   "read without token": {
+    "note": "reads are open to anyone who can reach the API",
+    "ok": true,
+    "status": 200
+   },
+   "restart project": {
+    "ok": true,
+    "status": 200
+   },
+   "revision register repeated (same content)": {
+    "ok": true,
+    "status": 201
+   },
+   "revision register v1": {
+    "ok": true,
+    "status": 201
+   },
+   "revision register v2": {
+    "ok": true,
+    "status": 201
+   },
+   "rollback production": {
+    "ok": true,
+    "status": 200
+   },
+   "start workload": {
+    "ok": true,
+    "status": 200
+   },
+   "stop workload": {
+    "ok": true,
+    "status": 200
+   }
+  },
+  "remote_operation_latency_ms": {
+   "certificate status": [
+    429.0
+   ],
+   "deploy v1 to preprod": [
+    2995.1
+   ],
+   "deploy v2 to production": [
+    4936.9
+   ],
+   "deployment receipt": [
+    76.3
+   ],
+   "dns status": [
+    460.8
+   ],
+   "domain add (no ingress, dns none)": [
+    2107.4
+   ],
+   "domain inspect": [
+    402.4
+   ],
+   "domain remove": [
+    1215.3
+   ],
+   "environment create preprod": [
+    451.6
+   ],
+   "environment create production": [
+    517.0
+   ],
+   "events": [
+    26.1
+   ],
+   "inspect deployment": [
+    45.2
+   ],
+   "logs": [
+    390.1
+   ],
+   "project status": [
+    421.0
+   ],
+   "promote preprod \u2192 production": [
+    1214.5
+   ],
+   "restart project": [
+    3440.8
+   ],
+   "revision register v1": [
+    86.7
+   ],
+   "revision register v2": [
+    45.1
+   ],
+   "rollback production": [
+    2256.7
+   ],
+   "start workload": [
+    2484.1
+   ],
+   "stop workload": [
+    1885.3
+   ]
+  },
+  "serving_before_failures": "v1 pid=16892"
+ },
+ "format": "compute.platform-audit.control-plane-drills@1",
+ "git": "ab61430",
+ "measured_at": "2026-09-25T01:44:22Z"
+}

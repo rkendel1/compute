@@ -1,0 +1,142 @@
+{
+  "format": "platform.feltdb-consumers@1",
+  "package": "@feltdb/core",
+  "notes": [
+    "Every repository that depends on FeltDB, and how to prove it still works after an upgrade.",
+    "checkout is the clone directory under --root (also searched as <root>/rkendel1/<checkout>).",
+    "manifests are package.json files whose dependencies, devDependencies, peerDependencies, or overrides name the package.",
+    "verify commands run in the consumer's checkout; ${FELTDB_SERVER_BIN} is expanded from the environment."
+  ],
+  "consumers": [
+    {
+      "name": "compute",
+      "repository": "rkendel1/compute",
+      "checkout": "compute",
+      "role": "control-plane state (compute.flow) compiled by @feltdb/core; the daemon speaks the wire protocol from Rust",
+      "manifests": ["packages/compute-state-model/package.json"],
+      "lockfile": "packages/compute-state-model/package-lock.json",
+      "manager": "npm",
+      "install_dir": "packages/compute-state-model",
+      "flows": ["crates/compute-state-feltdb/model/compute.flow"],
+      "schema_affecting": true,
+      "runtime": "none at runtime for the model package; compute-state-feltdb depends on FeltDB-Protocol: 1 of feltdb-server",
+      "verify": [
+        {"cwd": "packages/compute-state-model", "run": "npm test", "proves": "compute.flow compiles to the checked-in manifest with this FeltDB"},
+        {"cwd": ".", "run": "cargo test -q -p compute-state-feltdb -- --include-ignored", "requires": ["FELTDB_SERVER_BIN"], "proves": "the conformance suite against a real feltdb-server"}
+      ]
+    },
+    {
+      "name": "authboundry",
+      "repository": "rkendel1/authboundry",
+      "checkout": "authboundry",
+      "role": "authority state and audit; the Rust server spawns bridge/feltdb-store.cjs, which loads @feltdb/core",
+      "manifests": ["package.json", "apps/web/package.json", "examples/nextjs-stack/package.json"],
+      "lockfile": "package-lock.json",
+      "manager": "npm",
+      "install_dir": ".",
+      "flows": ["authboundry.flow"],
+      "schema_affecting": true,
+      "runtime": "Node bridge process at runtime",
+      "verify": [
+        {"cwd": ".", "run": "npm test --if-present", "proves": "the package's own tests"}
+      ]
+    },
+    {
+      "name": "attn",
+      "repository": "rkendel1/attn",
+      "checkout": "attn",
+      "role": "local state for the Attn helper and SDK",
+      "manifests": ["sdk/packages/core/package.json", "id8-macos/Backend/package.json"],
+      "lockfile": "bun.lock",
+      "manager": "bun",
+      "install_dir": ".",
+      "flows": ["cline.flow"],
+      "schema_affecting": true,
+      "runtime": "embedded in a bundled helper binary (bun compile)",
+      "verify": [
+        {"cwd": ".", "run": "bun run test", "proves": "the repository's tests"}
+      ]
+    },
+    {
+      "name": "factory",
+      "repository": "rkendel1/factory",
+      "checkout": "factory",
+      "role": "durable runs and evidence",
+      "manifests": ["package.json"],
+      "lockfile": "package-lock.json",
+      "manager": "npm",
+      "install_dir": ".",
+      "flows": [],
+      "schema_affecting": false,
+      "runtime": "Node service",
+      "verify": [
+        {"cwd": ".", "run": "npm test", "proves": "the runner's tests"}
+      ]
+    },
+    {
+      "name": "appport-services",
+      "repository": "rkendel1/appport-services",
+      "checkout": "appport-services",
+      "role": "durable state for API keys, jobs, schedules, secrets, webhooks, files, notifications",
+      "manifests": ["package.json"],
+      "lockfile": "package-lock.json",
+      "manager": "npm",
+      "install_dir": ".",
+      "flows": ["appport.flow"],
+      "schema_affecting": true,
+      "runtime": "Node library inside each application's process",
+      "verify": [
+        {"cwd": ".", "run": "npm test", "proves": "the services' tests"}
+      ]
+    },
+    {
+      "name": "jev-ui",
+      "repository": "rkendel1/jev-ui",
+      "checkout": "jev-ui",
+      "role": "application state for the Shapeshift demo",
+      "manifests": ["package.json"],
+      "lockfile": "bun.lock",
+      "manager": "bun",
+      "install_dir": ".",
+      "flows": ["feltdb.flow"],
+      "schema_affecting": true,
+      "runtime": "Next.js application",
+      "verify": [
+        {"cwd": ".", "run": "bun run test", "proves": "the application's tests"}
+      ]
+    },
+    {
+      "name": "appboundry",
+      "repository": "rkendel1/appboundry",
+      "checkout": "appboundry",
+      "role": "the FeltDB integration package for AppBoundry",
+      "manifests": ["integrations/feltdb/package.json"],
+      "lockfile": "pnpm-lock.yaml",
+      "manager": "pnpm",
+      "install_dir": ".",
+      "flows": ["integrations/feltdb/feltdb.flow", "apps/cloud-portal/feltdb.flow"],
+      "schema_affecting": true,
+      "runtime": "library",
+      "verify": [
+        {"cwd": "integrations/feltdb", "run": "pnpm test", "proves": "the integration's tests"}
+      ]
+    },
+    {
+      "name": "web-monitor",
+      "repository": "rkendel1/web-monitor",
+      "checkout": "web-monitor",
+      "role": "application state, through @appport/services (transitive only)",
+      "manifests": [],
+      "lockfile": "package-lock.json",
+      "manager": "npm",
+      "install_dir": ".",
+      "flows": ["feltdb.flow"],
+      "schema_affecting": true,
+      "transitive_via": "@appport/services",
+      "runtime": "Node service",
+      "verify": [
+        {"cwd": ".", "run": "npm test", "proves": "the monitor's tests"}
+      ]
+    }
+  ]
+}

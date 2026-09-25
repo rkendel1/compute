@@ -28,7 +28,38 @@ import {
   policyExplainResultSchema,
   policyInspectInputSchema,
   policyInspectResultSchema,
+  environmentCreateInputSchema,
+  environmentListInputSchema,
+  environmentListResultSchema,
+  environmentSelectorSchema,
+  environmentViewSchema,
+  projectAddInputSchema,
+  projectRemoveInputSchema,
+  projectRemoveResultSchema,
+  projectViewSchema,
+  projectListInputSchema,
+  projectListResultSchema,
+  projectInspectInputSchema,
+  projectInspectResultSchema,
+  projectSelectorSchema,
+  deploymentViewSchema,
+  deploymentInspectInputSchema,
+  deploymentCreateInputSchema,
+  deploymentPromoteInputSchema,
+  deploymentRollbackInputSchema,
+  domainListInputSchema,
+  domainListResultSchema,
+  domainSelectorSchema,
+  domainCreateInputSchema,
+  domainRemoveResultSchema,
+  domainViewSchema,
+  dnsInspectInputSchema,
+  dnsInspectResultSchema,
+  certificateInspectInputSchema,
+  certificateInspectResultSchema,
+  certificateViewSchema,
 } from "./schemas.js";
+import { ComputeDaemonClient, toAppPortError, type EnvironmentApi } from "./environment.js";
 import type {
   ExecutionFailureKind,
   ExecutionRequest,
@@ -58,6 +89,12 @@ export interface LocalComputeProviderOptions {
   poolConfig?: string;
   /** Capability cache used by pool discovery. */
   capabilityCache?: string;
+  /** Environment operations. Defaults to a client of the Compute API. */
+  environments?: EnvironmentApi;
+  /** Compute API endpoint (`http://host:port`) for the default client. */
+  daemon?: string;
+  /** Bearer token for a daemon that requires one for changes. */
+  daemonToken?: string;
 }
 
 /** Transport-neutral provider selected by the AppPort application boundary. */
@@ -760,6 +797,227 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
     handler: async ({ request, ...options }) =>
       (await pool("checkPolicy")(request as ExecutionRequest, options)).decision as never,
   });
+  // Environments are operated through the Compute API: the same lifecycle
+  // the CLI and the UI use. AppPort authorizes the caller first; the
+  // daemon then applies its own authorization and admission.
+  const environments = options.environments ?? new ComputeDaemonClient({
+    ...(options.daemon ? { endpoint: options.daemon } : {}),
+    ...(options.daemonToken ? { token: options.daemonToken } : {}),
+  });
+  const api = async (operation: () => Promise<unknown>): Promise<never> => {
+    try {
+      return (await operation()) as never;
+    } catch (error) {
+      throw toAppPortError(error);
+    }
+  };
+  const environmentAttributes = { "compute.contract": "1", "compute.environment": "compute.environment@1" };
+  const environmentList = defineCapability({
+    name: "compute.environment.list", version: 1,
+    description: "List environments with their desired state, actual state, and health.",
+    input: environmentListInputSchema, output: environmentListResultSchema, effect: "observation",
+    authorization: ["compute.environment.read"],
+    authorizationContract: { required: true, scopes: ["compute.environment.read"] },
+    attributes: { ...environmentAttributes, "compute.executes": false },
+    handler: () => api(() => environments.listEnvironments()),
+  });
+  const environmentInspect = defineCapability({
+    name: "compute.environment.inspect", version: 1,
+    description: "Inspect an environment: projects, workloads, ports, placement, resources, and evidence.",
+    input: environmentSelectorSchema, output: environmentViewSchema, effect: "observation",
+    authorization: ["compute.environment.read"],
+    authorizationContract: { required: true, scopes: ["compute.environment.read"] },
+    attributes: { ...environmentAttributes, "compute.executes": false },
+    handler: ({ environment }) => api(() => environments.inspectEnvironment(environment)),
+  });
+  const environmentStatus = defineCapability({
+    name: "compute.environment.status", version: 1,
+    description: "Report an environment's live state, reconciled against its desired state.",
+    input: environmentSelectorSchema, output: environmentViewSchema, effect: "observation",
+    authorization: ["compute.environment.read"],
+    authorizationContract: { required: true, scopes: ["compute.environment.read"] },
+    attributes: { ...environmentAttributes, "compute.executes": false },
+    handler: ({ environment }) => api(() => environments.environmentStatus(environment)),
+  });
+  const environmentCreate = defineCapability({
+    name: "compute.environment.create", version: 1,
+    description: "Create an isolated environment. Its policy can only restrict the daemon's.",
+    input: environmentCreateInputSchema, output: environmentViewSchema, effect: "consequential",
+    authorization: ["compute.environment.create"],
+    authorizationContract: { required: true, scopes: ["compute.environment.create"] },
+    attributes: { ...environmentAttributes, "compute.executes": false },
+    handler: (definition) => api(() => environments.createEnvironment(definition)),
+  });
+  const lifecycle = (action: "start" | "stop" | "restart", description: string) => defineCapability({
+    name: `compute.environment.${action}`, version: 1, description,
+    input: environmentSelectorSchema, output: environmentViewSchema, effect: "consequential",
+    authorization: [`compute.environment.${action}`],
+    authorizationContract: { required: true, scopes: [`compute.environment.${action}`] },
+    attributes: { ...environmentAttributes, "compute.executes": action !== "stop" },
+    handler: ({ environment }) => api(() => environments.environmentLifecycle(environment, action)),
+  });
+  const environmentStart = lifecycle("start", "Set an environment's desired state to running; admitted services start.");
+  const environmentStop = lifecycle("stop", "Stop an environment. Other environments are not affected.");
+  const environmentRestart = lifecycle("restart", "Restart an environment's services. Other environments are not affected.");
+  const projectAdd = defineCapability({
+    name: "compute.environment.project.add", version: 1,
+    description: "Add a project to an environment, or deploy a new revision of it. Only that project restarts.",
+    input: projectAddInputSchema, output: projectViewSchema, effect: "consequential",
+    authorization: ["compute.environment.project.add"],
+    authorizationContract: { required: true, scopes: ["compute.environment.project.add"] },
+    attributes: { ...environmentAttributes, "compute.executes": true },
+    handler: ({ environment, project }) => api(() => environments.addProject(environment, project)),
+  });
+  const projectRemove = defineCapability({
+    name: "compute.environment.project.remove", version: 1,
+    description: "Stop and remove one project. Sibling projects keep running.",
+    input: projectRemoveInputSchema, output: projectRemoveResultSchema, effect: "consequential",
+    authorization: ["compute.environment.project.remove"],
+    authorizationContract: { required: true, scopes: ["compute.environment.project.remove"] },
+    attributes: { ...environmentAttributes, "compute.executes": false },
+    handler: ({ environment, project }) => api(() => environments.removeProject(environment, project)),
+  });
+  const projectList = defineCapability({
+    name: "compute.project.list", version: 1,
+    description: "List projects and every environment each runs in.",
+    input: projectListInputSchema, output: projectListResultSchema, effect: "observation",
+    authorization: ["compute.project.read"],
+    authorizationContract: { required: true, scopes: ["compute.project.read"] },
+    attributes: { ...environmentAttributes, "compute.executes": false },
+    handler: () => api(() => environments.listProjects()),
+  });
+  const projectInspect = defineCapability({
+    name: "compute.project.inspect", version: 1,
+    description: "Inspect a project in one environment, or its revisions and deployments across all of them.",
+    input: projectInspectInputSchema, output: projectInspectResultSchema, effect: "observation",
+    authorization: ["compute.project.read"],
+    authorizationContract: { required: true, scopes: ["compute.project.read"] },
+    attributes: { ...environmentAttributes, "compute.executes": false },
+    handler: ({ project, environment }) => api(() => environments.inspectProject(project, environment)),
+  });
+  const projectLifecycle = (action: "start" | "stop" | "restart", description: string) => defineCapability({
+    name: `compute.project.${action}`, version: 1, description,
+    input: projectSelectorSchema, output: projectViewSchema, effect: "consequential",
+    authorization: [`compute.project.${action}`],
+    authorizationContract: { required: true, scopes: [`compute.project.${action}`] },
+    attributes: { ...environmentAttributes, "compute.executes": action !== "stop" },
+    handler: ({ environment, project }) => api(() => environments.projectLifecycle(environment, project, action)),
+  });
+  const projectStart = projectLifecycle("start", "Run a project in one environment. Its other environments are not affected.");
+  const projectStop = projectLifecycle("stop", "Stop a project in one environment. Sibling projects and its other environments are not affected.");
+  const projectRestart = projectLifecycle("restart", "Restart a project's services in one environment only.");
+  const deploymentInspect = defineCapability({
+    name: "compute.deployment.inspect", version: 1,
+    description: "Inspect a deployment: its revision, status, and admission and placement evidence.",
+    input: deploymentInspectInputSchema, output: deploymentViewSchema, effect: "observation",
+    authorization: ["compute.deployment.read"],
+    authorizationContract: { required: true, scopes: ["compute.deployment.read"] },
+    attributes: { ...environmentAttributes, "compute.executes": false },
+    handler: ({ deployment }) => api(() => environments.inspectDeployment(deployment)),
+  });
+  const deploymentCreate = defineCapability({
+    name: "compute.deployment.create", version: 1,
+    description: "Release a registered, immutable revision to an environment with zero downtime: admitted and placed, started next to what serves, switched once ready, drained. A release that fails keeps the current revision serving.",
+    input: deploymentCreateInputSchema, output: deploymentViewSchema, effect: "consequential",
+    authorization: ["compute.deployment.create"],
+    authorizationContract: { required: true, scopes: ["compute.deployment.create"] },
+    attributes: { ...environmentAttributes, "compute.executes": true },
+    handler: (request) => api(() => environments.createDeployment(request)),
+  });
+  const deploymentPromote = defineCapability({
+    name: "compute.deployment.promote", version: 1,
+    description: "Deploy the exact revision current in one environment to another. Nothing is rebuilt.",
+    input: deploymentPromoteInputSchema, output: deploymentViewSchema, effect: "consequential",
+    authorization: ["compute.deployment.promote"],
+    authorizationContract: { required: true, scopes: ["compute.deployment.promote"] },
+    attributes: { ...environmentAttributes, "compute.executes": true },
+    handler: (request) => api(() => environments.promoteDeployment(request)),
+  });
+  const deploymentRollback = defineCapability({
+    name: "compute.deployment.rollback", version: 1,
+    description: "Roll a release back: before traffic moved it is abandoned; after, traffic returns to the revision it replaced; a complete release is rolled back by releasing that revision again.",
+    input: deploymentRollbackInputSchema, output: deploymentViewSchema, effect: "consequential",
+    authorization: ["compute.deployment.rollback"],
+    authorizationContract: { required: true, scopes: ["compute.deployment.rollback"] },
+    attributes: { ...environmentAttributes, "compute.executes": true },
+    handler: ({ deployment }) => api(() => environments.rollbackDeployment(deployment)),
+  });
+  const networkAttributes = { ...environmentAttributes, "compute.executes": false };
+  const domainList = defineCapability({
+    name: "compute.domain.list", version: 1,
+    description: "List domains: where each routes, and its DNS, TLS, and routing state.",
+    input: domainListInputSchema, output: domainListResultSchema, effect: "observation",
+    authorization: ["compute.domain.read"],
+    authorizationContract: { required: true, scopes: ["compute.domain.read"] },
+    attributes: networkAttributes,
+    handler: () => api(() => environments.listDomains()),
+  });
+  const domainInspect = defineCapability({
+    name: "compute.domain.inspect", version: 1,
+    description: "Inspect a domain: its endpoint, the revision serving it, its DNS records, and its certificate.",
+    input: domainSelectorSchema, output: domainViewSchema, effect: "observation",
+    authorization: ["compute.domain.read"],
+    authorizationContract: { required: true, scopes: ["compute.domain.read"] },
+    attributes: networkAttributes,
+    handler: ({ domain }) => api(() => environments.inspectDomain(domain)),
+  });
+  const domainCreate = defineCapability({
+    name: "compute.domain.create", version: 1,
+    description: "Route a domain to one workload port of one project in one environment. Compute keeps its DNS record and certificate.",
+    input: domainCreateInputSchema, output: domainViewSchema, effect: "consequential",
+    authorization: ["compute.domain.create"],
+    authorizationContract: { required: true, scopes: ["compute.domain.create"] },
+    attributes: networkAttributes,
+    handler: (definition) => api(() => environments.createDomain(definition)),
+  });
+  const domainRemove = defineCapability({
+    name: "compute.domain.remove", version: 1,
+    description: "Stop routing a domain and remove its DNS records and certificate. What it routed to keeps running.",
+    input: domainSelectorSchema, output: domainRemoveResultSchema, effect: "consequential",
+    authorization: ["compute.domain.remove"],
+    authorizationContract: { required: true, scopes: ["compute.domain.remove"] },
+    attributes: networkAttributes,
+    handler: ({ domain }) => api(() => environments.removeDomain(domain)),
+  });
+  const dnsInspect = defineCapability({
+    name: "compute.dns.inspect", version: 1,
+    description: "Every DNS record Compute manages: desired, actual, status, and last error.",
+    input: dnsInspectInputSchema, output: dnsInspectResultSchema, effect: "observation",
+    authorization: ["compute.dns.read"],
+    authorizationContract: { required: true, scopes: ["compute.dns.read"] },
+    attributes: networkAttributes,
+    handler: () => api(() => environments.dnsStatus()),
+  });
+  const dnsReconcile = defineCapability({
+    name: "compute.dns.reconcile", version: 1,
+    description: "Read every DNS record back from its provider now and repair drift.",
+    input: dnsInspectInputSchema, output: dnsInspectResultSchema, effect: "consequential",
+    authorization: ["compute.dns.reconcile"],
+    authorizationContract: { required: true, scopes: ["compute.dns.reconcile"] },
+    attributes: networkAttributes,
+    handler: () => api(() => environments.reconcileDns()),
+  });
+  const certificateInspect = defineCapability({
+    name: "compute.certificate.inspect", version: 1,
+    description: "Certificates: status, expiry, renewal, and fingerprint. Keys are never returned.",
+    input: certificateInspectInputSchema, output: certificateInspectResultSchema, effect: "observation",
+    authorization: ["compute.certificate.read"],
+    authorizationContract: { required: true, scopes: ["compute.certificate.read"] },
+    attributes: networkAttributes,
+    handler: ({ domain }) => api(async () => {
+      const certificates = await environments.certificates();
+      return domain === undefined ? certificates : certificates.filter((item) => item.domain === domain.toLowerCase());
+    }),
+  });
+  const certificateRenew = defineCapability({
+    name: "compute.certificate.renew", version: 1,
+    description: "Renew a domain's certificate now, whatever its expiry.",
+    input: domainSelectorSchema, output: certificateViewSchema, effect: "consequential",
+    authorization: ["compute.certificate.renew"],
+    authorizationContract: { required: true, scopes: ["compute.certificate.renew"] },
+    attributes: networkAttributes,
+    handler: ({ domain }) => api(() => environments.renewCertificate(domain)),
+  });
   return createApplication({
     application: {
       id: "dev.compute.provider.local",
@@ -772,6 +1030,12 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
       placementInspect, poolRun, poolSubmit,
       policyInspect, policyCheck, policyExplain, admission,
       submit, status, cancel, result, jobReceipt,
+      environmentList, environmentInspect, environmentStatus, environmentCreate,
+      environmentStart, environmentStop, environmentRestart, projectAdd, projectRemove,
+      projectList, projectInspect, projectStart, projectStop, projectRestart,
+      deploymentInspect, deploymentCreate, deploymentPromote, deploymentRollback,
+      domainList, domainInspect, domainCreate, domainRemove,
+      dnsInspect, dnsReconcile, certificateInspect, certificateRenew,
     ],
     ...(options.authorizer ? { authorizer: options.authorizer } : {}),
     mode: options.mode ?? "development",

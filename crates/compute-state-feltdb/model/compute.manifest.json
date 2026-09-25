@@ -1,0 +1,1601 @@
+{
+  "application_id": "",
+  "tenant_id": "",
+  "schema": 1,
+  "metadata": {
+    "name": "compute",
+    "labels": {}
+  },
+  "collections": [
+    {
+      "name": "Project",
+      "fields": [
+        {
+          "name": "name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "source",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "ProjectRevision",
+      "fields": [
+        {
+          "name": "project_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "revision_digest",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "source",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "workloads",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Environment",
+      "fields": [
+        {
+          "name": "name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "desired_state",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "running",
+            "stopped"
+          ]
+        },
+        {
+          "name": "config",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "policy",
+          "type": "json",
+          "required": false
+        },
+        {
+          "name": "provider",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "EnvironmentProject",
+      "fields": [
+        {
+          "name": "environment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "desired_state",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "running",
+            "stopped"
+          ]
+        },
+        {
+          "name": "config",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "revision_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "deployment_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "updated_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Deployment",
+      "fields": [
+        {
+          "name": "environment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "revision_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "revision_digest",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "pending",
+            "starting",
+            "ready",
+            "network_ready",
+            "switching",
+            "active",
+            "draining",
+            "complete",
+            "failed",
+            "rolled_back",
+            "queued",
+            "admitted",
+            "placed",
+            "healthy",
+            "stopped",
+            "superseded"
+          ]
+        },
+        {
+          "name": "promoted_from",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "previous",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "workloads",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "failure",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "receipt_ids",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "old_revision",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "config_digest",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "config",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "readiness_result",
+          "type": "json",
+          "required": false
+        },
+        {
+          "name": "network_result",
+          "type": "json",
+          "required": false
+        },
+        {
+          "name": "traffic_switch_result",
+          "type": "json",
+          "required": false
+        },
+        {
+          "name": "rollback_reason",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "receipt",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "status_since",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "completed_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "updated_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Workload",
+      "fields": [
+        {
+          "name": "environment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "service",
+            "task"
+          ]
+        },
+        {
+          "name": "desired_state",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "running",
+            "stopped"
+          ]
+        },
+        {
+          "name": "restart",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "never",
+            "on_failure"
+          ]
+        },
+        {
+          "name": "bundle_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload_identity",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "runtime",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "ports",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "deployment_id",
+          "type": "text",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Execution",
+      "fields": [
+        {
+          "name": "execution_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "service",
+            "task"
+          ]
+        },
+        {
+          "name": "deployment_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "exit_code",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "started_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "finished_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "receipt_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "policy_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "admission_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "placement_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "provider",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "error",
+          "type": "text",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "Receipt",
+      "fields": [
+        {
+          "name": "receipt_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "execution_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "deployment_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "policy_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "admission_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "artifact_digest",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Service",
+      "fields": [
+        {
+          "name": "name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "capabilities",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "provider",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "workload",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "endpoint",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "updated_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Provider",
+      "fields": [
+        {
+          "name": "provider_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "endpoint",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "priority",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "registered_by",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "observed_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Event",
+      "fields": [
+        {
+          "name": "sequence",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "workload",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "deployment_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "execution_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "message",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "data",
+          "type": "json",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "WorkloadStatus",
+      "fields": [
+        {
+          "name": "workload_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "actual_state",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "health",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "deployment_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "execution_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "restarts",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "error",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "observed_by",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "observed_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Artifact",
+      "fields": [
+        {
+          "name": "digest",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "size",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "chunks",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "ArtifactChunk",
+      "fields": [
+        {
+          "name": "digest",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "position",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "data",
+          "type": "text",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "WorkloadInstance",
+      "fields": [
+        {
+          "name": "environment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "deployment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "state",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "starting",
+            "ready",
+            "serving",
+            "draining",
+            "stopped",
+            "failed"
+          ]
+        },
+        {
+          "name": "ports",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "readiness",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "started_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "ready_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "stopped_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "error",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "updated_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "TrafficAssignment",
+      "fields": [
+        {
+          "name": "endpoint",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "port",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "host_port",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "domains",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "deployment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "instance_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "target_port",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "previous_deployment_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "previous_instance_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "switched_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Domain",
+      "fields": [
+        {
+          "name": "name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "workload",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "port",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "dns_provider",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "certificate_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "dns",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "tls",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "routing",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "DnsRecord",
+      "fields": [
+        {
+          "name": "domain",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "provider",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "zone",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "record_type",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "value",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "ttl",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "provider_record_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "state",
+          "type": "json",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Certificate",
+      "fields": [
+        {
+          "name": "domain",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "issuer",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "renewal_status",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "not_before",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "expires_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "fingerprint",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "secret_reference",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "held_by",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "last_error",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "last_reconciled_at",
+          "type": "datetime",
+          "required": false
+        }
+      ]
+    }
+  ],
+  "indexes": [
+    {
+      "name": "Project.name",
+      "collection": "Project",
+      "fields": [
+        "name"
+      ],
+      "unique": false
+    },
+    {
+      "name": "ProjectRevision.project_id",
+      "collection": "ProjectRevision",
+      "fields": [
+        "project_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "ProjectRevision.revision",
+      "collection": "ProjectRevision",
+      "fields": [
+        "revision"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Environment.name",
+      "collection": "Environment",
+      "fields": [
+        "name"
+      ],
+      "unique": false
+    },
+    {
+      "name": "EnvironmentProject.environment_id",
+      "collection": "EnvironmentProject",
+      "fields": [
+        "environment_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "EnvironmentProject.project_id",
+      "collection": "EnvironmentProject",
+      "fields": [
+        "project_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Deployment.environment_id",
+      "collection": "Deployment",
+      "fields": [
+        "environment_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Deployment.project_id",
+      "collection": "Deployment",
+      "fields": [
+        "project_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Deployment.status",
+      "collection": "Deployment",
+      "fields": [
+        "status"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Workload.environment_id",
+      "collection": "Workload",
+      "fields": [
+        "environment_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Workload.project_id",
+      "collection": "Workload",
+      "fields": [
+        "project_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Execution.workload_id",
+      "collection": "Execution",
+      "fields": [
+        "workload_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Execution.environment_id",
+      "collection": "Execution",
+      "fields": [
+        "environment_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Execution.deployment_id",
+      "collection": "Execution",
+      "fields": [
+        "deployment_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Receipt.execution_id",
+      "collection": "Receipt",
+      "fields": [
+        "execution_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Receipt.receipt_id",
+      "collection": "Receipt",
+      "fields": [
+        "receipt_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Service.name",
+      "collection": "Service",
+      "fields": [
+        "name"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Event.sequence",
+      "collection": "Event",
+      "fields": [
+        "sequence"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Event.kind",
+      "collection": "Event",
+      "fields": [
+        "kind"
+      ],
+      "unique": false
+    },
+    {
+      "name": "WorkloadStatus.workload_id",
+      "collection": "WorkloadStatus",
+      "fields": [
+        "workload_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "WorkloadStatus.environment",
+      "collection": "WorkloadStatus",
+      "fields": [
+        "environment"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Artifact.digest",
+      "collection": "Artifact",
+      "fields": [
+        "digest"
+      ],
+      "unique": false
+    },
+    {
+      "name": "ArtifactChunk.digest",
+      "collection": "ArtifactChunk",
+      "fields": [
+        "digest"
+      ],
+      "unique": false
+    },
+    {
+      "name": "WorkloadInstance.workload_id",
+      "collection": "WorkloadInstance",
+      "fields": [
+        "workload_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "WorkloadInstance.deployment_id",
+      "collection": "WorkloadInstance",
+      "fields": [
+        "deployment_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "TrafficAssignment.endpoint",
+      "collection": "TrafficAssignment",
+      "fields": [
+        "endpoint"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Domain.name",
+      "collection": "Domain",
+      "fields": [
+        "name"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Domain.environment_id",
+      "collection": "Domain",
+      "fields": [
+        "environment_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "DnsRecord.domain",
+      "collection": "DnsRecord",
+      "fields": [
+        "domain"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Certificate.domain",
+      "collection": "Certificate",
+      "fields": [
+        "domain"
+      ],
+      "unique": false
+    }
+  ],
+  "references": [],
+  "queries": [],
+  "actions": [],
+  "workflows": [],
+  "triggers": [],
+  "schedules": [],
+  "agents": [],
+  "capabilities": [],
+  "modules": [],
+  "connections": [],
+  "policies": [
+    {
+      "name": "Project",
+      "resource": "Project",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "ProjectRevision",
+      "resource": "ProjectRevision",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Environment",
+      "resource": "Environment",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "EnvironmentProject",
+      "resource": "EnvironmentProject",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Deployment",
+      "resource": "Deployment",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Workload",
+      "resource": "Workload",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Execution",
+      "resource": "Execution",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Receipt",
+      "resource": "Receipt",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Service",
+      "resource": "Service",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Provider",
+      "resource": "Provider",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Event",
+      "resource": "Event",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "WorkloadStatus",
+      "resource": "WorkloadStatus",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Artifact",
+      "resource": "Artifact",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "ArtifactChunk",
+      "resource": "ArtifactChunk",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "WorkloadInstance",
+      "resource": "WorkloadInstance",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "TrafficAssignment",
+      "resource": "TrafficAssignment",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Domain",
+      "resource": "Domain",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "DnsRecord",
+      "resource": "DnsRecord",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Certificate",
+      "resource": "Certificate",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    }
+  ],
+  "ui": {
+    "routes": [],
+    "bindings": [],
+    "forms": [],
+    "dashboards": []
+  },
+  "environments": [
+    {
+      "name": "development",
+      "configuration": {}
+    },
+    {
+      "name": "preview",
+      "configuration": {}
+    },
+    {
+      "name": "staging",
+      "configuration": {}
+    },
+    {
+      "name": "production",
+      "configuration": {}
+    }
+  ],
+  "artifacts": [],
+  "deployment": {
+    "environments": [
+      "development",
+      "preview",
+      "staging",
+      "production"
+    ]
+  },
+  "runtime": {
+    "contract": 1,
+    "minimum_engine": "0.2.0",
+    "maximum_engine_exclusive": "2.0.0"
+  }
+}
