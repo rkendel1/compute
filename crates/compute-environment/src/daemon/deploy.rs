@@ -361,7 +361,7 @@ impl Daemon {
         self.deployment(&deployment_id).await
     }
 
-    /// Wait until a release has moved traffic (or ended), up to `timeout`.
+    /// Wait until a release ends, up to `timeout`.
     pub async fn await_release(
         self: &Arc<Self>,
         deployment_id: &str,
@@ -371,13 +371,7 @@ impl Daemon {
         loop {
             let deployment = self.deployment(deployment_id).await?;
             let status = deployment.record.status;
-            if status.is_terminal()
-                || matches!(
-                    status,
-                    DeploymentStatus::Active | DeploymentStatus::Draining
-                )
-                || tokio::time::Instant::now() >= deadline
-            {
+            if status.is_terminal() || tokio::time::Instant::now() >= deadline {
                 return Ok(deployment);
             }
             self.wake();

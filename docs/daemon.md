@@ -21,10 +21,14 @@ compute stop
 | `--listen` | `127.0.0.1:8787` | API and UI address |
 | `--state-dir` | `.compute/daemon` | Node-local data: artifact cache, logs, and the daemon lock (and, for the file backend, control state) |
 | `--state` | `[state] backend`, then `file` | Control-state backend: `file`, `memory`, or `feltdb` ([docs/control-plane.md](control-plane.md)) |
-| `--config` | `$COMPUTE_CONFIG`, then `./compute.toml` | Configuration with a `[state]` section |
+| `--config` | `$COMPUTE_CONFIG`, then `./compute.toml` | Configuration: `[state]`, `[network]`, `[release]` |
 | `--policy` | none | Daemon-wide `compute.policy@1`, intersected into every admission |
 | `--pool-config` | none | Provider pool for tasks. `local` is always the daemon itself |
-| `--port-range` | `20000-29999` | Host ports for logical port bindings |
+| `--port-range` | `20000-29999` | Host ports for services' stable endpoints |
+| `--instance-port-range` | `[release] instance_port_range`, then `30000-39999` | Host ports for service instances behind endpoints |
+| `--drain-timeout-ms` | `[release] drain_timeout_ms`, then `30000` | How long a replaced instance may finish its connections |
+| `--endpoint-address` | `[network] endpoint_address`, then `127.0.0.1` | Where endpoints listen |
+| `--ingress-http`, `--ingress-https` | `[network]`, off otherwise | The public entry ([docs/networking.md](networking.md)) |
 | `--reconcile-interval-ms` | `5000` | How often the reconciler rereads desired state |
 | `--require-token-env NAME` | none | Require `Authorization: Bearer $NAME` for every change |
 | `--detach` | off | Start in the background, log to `daemon.log` in the state directory, and return once the API answers |
@@ -37,10 +41,11 @@ or from the variable named by `--token-env`.
 
 | What | Where | Durable? |
 | --- | --- | --- |
-| Desired state: environments, projects, revisions, memberships, deployments, workloads, services, providers | Control state (file or Managed FeltDB) | Yes |
+| Desired state: environments, projects, revisions, memberships, releases, workloads, instances, traffic assignments, domains, DNS records, certificates (public facts), services, providers | Control state (file or Managed FeltDB) | Yes |
 | Evidence: executions, receipt references, lifecycle events, observed workload status | Control state | Yes |
+| Certificate keys and the ACME account key | The node's secret store (`<state-dir>/secrets`, 0700) | Node-local |
 | Artifacts: workload bundles and receipt documents, by digest | The control state's artifact store (a directory for file state; chunks in FeltDB) | Yes |
-| Running processes, their live health and output, restart backoff | Daemon memory | No |
+| Running processes, their live health and output, restart backoff, endpoint listeners and their open connections | Daemon memory | No |
 | Artifact cache, service logs, the daemon lock, the node's process records | `--state-dir` | Node-local |
 
 The daemon's memory can disappear, and so can its node. The desired state
@@ -49,20 +54,24 @@ restores every environment, bundles included.
 
 ## Reconciliation
 
-Each cycle, the reconciler reads desired state from control state, and then
-acts on it:
+Each cycle, the reconciler reads desired state from control state, advances
+every release in flight ([docs/releases.md](releases.md)), and then acts on
+it:
 
-- **Missing:** a service that should run and doesn't is started.
-- **Wrong revision:** a service running an old deployment is replaced.
-- **Should not run:** a running service whose desired state (its own, its
-  project's, or its environment's) is stopped is stopped.
+- **Missing:** an instance that should run and doesn't is started.
+- **Replaced:** an instance a release replaced is stopped once it has
+  drained.
+- **Should not run:** a running instance whose desired state (its
+  workload's, its project's, or its environment's) is stopped is stopped.
 - **Failed:** a service that fails or is killed restarts with backoff
   (1s doubling to 60s) unless its restart policy is `never`. A denied
   service is never retried.
 - **Correct:** no change.
 
-It then writes what it observed back to control state: workload status,
-deployment progress, and events. Cycles run every `--reconcile-interval-ms`
+Endpoints are pointed at the instances their traffic assignments name.
+Ingress routes, DNS records, and certificates are reconciled
+([docs/networking.md](networking.md)). Then the reconciler writes what it
+observed back to control state: workload status and events. Cycles run every `--reconcile-interval-ms`
 and after every change made through the API. A change made directly in
 Managed FeltDB, for example by another tool, takes effect within one cycle.
 
@@ -98,6 +107,12 @@ GET  /projects                GET /projects/:p [/status]
 GET  /projects/:p/revisions   POST /projects/:p/revisions
 GET  /deployments?environment=&project=&limit=           POST /deployments
 POST /deployments/promote     GET /deployments/:id
+GET  /deployments/:id/receipt POST /deployments/:id/rollback
+GET  /domains                 POST /domains
+GET  /domains/:domain         DELETE /domains/:domain
+GET  /dns                     POST /dns/reconcile
+GET  /certificates            POST /certificates/:domain/renew
+GET  /network
 GET  /executions/:id          GET /receipts/:receipt_id
 GET  /events?after=&environment=&project=&deployment=&limit=
 GET  /events/stream?after=    (server-sent events)
@@ -137,7 +152,11 @@ screen. From there you can:
   deployments, logs, resources, configuration, receipts, and events
 - assign projects to environments
 - deploy a registered revision, or promote the revision current in another
-  environment
+  environment, and follow the release step by step on its own page, with
+  its instances, readiness, traffic switch, events, and receipt
+- roll a release back
+- add, inspect, and remove domains, and see their DNS, TLS, and routing,
+  reconcile DNS, and renew certificates
 - start, stop, restart, or remove projects and workloads, each after a
   confirmation that states what it affects and what it doesn't
 
@@ -159,4 +178,10 @@ admission.
 | `compute.project.list@1`, `.inspect@1` | `compute.project.read` |
 | `compute.project.start@1`, `.stop@1`, `.restart@1` | same as the capability |
 | `compute.deployment.inspect@1` | `compute.deployment.read` |
-| `compute.deployment.create@1`, `.promote@1` | same as the capability |
+| `compute.deployment.create@1`, `.promote@1`, `.rollback@1` | same as the capability |
+| `compute.domain.list@1`, `.inspect@1` | `compute.domain.read` |
+| `compute.domain.create@1`, `.remove@1` | same as the capability |
+| `compute.dns.inspect@1` | `compute.dns.read` |
+| `compute.dns.reconcile@1` | same as the capability |
+| `compute.certificate.inspect@1` | `compute.certificate.read` |
+| `compute.certificate.renew@1` | same as the capability |

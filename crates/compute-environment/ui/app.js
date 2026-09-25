@@ -57,22 +57,36 @@ const STATES = {
   running: ['ok', '●', 'Running'],
   healthy: ['ok', '●', 'Healthy'],
   completed: ['ok', '●', 'Completed'],
+  complete: ['ok', '●', 'Complete'],
   active: ['ok', '●', 'Active'],
+  serving: ['ok', '●', 'Serving'],
+  valid: ['ok', '●', 'Valid'],
   starting: ['warn', '◐', 'Starting'],
-  pending: ['idle', '○', 'Pending'],
-  queued: ['warn', '◐', 'Queued'],
-  admitted: ['warn', '◐', 'Admitted'],
-  placed: ['warn', '◐', 'Placed'],
+  pending: ['warn', '◐', 'Pending'],
+  ready: ['warn', '◐', 'Ready'],
+  network_ready: ['warn', '◐', 'Network ready'],
+  switching: ['warn', '◐', 'Switching'],
+  draining: ['warn', '◐', 'Draining'],
+  issuing: ['warn', '◐', 'Issuing'],
+  renewing: ['warn', '◐', 'Renewing'],
+  due: ['warn', '◐', 'Due'],
   deploying: ['warn', '◐', 'Deploying'],
   stopping: ['warn', '◐', 'Stopping'],
   degraded: ['warn', '◐', 'Degraded'],
   unknown: ['idle', '○', 'Unknown'],
   stopped: ['idle', '○', 'Stopped'],
-  superseded: ['idle', '○', 'Superseded'],
+  disabled: ['idle', '○', 'Disabled'],
+  unmanaged: ['idle', '○', 'Unmanaged'],
+  not_due: ['idle', '○', 'Not due'],
   unhealthy: ['bad', '×', 'Unhealthy'],
   failed: ['bad', '×', 'Failed'],
+  rolled_back: ['bad', '↺', 'Rolled back'],
+  expired: ['bad', '×', 'Expired'],
   denied: ['bad', '×', 'Denied'],
 };
+
+/// The release lifecycle, in order.
+const RELEASE = ['pending', 'starting', 'ready', 'network_ready', 'switching', 'active', 'draining', 'complete'];
 
 function state(value, text) {
   const [tone, glyph, label] = STATES[value] || ['idle', '○', value];
@@ -82,8 +96,8 @@ function state(value, text) {
 /// The single status of a project or environment: actual state, unless it
 /// runs, in which case its health.
 function status(item) {
-  if (item.deployment && ['queued', 'admitted', 'placed', 'starting'].includes(item.deployment.status)) {
-    return state('deploying');
+  if (item.deployment && RELEASE.slice(0, -1).includes(item.deployment.status)) {
+    return state('deploying', `Releasing · ${STATES[item.deployment.status][2]}`);
   }
   if (item.actual_state === 'running') return state(item.health === 'unknown' ? 'running' : item.health);
   return state(item.actual_state);
@@ -311,7 +325,7 @@ async function deployWizard({ project, environment, revision }) {
           h('li', {}, `Environment: ${state.environment}`),
           h('li', {}, `Revision: ${chosen.revision || state.revision} (${short(chosen.revision_digest)})`),
           h('li', {}, `Workloads: ${(chosen.workloads || []).map((item) => `${item.name} (${item.kind})`).join(', ') || '—'}`)),
-        h('p', { class: 'subtitle' }, 'Every workload is admitted and placed before anything changes. If admission fails, the current deployment keeps running.')), [
+        h('p', { class: 'subtitle' }, 'The new revision starts next to what serves now. Traffic moves only once it is ready, and what it replaces drains before it stops. If anything fails first, the current revision keeps serving.')), [
         h('button', { onclick: close }, 'Cancel'),
         h('button', { class: 'primary', 'data-apply': 'true', onclick: async () => {
           close();
@@ -319,6 +333,7 @@ async function deployWizard({ project, environment, revision }) {
             project: state.project, environment: state.environment, revision: chosen.revision_id || state.revision,
           }));
           if (deployment && deployment.status === 'failed') toast(`Deployment failed: ${deployment.failure}`, true);
+          if (deployment) location.hash = `#/deployments/${enc(deployment.deployment_id)}`;
         } }, 'Apply'),
       ]);
     }
@@ -340,6 +355,7 @@ async function promoteDialog(project, from) {
       close();
       const deployment = await act(`Promoting ${project} from ${from} to ${select.value}`, () => api('POST', '/deployments/promote', { project, from, to: select.value }));
       if (deployment && deployment.status === 'failed') toast(`Promotion failed: ${deployment.failure}`, true);
+      if (deployment) location.hash = `#/deployments/${enc(deployment.deployment_id)}`;
     } }, 'Promote'),
   ]);
 }
@@ -470,10 +486,13 @@ async function projectTab(environment, name, project, tab) {
             h('button', { class: 'small danger', onclick: () => workloadLifecycle(environment, name, workload.name, 'stop') }, 'Stop')]))));
     case 'Deployments': {
       const deployments = await api('GET', `/deployments?environment=${enc(environment)}&project=${enc(name)}&limit=50`);
-      return table(['Deployment', 'Revision', 'Status', 'Admission', 'Created', 'Promoted from'], deployments.map((deployment) => h('tr', {},
+      return table(['Deployment', 'Revision', 'Status', 'Admission', 'Created', 'Promoted from'], deployments.map((deployment) => h('tr', {
+        class: 'link', 'data-deployment': deployment.deployment_id,
+        onclick: () => { location.hash = `#/deployments/${enc(deployment.deployment_id)}`; },
+      },
         h('td', { class: 'mono' }, deployment.deployment_id),
         h('td', { class: 'mono' }, deployment.revision),
-        h('td', {}, state(deployment.status), deployment.failure ? h('div', { class: 'error' }, deployment.failure) : null),
+        h('td', {}, state(deployment.status), (deployment.failure || deployment.rollback_reason) ? h('div', { class: 'error' }, deployment.failure || deployment.rollback_reason) : null),
         h('td', {}, deployment.workloads.map((workload) => h('div', { class: 'mono' }, `${workload.name}: ${workload.admitted ? 'admitted' : 'denied'} ${short(workload.admission_id)}`))),
         h('td', {}, ago(deployment.created_at)),
         h('td', { class: 'mono' }, deployment.promoted_from || '—'))), 'No deployments.');
@@ -571,7 +590,9 @@ async function projectDetailView(name) {
       h('td', {}, revision.workloads.map((workload) => `${workload.name} (${workload.kind})`).join(', ')),
       h('td', {}, ago(revision.created_at))))),
     h('h2', {}, 'Deployments'),
-    table(['Deployment', 'Environment', 'Revision', 'Status', 'Created'], detail.deployments.map((deployment) => h('tr', {},
+    table(['Deployment', 'Environment', 'Revision', 'Status', 'Created'], detail.deployments.map((deployment) => h('tr', {
+      class: 'link', onclick: () => { location.hash = `#/deployments/${enc(deployment.deployment_id)}`; },
+    },
       h('td', { class: 'mono' }, deployment.deployment_id),
       h('td', {}, deployment.environment),
       h('td', { class: 'mono' }, deployment.revision),
@@ -611,6 +632,180 @@ async function eventsView() {
   ];
 }
 
+// ---- Releases -------------------------------------------------------------------
+
+function progress(current) {
+  const failed = ['failed', 'rolled_back'].includes(current);
+  const at = RELEASE.indexOf(current);
+  return h('ol', { class: 'progress', 'aria-label': 'Release progress' }, RELEASE.map((step, index) => h('li', {
+    class: failed ? '' : index < at || current === 'complete' ? 'done' : index === at ? 'current' : '',
+    'aria-current': index === at ? 'step' : null,
+  }, STATES[step][2])), failed ? h('li', { class: 'failed', 'aria-current': 'step' }, STATES[current][2]) : null);
+}
+
+async function rollbackRelease(deployment) {
+  const moved = RELEASE.indexOf(deployment.status) >= RELEASE.indexOf('switching');
+  const affects = deployment.status === 'complete'
+    ? [`A new release of ${deployment.old_revision || 'the previous revision'} to ${deployment.environment}`]
+    : moved ? [`Traffic of ${deployment.project} in ${deployment.environment} returns to ${deployment.old_revision || 'the previous revision'}`]
+      : [`The release of ${deployment.revision} is abandoned; its instances stop`];
+  if (await confirmImpact(`Roll back ${deployment.project} ${deployment.revision}?`, affects, ['Other projects', 'Other environments'], 'danger')) {
+    const result = await act(`Rolling back ${deployment.revision}`, () => api('POST', `/deployments/${enc(deployment.deployment_id)}/rollback`));
+    if (result && result.deployment_id !== deployment.deployment_id) location.hash = `#/deployments/${enc(result.deployment_id)}`;
+  }
+}
+
+async function showReceipt(deploymentId) {
+  const receipt = await api('GET', `/deployments/${enc(deploymentId)}/receipt`);
+  modal('Deployment receipt', h('pre', { class: 'log' }, JSON.stringify(receipt, null, 2)), [h('button', { onclick: close }, 'Close')]);
+}
+
+async function deploymentView(id) {
+  const deployment = await api('GET', `/deployments/${enc(id)}`);
+  const events = await api('GET', `/events?deployment=${enc(id)}&limit=200`);
+  const readiness = Object.entries(deployment.readiness_result || {});
+  const network = deployment.network_result || {};
+  const traffic = deployment.traffic_switch_result || {};
+  const inFlight = RELEASE.slice(0, -1).includes(deployment.status);
+  const reason = deployment.failure || deployment.rollback_reason;
+  return [
+    h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Environments'), ' / ',
+      h('a', { href: `#/environments/${enc(deployment.environment)}` }, deployment.environment), ' / ',
+      h('a', { href: `#/environments/${enc(deployment.environment)}/projects/${enc(deployment.project)}/deployments` }, deployment.project), ' / ', short(id)),
+    h('div', { class: 'title' }, h('h1', {}, `RELEASE ${deployment.revision}`), state(deployment.status),
+      h('div', { class: 'actions' },
+        deployment.receipt ? h('button', { onclick: () => showReceipt(id) }, 'Receipt') : null,
+        ['failed', 'rolled_back'].includes(deployment.status) ? null
+          : h('button', { class: 'danger', 'data-rollback': 'true', onclick: () => rollbackRelease(deployment) }, 'Roll back'))),
+    h('div', { class: 'subtitle' }, `${deployment.project} → ${deployment.environment} · replaces ${deployment.old_revision || 'nothing'} · ${inFlight ? `${STATES[deployment.status][2].toLowerCase()} since ${ago(deployment.status_since)}` : `ended ${ago(deployment.completed_at || deployment.updated_at)}`}`),
+    progress(deployment.status),
+    reason ? h('div', { class: 'panel fact error', role: 'alert' }, reason) : null,
+    h('div', { class: 'grid' },
+      fact('Revision', `${deployment.revision} · ${short(deployment.revision_digest)}`, true),
+      fact('Replaces', deployment.old_revision ? `${deployment.old_revision} · ${short(deployment.previous)}` : 'nothing', true),
+      fact('Configuration', short(deployment.config_digest), true),
+      fact('Promoted from', deployment.promoted_from ? short(deployment.promoted_from) : '—', true)),
+    h('h2', {}, 'Instances'),
+    table(['Instance', 'Workload', 'State', 'Process', 'Ports', 'Connections', 'Readiness'], deployment.instances.map((instance) => h('tr', { 'data-instance': instance.instance_id },
+      h('td', { class: 'mono' }, short(instance.instance_id)),
+      h('td', {}, instance.workload),
+      h('td', {}, state(instance.state), instance.error ? h('div', { class: 'error' }, instance.error) : null),
+      h('td', {}, instance.actual_state ? state(instance.actual_state) : '—'),
+      h('td', { class: 'mono' }, instance.ports.map((port) => `${port.name} ${port.host}`).join(', ') || '—'),
+      h('td', {}, String(instance.open_connections)),
+      h('td', {}, instance.readiness || '—'))), inFlight ? 'Instances are created once the release is admitted.' : 'This release has no instances now.'),
+    h('h2', {}, 'Readiness'),
+    table(['Workload', 'Check', 'Result', 'Ready'], readiness.map(([workload, result]) => h('tr', {},
+      h('td', {}, workload), h('td', {}, result.check || '—'), h('td', {}, result.detail || '—'), h('td', {}, ago(result.ready_at)))), 'Not verified yet.'),
+    h('h2', {}, 'Network'),
+    table(['Endpoint', 'Port', 'From', 'To', 'Verified'], (traffic.endpoints || (network.endpoints || []).map((endpoint) => ({ endpoint: endpoint.endpoint, host_port: endpoint.host_port }))).map((endpoint) => h('tr', {},
+      h('td', { class: 'mono' }, endpoint.endpoint),
+      h('td', { class: 'mono' }, String(endpoint.host_port)),
+      h('td', { class: 'mono' }, endpoint.from_revision ? `${endpoint.from_revision} · ${short(endpoint.from_instance)}` : '—'),
+      h('td', { class: 'mono' }, endpoint.to_instance ? short(endpoint.to_instance) : '—'),
+      h('td', {}, ((traffic.verified || []).find((item) => item.endpoint === endpoint.endpoint) || {}).verified || '—'))), 'Traffic has not moved.'),
+    (network.domains || []).length ? table(['Domain', 'DNS', 'TLS', 'Routing'], network.domains.map((domain) => h('tr', {},
+      h('td', {}, h('a', { href: `#/domains/${enc(domain.domain)}` }, domain.domain)), h('td', {}, state(domain.dns)), h('td', {}, state(domain.tls)), h('td', {}, state(domain.routing))))) : null,
+    h('h2', {}, 'Events'),
+    eventTable(events.slice().reverse()),
+  ];
+}
+
+// ---- Domains ---------------------------------------------------------------------
+
+async function addDomain() {
+  const environments = await api('GET', '/environments');
+  if (!environments.length) { toast('Create an environment first.', true); return; }
+  const name = h('input', { id: 'domain-name', placeholder: 'app.example.com', autocomplete: 'off' });
+  const environment = h('select', { id: 'domain-environment' }, environments.map((item) => h('option', { value: item.name }, item.name)));
+  const project = h('select', { id: 'domain-project' });
+  const fill = async () => {
+    const projects = await api('GET', `/environments/${enc(environment.value)}/projects`);
+    project.replaceChildren(...projects.map((item) => h('option', { value: item.name }, item.name)));
+  };
+  environment.onchange = fill;
+  await fill();
+  modal('Add domain', h('div', {},
+    h('p', { class: 'subtitle' }, 'A domain routes to one project in one environment. Compute keeps its DNS record and certificate.'),
+    h('label', { for: 'domain-name' }, 'Domain'), name,
+    h('label', { for: 'domain-environment' }, 'Environment'), environment,
+    h('label', { for: 'domain-project' }, 'Project'), project), [
+    h('button', { onclick: close }, 'Cancel'),
+    h('button', { class: 'primary', 'data-apply': 'true', onclick: async () => {
+      close();
+      const created = await act(`${name.value} added`, () => api('POST', '/domains', { name: name.value, environment: environment.value, project: project.value }));
+      if (created) location.hash = `#/domains/${enc(created.name)}`;
+    } }, 'Add'),
+  ]);
+  name.focus();
+}
+
+async function domainsView() {
+  const domains = await api('GET', '/domains');
+  return [
+    h('div', { class: 'title' }, h('h1', {}, 'Domains'),
+      h('div', { class: 'actions' },
+        h('button', { onclick: () => act('DNS reconciled', () => api('POST', '/dns/reconcile')) }, 'Reconcile DNS'),
+        h('button', { class: 'primary', onclick: addDomain }, 'Add domain'))),
+    h('div', { class: 'subtitle' }, 'Each domain routes to one project in one environment, and follows its releases.'),
+    table(['Domain', 'Routes to', 'Status', 'DNS', 'TLS', 'Routing'], domains.map((domain) => h('tr', {
+      class: 'link', 'data-domain': domain.name, onclick: () => { location.hash = `#/domains/${enc(domain.name)}`; },
+    },
+    h('td', {}, h('strong', {}, domain.name)),
+    h('td', { class: 'mono' }, domain.endpoint),
+    h('td', {}, state(domain.status)),
+    h('td', {}, state(domain.dns.status)),
+    h('td', {}, state(domain.tls.status)),
+    h('td', {}, state(domain.routing.status)))), 'No domains yet.'),
+  ];
+}
+
+function reconciliation(label, item) {
+  return fact(label, [state(item.status), h('div', {}, `desired: ${item.desired || '—'}`), h('div', {}, `actual: ${item.actual || '—'}`),
+    item.last_error ? h('div', { class: 'error' }, item.last_error) : null, h('div', { class: 'subtitle' }, `checked ${ago(item.last_reconciled_at)}`)]);
+}
+
+async function domainView(name) {
+  const domain = await api('GET', `/domains/${enc(name)}`);
+  const certificate = domain.certificate;
+  return [
+    h('div', { class: 'crumbs' }, h('a', { href: '#/domains' }, 'Domains'), ' / ', name),
+    h('div', { class: 'title' }, h('h1', {}, name), state(domain.status),
+      h('div', { class: 'actions' },
+        h('button', { onclick: () => act('DNS reconciled', () => api('POST', '/dns/reconcile')) }, 'Reconcile DNS'),
+        certificate ? h('button', { onclick: () => act(`Renewing the certificate for ${name}`, () => api('POST', `/certificates/${enc(name)}/renew`)) }, 'Renew certificate') : null,
+        h('button', { class: 'danger', onclick: async () => {
+          if (await confirmImpact(`Remove ${name}?`, [`Routing of ${name}`, 'Its DNS records at the provider', 'Its certificate'], [`${domain.project} in ${domain.environment}`, 'Other domains'], 'danger')) {
+            const removed = await act(`${name} removed`, () => api('DELETE', `/domains/${enc(name)}`));
+            if (removed) location.hash = '#/domains';
+          }
+        } }, 'Remove'))),
+    h('div', { class: 'subtitle' }, [`Routes to `, h('a', { href: `#/environments/${enc(domain.environment)}/projects/${enc(domain.project)}` }, domain.endpoint),
+      domain.serving_revision ? ` · serving ${domain.serving_revision} on port ${domain.host_port}` : ' · nothing serves it yet']),
+    h('div', { class: 'grid' },
+      reconciliation('Routing', domain.routing),
+      reconciliation('DNS', domain.dns),
+      reconciliation('TLS', domain.tls)),
+    h('h2', {}, 'DNS records'),
+    table(['Record', 'Provider', 'Desired', 'Actual', 'Status', 'Checked'], domain.dns_records.map((record) => h('tr', {},
+      h('td', { class: 'mono' }, `${record.name} ${record.record_type} (${record.zone})`),
+      h('td', {}, record.provider),
+      h('td', { class: 'mono' }, record.value),
+      h('td', { class: 'mono' }, record.state.actual || '—'),
+      h('td', {}, state(record.state.status), record.state.last_error ? h('div', { class: 'error' }, record.state.last_error) : null),
+      h('td', {}, ago(record.state.last_reconciled_at)))), domain.dns_provider === 'none' ? 'DNS is managed outside Compute.' : 'No records yet.'),
+    h('h2', {}, 'Certificate'),
+    certificate ? h('div', { class: 'grid' },
+      fact('Status', [state(certificate.status), ' ', state(certificate.renewal_status)]),
+      fact('Expires', certificate.expires_at ? `${new Date(certificate.expires_at).toISOString().slice(0, 10)}` : '—'),
+      fact('Issuer', certificate.issuer, true),
+      fact('Fingerprint', short(certificate.fingerprint), true),
+      fact('Key', certificate.held_here ? 'Held by this node' : 'Not on this node', false),
+      certificate.last_error ? fact('Last error', h('span', { class: 'error' }, certificate.last_error)) : null)
+      : h('div', { class: 'panel empty' }, 'TLS is disabled for this domain.'),
+  ];
+}
+
 // ---- Router and live updates --------------------------------------------------------------
 
 function route() {
@@ -623,6 +818,9 @@ function route() {
   if (parts[0] === 'projects' && parts[1]) return { nav: 'projects', render: () => projectDetailView(parts[1]) };
   if (parts[0] === 'projects') return { nav: 'projects', render: projectsView };
   if (parts[0] === 'services') return { nav: 'services', render: servicesView };
+  if (parts[0] === 'deployments' && parts[1]) return { nav: 'environments', render: () => deploymentView(parts[1]) };
+  if (parts[0] === 'domains' && parts[1]) return { nav: 'domains', render: () => domainView(parts[1]) };
+  if (parts[0] === 'domains') return { nav: 'domains', render: domainsView };
   if (parts[0] === 'events') return { nav: 'events', render: eventsView };
   return { nav: 'environments', render: environmentsView };
 }

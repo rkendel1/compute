@@ -5,9 +5,11 @@ here is Hetzner-specific) running the Compute daemon, with Managed FeltDB as
 the durable control plane, and `preprod` and `production` environments.
 
 ```text
+Internet ─▶ :80 / :443 ingress (ACME, TLS by SNI)
 Hetzner host
 └── Compute daemon (systemd)
     ├── Managed FeltDB  ← desired state, evidence, bundles
+    ├── Hetzner DNS     ← A records for your domains
     ├── preprod
     └── production
 ```
@@ -43,8 +45,8 @@ It prints the application ID. Running it again changes nothing.
 ## 3. Configure
 
 ```sh
-install -m 0640 -g compute compute.toml /etc/compute/compute.toml   # set url and application
-install -m 0600 compute.env.example /etc/compute/compute.env        # set both tokens
+install -m 0640 -g compute compute.toml /etc/compute/compute.toml   # set url, application, public_ipv4, zone
+install -m 0600 compute.env.example /etc/compute/compute.env        # set the tokens
 install -m 0644 compute.service /etc/systemd/system/compute.service
 systemctl daemon-reload
 systemctl enable --now compute
@@ -56,8 +58,11 @@ unreachable, the daemon refuses to start and systemd retries. It never falls
 back to local state.
 
 The API and UI listen on localhost. To reach the UI, use an SSH tunnel
-(`ssh -L 8787:127.0.0.1:8787 host`, then open `http://127.0.0.1:8787/ui/`)
-until the network control plane (domains, TLS, routing) lands.
+(`ssh -L 8787:127.0.0.1:8787 host`, then open `http://127.0.0.1:8787/ui/`).
+Open ports 80 and 443 in the host's firewall for ingress. The unit grants
+`CAP_NET_BIND_SERVICE` so the daemon binds them without running as root.
+The Hetzner DNS token is a Hetzner Cloud API token with read and write
+access to the project that holds the zone.
 
 ## 4. Environments and first deployment
 
@@ -66,8 +71,18 @@ export COMPUTE_DAEMON_TOKEN=...          # the same token as compute.env
 compute environment create preprod
 compute environment create production
 compute deploy feltdb --environment preprod --source ./feltdb --revision v0.11.7 --wait
-# verify preprod, then:
-compute promote feltdb --from preprod --to production --set DATABASE_URL=... --wait
+# verify preprod, then release the exact revision to production:
+compute deploy feltdb --from preprod --to production --set DATABASE_URL=... --wait
+compute domain add feltdb.example.com --environment production --project feltdb
+compute domain status feltdb.example.com       # DNS, TLS, and routing
+```
+
+Every later release has zero downtime ([docs/releases.md](../../docs/releases.md)):
+
+```sh
+compute deploy feltdb --environment preprod --source ./feltdb --revision v0.11.8 --wait
+compute deploy feltdb --from preprod --to production --wait
+compute deployment rollback dep_…              # if it must be undone
 ```
 
 ## 5. Operating
@@ -79,13 +94,19 @@ compute promote feltdb --from preprod --to production --set DATABASE_URL=... --w
 | The host reboots | The daemon starts and restores desired state from FeltDB. |
 | The host is replaced | Install and configure a new host (steps 1 and 3). It restores everything from FeltDB, bundles included. |
 | FeltDB is briefly unreachable | Running services keep running. Changes return `503` until FeltDB is back. |
+| The daemon restarts mid-release | The next daemon reloads the release from FeltDB and finishes it. |
+| A release fails or never becomes ready | It fails; the current revision keeps serving. |
+| A DNS record is changed at Hetzner | Compute restores it within `dns_interval_seconds` and records `network.dns.drifted`. |
+| A certificate nears expiry | Compute renews it 30 days before expiry; the valid one keeps serving if renewal fails. |
 
 ## 6. Cutting over from Fly
 
 1. Deploy each project to `preprod` and `production` here, and verify it on
-   its host port (through the tunnel or the host's firewall rules).
-2. Point DNS for each domain at this host, behind whatever TLS terminator
-   you use today. First-class domains, TLS, and routing are the next
-   Compute release.
-3. Watch `compute events --follow` and the UI through the change.
+   its endpoint (through the tunnel).
+2. Add each domain with `compute domain add`. Compute points its DNS at this
+   host and issues its certificate once DNS resolves here. If the zone
+   stays elsewhere for now, add it with `--dns-provider none` and move the
+   record yourself.
+3. Watch `compute events --follow`, `compute domain status`, and the UI
+   through the change.
 4. Remove the Fly apps.

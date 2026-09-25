@@ -25,7 +25,9 @@ const capabilities = [
   "compute.environment.restart", "compute.environment.project.add", "compute.environment.project.remove",
   "compute.project.list", "compute.project.inspect", "compute.project.start", "compute.project.stop",
   "compute.project.restart", "compute.deployment.inspect", "compute.deployment.create",
-  "compute.deployment.promote",
+  "compute.deployment.promote", "compute.deployment.rollback",
+  "compute.domain.list", "compute.domain.inspect", "compute.domain.create", "compute.domain.remove",
+  "compute.dns.inspect", "compute.dns.reconcile", "compute.certificate.inspect", "compute.certificate.renew",
 ];
 
 function session(permissions: string[]): Session {
@@ -99,6 +101,9 @@ test("environment capabilities are versioned; every one requires authorization",
   assert.equal(effect("compute.environment.inspect"), "observation");
   assert.equal(effect("compute.environment.create"), "consequential");
   assert.equal(effect("compute.environment.project.add"), "consequential");
+  assert.equal(effect("compute.domain.inspect"), "observation");
+  assert.equal(effect("compute.deployment.rollback"), "consequential");
+  assert.equal(effect("compute.certificate.renew"), "consequential");
 });
 
 test("environment capabilities drive the daemon through the Compute API", async (context) => {
@@ -119,7 +124,8 @@ test("environment capabilities drive the daemon through the Compute API", async 
     computeBinary, daemon: endpoint, daemonToken: "secret", authorizer: permissionAuthorizer(),
   });
   const all = session([
-    "compute.environment.read", "compute.project.read", "compute.deployment.read", ...capabilities,
+    "compute.environment.read", "compute.project.read", "compute.deployment.read",
+    "compute.domain.read", "compute.dns.read", "compute.certificate.read", ...capabilities,
   ]);
 
   // AppPort authorization comes first: no scope, no change.
@@ -164,7 +170,7 @@ test("environment capabilities drive the daemon through the Compute API", async 
     envelope("compute.project.inspect", { project: "app", environment: "staging" }), { session: all },
   ));
   assert.equal(inStaging.environment, "staging");
-  assert.equal(inStaging.deployment.status, "healthy");
+  assert.equal(inStaging.deployment.status, "complete");
   const redeployed = output<any>(await app.handleRequest(envelope("compute.deployment.create", {
     project: "app", environment: "staging", revision: "rev-1",
   }), { session: all }));
@@ -177,7 +183,7 @@ test("environment capabilities drive the daemon through the Compute API", async 
     const current = output<any>(await app.handleRequest(
       envelope("compute.deployment.inspect", { deployment: redeployed.deployment_id }), { session: all },
     ));
-    if (current.status === "healthy") break;
+    if (current.status === "complete") break;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   }
   const promoted = output<any>(await app.handleRequest(envelope("compute.deployment.promote", {
@@ -218,6 +224,40 @@ test("environment capabilities drive the daemon through the Compute API", async 
   assert.equal(started.desired_state, "running");
   output(await app.handleRequest(envelope("compute.environment.restart", { environment: "staging" }), { session: all }));
 
+  // Releases roll back; a complete release by releasing what it replaced.
+  const rolledBack = output<any>(await app.handleRequest(
+    envelope("compute.deployment.rollback", { deployment: redeployed.deployment_id }), { session: all },
+  ));
+  assert.notEqual(rolledBack.deployment_id, redeployed.deployment_id);
+  assert.equal(rolledBack.revision, "rev-1");
+  const deniedRollback = await app.handleRequest(
+    envelope("compute.deployment.rollback", { deployment: redeployed.deployment_id }),
+    { session: session(["compute.deployment.read"]) },
+  );
+  assert.equal(deniedRollback.ok, false, "rollback requires its scope");
+
+  // Network: nothing routed yet; a domain needs a service that listens.
+  assert.deepEqual(output<any[]>(await app.handleRequest(envelope("compute.domain.list", {}), { session: all })), []);
+  assert.deepEqual(output<any[]>(await app.handleRequest(envelope("compute.dns.inspect", {}), { session: all })), []);
+  assert.deepEqual(output<any[]>(await app.handleRequest(envelope("compute.certificate.inspect", {}), { session: all })), []);
+  const noService = await app.handleRequest(envelope("compute.domain.create", {
+    name: "app.example.com", environment: "staging", project: "app",
+  }), { session: all });
+  assert.equal(noService.ok, false);
+  assert.match(noService.ok ? "" : noService.error.message, /services with ports/);
+  const missing = await app.handleRequest(envelope("compute.domain.inspect", { domain: "nowhere.example.com" }), { session: all });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.ok ? "" : missing.error.code, "NOT_FOUND");
+  const noScope = await app.handleRequest(envelope("compute.domain.list", {}), { session: session([]) });
+  assert.equal(noScope.ok, false, "domains require their scope");
+
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const current = output<any>(await app.handleRequest(
+      envelope("compute.deployment.inspect", { deployment: rolledBack.deployment_id }), { session: all },
+    ));
+    if (current.status === "complete") break;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+  }
   const removed = output<any>(await app.handleRequest(
     envelope("compute.environment.project.remove", { environment: "staging", project: "app" }), { session: all },
   ));

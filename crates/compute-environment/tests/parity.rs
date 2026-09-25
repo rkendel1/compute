@@ -93,6 +93,15 @@ fn every_ui_operation_is_an_api_operation() {
         ("POST", "/environments/{}/start"),
         ("DELETE", "/environments/{}/projects/{}"),
         ("GET", "/events/stream"),
+        ("GET", "/deployments/{}"),
+        ("POST", "/deployments/{}/rollback"),
+        ("GET", "/deployments/{}/receipt"),
+        ("GET", "/domains"),
+        ("POST", "/domains"),
+        ("GET", "/domains/{}"),
+        ("DELETE", "/domains/{}"),
+        ("POST", "/dns/reconcile"),
+        ("POST", "/certificates/{}/renew"),
     ] {
         assert!(
             ui.contains(&(operation.0.to_string(), operation.1.to_string())),

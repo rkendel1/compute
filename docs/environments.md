@@ -75,7 +75,7 @@ policy says otherwise:
 | `compute stop` (daemon) | Every service, which stops. Desired state is kept, and `compute start` restores it | Stored definitions |
 | `environment stop/restart` | That environment's services | Other environments |
 | `project stop/restart` | That project's services | Sibling projects, and the environment |
-| a deployment (new revision) | That project in that environment, which is replaced and restarted | Sibling projects, and the project in other environments |
+| a deployment (new revision) | That project in that environment: its new revision starts beside the old one and takes over its traffic without downtime | Sibling projects, and the project in other environments |
 | `project remove` | That project, which is stopped and deleted | Sibling projects |
 | `workload stop/restart` | That service | Sibling workloads |
 | a service failure | That service | Anything else |
@@ -139,18 +139,23 @@ A project declares **logical** ports:
 ports = [{ name = "http", port = 8000 }]
 ```
 
-The daemon binds each one to a stable host port from its range. The default
-range is `20000-29999`. The binding is stored in `<state>/ports.json` and
-kept across restarts and redeployments. The workload receives:
+Each port gets a stable **endpoint**, a host port from the daemon's range
+(default `20000-29999`) that is kept across restarts and releases. Each
+instance of the service listens on a port of its own, and the endpoint
+forwards to the instance that serves. That is what lets a release switch
+revisions without refusing a connection ([docs/releases.md](releases.md)).
+The workload receives its instance's port:
 
-- `COMPUTE_PORT_HTTP=<host port>`
-- `PORT=<host port>`, when the workload declares exactly one port
+- `COMPUTE_PORT_HTTP=<instance port>`
+- `PORT=<instance port>`, when the workload declares exactly one port
 
-`compute project status` shows `http:8000→20000`. A service that declares
-ports is `healthy` only while every declared port accepts TCP connections.
+`compute project status` shows `http:8000→20000`, the endpoint. A service
+that declares ports is `healthy` only while every port of the instance
+serving it accepts TCP connections.
 
-Compute does not proxy, load-balance, or publish ports. A reverse proxy in
-front of the host ports is up to you.
+Endpoints listen on `127.0.0.1` unless `--endpoint-address` says otherwise.
+The public entry is ingress, with domains, DNS, and TLS
+([docs/networking.md](networking.md)).
 
 ## Admission
 

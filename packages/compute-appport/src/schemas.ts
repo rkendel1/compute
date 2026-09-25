@@ -522,6 +522,7 @@ const health = s.enum(["healthy", "unhealthy", "unknown"] as const);
 const workloadKind = s.enum(["service", "task"] as const);
 const timestamp = s.string({ minLength: 1 });
 const configuration = s.record(s.string());
+const portBinding = s.object({ name: s.string(), logical: s.integer(), host: s.integer() });
 
 const workloadView = s.object({
   workload_id: s.string({ pattern: "^wl_[0-9a-f]+$" }),
@@ -535,7 +536,7 @@ const workloadView = s.object({
   bundle_id: digest,
   deployment_id: s.string({ pattern: "^dep_[0-9a-f]+$" }),
   execution_id: s.optional(s.string()),
-  ports: s.array(s.object({ name: s.string(), logical: s.integer(), host: s.integer() })),
+  ports: s.array(portBinding),
   restarts: s.integer({ minimum: 0 }),
   started_at: s.optional(timestamp),
   finished_at: s.optional(timestamp),
@@ -562,7 +563,8 @@ const workloadView = s.object({
 });
 
 const deploymentStatus = s.enum([
-  "queued", "admitted", "placed", "starting", "healthy", "failed", "stopped", "superseded",
+  "pending", "starting", "ready", "network_ready", "switching", "active", "draining",
+  "complete", "failed", "rolled_back",
 ] as const);
 const deploymentId = s.string({ pattern: "^dep_[0-9a-f]+$" });
 const deploymentSummary = s.object({
@@ -648,6 +650,15 @@ export const workloadDefinitionSchema = s.object({
   ports: s.optional(s.array(s.object({ name: s.string({ minLength: 1 }), port: s.integer({ minimum: 1, maximum: 65535 }) }))),
   restart: s.optional(s.enum(["never", "on_failure"] as const)),
   desired_state: s.optional(desiredState),
+  /** What proves a new instance of a service is ready for traffic. */
+  readiness: s.optional(s.object({
+    check: s.enum(["process", "port", "http", "task"] as const),
+    port: s.optional(s.string({ minLength: 1 })),
+    path: s.optional(s.string({ pattern: "^/" })),
+    task: s.optional(name),
+    timeout_ms: s.optional(s.integer({ minimum: 1 })),
+    interval_ms: s.optional(s.integer({ minimum: 1 })),
+  })),
 });
 
 export const projectAddInputSchema = s.object({
@@ -714,7 +725,32 @@ const deploymentWorkload = s.object({
   placement_id: s.optional(digest),
   provider: s.optional(s.string()),
   reasons: s.optional(s.array(s.string())),
+  endpoints: s.optional(s.array(portBinding)),
 });
+
+const instanceView = s.object({
+  instance_id: s.string({ pattern: "^wi_[0-9a-f]+$" }),
+  environment_id: s.string({ pattern: "^env_[0-9a-f]+$" }),
+  environment: name,
+  project_id: s.string({ pattern: "^prj_[0-9a-f]+$" }),
+  project: name,
+  workload: name,
+  workload_id: s.string(),
+  deployment_id: deploymentId,
+  revision: s.string(),
+  state: s.enum(["starting", "ready", "serving", "draining", "stopped", "failed"] as const),
+  ports: s.array(portBinding),
+  readiness: s.optional(s.string()),
+  started_at: s.optional(timestamp),
+  ready_at: s.optional(timestamp),
+  stopped_at: s.optional(timestamp),
+  error: s.optional(s.string()),
+  updated_at: timestamp,
+  actual_state: s.optional(actualState),
+  open_connections: s.integer({ minimum: 0 }),
+});
+
+const evidence = s.object({}, { additionalProperties: true });
 
 /** A compute.state@1 deployment, with its admission and placement evidence. */
 export const deploymentViewSchema = s.object({
@@ -732,9 +768,105 @@ export const deploymentViewSchema = s.object({
   workloads: s.array(deploymentWorkload),
   failure: s.optional(s.string()),
   receipt_ids: s.array(s.string()),
+  old_revision: s.optional(s.string()),
+  config_digest: s.optional(digest),
+  config: s.optional(configuration),
+  readiness_result: s.optional(evidence),
+  network_result: s.optional(evidence),
+  traffic_switch_result: s.optional(evidence),
+  rollback_reason: s.optional(s.string()),
+  receipt: s.optional(digest),
+  status_since: s.optional(timestamp),
+  completed_at: s.optional(timestamp),
   created_at: timestamp,
   updated_at: timestamp,
+  instances: s.optional(s.array(instanceView)),
 });
+
+export const deploymentRollbackInputSchema = s.object({ deployment: deploymentId });
+
+// Network: domains, DNS records, certificates.
+
+const reconciliation = s.object({
+  status: s.string(),
+  desired: s.optional(s.string()),
+  actual: s.optional(s.string()),
+  last_error: s.optional(s.string()),
+  last_reconciled_at: s.optional(timestamp),
+});
+
+export const dnsRecordViewSchema = s.object({
+  record_id: s.string({ pattern: "^dns_[0-9a-f]+$" }),
+  domain: s.string(),
+  provider: s.string(),
+  zone: s.string(),
+  name: s.string(),
+  record_type: s.enum(["A", "AAAA", "CNAME"] as const),
+  value: s.string(),
+  ttl: s.integer({ minimum: 0 }),
+  provider_record_id: s.optional(s.string()),
+  state: reconciliation,
+});
+
+/** Public facts only: a certificate's key never leaves its node. */
+export const certificateViewSchema = s.object({
+  certificate_id: s.string({ pattern: "^cert_[0-9a-f]+$" }),
+  domain: s.string(),
+  issuer: s.string(),
+  status: s.string(),
+  renewal_status: s.string(),
+  not_before: s.optional(timestamp),
+  expires_at: s.optional(timestamp),
+  fingerprint: s.optional(digest),
+  secret_reference: s.optional(s.string({ pattern: "^node:" })),
+  held_by: s.optional(s.string()),
+  last_error: s.optional(s.string()),
+  last_reconciled_at: s.optional(timestamp),
+  held_here: s.boolean(),
+});
+
+export const domainViewSchema = s.object({
+  domain_id: s.string({ pattern: "^dom_[0-9a-f]+$" }),
+  name: s.string(),
+  environment_id: s.string({ pattern: "^env_[0-9a-f]+$" }),
+  environment: name,
+  project_id: s.string({ pattern: "^prj_[0-9a-f]+$" }),
+  project: name,
+  workload: name,
+  port: s.string(),
+  dns_provider: s.string(),
+  certificate_id: s.optional(s.string()),
+  status: s.string(),
+  dns: reconciliation,
+  tls: reconciliation,
+  routing: reconciliation,
+  created_at: timestamp,
+  endpoint: s.string(),
+  host_port: s.optional(s.integer()),
+  serving_revision: s.optional(s.string()),
+  serving_deployment: s.optional(deploymentId),
+  dns_records: s.array(dnsRecordViewSchema),
+  certificate: s.optional(certificateViewSchema),
+});
+
+export const domainListInputSchema = s.object({});
+export const domainListResultSchema = s.array(domainViewSchema);
+export const domainSelectorSchema = s.object({ domain: s.string({ minLength: 1 }) });
+export const domainCreateInputSchema = s.object({
+  name: s.string({ minLength: 1, maxLength: 253 }),
+  environment: s.string({ minLength: 1 }),
+  project: name,
+  workload: s.optional(name),
+  port: s.optional(s.string({ minLength: 1 })),
+  /** A configured DNS provider, or `none` to manage DNS outside Compute. */
+  dns_provider: s.optional(s.string({ minLength: 1 })),
+  tls: s.optional(s.boolean()),
+});
+export const domainRemoveResultSchema = s.object({ removed: s.string() });
+export const dnsInspectInputSchema = s.object({});
+export const dnsInspectResultSchema = s.array(dnsRecordViewSchema);
+export const certificateInspectInputSchema = s.object({ domain: s.optional(s.string({ minLength: 1 })) });
+export const certificateInspectResultSchema = s.array(certificateViewSchema);
 
 /** A project in one environment, or across all of them. */
 export const projectInspectInputSchema = s.object({

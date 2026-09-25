@@ -83,8 +83,13 @@ never stops its parent or its siblings. The CLI, AppPort, and the UI are
 all clients of one Compute API, and the daemon serves a control-plane UI.
 Desired state is durable: in a local file, or in Managed FeltDB as the
 control-plane authority. The daemon reconciles toward it, and restores it
-after a crash or on a new node. See [docs/environments.md](docs/environments.md),
-[docs/daemon.md](docs/daemon.md), and [docs/control-plane.md](docs/control-plane.md).
+after a crash or on a new node. Releases have zero downtime: a new revision
+starts beside the old one, traffic moves only once it is ready, and the old
+one drains, with rollback and a resumable, durable state machine. Domains get
+DNS records at their provider and ACME certificates. See
+[docs/environments.md](docs/environments.md), [docs/daemon.md](docs/daemon.md),
+[docs/control-plane.md](docs/control-plane.md), [docs/releases.md](docs/releases.md),
+and [docs/networking.md](docs/networking.md).
 
 ```sh
 compute start --detach
@@ -93,7 +98,9 @@ compute environment status staging
 compute workload run authboundry/migrate --environment staging
 compute project restart authboundry --environment staging
 compute deploy authboundry --environment preprod --source ./authboundry --revision abc123 --wait
-compute promote authboundry --from preprod --to production --wait
+compute deploy authboundry --from preprod --to production --wait
+compute deployment rollback dep_…
+compute domain add app.example.com --environment production --project authboundry
 ```
 
 ## Universal runtime distribution

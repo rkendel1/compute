@@ -56,8 +56,11 @@ embedded FeltDB crate.
 | `ProjectRevision` | Immutable content: a label, its workloads, and their bundle identities |
 | `Environment` | A deployed, isolated place (`preprod`, `production`), with its configuration and policy |
 | `EnvironmentProject` | A project's membership in an environment: desired state, configuration, current revision and deployment |
-| `Deployment` | A revision delivered to an environment, with admission and placement evidence and status |
-| `Workload` | A service or task of a project in an environment, with its host port bindings |
+| `Deployment` | A release of a revision to an environment: its status, configuration digest, and the evidence of each step |
+| `Workload` | A service or task of a project in an environment, with its stable endpoint ports |
+| `WorkloadInstance` | One instance of a service at one deployment's revision, with its own ports and state |
+| `TrafficAssignment` | Which instance an endpoint serves; one per endpoint |
+| `Domain`, `DnsRecord`, `Certificate` | The network control plane ([docs/networking.md](networking.md)); certificates by reference only |
 | `WorkloadStatus` | What the daemon last observed: actual state and health |
 | `Execution` | One invocation, with its status, exit code, and evidence IDs |
 | `Receipt` | A reference to receipt evidence; the receipt itself is an artifact |
@@ -66,7 +69,9 @@ embedded FeltDB crate.
 | `Event` | A lifecycle event, sequenced |
 | `Artifact`, `ArtifactChunk` | Bundles and receipt documents, by digest, in request-sized chunks |
 
-Only desired state and evidence live there. Live process state does not.
+Only desired state and evidence live there. Live process state does not,
+and neither do secrets: certificate keys live in the node's secret store,
+and DNS and FeltDB credentials come from environment variables.
 
 `compute.manifest.json` beside it is `compute.flow` compiled by `@feltdb/core`.
 Three tests keep the three descriptions from drifting apart:
@@ -79,6 +84,9 @@ Three tests keep the three descriptions from drifting apart:
 - The conformance suite writes every collection against a real FeltDB.
 
 A change to the state model therefore needs a `compute.flow` change.
+`Deployment.status` keeps the values written before releases (`queued` …
+`superseded`) so existing records stay valid. Compute reads them as
+`pending` or `complete`.
 
 ## Configuration
 
@@ -160,34 +168,32 @@ compute deployment list --project attn
 ```
 
 A revision is immutable: a label always names the same content, and
-reusing a label for different content is refused. A deployment goes through
-these statuses:
+reusing a label for different content is refused. A deployment is a
+**release**, a durable state machine:
 
 ```text
-queued → admitted → placed → starting → healthy
-                │                  ╰──→ failed (startup)
-                ╰─────────────────────→ failed (admission or placement)
+pending → starting → ready → network_ready → switching → active → draining → complete
+   ╰──────────╰─────────╰───────────╰──→ failed          (the old revision keeps serving)
+                                switching ─→ rolled_back   (traffic returned to the old revision)
 ```
 
-Every workload is admitted and placed before anything changes. A deployment
-that fails admission or placement never becomes current, and the current
-one keeps running. When a deployment activates, one atomic change makes it
-current and marks the previous one `superseded`. A current deployment reads
-`stopped` while its project is stopped.
+The new revision starts next to the one serving. Traffic moves in one
+transaction once the new revision is ready, and the old revision drains
+before it stops. Every step's evidence is in the release record, so a
+daemon that restarts continues a release from its status. See
+[docs/releases.md](releases.md).
 
-`deploy` exits non-zero when the deployment fails, and `--wait` follows it
-until it is healthy or has failed. No deployment is silent. Each one is
-recorded with its evidence and events.
+`deploy` exits non-zero when the release fails or is rolled back, and
+`--wait` follows it until it ends. No deployment is silent. Each one is
+recorded with its evidence, its events, and a deployment receipt.
 
 **Promotion** deploys the exact revision current in the source
 environment, with the same revision ID and content digest, and records
 `promoted_from`. Nothing is rebuilt. Configuration isn't copied:
 production's configuration is production's, and `--set` sets it. By
-default only a healthy source deployment can be promoted.
-
-In this version, deploying a new revision replaces a project's services by
-stopping each old service and then starting the new one, so a service is
-briefly unavailable. Zero-downtime releases come next.
+default only a released (`active`, `draining`, or `complete`) source
+deployment can be promoted. `compute deploy feltdb --from preprod --to
+production` is the same operation.
 
 ## Failing closed
 
@@ -220,8 +226,14 @@ Lifecycle events are durable, sequenced records:
   `project.added`, `project.removed`, `project.started`, `project.stopped`,
   `project.restarted`
 - **Deployment:** `deployment.started`, `deployment.admitted`,
-  `deployment.placed`, `deployment.activated`, `deployment.completed`,
-  `deployment.failed`, `deployment.promoted`
+  `deployment.placed`, `deployment.ready`, `deployment.switched`,
+  `deployment.activated`, `deployment.draining`, `deployment.completed`,
+  `deployment.failed`, `deployment.rolled_back`, `deployment.promoted`
+- **Instance:** `instance.ready`, `instance.stopped`
+- **Network:** `domain.created`, `domain.removed`, `network.dns.applied`,
+  `network.dns.drifted`, `network.dns.failed`,
+  `network.certificate.issued`, `network.certificate.renewed`,
+  `network.certificate.failed`, `network.route.switched`
 - **Service:** `service.started`, `service.healthy`, `service.unhealthy`,
   `service.stopped`, `service.failed`, `service.denied`
 - **Task:** `task.completed`, `task.failed`, `task.denied`
@@ -237,7 +249,9 @@ Control state keeps a receipt's reference: its ID, the execution, the
 workload, project, environment, and deployment IDs, the policy and
 admission IDs, and the artifact digest. The receipt document itself is an
 artifact, served by `GET /receipts/:id` and verifiable with
-`compute receipt verify`.
+`compute receipt verify`. A release's own receipt,
+`compute.deployment-receipt@1`, is an artifact too, served by
+`GET /deployments/:id/receipt`.
 
 ## Shared services
 
@@ -250,8 +264,9 @@ boundary only: Compute doesn't yet manage a service catalog.
 - **One daemon per control plane.** Two daemons against the same FeltDB
   application and environment would both reconcile it; nothing prevents
   that yet.
-- **Brief replacement gap.** A new revision replaces running services, so a
-  service is briefly unavailable (see Deployments).
+- **Endpoints are served by the daemon.** While the daemon itself is down,
+  endpoints do not accept connections (see
+  [releases](releases.md#limitations)).
 - **Services run on the daemon's own node.** Tasks can be placed on pool
   providers.
 - **Revisions come from the CLI.** The UI deploys revisions that are

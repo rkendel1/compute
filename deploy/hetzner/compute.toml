@@ -8,3 +8,24 @@ application = "app_REPLACE_ME"            # from: compute control-plane provisio
 environment = "production"                # the FeltDB environment holding Compute's state
 token_env = "COMPUTE_FELTDB_TOKEN"        # set in /etc/compute/compute.env
 # ca_file = "/etc/compute/feltdb-ca.pem"  # only for a private CA
+
+# The public entry: ACME HTTP-01, redirects, and TLS by SNI (docs/networking.md).
+[network]
+ingress_http = "0.0.0.0:80"
+ingress_https = "0.0.0.0:443"
+public_ipv4 = "203.0.113.10"              # this host's address: DNS A records point here
+# public_ipv6 = "2001:db8::10"
+
+[network.acme]
+directory = "https://acme-v02.api.letsencrypt.org/directory"
+contact = "mailto:ops@example.com"
+
+# Hetzner DNS for your zone; the token comes from /etc/compute/compute.env.
+[network.dns.hetzner]
+kind = "hetzner"
+zone = "example.com"
+token_env = "HETZNER_DNS_TOKEN"
+
+# How releases move traffic (docs/releases.md).
+[release]
+drain_timeout_ms = 30000

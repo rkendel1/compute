@@ -46,6 +46,18 @@ import {
   deploymentInspectInputSchema,
   deploymentCreateInputSchema,
   deploymentPromoteInputSchema,
+  deploymentRollbackInputSchema,
+  domainListInputSchema,
+  domainListResultSchema,
+  domainSelectorSchema,
+  domainCreateInputSchema,
+  domainRemoveResultSchema,
+  domainViewSchema,
+  dnsInspectInputSchema,
+  dnsInspectResultSchema,
+  certificateInspectInputSchema,
+  certificateInspectResultSchema,
+  certificateViewSchema,
 } from "./schemas.js";
 import { ComputeDaemonClient, toAppPortError, type EnvironmentApi } from "./environment.js";
 import type {
@@ -905,7 +917,7 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
   });
   const deploymentCreate = defineCapability({
     name: "compute.deployment.create", version: 1,
-    description: "Deploy a registered, immutable revision to an environment. Every workload is admitted and placed first; a failed deployment keeps the current one.",
+    description: "Release a registered, immutable revision to an environment with zero downtime: admitted and placed, started next to what serves, switched once ready, drained. A release that fails keeps the current revision serving.",
     input: deploymentCreateInputSchema, output: deploymentViewSchema, effect: "consequential",
     authorization: ["compute.deployment.create"],
     authorizationContract: { required: true, scopes: ["compute.deployment.create"] },
@@ -920,6 +932,91 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
     authorizationContract: { required: true, scopes: ["compute.deployment.promote"] },
     attributes: { ...environmentAttributes, "compute.executes": true },
     handler: (request) => api(() => environments.promoteDeployment(request)),
+  });
+  const deploymentRollback = defineCapability({
+    name: "compute.deployment.rollback", version: 1,
+    description: "Roll a release back: before traffic moved it is abandoned; after, traffic returns to the revision it replaced; a complete release is rolled back by releasing that revision again.",
+    input: deploymentRollbackInputSchema, output: deploymentViewSchema, effect: "consequential",
+    authorization: ["compute.deployment.rollback"],
+    authorizationContract: { required: true, scopes: ["compute.deployment.rollback"] },
+    attributes: { ...environmentAttributes, "compute.executes": true },
+    handler: ({ deployment }) => api(() => environments.rollbackDeployment(deployment)),
+  });
+  const networkAttributes = { ...environmentAttributes, "compute.executes": false };
+  const domainList = defineCapability({
+    name: "compute.domain.list", version: 1,
+    description: "List domains: where each routes, and its DNS, TLS, and routing state.",
+    input: domainListInputSchema, output: domainListResultSchema, effect: "observation",
+    authorization: ["compute.domain.read"],
+    authorizationContract: { required: true, scopes: ["compute.domain.read"] },
+    attributes: networkAttributes,
+    handler: () => api(() => environments.listDomains()),
+  });
+  const domainInspect = defineCapability({
+    name: "compute.domain.inspect", version: 1,
+    description: "Inspect a domain: its endpoint, the revision serving it, its DNS records, and its certificate.",
+    input: domainSelectorSchema, output: domainViewSchema, effect: "observation",
+    authorization: ["compute.domain.read"],
+    authorizationContract: { required: true, scopes: ["compute.domain.read"] },
+    attributes: networkAttributes,
+    handler: ({ domain }) => api(() => environments.inspectDomain(domain)),
+  });
+  const domainCreate = defineCapability({
+    name: "compute.domain.create", version: 1,
+    description: "Route a domain to one workload port of one project in one environment. Compute keeps its DNS record and certificate.",
+    input: domainCreateInputSchema, output: domainViewSchema, effect: "consequential",
+    authorization: ["compute.domain.create"],
+    authorizationContract: { required: true, scopes: ["compute.domain.create"] },
+    attributes: networkAttributes,
+    handler: (definition) => api(() => environments.createDomain(definition)),
+  });
+  const domainRemove = defineCapability({
+    name: "compute.domain.remove", version: 1,
+    description: "Stop routing a domain and remove its DNS records and certificate. What it routed to keeps running.",
+    input: domainSelectorSchema, output: domainRemoveResultSchema, effect: "consequential",
+    authorization: ["compute.domain.remove"],
+    authorizationContract: { required: true, scopes: ["compute.domain.remove"] },
+    attributes: networkAttributes,
+    handler: ({ domain }) => api(() => environments.removeDomain(domain)),
+  });
+  const dnsInspect = defineCapability({
+    name: "compute.dns.inspect", version: 1,
+    description: "Every DNS record Compute manages: desired, actual, status, and last error.",
+    input: dnsInspectInputSchema, output: dnsInspectResultSchema, effect: "observation",
+    authorization: ["compute.dns.read"],
+    authorizationContract: { required: true, scopes: ["compute.dns.read"] },
+    attributes: networkAttributes,
+    handler: () => api(() => environments.dnsStatus()),
+  });
+  const dnsReconcile = defineCapability({
+    name: "compute.dns.reconcile", version: 1,
+    description: "Read every DNS record back from its provider now and repair drift.",
+    input: dnsInspectInputSchema, output: dnsInspectResultSchema, effect: "consequential",
+    authorization: ["compute.dns.reconcile"],
+    authorizationContract: { required: true, scopes: ["compute.dns.reconcile"] },
+    attributes: networkAttributes,
+    handler: () => api(() => environments.reconcileDns()),
+  });
+  const certificateInspect = defineCapability({
+    name: "compute.certificate.inspect", version: 1,
+    description: "Certificates: status, expiry, renewal, and fingerprint. Keys are never returned.",
+    input: certificateInspectInputSchema, output: certificateInspectResultSchema, effect: "observation",
+    authorization: ["compute.certificate.read"],
+    authorizationContract: { required: true, scopes: ["compute.certificate.read"] },
+    attributes: networkAttributes,
+    handler: ({ domain }) => api(async () => {
+      const certificates = await environments.certificates();
+      return domain === undefined ? certificates : certificates.filter((item) => item.domain === domain.toLowerCase());
+    }),
+  });
+  const certificateRenew = defineCapability({
+    name: "compute.certificate.renew", version: 1,
+    description: "Renew a domain's certificate now, whatever its expiry.",
+    input: domainSelectorSchema, output: certificateViewSchema, effect: "consequential",
+    authorization: ["compute.certificate.renew"],
+    authorizationContract: { required: true, scopes: ["compute.certificate.renew"] },
+    attributes: networkAttributes,
+    handler: ({ domain }) => api(() => environments.renewCertificate(domain)),
   });
   return createApplication({
     application: {
@@ -936,7 +1033,9 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
       environmentList, environmentInspect, environmentStatus, environmentCreate,
       environmentStart, environmentStop, environmentRestart, projectAdd, projectRemove,
       projectList, projectInspect, projectStart, projectStop, projectRestart,
-      deploymentInspect, deploymentCreate, deploymentPromote,
+      deploymentInspect, deploymentCreate, deploymentPromote, deploymentRollback,
+      domainList, domainInspect, domainCreate, domainRemove,
+      dnsInspect, dnsReconcile, certificateInspect, certificateRenew,
     ],
     ...(options.authorizer ? { authorizer: options.authorizer } : {}),
     mode: options.mode ?? "development",

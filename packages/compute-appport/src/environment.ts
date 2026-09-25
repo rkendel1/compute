@@ -1,5 +1,9 @@
 import { errors } from "@appport/protocol";
 import type {
+  CertificateView,
+  DnsRecordView,
+  DomainCreateInput,
+  DomainView,
   DeploymentCreateInput,
   DeploymentPromoteInput,
   DeploymentView,
@@ -32,6 +36,16 @@ export interface EnvironmentApi {
   inspectDeployment(deployment: string): Promise<DeploymentView>;
   createDeployment(request: DeploymentCreateInput): Promise<DeploymentView>;
   promoteDeployment(request: DeploymentPromoteInput): Promise<DeploymentView>;
+  /** Before traffic moved: abandon. After: return traffic. Complete: release the previous revision again. */
+  rollbackDeployment(deployment: string): Promise<DeploymentView>;
+  listDomains(): Promise<DomainView[]>;
+  inspectDomain(domain: string): Promise<DomainView>;
+  createDomain(definition: DomainCreateInput): Promise<DomainView>;
+  removeDomain(domain: string): Promise<{ removed: string }>;
+  dnsStatus(): Promise<DnsRecordView[]>;
+  reconcileDns(): Promise<DnsRecordView[]>;
+  certificates(): Promise<CertificateView[]>;
+  renewCertificate(domain: string): Promise<CertificateView>;
 }
 
 export const DEFAULT_DAEMON_ENDPOINT = "http://127.0.0.1:8787";
@@ -112,6 +126,42 @@ export class ComputeDaemonClient implements EnvironmentApi {
 
   promoteDeployment(request: DeploymentPromoteInput): Promise<DeploymentView> {
     return this.request("POST", "/deployments/promote", request);
+  }
+
+  rollbackDeployment(deployment: string): Promise<DeploymentView> {
+    return this.request("POST", `/deployments/${segment(deployment)}/rollback`);
+  }
+
+  listDomains(): Promise<DomainView[]> {
+    return this.request("GET", "/domains");
+  }
+
+  inspectDomain(domain: string): Promise<DomainView> {
+    return this.request("GET", `/domains/${segment(domain)}`);
+  }
+
+  createDomain(definition: DomainCreateInput): Promise<DomainView> {
+    return this.request("POST", "/domains", definition);
+  }
+
+  removeDomain(domain: string): Promise<{ removed: string }> {
+    return this.request("DELETE", `/domains/${segment(domain)}`);
+  }
+
+  dnsStatus(): Promise<DnsRecordView[]> {
+    return this.request("GET", "/dns");
+  }
+
+  reconcileDns(): Promise<DnsRecordView[]> {
+    return this.request("POST", "/dns/reconcile");
+  }
+
+  certificates(): Promise<CertificateView[]> {
+    return this.request("GET", "/certificates");
+  }
+
+  renewCertificate(domain: string): Promise<CertificateView> {
+    return this.request("POST", `/certificates/${segment(domain)}/renew`);
   }
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {

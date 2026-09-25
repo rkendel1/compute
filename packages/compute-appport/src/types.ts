@@ -420,8 +420,40 @@ export interface EnvironmentWorkloadView {
   log_directory?: string;
 }
 
+/**
+ * A release: pending → starting → ready → network_ready → switching →
+ * active → draining → complete, or failed (before traffic moved) or
+ * rolled_back (after).
+ */
 export type DeploymentStatus =
-  | "queued" | "admitted" | "placed" | "starting" | "healthy" | "failed" | "stopped" | "superseded";
+  | "pending" | "starting" | "ready" | "network_ready" | "switching" | "active" | "draining"
+  | "complete" | "failed" | "rolled_back";
+
+export type InstanceState = "starting" | "ready" | "serving" | "draining" | "stopped" | "failed";
+
+/** One instance of a service at one deployment's revision. */
+export interface InstanceView {
+  instance_id: string;
+  environment_id: string;
+  environment: string;
+  project_id: string;
+  project: string;
+  workload: string;
+  workload_id: string;
+  deployment_id: string;
+  revision: string;
+  state: InstanceState;
+  /** The instance's own host ports, behind the workload's stable endpoints. */
+  ports: Array<{ name: string; logical: number; host: number }>;
+  readiness?: string;
+  started_at?: string;
+  ready_at?: string;
+  stopped_at?: string;
+  error?: string;
+  updated_at: string;
+  actual_state?: ActualState;
+  open_connections: number;
+}
 
 export interface DeploymentSummary {
   deployment_id: string;
@@ -508,11 +540,101 @@ export interface DeploymentView {
     placement_id?: string;
     provider?: string;
     reasons?: string[];
+    /** A service's stable endpoints. */
+    endpoints?: Array<{ name: string; logical: number; host: number }>;
   }>;
   failure?: string;
   receipt_ids: string[];
+  /** The revision this release replaces. */
+  old_revision?: string;
+  /** Digest of the configuration the release runs with. */
+  config_digest?: string;
+  config?: Record<string, string>;
+  readiness_result?: Record<string, unknown>;
+  network_result?: Record<string, unknown>;
+  traffic_switch_result?: Record<string, unknown>;
+  rollback_reason?: string;
+  /** The deployment receipt's artifact digest. */
+  receipt?: string;
+  status_since?: string;
+  completed_at?: string;
   created_at: string;
   updated_at: string;
+  instances?: InstanceView[];
+}
+
+/** What is wanted, what is, and what went wrong last. */
+export interface Reconciliation {
+  status: string;
+  desired?: string;
+  actual?: string;
+  last_error?: string;
+  last_reconciled_at?: string;
+}
+
+export interface DnsRecordView {
+  record_id: string;
+  domain: string;
+  provider: string;
+  zone: string;
+  name: string;
+  record_type: string;
+  value: string;
+  ttl: number;
+  provider_record_id?: string;
+  state: Reconciliation;
+}
+
+/** A certificate's public facts; its key never leaves the node that holds it. */
+export interface CertificateView {
+  certificate_id: string;
+  domain: string;
+  issuer: string;
+  status: string;
+  renewal_status: string;
+  not_before?: string;
+  expires_at?: string;
+  fingerprint?: string;
+  secret_reference?: string;
+  held_by?: string;
+  last_error?: string;
+  last_reconciled_at?: string;
+  held_here: boolean;
+}
+
+/** A domain routed to one workload port of one project in one environment. */
+export interface DomainView {
+  domain_id: string;
+  name: string;
+  environment_id: string;
+  environment: string;
+  project_id: string;
+  project: string;
+  workload: string;
+  port: string;
+  dns_provider: string;
+  certificate_id?: string;
+  status: string;
+  dns: Reconciliation;
+  tls: Reconciliation;
+  routing: Reconciliation;
+  created_at: string;
+  endpoint: string;
+  host_port?: number;
+  serving_revision?: string;
+  serving_deployment?: string;
+  dns_records: DnsRecordView[];
+  certificate?: CertificateView;
+}
+
+export interface DomainCreateInput {
+  name: string;
+  environment: string;
+  project: string;
+  workload?: string | undefined;
+  port?: string | undefined;
+  dns_provider?: string | undefined;
+  tls?: boolean | undefined;
 }
 
 export interface ProjectDetail extends ProjectSummary {
