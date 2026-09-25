@@ -72,8 +72,33 @@ pub struct ControllerInfo {
     pub control_plane: ControlPlaneView,
     /// Where workloads run and endpoints listen.
     pub data_plane: DataPlaneView,
+    pub reconcile: ReconcileMetrics,
     /// Runtimes this node can execute, as its provider reports them.
     pub runtimes: serde_json::Value,
+}
+
+/// Reconciliation, measured: the last cycle and totals since start.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ReconcileMetrics {
+    pub cycles: u64,
+    pub errors_total: u64,
+    pub duration_seconds_total: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<ReconcileCycle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReconcileCycle {
+    pub started_at: DateTime<Utc>,
+    pub duration_ms: f64,
+    /// Workloads, instances, releases, and endpoints the cycle looked at.
+    pub resources_examined: usize,
+    /// What it changed: units started or stopped, release steps, status
+    /// records written, routes assigned.
+    pub resources_changed: usize,
+    pub errors: usize,
+    /// Milliseconds per phase.
+    pub phases_ms: std::collections::BTreeMap<String, f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

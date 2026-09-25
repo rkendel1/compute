@@ -57,6 +57,18 @@ impl Batch {
         self.writes.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.writes.len()
+    }
+
+    /// The documents this batch writes.
+    pub fn targets(&self) -> Vec<(crate::Collection, String)> {
+        self.writes
+            .iter()
+            .map(|write| (write.collection(), write.id().to_string()))
+            .collect()
+    }
+
     /// Insert a document that must not exist yet.
     pub fn create<T: Document>(mut self, id: &str, value: &T) -> Self {
         match encode(value) {

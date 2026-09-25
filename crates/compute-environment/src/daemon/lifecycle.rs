@@ -552,7 +552,7 @@ impl Daemon {
         project: &str,
         workload: &str,
     ) -> Result<(Key, compute_state::Stored<WorkloadRecord>), EnvironmentError> {
-        self.refresh().await?;
+        self.refresh_for_read().await?;
         let inner = self.inner.lock().await;
         let env_name = inner
             .desired

@@ -167,6 +167,113 @@ pub struct DaemonCommand {
     pub json: bool,
 }
 
+/// Carry out a hand-over this controller agreed to: start the new build
+/// with this controller's own arguments and environment, and wait for it
+/// to report itself ready. If it refuses, dies, or is not ready in time,
+/// stop it and start the previous build again. Workloads keep running on
+/// the supervisor throughout; only the API pauses.
+async fn hand_over(
+    record: compute_environment::upgrade::UpgradeRecord,
+    state_dir: &std::path::Path,
+) -> compute_core::Result<()> {
+    use compute_environment::upgrade::{read_record, write_record};
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let launch = |program: &str| -> std::io::Result<std::process::Child> {
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(state_dir.join("daemon.log"))?;
+        let mut child = std::process::Command::new(program);
+        child
+            .args(&arguments)
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: setsid in the child before exec only detaches it
+            // from this session.
+            unsafe {
+                child.pre_exec(|| {
+                    if libc::setsid() < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        child.spawn()
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(record.timeout_seconds);
+    let failure = match launch(&record.to.path) {
+        Err(error) => format!("the new controller did not start: {error}"),
+        Ok(mut child) => loop {
+            if let Some(current) = read_record(state_dir) {
+                match current.status.as_str() {
+                    "completed" => {
+                        eprintln!(
+                            "{} {} completed: controller pid {} serves {} ({})",
+                            record.kind,
+                            record.upgrade_id,
+                            child.id(),
+                            record.to.version,
+                            record.to.build_id
+                        );
+                        return Ok(());
+                    }
+                    "refused" => {
+                        let _ = child.wait();
+                        break current
+                            .reason
+                            .unwrap_or_else(|| "the new controller refused".into());
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                break format!("the new controller exited ({status}) before it was ready");
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break format!(
+                    "the new controller was not ready within {}s",
+                    record.timeout_seconds
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        },
+    };
+    eprintln!(
+        "{} {} failed: {failure}; restoring {}",
+        record.kind, record.upgrade_id, record.from.build_id
+    );
+    let mut restoring = read_record(state_dir).unwrap_or(record.clone());
+    restoring.status = "rolling_back".into();
+    restoring.reason = Some(failure.clone());
+    write_record(state_dir, &restoring).map_err(error)?;
+    let mut restored = launch(&record.from.path)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        if read_record(state_dir).is_some_and(|current| current.status == "rolled_back") {
+            eprintln!("previous controller restored (pid {})", restored.id());
+            return Ok(());
+        }
+        if let Ok(Some(status)) = restored.try_wait() {
+            return Err(ComputeError::Runtime(format!(
+                "the previous controller exited ({status}) while being restored; workloads keep running on the supervisor; start a controller"
+            )));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(ComputeError::Runtime(
+                "the previous controller did not report itself restored".into(),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Decide how the API is secured, failing closed. Plaintext without
 /// credentials is allowed only when asked for (`--insecure`) or on a
 /// loopback listener; a reachable listener needs TLS.
@@ -446,6 +553,11 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
     // The API stops answering as soon as a shutdown begins; the process
     // stays until the shutdown has stopped (or detached from) everything.
     let _ = tokio::time::timeout(Duration::from_secs(300), daemon.wait_stopped()).await;
+    if let Some(record) = daemon.take_upgrade() {
+        daemon.release_node();
+        drop(daemon);
+        return hand_over(record, &command.state_dir).await;
+    }
     Ok(())
 }
 

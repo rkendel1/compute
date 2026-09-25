@@ -26,6 +26,7 @@ pub mod manifest;
 pub mod model;
 pub mod status;
 pub mod tls;
+pub mod upgrade;
 
 pub use compute_network::acme::AcmeConfig;
 pub use compute_network::dns::DnsProviderConfig;

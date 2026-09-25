@@ -37,6 +37,11 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/auth/credentials/{credential}/revoke"),
     ("POST", "/auth/credentials/{credential}/rotate"),
     ("GET", "/audit"),
+    ("GET", "/metrics"),
+    ("POST", "/node/reconcile"),
+    ("GET", "/node/upgrade"),
+    ("POST", "/node/upgrade"),
+    ("POST", "/node/rollback"),
     ("POST", "/shutdown"),
     ("GET", "/environments"),
     ("POST", "/environments"),
@@ -271,6 +276,7 @@ fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         201 => "Created",
+        202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
@@ -288,8 +294,19 @@ async fn write_response(
     body: &[u8],
     request_id: &str,
 ) -> std::io::Result<()> {
+    write_response_with(stream, status, content_type, body, request_id, "").await
+}
+
+async fn write_response_with(
+    stream: &mut Stream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    request_id: &str,
+    extra_headers: &str,
+) -> std::io::Result<()> {
     let head = format!(
-        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nX-Compute-Api: {API_VERSION}\r\nX-Request-Id: {request_id}\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nX-Compute-Api: {API_VERSION}\r\nX-Request-Id: {request_id}\r\n{extra_headers}Cache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         reason(status),
         body.len()
     );
@@ -311,21 +328,49 @@ async fn write_json(
 enum Response {
     Json(u16, Value),
     Static(&'static str, &'static str),
+    Text(&'static str, String),
     Redirect(&'static str),
     Stream(EventFilter),
 }
 
 async fn handle(mut stream: Stream, daemon: Arc<Daemon>) -> std::io::Result<()> {
     let request_id = crate::auth::request_id();
+    let freshness = Arc::new(std::sync::Mutex::new(None));
     let result = match read_request(&mut stream).await {
-        Ok(request) => dispatch(&daemon, request, &request_id).await,
+        Ok(request) => {
+            crate::auth::FRESHNESS
+                .scope(freshness.clone(), dispatch(&daemon, request, &request_id))
+                .await
+        }
         Err(error) => Err(error),
     };
+    // A response built from cached or stale desired state says so.
+    let freshness = *freshness.lock().expect("freshness");
+    let state_headers = freshness
+        .map(|(kind, as_of)| {
+            format!(
+                "X-Compute-State: {kind}\r\nX-Compute-State-As-Of: {}\r\n",
+                as_of.to_rfc3339()
+            )
+        })
+        .unwrap_or_default();
     match result {
         Ok(Response::Json(status, value)) => {
-            write_json(&mut stream, status, &value, &request_id).await
+            let body = serde_json::to_vec(&value).unwrap_or_default();
+            write_response_with(
+                &mut stream,
+                status,
+                "application/json",
+                &body,
+                &request_id,
+                &state_headers,
+            )
+            .await
         }
         Ok(Response::Static(content_type, body)) => {
+            write_response(&mut stream, 200, content_type, body.as_bytes(), &request_id).await
+        }
+        Ok(Response::Text(content_type, body)) => {
             write_response(&mut stream, 200, content_type, body.as_bytes(), &request_id).await
         }
         Ok(Response::Redirect(location)) => {
@@ -475,6 +520,23 @@ async fn dispatch(
                 .await;
         }
         return Err(error);
+    }
+    // Nothing is changed while durable state is unreachable: a mutation
+    // fails before it starts rather than half-applying.
+    if mutation && !matches!(segments.as_slice(), ["shutdown"]) {
+        if let Err(error) = daemon.require_state().await {
+            daemon
+                .audit(audit(
+                    &principal.operator_id,
+                    principal.credential_id.clone(),
+                    "failed",
+                    error.status(),
+                    Some(&error),
+                    Default::default(),
+                ))
+                .await;
+            return Err(error);
+        }
     }
     let context = RequestContext {
         request_id: request_id.to_string(),
@@ -741,6 +803,27 @@ async fn route(
                 .rotate_credential(principal, id, parse(body)?)
                 .await?,
         )?),
+        // The node's controller.
+        ("POST", ["node", "reconcile"]) => {
+            daemon.reconcile().await;
+            ok(to_value(daemon.info().await.reconcile)?)
+        }
+        ("GET", ["node", "upgrade"]) => ok(to_value(daemon.upgrade_record())?),
+        ("POST", ["node", "upgrade"]) => {
+            let record = daemon.request_upgrade(principal, parse(body)?).await?;
+            Ok(Response::Json(202, to_value(record)?))
+        }
+        ("POST", ["node", "rollback"]) => {
+            let request: serde_json::Value = parse(body)?;
+            let record = daemon
+                .request_rollback(principal, request["timeout_seconds"].as_u64())
+                .await?;
+            Ok(Response::Json(202, to_value(record)?))
+        }
+        ("GET", ["metrics"]) => Ok(Response::Text(
+            "text/plain; version=0.0.4",
+            daemon.metrics().await,
+        )),
         ("GET", ["audit"]) => ok(to_value(
             daemon
                 .audit_records(query.get("operator").map(String::as_str), limit(100))

@@ -1063,16 +1063,31 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         }
         Commands::Isolation(json_flag) => print_isolation_profiles(&compute, json_flag.json),
         Commands::Version(json_flag) => {
+            let identity = compute_environment::identity::ControllerIdentity::current();
             if json_flag.json {
                 println!(
                     "{}",
                     serde_json::json!({
                         "name": "compute",
-                        "version": env!("CARGO_PKG_VERSION"),
+                        "version": identity.version,
+                        "git_commit": identity.git_commit,
+                        "build_id": identity.build_id,
+                        "build_profile": identity.build_profile,
+                        "platform": identity.platform,
+                        "api": compute_environment::api::API_VERSION,
+                        "supervisor_protocol": compute_environment::dataplane::SUPERVISOR_PROTOCOL,
+                        "runtimes": RuntimeKind::ALL.iter().map(|kind| kind.as_str()).collect::<Vec<_>>(),
+                        "isolation_profiles": compute_core::IsolationProfile::ALL
+                            .iter()
+                            .map(|profile| profile.as_str())
+                            .collect::<Vec<_>>(),
                     })
                 );
             } else {
-                println!("compute {}", env!("CARGO_PKG_VERSION"));
+                println!("compute {}", identity.version);
+                println!("commit {}", identity.git_commit);
+                println!("build {}", identity.build_id);
+                println!("platform {}", identity.platform);
             }
         }
         Commands::Exec(command) => {

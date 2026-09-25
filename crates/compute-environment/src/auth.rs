@@ -545,6 +545,29 @@ tokio::task_local! {
     pub(crate) static REQUEST: RequestContext;
 }
 
+tokio::task_local! {
+    /// How fresh the desired state a response was built from is.
+    pub(crate) static FRESHNESS: std::sync::Arc<std::sync::Mutex<Option<(&'static str, DateTime<Utc>)>>>;
+}
+
+/// Record, for the response being built, where its desired state came
+/// from: `live` (read now), `cached` (a recent read, nothing written
+/// since), or `stale` (durable state is unreachable; the last read).
+pub(crate) fn set_freshness(kind: &'static str, as_of: DateTime<Utc>) {
+    let _ = FRESHNESS.try_with(|freshness| {
+        let mut freshness = freshness.lock().expect("freshness");
+        // The least fresh source wins.
+        let rank = |kind: &str| match kind {
+            "live" => 0,
+            "cached" => 1,
+            _ => 2,
+        };
+        if freshness.is_none_or(|(current, _)| rank(kind) >= rank(current)) {
+            *freshness = Some((kind, as_of));
+        }
+    });
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RequestContext {
     pub request_id: String,

@@ -21,6 +21,7 @@ mod processes;
 mod reconcile;
 mod release;
 mod supervision;
+mod upgrades;
 
 pub use supervision::Recovery;
 mod views;
@@ -100,6 +101,13 @@ pub struct DaemonConfig {
     /// process, sharing its fate; the CLI uses the node's supervisor
     /// process, which outlives controller restarts and upgrades.
     pub data_plane: Option<Arc<dyn crate::dataplane::DataPlane>>,
+    /// How old desired state a read may be served from. The cache is
+    /// dropped by every write this controller makes, so it never hides a
+    /// change made here; changes made elsewhere show within this bound.
+    pub read_cache: Duration,
+    /// Refuse to start while durable control state is unreachable,
+    /// instead of starting with a degraded control plane.
+    pub require_state_at_start: bool,
 }
 
 impl DaemonConfig {
@@ -125,6 +133,8 @@ impl DaemonConfig {
             security: crate::auth::SecurityConfig::default(),
             api_tls: None,
             data_plane: None,
+            read_cache: Duration::from_millis(1000),
+            require_state_at_start: false,
         }
     }
 }
@@ -251,6 +261,9 @@ pub(crate) struct Desired {
     pub dns_records: BTreeMap<String, Stored<DnsRecordRecord>>,
     /// Certificates by domain.
     pub certificates: BTreeMap<String, Stored<CertificateRecord>>,
+    /// Instance IDs by workload and deployment, so finding a unit's
+    /// instance does not scan every instance.
+    pub instance_index: BTreeMap<(Key, String), String>,
 }
 
 impl Desired {
@@ -323,12 +336,26 @@ impl Desired {
         key: &Key,
         deployment_id: &str,
     ) -> Option<&Stored<WorkloadInstanceRecord>> {
-        self.instances.values().find(|instance| {
-            instance.value.deployment_id == deployment_id
-                && instance.value.environment == key.0
-                && instance.value.project == key.1
-                && instance.value.workload == key.2
-        })
+        self.instance_index
+            .get(&(key.clone(), deployment_id.to_string()))
+            .and_then(|id| self.instances.get(id))
+    }
+
+    /// Rebuild the indexes after the maps changed.
+    pub fn reindex(&mut self) {
+        self.instance_index = self
+            .instances
+            .values()
+            .map(|instance| {
+                (
+                    (
+                        Self::instance_key(&instance.value),
+                        instance.value.deployment_id.clone(),
+                    ),
+                    instance.id.clone(),
+                )
+            })
+            .collect();
     }
 
     pub fn revision_of(&self, deployment_id: &str) -> Option<&ProjectRevisionRecord> {
@@ -357,7 +384,9 @@ impl Desired {
 }
 
 pub(crate) struct Inner {
-    pub desired: Desired,
+    /// The last read of desired state. Shared, never mutated in place: a
+    /// refresh replaces it, so taking a snapshot costs nothing.
+    pub desired: Arc<Desired>,
     pub runtime: BTreeMap<Unit, WorkloadRuntime>,
     /// Output of recent executions, which control state does not keep.
     pub outputs: BTreeMap<String, (String, String)>,
@@ -378,6 +407,26 @@ pub(crate) struct Inner {
     pub pending_audit: Vec<compute_state::AuditRecord>,
     /// Refused requests recorded as events this minute: (minute, count).
     pub refusals: (i64, u32),
+    /// When desired state was last read, and how many writes this
+    /// controller had made by then.
+    pub loaded: Option<Loaded>,
+    /// Since when durable control state has been unreachable.
+    pub degraded_since: Option<DateTime<Utc>>,
+    /// An outage that ended, to be recorded: when it began.
+    pub recovered_from: Option<DateTime<Utc>>,
+    /// Whether the current outage has been announced.
+    pub outage_announced: bool,
+    pub reconcile: ReconcileMetrics,
+    /// What the current cycle changed, counted by the phases.
+    pub cycle_changes: usize,
+}
+
+/// When desired state was read.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Loaded {
+    pub writes: u64,
+    pub at: std::time::Instant,
+    pub as_of: DateTime<Utc>,
 }
 
 /// The most recently terminalized executions, by execution ID.
@@ -421,6 +470,14 @@ pub struct Daemon {
     pool: ProviderPool,
     cache: Mutex<CapabilityCache>,
     sequence: AtomicU64,
+    /// Writes this controller has committed: the read cache's generation.
+    writes: AtomicU64,
+    /// Documents this controller wrote since desired state was last read,
+    /// for a targeted refresh.
+    dirty: std::sync::Mutex<Vec<(Collection, String)>>,
+    /// What each bundle declares, by bundle identity.
+    declared:
+        std::sync::Mutex<std::collections::HashMap<String, (Option<u64>, Option<u64>, String)>>,
     events: broadcast::Sender<EventRecord>,
     data_plane: Arc<dyn crate::dataplane::DataPlane>,
     /// The routes this controller assigned, mirrored so a reconcile that
@@ -439,7 +496,10 @@ pub struct Daemon {
     authority: crate::auth::Authority,
     /// What this controller found on the data plane when it started.
     recovery: std::sync::Mutex<Recovery>,
-    _lock: std::fs::File,
+    /// A hand-over this controller agreed to.
+    upgrade: std::sync::Mutex<Option<crate::upgrade::UpgradeRecord>>,
+    /// The node lock: held until the controller hands the node over.
+    lock: std::sync::Mutex<Option<std::fs::File>>,
 }
 
 pub(crate) enum Outcome {
@@ -538,6 +598,9 @@ impl Daemon {
         };
         let control = ControlState::new(config.state.clone());
         // The first read proves the control state is reachable and ours.
+        // Without it the controller still starts — its data plane keeps
+        // serving and it reattaches to its workloads — with a degraded
+        // control plane: nothing changes until durable state answers.
         let last = control
             .query::<EventRecord>(
                 Query::all(Collection::Event)
@@ -550,8 +613,12 @@ impl Daemon {
                     "cannot read control state at {}: {error}",
                     config.state.backend().location
                 ))
-            })?;
-        let sequence = last.first().map_or(0, |event| event.value.sequence);
+            });
+        let (sequence, degraded) = match last {
+            Ok(last) => (last.first().map_or(0, |event| event.value.sequence), None),
+            Err(error) if !config.require_state_at_start => (0, Some(error)),
+            Err(error) => return Err(error),
+        };
         let pool = build_pool(&config)?;
         let started_at = Utc::now();
         let instance_id = format!(
@@ -632,7 +699,7 @@ impl Daemon {
             instance_id,
             started_at,
             inner: Mutex::new(Inner {
-                desired: Desired::default(),
+                desired: Arc::new(Desired::default()),
                 runtime: BTreeMap::new(),
                 outputs: BTreeMap::new(),
                 state_error: None,
@@ -644,11 +711,20 @@ impl Daemon {
                 pending_evidence: Vec::new(),
                 pending_audit: Vec::new(),
                 refusals: (0, 0),
+                loaded: None,
+                degraded_since: None,
+                recovered_from: None,
+                outage_announced: false,
+                reconcile: ReconcileMetrics::default(),
+                cycle_changes: 0,
             }),
             reconciling: Mutex::new(()),
             pool,
             cache: Mutex::new(CapabilityCache::default()),
             sequence: AtomicU64::new(sequence),
+            writes: AtomicU64::new(0),
+            dirty: std::sync::Mutex::new(Vec::new()),
+            declared: std::sync::Mutex::new(std::collections::HashMap::new()),
             events,
             data_plane,
             routes: std::sync::Mutex::new(routes),
@@ -663,11 +739,22 @@ impl Daemon {
             stopped,
             authority,
             recovery: std::sync::Mutex::new(Recovery::default()),
-            _lock: lock,
+            upgrade: std::sync::Mutex::new(None),
+            lock: std::sync::Mutex::new(Some(lock)),
         });
-        daemon.register_providers().await?;
-        daemon.load_credentials().await?;
-        daemon.bootstrap_admin().await?;
+        if let Some(error) = &degraded {
+            let mut inner = daemon.inner.lock().await;
+            inner.state_error = Some(error.message());
+            inner.degraded_since = Some(Utc::now());
+        }
+        if degraded.is_none() {
+            daemon.register_providers().await?;
+            daemon.load_credentials().await?;
+            daemon.bootstrap_admin().await?;
+        } else {
+            // Verifiers from this node's last snapshot; nothing new.
+            let _ = daemon.load_credentials().await;
+        }
         let started = Change::new();
         let started = daemon.event(
             started,
@@ -680,7 +767,9 @@ impl Daemon {
                 "reaped": reaped,
             }),
         );
-        daemon.apply(started).await?;
+        if degraded.is_none() {
+            daemon.apply(started).await?;
+        }
         // Supervise again whatever the data plane still runs before
         // reconciling, so nothing healthy is started twice or restarted.
         let _ = daemon.refresh().await;
@@ -707,6 +796,17 @@ impl Daemon {
         );
         let _ = daemon.apply(change).await;
         *daemon.recovery.lock().expect("recovery") = recovery;
+        // Part of an upgrade: take over only with every workload accounted
+        // for.
+        if let Err(error) = daemon.resume_upgrade().await {
+            for runtime in daemon.inner.lock().await.runtime.values_mut() {
+                if let Some(handle) = runtime.handle.take() {
+                    handle.abort();
+                }
+            }
+            daemon.release_node();
+            return Err(error);
+        }
         daemon.reconcile().await;
         let change = daemon.event(
             Change::new(),
@@ -818,6 +918,98 @@ impl Daemon {
         }
     }
 
+    /// Metrics in the Prometheus text format: reconciliation, workloads,
+    /// the control plane's availability, and evidence not yet written.
+    pub async fn metrics(&self) -> String {
+        use std::fmt::Write;
+        let inner = self.inner.lock().await;
+        let metrics = &inner.reconcile;
+        let last = metrics.last.as_ref();
+        let running = inner
+            .runtime
+            .values()
+            .filter(|runtime| runtime.state == Some(ActualState::Running))
+            .count();
+        let unhealthy = inner
+            .runtime
+            .values()
+            .filter(|runtime| runtime.health == Some(Health::Unhealthy))
+            .count();
+        let mut out = String::new();
+        let mut metric = |name: &str, kind: &str, help: &str, value: f64| {
+            let _ = writeln!(out, "# HELP {name} {help}");
+            let _ = writeln!(out, "# TYPE {name} {kind}");
+            let _ = writeln!(out, "{name} {value}");
+        };
+        metric(
+            "compute_reconcile_cycles_total",
+            "counter",
+            "Reconciliation cycles run.",
+            metrics.cycles as f64,
+        );
+        metric(
+            "compute_reconcile_errors_total",
+            "counter",
+            "Cycles that could not complete.",
+            metrics.errors_total as f64,
+        );
+        metric(
+            "compute_reconcile_duration_seconds_total",
+            "counter",
+            "Time spent reconciling.",
+            metrics.duration_seconds_total,
+        );
+        metric(
+            "compute_reconcile_duration_seconds",
+            "gauge",
+            "The last cycle's duration.",
+            last.map_or(0.0, |cycle| cycle.duration_ms / 1000.0),
+        );
+        metric(
+            "compute_reconcile_resources_examined",
+            "gauge",
+            "Resources the last cycle examined.",
+            last.map_or(0.0, |cycle| cycle.resources_examined as f64),
+        );
+        metric(
+            "compute_reconcile_resources_changed",
+            "gauge",
+            "Resources the last cycle changed.",
+            last.map_or(0.0, |cycle| cycle.resources_changed as f64),
+        );
+        metric(
+            "compute_workloads_running",
+            "gauge",
+            "Units running on this node.",
+            running as f64,
+        );
+        metric(
+            "compute_workloads_unhealthy",
+            "gauge",
+            "Running services failing their health check.",
+            unhealthy as f64,
+        );
+        metric(
+            "compute_control_state_available",
+            "gauge",
+            "1 when durable control state answers.",
+            f64::from(u8::from(inner.state_error.is_none())),
+        );
+        metric(
+            "compute_evidence_pending",
+            "gauge",
+            "Execution evidence waiting for control state.",
+            inner.pending_evidence.len() as f64,
+        );
+        metric(
+            "compute_audit_pending",
+            "gauge",
+            "Audit records waiting for control state.",
+            inner.pending_audit.len() as f64,
+        );
+        out
+    }
+
     /// What this controller found on the data plane when it started.
     pub fn recovery(&self) -> Recovery {
         self.recovery.lock().expect("recovery").clone()
@@ -901,11 +1093,16 @@ impl Daemon {
                 last_reconciled_at: inner.last_reconciled_at,
             },
             data_plane,
+            reconcile: inner.reconcile.clone(),
             runtimes,
         }
     }
 
     // ---- Control-state changes --------------------------------------------
+
+    pub(crate) fn next_sequence(&self) -> u64 {
+        self.sequence.fetch_add(1, Ordering::SeqCst) + 1
+    }
 
     /// Add an event to a change. Sequences increase across daemon restarts.
     pub(crate) fn event(
@@ -959,7 +1156,21 @@ impl Daemon {
     /// Commit a change, then publish its events. Nothing is published for
     /// a change that did not commit.
     pub(crate) async fn apply(&self, change: Change) -> Result<(), EnvironmentError> {
-        self.control.transaction(change.batch).await?;
+        let targets = change.batch.targets();
+        let result = self.control.transaction(change.batch).await;
+        if result.is_ok() {
+            self.dirty.lock().expect("dirty").extend(targets);
+        } else {
+            // Unknown what landed: the next refresh reads everything.
+            self.dirty
+                .lock()
+                .expect("dirty")
+                .push((Collection::Environment, String::new()));
+        }
+        // Whatever the outcome, a write was attempted: cached reads must
+        // look again.
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        result?;
         for event in change.events {
             let _ = self.events.send(event);
         }
@@ -969,32 +1180,376 @@ impl Daemon {
     /// Read desired state. On failure, the snapshot is kept and the error
     /// is reported; nothing is started or stopped from stale intent.
     pub(crate) async fn refresh(&self) -> Result<(), EnvironmentError> {
+        let writes = self.writes.load(Ordering::SeqCst);
+        let dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty"));
         let loaded = self.load_desired().await;
+        if loaded.is_err() {
+            self.dirty.lock().expect("dirty").extend(dirty);
+        }
         let mut inner = self.inner.lock().await;
         match loaded {
             Ok(desired) => {
-                inner.desired = desired;
+                inner.desired = Arc::new(desired);
                 inner.state_error = None;
+                inner.loaded = Some(Loaded {
+                    writes,
+                    at: std::time::Instant::now(),
+                    as_of: Utc::now(),
+                });
+                if let Some(since) = inner.degraded_since.take() {
+                    inner.recovered_from = Some(since);
+                    inner.outage_announced = false;
+                }
                 Ok(())
             }
             Err(error) => {
+                inner.state_error = Some(error.to_string());
+                if inner.degraded_since.is_none() {
+                    inner.degraded_since = Some(Utc::now());
+                }
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Desired state for a read: this controller's last read when it is
+    /// recent and nothing was written since, otherwise a fresh read. When
+    /// durable state is unreachable, the last read is served and the
+    /// response says how old it is; with no read at all, the request
+    /// fails with `state_unavailable`.
+    pub(crate) async fn refresh_for_read(&self) -> Result<(), EnvironmentError> {
+        let (cached, degraded) = {
+            let inner = self.inner.lock().await;
+            (inner.loaded, inner.state_error.is_some())
+        };
+        if let Some(loaded) = cached
+            && !degraded
+            && loaded.writes == self.writes.load(Ordering::SeqCst)
+            && loaded.at.elapsed() < self.config.read_cache
+        {
+            crate::auth::set_freshness("cached", loaded.as_of);
+            return Ok(());
+        }
+        match self.refresh().await {
+            Ok(()) => {
+                crate::auth::set_freshness("live", Utc::now());
+                Ok(())
+            }
+            Err(EnvironmentError::Unavailable(message)) => match cached {
+                Some(loaded) => {
+                    crate::auth::set_freshness("stale", loaded.as_of);
+                    Ok(())
+                }
+                None => Err(EnvironmentError::Unavailable(format!(
+                    "{message}; this controller has no earlier read to serve"
+                ))),
+            },
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Re-read only what this controller wrote since the last read: the
+    /// records themselves, and deployments and revisions they now name.
+    /// Changes made elsewhere are picked up by the next full refresh,
+    /// which every reconciliation cycle begins with.
+    pub(crate) async fn refresh_targeted(&self) -> Result<(), EnvironmentError> {
+        let writes = self.writes.load(Ordering::SeqCst);
+        let dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty"));
+        let relevant = dirty
+            .iter()
+            .filter(|(collection, _)| {
+                matches!(
+                    collection,
+                    Collection::Environment
+                        | Collection::Project
+                        | Collection::EnvironmentProject
+                        | Collection::Workload
+                        | Collection::WorkloadInstance
+                        | Collection::TrafficAssignment
+                        | Collection::Domain
+                        | Collection::DnsRecord
+                        | Collection::Certificate
+                        | Collection::Deployment
+                )
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if relevant.is_empty() {
+            return Ok(());
+        }
+        // An unknown write, or too many to be worth it: read everything.
+        if relevant.iter().any(|(_, id)| id.is_empty()) || relevant.len() > 64 {
+            return self.refresh().await;
+        }
+        let result = self.apply_targets(&relevant).await;
+        match result {
+            Ok(desired) => {
+                let mut inner = self.inner.lock().await;
+                inner.desired = Arc::new(desired);
+                inner.loaded = Some(Loaded {
+                    writes,
+                    at: std::time::Instant::now(),
+                    as_of: Utc::now(),
+                });
+                Ok(())
+            }
+            Err(error) => {
+                self.dirty.lock().expect("dirty").extend(dirty);
+                let mut inner = self.inner.lock().await;
                 inner.state_error = Some(error.to_string());
                 Err(error.into())
             }
         }
     }
 
+    async fn apply_targets(
+        &self,
+        targets: &BTreeSet<(Collection, String)>,
+    ) -> Result<Desired, compute_state::StateError> {
+        let control = &self.control;
+        let mut desired = (*self.inner.lock().await.desired).clone();
+        let mut reads = tokio::task::JoinSet::new();
+        for (collection, id) in targets.iter().cloned() {
+            let control = control.clone();
+            reads.spawn(async move {
+                let record = control.store().get(collection, &id).await?;
+                Ok::<_, compute_state::StateError>((collection, id, record))
+            });
+        }
+        let mut read = vec![];
+        while let Some(result) = reads.join_next().await {
+            read.push(
+                result
+                    .map_err(|error| compute_state::StateError::Unavailable(error.to_string()))??,
+            );
+        }
+        fn decode<T: Document>(
+            id: &str,
+            record: Option<compute_state::Record>,
+        ) -> Result<Option<Stored<T>>, compute_state::StateError> {
+            record
+                .map(|record| {
+                    Ok(Stored {
+                        id: id.to_string(),
+                        version: record.version,
+                        value: serde_json::from_value(serde_json::Value::Object(record.value))
+                            .map_err(|error| {
+                                compute_state::StateError::Invalid(error.to_string())
+                            })?,
+                    })
+                })
+                .transpose()
+        }
+        for (collection, id, record) in read {
+            match collection {
+                Collection::Environment => {
+                    desired.environments.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<EnvironmentRecord>(&id, record)? {
+                        desired
+                            .environments
+                            .insert(stored.value.name.clone(), stored);
+                    }
+                }
+                Collection::Project => {
+                    desired.projects.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<ProjectRecord>(&id, record)? {
+                        desired.projects.insert(stored.value.name.clone(), stored);
+                    }
+                }
+                Collection::EnvironmentProject => {
+                    desired.memberships.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<EnvironmentProjectRecord>(&id, record)? {
+                        desired.memberships.insert(
+                            (
+                                stored.value.environment.clone(),
+                                stored.value.project.clone(),
+                            ),
+                            stored,
+                        );
+                    }
+                }
+                Collection::Workload => {
+                    desired.workloads.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<WorkloadRecord>(&id, record)? {
+                        desired.workloads.insert(
+                            (
+                                stored.value.environment.clone(),
+                                stored.value.project.clone(),
+                                stored.value.name.clone(),
+                            ),
+                            stored,
+                        );
+                    }
+                }
+                Collection::WorkloadInstance => {
+                    desired.instances.remove(&id);
+                    if let Some(stored) = decode::<WorkloadInstanceRecord>(&id, record)? {
+                        desired.instances.insert(id.clone(), stored);
+                    }
+                }
+                Collection::TrafficAssignment => {
+                    desired.traffic.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<TrafficAssignmentRecord>(&id, record)? {
+                        desired
+                            .traffic
+                            .insert(stored.value.endpoint.clone(), stored);
+                    }
+                }
+                Collection::Domain => {
+                    desired.domains.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<DomainRecord>(&id, record)? {
+                        desired.domains.insert(stored.value.name.clone(), stored);
+                    }
+                }
+                Collection::DnsRecord => {
+                    desired.dns_records.remove(&id);
+                    if let Some(stored) = decode::<DnsRecordRecord>(&id, record)? {
+                        desired.dns_records.insert(id.clone(), stored);
+                    }
+                }
+                Collection::Certificate => {
+                    desired.certificates.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<CertificateRecord>(&id, record)? {
+                        desired
+                            .certificates
+                            .insert(stored.value.domain.clone(), stored);
+                    }
+                }
+                Collection::Deployment => {
+                    desired.deployments.remove(&id);
+                    if let Some(stored) = decode::<DeploymentRecord>(&id, record)? {
+                        desired.deployments.insert(id.clone(), stored);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Keep exactly the deployments a full read keeps: in flight, or
+        // named by a membership or an instance.
+        let wanted = desired
+            .memberships
+            .values()
+            .filter_map(|membership| membership.value.deployment_id.clone())
+            .chain(
+                desired
+                    .instances
+                    .values()
+                    .map(|instance| instance.value.deployment_id.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        desired.deployments.retain(|id, deployment| {
+            wanted.contains(id) || IN_FLIGHT.contains(&deployment.value.status)
+        });
+        let mut gets = tokio::task::JoinSet::new();
+        for id in wanted
+            .iter()
+            .filter(|id| !desired.deployments.contains_key(*id))
+            .cloned()
+        {
+            let control = control.clone();
+            gets.spawn(async move { control.get::<DeploymentRecord>(&id).await });
+        }
+        while let Some(result) = gets.join_next().await {
+            if let Some(deployment) = result
+                .map_err(|error| compute_state::StateError::Unavailable(error.to_string()))??
+            {
+                desired
+                    .deployments
+                    .insert(deployment.id.clone(), deployment);
+            }
+        }
+        let missing = desired
+            .deployments
+            .values()
+            .map(|deployment| deployment.value.revision_id.clone())
+            .filter(|id| !desired.revisions.contains_key(id))
+            .collect::<BTreeSet<_>>();
+        for revision_id in missing {
+            if let Some(revision) = control.get::<ProjectRevisionRecord>(&revision_id).await? {
+                desired.revisions.insert(revision_id, revision.value);
+            }
+        }
+        desired.reindex();
+        Ok(desired)
+    }
+
+    /// Mutations need durable state: while it is unreachable they fail
+    /// with `state_unavailable` before anything is attempted.
+    pub(crate) async fn require_state(&self) -> Result<(), EnvironmentError> {
+        let degraded = self.inner.lock().await.state_error.is_some();
+        if degraded {
+            self.refresh().await?;
+        }
+        Ok(())
+    }
+
+    /// Whether the control plane is degraded, and since when.
+    pub fn degraded_since(&self) -> Option<DateTime<Utc>> {
+        self.inner
+            .try_lock()
+            .ok()
+            .and_then(|inner| inner.degraded_since)
+    }
+
+    /// Read desired state. The reads are independent, so they are issued
+    /// together: a refresh costs about one round trip per phase (every
+    /// collection and in-flight release; then the deployments they name;
+    /// then revisions not already known), not one per collection.
     async fn load_desired(&self) -> Result<Desired, compute_state::StateError> {
+        let control = &self.control;
+        let in_flight = async {
+            let mut queries = tokio::task::JoinSet::new();
+            for status in IN_FLIGHT {
+                let control = control.clone();
+                queries.spawn(async move {
+                    control
+                        .query::<DeploymentRecord>(
+                            Query::all(Collection::Deployment).eq("status", status.as_str()),
+                        )
+                        .await
+                });
+            }
+            let mut deployments = vec![];
+            while let Some(result) = queries.join_next().await {
+                deployments.extend(result.map_err(|error| {
+                    compute_state::StateError::Unavailable(error.to_string())
+                })??);
+            }
+            Ok::<_, compute_state::StateError>(deployments)
+        };
+        let (
+            environments,
+            projects,
+            memberships,
+            workloads,
+            instances,
+            traffic,
+            domains,
+            dns_records,
+            certificates,
+            in_flight,
+        ) = tokio::try_join!(
+            control.list::<EnvironmentRecord>(),
+            control.list::<ProjectRecord>(),
+            control.list::<EnvironmentProjectRecord>(),
+            control.list::<WorkloadRecord>(),
+            control.list::<WorkloadInstanceRecord>(),
+            control.list::<TrafficAssignmentRecord>(),
+            control.list::<DomainRecord>(),
+            control.list::<DnsRecordRecord>(),
+            control.list::<CertificateRecord>(),
+            in_flight,
+        )?;
         let mut desired = Desired::default();
-        for environment in self.control.list::<EnvironmentRecord>().await? {
+        for environment in environments {
             desired
                 .environments
                 .insert(environment.value.name.clone(), environment);
         }
-        for project in self.control.list::<ProjectRecord>().await? {
+        for project in projects {
             desired.projects.insert(project.value.name.clone(), project);
         }
-        for membership in self.control.list::<EnvironmentProjectRecord>().await? {
+        for membership in memberships {
             desired.memberships.insert(
                 (
                     membership.value.environment.clone(),
@@ -1003,7 +1558,7 @@ impl Daemon {
                 membership,
             );
         }
-        for workload in self.control.list::<WorkloadRecord>().await? {
+        for workload in workloads {
             desired.workloads.insert(
                 (
                     workload.value.environment.clone(),
@@ -1013,21 +1568,21 @@ impl Daemon {
                 workload,
             );
         }
-        for instance in self.control.list::<WorkloadInstanceRecord>().await? {
+        for instance in instances {
             desired.instances.insert(instance.id.clone(), instance);
         }
-        for assignment in self.control.list::<TrafficAssignmentRecord>().await? {
+        for assignment in traffic {
             desired
                 .traffic
                 .insert(assignment.value.endpoint.clone(), assignment);
         }
-        for domain in self.control.list::<DomainRecord>().await? {
+        for domain in domains {
             desired.domains.insert(domain.value.name.clone(), domain);
         }
-        for record in self.control.list::<DnsRecordRecord>().await? {
+        for record in dns_records {
             desired.dns_records.insert(record.id.clone(), record);
         }
-        for certificate in self.control.list::<CertificateRecord>().await? {
+        for certificate in certificates {
             desired
                 .certificates
                 .insert(certificate.value.domain.clone(), certificate);
@@ -1045,23 +1600,24 @@ impl Daemon {
                     .map(|instance| instance.value.deployment_id.clone()),
             )
             .collect::<BTreeSet<_>>();
-        for status in IN_FLIGHT {
-            for deployment in self
-                .control
-                .query::<DeploymentRecord>(
-                    Query::all(Collection::Deployment).eq("status", status.as_str()),
-                )
-                .await?
+        for deployment in in_flight {
+            wanted.remove(&deployment.id);
+            desired
+                .deployments
+                .insert(deployment.id.clone(), deployment);
+        }
+        let mut gets = tokio::task::JoinSet::new();
+        for deployment_id in wanted {
+            let control = control.clone();
+            gets.spawn(async move { control.get::<DeploymentRecord>(&deployment_id).await });
+        }
+        while let Some(result) = gets.join_next().await {
+            if let Some(deployment) = result
+                .map_err(|error| compute_state::StateError::Unavailable(error.to_string()))??
             {
-                wanted.remove(&deployment.id);
                 desired
                     .deployments
                     .insert(deployment.id.clone(), deployment);
-            }
-        }
-        for deployment_id in wanted {
-            if let Some(deployment) = self.control.get::<DeploymentRecord>(&deployment_id).await? {
-                desired.deployments.insert(deployment_id, deployment);
             }
         }
         // Revisions are immutable: reuse ones already read.
@@ -1071,24 +1627,37 @@ impl Daemon {
             .values()
             .map(|deployment| deployment.value.revision_id.clone())
             .collect::<BTreeSet<_>>();
+        let mut gets = tokio::task::JoinSet::new();
         for revision_id in revision_ids {
             if let Some(revision) = known.get(&revision_id) {
                 desired.revisions.insert(revision_id, revision.clone());
-            } else if let Some(revision) = self
-                .control
-                .get::<ProjectRevisionRecord>(&revision_id)
-                .await?
+            } else {
+                let control = control.clone();
+                gets.spawn(async move {
+                    control
+                        .get::<ProjectRevisionRecord>(&revision_id)
+                        .await
+                        .map(|revision| (revision_id, revision))
+                });
+            }
+        }
+        while let Some(result) = gets.join_next().await {
+            if let (revision_id, Some(revision)) = result
+                .map_err(|error| compute_state::StateError::Unavailable(error.to_string()))??
             {
                 desired.revisions.insert(revision_id, revision.value);
             }
         }
+        desired.reindex();
         Ok(desired)
     }
 
     /// Read-your-writes: refresh desired state after a change, then
     /// reconcile.
+    /// Act on a change this controller just made to desired state, which
+    /// it read in full before making it.
     pub(crate) async fn changed(self: &Arc<Self>) {
-        self.reconcile().await;
+        self.reconcile_targeted().await;
     }
 
     async fn register_providers(&self) -> Result<(), EnvironmentError> {

@@ -947,7 +947,12 @@ impl Daemon {
     pub(crate) async fn flush_pending_evidence(&self) {
         let pending = std::mem::take(&mut self.inner.lock().await.pending_evidence);
         let mut failed = vec![];
-        for evidence in pending {
+        for mut evidence in pending {
+            // Sequences assigned while durable state was unreachable may
+            // collide with ones written since; events take the next ones.
+            for event in &mut evidence.events {
+                event.sequence = self.next_sequence();
+            }
             if self.persist_evidence(&evidence).await.is_err() {
                 failed.push(evidence);
             } else {

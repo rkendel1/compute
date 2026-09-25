@@ -571,11 +571,26 @@ async fn compute_fails_closed_without_its_control_state() {
         down: AtomicBool::new(true),
     });
     let node = tempfile::tempdir().unwrap();
-    // It refuses to start rather than invent local state.
+    // Required to have its control state, it refuses to start rather than
+    // invent local state.
+    let mut strict = config(node.path(), store.clone());
+    strict.require_state_at_start = true;
     assert!(matches!(
-        Daemon::start(config(node.path(), store.clone())).await,
+        Daemon::start(strict).await,
         Err(EnvironmentError::Unavailable(_))
     ));
+    // By default it starts with a degraded control plane: it invents
+    // nothing, changes nothing, and says so.
+    let degraded = Daemon::start(config(node.path(), store.clone()))
+        .await
+        .unwrap();
+    assert!(!degraded.status().await.state_available);
+    assert!(matches!(
+        degraded.create_environment(environment("production")).await,
+        Err(EnvironmentError::Unavailable(_))
+    ));
+    degraded.shutdown().await;
+    drop(degraded);
     store.down.store(false, Ordering::SeqCst);
     let daemon = Daemon::start(config(node.path(), store.clone()))
         .await

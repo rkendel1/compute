@@ -1,6 +1,9 @@
 //! `compute auth` and `compute node`: operator credentials, the audit
 //! trail, and the controller itself, through the Compute API.
 
+use std::path::PathBuf;
+use std::time::Duration;
+
 use clap::{Args, Subcommand};
 use compute_core::ComputeError;
 use compute_environment::ControllerInfo;
@@ -272,6 +275,38 @@ pub enum NodeCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Reconcile now, fully, and show what the cycle examined and changed.
+    Reconcile {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Replace the controller with another Compute build, without
+    /// restarting or redeploying a workload. The previous controller is
+    /// restored if the new one does not become ready.
+    Upgrade {
+        /// The new Compute executable, on the node.
+        artifact: PathBuf,
+        /// Refuse unless the artifact has this SHA-256.
+        #[arg(long)]
+        sha256: Option<String>,
+        /// Seconds the new controller has to become ready.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Return to the build that ran before the last upgrade.
+    Rollback {
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The last upgrade or rollback on this node.
+    UpgradeStatus {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub async fn node(command: NodeCommand) -> compute_core::Result<()> {
@@ -283,6 +318,63 @@ pub async fn node(command: NodeCommand) -> compute_core::Result<()> {
                 print_json(&info);
             } else {
                 print_info(&info);
+            }
+        }
+        NodeCommands::Reconcile { json } => {
+            let metrics: compute_environment::ReconcileMetrics = client
+                .post::<(), _>("/node/reconcile", None)
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&metrics);
+            } else if let Some(cycle) = &metrics.last {
+                println!(
+                    "Reconciled in {:.1} ms: {} resources examined, {} changed, {} errors",
+                    cycle.duration_ms,
+                    cycle.resources_examined,
+                    cycle.resources_changed,
+                    cycle.errors
+                );
+            }
+        }
+        NodeCommands::Upgrade {
+            artifact,
+            sha256,
+            timeout,
+            json,
+        } => {
+            let artifact = std::fs::canonicalize(&artifact)?;
+            let request = compute_environment::upgrade::UpgradeRequest {
+                artifact: artifact.display().to_string(),
+                expect_sha256: sha256,
+                timeout_seconds: Some(timeout),
+            };
+            let started: compute_environment::upgrade::UpgradeRecord = client
+                .post("/node/upgrade", Some(&request))
+                .await
+                .map_err(error)?;
+            follow_upgrade(&client, started, timeout, json).await?;
+        }
+        NodeCommands::Rollback { timeout, json } => {
+            let started: compute_environment::upgrade::UpgradeRecord = client
+                .post(
+                    "/node/rollback",
+                    Some(&serde_json::json!({ "timeout_seconds": timeout })),
+                )
+                .await
+                .map_err(error)?;
+            follow_upgrade(&client, started, timeout, json).await?;
+        }
+        NodeCommands::UpgradeStatus { json } => {
+            let record: Option<compute_environment::upgrade::UpgradeRecord> =
+                client.get("/node/upgrade").await.map_err(error)?;
+            if json {
+                print_json(&record);
+            } else {
+                match record {
+                    Some(record) => print_upgrade(&record),
+                    None => println!("No upgrade has run on this node"),
+                }
             }
         }
         NodeCommands::Health { json } => {
@@ -300,6 +392,69 @@ pub async fn node(command: NodeCommand) -> compute_core::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Wait until the hand-over finishes: the API pauses while controllers
+/// change, and answers again from the new one (or the restored one).
+async fn follow_upgrade(
+    client: &compute_environment::client::DaemonClient,
+    started: compute_environment::upgrade::UpgradeRecord,
+    timeout: u64,
+    json: bool,
+) -> compute_core::Result<()> {
+    if !json {
+        println!(
+            "{} {}: {} -> {} (workloads keep running)",
+            started.kind, started.upgrade_id, started.from.build_id, started.to.build_id
+        );
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout + 150);
+    loop {
+        if let Ok(Some(record)) = client
+            .get::<Option<compute_environment::upgrade::UpgradeRecord>>("/node/upgrade")
+            .await
+            && record.upgrade_id == started.upgrade_id
+            && record.is_terminal()
+        {
+            if json {
+                print_json(&record);
+            } else {
+                print_upgrade(&record);
+            }
+            return if record.status == "completed" {
+                Ok(())
+            } else {
+                Err(ComputeError::Runtime(format!(
+                    "upgrade_failed: {}",
+                    record.reason.unwrap_or_default()
+                )))
+            };
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ComputeError::Runtime(
+                "upgrade_failed: no controller reported the upgrade finished".into(),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn print_upgrade(record: &compute_environment::upgrade::UpgradeRecord) {
+    println!("Upgrade: {} ({})", record.upgrade_id, record.kind);
+    println!("Status: {}", record.status);
+    println!("From: {} {}", record.from.version, record.from.build_id);
+    println!("To: {} {}", record.to.version, record.to.build_id);
+    println!("Workloads kept running: {}", record.units.len());
+    if let Some(reason) = &record.reason {
+        println!("Reason: {reason}");
+    }
+    if let (Some(finished), Some(controller)) = (record.finished_at, &record.controller) {
+        println!(
+            "Finished: {} in {:.1}s, controller {controller}",
+            finished.to_rfc3339(),
+            (finished - record.started_at).num_milliseconds() as f64 / 1000.0
+        );
+    }
 }
 
 pub(crate) fn print_info(info: &ControllerInfo) {

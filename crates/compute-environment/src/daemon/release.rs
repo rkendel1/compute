@@ -83,7 +83,8 @@ impl Daemon {
                 break;
             }
             changed = true;
-            if self.refresh().await.is_err() {
+            // Only what the steps wrote needs reading back.
+            if self.refresh_targeted().await.is_err() {
                 break;
             }
         }

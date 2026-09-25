@@ -398,7 +398,7 @@ impl Daemon {
     }
 
     pub async fn domains(&self) -> Result<Vec<DomainView>, EnvironmentError> {
-        self.refresh().await?;
+        self.refresh_for_read().await?;
         let names = self
             .inner
             .lock()
@@ -416,7 +416,7 @@ impl Daemon {
     }
 
     pub async fn domain(&self, name: &str) -> Result<DomainView, EnvironmentError> {
-        self.refresh().await?;
+        self.refresh_for_read().await?;
         self.domain_view(&name.to_ascii_lowercase()).await
     }
 
@@ -458,7 +458,7 @@ impl Daemon {
     }
 
     pub async fn dns_status(&self) -> Result<Vec<DnsRecordView>, EnvironmentError> {
-        self.refresh().await?;
+        self.refresh_for_read().await?;
         Ok(self
             .inner
             .lock()
@@ -481,7 +481,7 @@ impl Daemon {
     }
 
     pub async fn certificates(&self) -> Result<Vec<CertificateView>, EnvironmentError> {
-        self.refresh().await?;
+        self.refresh_for_read().await?;
         Ok(self
             .inner
             .lock()
