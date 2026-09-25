@@ -44,6 +44,7 @@ impl Daemon {
         if self.refresh().await.is_err() {
             return;
         }
+        self.flush_pending_evidence().await;
         if self.advance_releases().await && self.refresh().await.is_err() {
             return;
         }
@@ -142,6 +143,7 @@ impl Daemon {
     async fn start_service(self: &Arc<Self>, unit: Unit) {
         let control;
         let generation;
+        let started_at = Utc::now();
         {
             let mut inner = self.inner.lock().await;
             let log_directory = self.logs_dir(&unit.key);
@@ -158,7 +160,7 @@ impl Daemon {
             runtime.held = false;
             runtime.control = Some(control.clone());
             runtime.deployment_id = Some(unit.deployment_id.clone());
-            runtime.started_at = Some(Utc::now());
+            runtime.started_at = Some(started_at);
             runtime.running_since = None;
             runtime.finished_at = None;
             runtime.exit_code = None;
@@ -190,8 +192,12 @@ impl Daemon {
             let (outcome, deployment_id) = daemon
                 .execute(&task_unit, Some((generation, control)))
                 .await;
-            daemon
-                .finish(&task_unit, generation, outcome, deployment_id, true)
+            let invocation = super::execute::Invocation {
+                generation,
+                started_at,
+            };
+            let _ = daemon
+                .finish(&task_unit, invocation, outcome, deployment_id, true)
                 .await;
         });
         let mut inner = self.inner.lock().await;

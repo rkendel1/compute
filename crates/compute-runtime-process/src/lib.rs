@@ -322,6 +322,33 @@ fn discover_executable(
     }
     let output = match probe.output() {
         Ok(output) if output.status.success() => output,
+        // A POSIX shell without `--help` (dash is /bin/sh on Debian and
+        // Ubuntu) is identified by the shell it resolves to.
+        Ok(_) if definition.invocation == Invocation::Shell => {
+            match std::process::Command::new(path)
+                .args(["-c", "echo posix-sh"])
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+                    let name = resolved
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "sh".into());
+                    std::process::Output {
+                        status: output.status,
+                        stdout: format!("POSIX shell ({name})").into_bytes(),
+                        stderr: vec![],
+                    }
+                }
+                _ => {
+                    return DiscoveredRuntime::unavailable(
+                        source,
+                        format!("{} is not a working POSIX shell", path.display()),
+                    );
+                }
+            }
+        }
         Ok(output) => {
             return DiscoveredRuntime::unavailable(
                 source,

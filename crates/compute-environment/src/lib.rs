@@ -42,8 +42,25 @@ pub enum EnvironmentError {
     Conflict(String),
     #[error("admission denied: {0}")]
     Denied(String),
-    #[error("unauthorized: {0}")]
+    /// The request carried no valid credential.
+    #[error("authentication failed: {0}")]
     Unauthorized(String),
+    /// The credential is valid but lacks the scope the operation needs.
+    #[error("authorization denied: {0}")]
+    Forbidden(String),
+    /// The runtime or provider could not run the workload. This is an
+    /// infrastructure failure, not the workload's.
+    #[error("runtime unavailable: {0}")]
+    RuntimeUnavailable(String),
+    /// The invocation was stopped before it ran.
+    #[error("cancelled: {0}")]
+    Cancelled(String),
+    /// The Compute controller cannot be reached.
+    #[error("controller unavailable: {0}")]
+    ControllerUnavailable(String),
+    /// A binary upgrade did not complete; the previous controller serves.
+    #[error("upgrade failed: {0}")]
+    UpgradeFailed(String),
     /// The durable control state cannot be reached. Compute fails closed:
     /// nothing is changed until it can.
     #[error("control state unavailable: {0}")]
@@ -78,7 +95,12 @@ impl EnvironmentError {
             Self::NoRoute(_) => "no_route",
             Self::Conflict(_) => "conflict",
             Self::Denied(_) => "admission_denied",
-            Self::Unauthorized(_) => "unauthorized",
+            Self::Unauthorized(_) => "authentication_failed",
+            Self::Forbidden(_) => "authorization_denied",
+            Self::RuntimeUnavailable(_) => "runtime_unavailable",
+            Self::Cancelled(_) => "cancelled",
+            Self::ControllerUnavailable(_) => "controller_unavailable",
+            Self::UpgradeFailed(_) => "upgrade_failed",
             Self::Unavailable(_) => "state_unavailable",
             Self::Io(_) => "io",
         }
@@ -94,6 +116,11 @@ impl EnvironmentError {
             | Self::Conflict(message)
             | Self::Denied(message)
             | Self::Unauthorized(message)
+            | Self::Forbidden(message)
+            | Self::RuntimeUnavailable(message)
+            | Self::Cancelled(message)
+            | Self::ControllerUnavailable(message)
+            | Self::UpgradeFailed(message)
             | Self::Unavailable(message) => message.clone(),
             other => other.to_string(),
         }
@@ -103,7 +130,10 @@ impl EnvironmentError {
         match self {
             Self::Invalid(_) | Self::Json(_) | Self::Compute(_) => 400,
             Self::Unauthorized(_) => 401,
-            Self::Denied(_) => 403,
+            Self::Denied(_) | Self::Forbidden(_) => 403,
+            Self::Cancelled(_) => 409,
+            Self::UpgradeFailed(_) => 500,
+            Self::RuntimeUnavailable(_) | Self::ControllerUnavailable(_) => 503,
             Self::NotFound(_) | Self::NoRoute(_) => 404,
             Self::Conflict(_) => 409,
             Self::Io(_) => 500,

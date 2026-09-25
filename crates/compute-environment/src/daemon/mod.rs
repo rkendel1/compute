@@ -350,6 +350,42 @@ pub(crate) struct Inner {
     /// Whether a release is in flight: the reconciler then runs often.
     pub releasing: bool,
     pub network: network::NetworkRuntime,
+    /// Executions terminalized recently, so terminalizing one again is a
+    /// no-op.
+    pub terminal: TerminalLog,
+    /// Execution records whose evidence could not be written yet because
+    /// control state was unreachable; written once it is.
+    pub pending_evidence: Vec<execute::PendingEvidence>,
+}
+
+/// The most recently terminalized executions, by execution ID.
+#[derive(Default)]
+pub(crate) struct TerminalLog {
+    records: std::collections::HashMap<String, ExecutionRecord>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl TerminalLog {
+    const CAPACITY: usize = 4096;
+
+    pub fn get(&self, execution_id: &str) -> Option<&ExecutionRecord> {
+        self.records.get(execution_id)
+    }
+
+    pub fn insert(&mut self, record: ExecutionRecord) {
+        if self
+            .records
+            .insert(record.execution_id.clone(), record.clone())
+            .is_none()
+        {
+            self.order.push_back(record.execution_id);
+        }
+        while self.order.len() > Self::CAPACITY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.records.remove(&oldest);
+            }
+        }
+    }
 }
 
 pub struct Daemon {
@@ -378,7 +414,9 @@ pub struct Daemon {
 
 pub(crate) enum Outcome {
     Denied(String, Option<Box<compute_policy::AdmissionDecision>>),
-    Failed(String),
+    /// Nothing executed. The error says why: a workload's own failure is
+    /// never reported as an infrastructure failure, or the reverse.
+    Failed(EnvironmentError),
     Executed(
         Box<compute_core::ExecutionResult>,
         Option<String>,
@@ -526,6 +564,8 @@ impl Daemon {
                 endpoint_errors: BTreeMap::new(),
                 releasing: false,
                 network: network::NetworkRuntime::default(),
+                terminal: TerminalLog::default(),
+                pending_evidence: Vec::new(),
             }),
             reconciling: Mutex::new(()),
             pool,

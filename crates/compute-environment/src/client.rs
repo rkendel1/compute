@@ -113,7 +113,14 @@ impl DaemonClient {
                 Some("state_unavailable") => EnvironmentError::Unavailable(message),
                 Some("conflict") => EnvironmentError::Conflict(message),
                 Some("admission_denied") => EnvironmentError::Denied(message),
-                Some("unauthorized") => EnvironmentError::Unauthorized(message),
+                Some("unauthorized" | "authentication_failed") => {
+                    EnvironmentError::Unauthorized(message)
+                }
+                Some("authorization_denied") => EnvironmentError::Forbidden(message),
+                Some("runtime_unavailable") => EnvironmentError::RuntimeUnavailable(message),
+                Some("cancelled") => EnvironmentError::Cancelled(message),
+                Some("controller_unavailable") => EnvironmentError::ControllerUnavailable(message),
+                Some("upgrade_failed") => EnvironmentError::UpgradeFailed(message),
                 _ => EnvironmentError::Invalid(message),
             });
         }
