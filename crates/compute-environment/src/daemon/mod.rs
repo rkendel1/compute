@@ -1095,6 +1095,7 @@ impl Daemon {
             data_plane,
             reconcile: inner.reconcile.clone(),
             runtimes,
+            isolation: Some(compute_core::host::host_isolation_report()),
         }
     }
 

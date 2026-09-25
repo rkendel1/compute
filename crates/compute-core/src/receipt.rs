@@ -1006,6 +1006,7 @@ mod tests {
             network: NetworkPolicy::Network,
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
+            host_isolation: crate::HostProfile::Trusted,
             dependencies: None,
         };
         let resolved = ResolvedRuntime {
@@ -1037,6 +1038,7 @@ mod tests {
                 network: BoundaryStatus::NotRequested,
                 environment: BoundaryStatus::Enforced,
                 resources: BoundaryStatus::NotRequested,
+                host: None,
             }),
             dependencies: None,
             provider: None,

@@ -1894,6 +1894,7 @@ fn print_isolation_profiles(compute: &Compute, json: bool) {
             })
         })
         .collect::<Vec<_>>();
+    let host = compute_core::host::host_isolation_report();
     if json {
         println!(
             "{}",
@@ -1901,6 +1902,7 @@ fn print_isolation_profiles(compute: &Compute, json: bool) {
                 "version": compute_core::ISOLATION_MODEL_VERSION,
                 "profiles": profiles,
                 "runtimes": runtimes,
+                "host": host,
             }))
             .unwrap()
         );
@@ -1922,6 +1924,45 @@ fn print_isolation_profiles(compute: &Compute, json: bool) {
             item["sandboxed"].as_str().unwrap_or("no"),
             item["strict"].as_str().unwrap_or("no"),
         );
+    }
+    println!(
+        "\nHost profiles for process runtimes (landlock ABI {}, network namespaces {}, cgroups {})",
+        host.capabilities.landlock_abi,
+        yes_no(host.capabilities.network_namespaces),
+        host.capabilities
+            .cgroups
+            .as_ref()
+            .map_or("none".to_string(), |cgroups| cgroups.version.clone())
+    );
+    println!("Profile\tFilesystem\tNetwork\tMemory\tCPU\tProcess");
+    for support in &host.profiles {
+        match &support.enforcement {
+            Some(plan) => {
+                let text = |value: compute_core::host::Enforcement| {
+                    serde_json::to_value(value)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_string))
+                        .unwrap_or_default()
+                };
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    support.profile,
+                    text(plan.filesystem),
+                    text(plan.network),
+                    text(plan.memory),
+                    text(plan.cpu),
+                    text(plan.process)
+                );
+            }
+            None => println!(
+                "{}\tunsupported: {}",
+                support.profile,
+                support
+                    .refusal
+                    .as_ref()
+                    .map_or("", |refusal| refusal.message.as_str())
+            ),
+        }
     }
 }
 

@@ -140,6 +140,10 @@ pub struct StartCommand {
     /// this controller, and they stop with it.
     #[arg(long, default_value = "supervisor", value_parser = ["supervisor", "in-process"])]
     pub data_plane: String,
+    /// Refuse to start while durable control state is unreachable,
+    /// instead of starting with a degraded control plane.
+    #[arg(long)]
+    pub require_state_at_start: bool,
     /// Run in the background and return once the API answers.
     #[arg(long)]
     pub detach: bool,
@@ -499,6 +503,7 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
             .transpose()?,
     };
     config.api_tls = tls.clone();
+    config.require_state_at_start = command.require_state_at_start;
     if command.data_plane == "supervisor" {
         config.data_plane =
             Some(ensure_supervisor(&command.state_dir, config.network.endpoint_address).await?);
@@ -591,6 +596,9 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
         child.arg("--insecure");
     }
     child.arg("--data-plane").arg(&command.data_plane);
+    if command.require_state_at_start {
+        child.arg("--require-state-at-start");
+    }
     if command.production {
         child.arg("--production");
     }

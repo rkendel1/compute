@@ -206,6 +206,7 @@ pub fn requirements(kind: RuntimeKind) -> PlacementRequirements {
         distribution: None,
         dependencies: None,
         isolation: IsolationProfile::Process,
+        host: compute_core::HostProfile::Trusted,
         network: if kind == RuntimeKind::Wasm {
             NetworkPolicy::None
         } else {

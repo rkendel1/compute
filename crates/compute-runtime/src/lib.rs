@@ -753,6 +753,7 @@ impl Compute {
             network,
             resources,
             isolation,
+            host_isolation: compute_core::HostProfile::Trusted,
             dependencies: None,
         })
     }

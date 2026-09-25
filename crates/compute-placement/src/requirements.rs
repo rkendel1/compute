@@ -108,6 +108,9 @@ pub struct PlacementRequirements {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<DependencyRequirement>,
     pub isolation: IsolationProfile,
+    /// The host boundary a process runtime needs.
+    #[serde(default, skip_serializing_if = "compute_core::HostProfile::is_trusted")]
+    pub host: compute_core::HostProfile,
     pub network: NetworkPolicy,
     pub resources: ResourceRequirement,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -242,6 +245,7 @@ impl PlacementRequirements {
                 .map(|id| DistributionRequirement { id }),
             dependencies,
             isolation,
+            host: workload.isolation.host,
             network: workload.network.clone(),
             resources: ResourceRequirement {
                 memory_bytes: resources.memory_bytes,

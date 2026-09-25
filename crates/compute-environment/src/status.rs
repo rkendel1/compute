@@ -75,6 +75,10 @@ pub struct ControllerInfo {
     pub reconcile: ReconcileMetrics,
     /// Runtimes this node can execute, as its provider reports them.
     pub runtimes: serde_json::Value,
+    /// What each host isolation profile enforces on this node, per
+    /// dimension, or why it is unsupported.
+    #[serde(default)]
+    pub isolation: Option<compute_core::host::HostIsolationReport>,
 }
 
 /// Reconciliation, measured: the last cycle and totals since start.

@@ -267,6 +267,26 @@ pub fn match_provider(
         );
     }
 
+    // Host isolation: a process runtime's operating-system boundary.
+    if !requirements.host.is_trusted()
+        && offer.is_some_and(|offer| {
+            !offer
+                .capabilities
+                .host_profiles
+                .contains(&requirements.host)
+        })
+    {
+        reasons.push(
+            ReasonCode::IsolationUnsupported,
+            json!(requirements.host),
+            json!(offer.map(|offer| offer.capabilities.host_profiles.clone())),
+            Some(format!(
+                "{runtime_kind} on this provider cannot run under host isolation {}",
+                requirements.host
+            )),
+        );
+    }
+
     // Network.
     if !descriptor
         .network_capabilities
@@ -280,6 +300,7 @@ pub fn match_provider(
         );
     } else if let Some(offer) = offer
         && !offer.network_policies.contains(&requirements.network)
+        && !host_offered(Some(offer), requirements)
     {
         reasons.push(
             ReasonCode::NetworkUnsupported,
@@ -323,7 +344,9 @@ pub fn match_provider(
                 None,
             );
         }
-        if offer.is_some_and(|offer| !offer.capabilities.memory_limit.supported) {
+        if offer.is_some_and(|offer| {
+            !offer.capabilities.memory_limit.supported && !host_offered(Some(offer), requirements)
+        }) {
             reasons.push(
                 ReasonCode::MemoryUnenforceable,
                 json!(memory),
@@ -336,6 +359,7 @@ pub fn match_provider(
         let capabilities = &offer.capabilities;
         if let Some(value) = resources.cpu_time_ms
             && !capabilities.cpu_limit.supported
+            && !host_offered(Some(offer), requirements)
         {
             reasons.push(
                 ReasonCode::CpuLimitUnenforceable,
@@ -346,6 +370,7 @@ pub fn match_provider(
         }
         if let Some(value) = resources.process_count
             && !capabilities.process_limit.supported
+            && !host_offered(Some(offer), requirements)
         {
             reasons.push(
                 ReasonCode::ProcessLimitUnenforceable,
@@ -400,9 +425,10 @@ pub fn match_provider(
         if reasons.0.is_empty()
             && let Err(rejection) = capabilities.resolve_isolation(
                 runtime_kind,
-                &probe(
+                &crate::descriptor::probe_on_host(
                     runtime_kind,
                     requirements.isolation,
+                    requirements.host,
                     requirements.network.clone(),
                     resources.to_limits(),
                 ),
@@ -466,6 +492,19 @@ pub fn match_provider(
 
 /// Version matching mirrors the runtime adapters: WASM accepts only `wasi`,
 /// process runtimes require the observed version to contain the request.
+/// Whether the runtime offers the host profile the requirements ask for,
+/// in which case the operating system enforces the network and limits the
+/// runtime cannot; the full request is resolved as execution resolves it.
+fn host_offered(offer: Option<&crate::RuntimeOffer>, requirements: &PlacementRequirements) -> bool {
+    !requirements.host.is_trusted()
+        && offer.is_some_and(|offer| {
+            offer
+                .capabilities
+                .host_profiles
+                .contains(&requirements.host)
+        })
+}
+
 pub fn runtime_version_matches(kind: RuntimeKind, requested: &str, offered: &str) -> bool {
     if kind == RuntimeKind::Wasm {
         requested.eq_ignore_ascii_case("wasi")
