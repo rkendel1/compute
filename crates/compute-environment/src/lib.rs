@@ -20,6 +20,7 @@ pub mod api;
 pub mod auth;
 pub mod client;
 pub mod daemon;
+pub mod dataplane;
 pub mod identity;
 pub mod manifest;
 pub mod model;

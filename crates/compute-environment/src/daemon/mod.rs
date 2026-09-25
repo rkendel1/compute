@@ -20,6 +20,9 @@ mod operators;
 mod processes;
 mod reconcile;
 mod release;
+mod supervision;
+
+pub use supervision::Recovery;
 mod views;
 
 pub use views::EventFilter;
@@ -93,6 +96,10 @@ pub struct DaemonConfig {
     pub security: crate::auth::SecurityConfig,
     /// The API's TLS, when it terminates TLS.
     pub api_tls: Option<Arc<crate::tls::ApiTls>>,
+    /// Where services run and endpoints listen. `None` runs them in this
+    /// process, sharing its fate; the CLI uses the node's supervisor
+    /// process, which outlives controller restarts and upgrades.
+    pub data_plane: Option<Arc<dyn crate::dataplane::DataPlane>>,
 }
 
 impl DaemonConfig {
@@ -117,6 +124,7 @@ impl DaemonConfig {
             reconcile_interval: Duration::from_secs(5),
             security: crate::auth::SecurityConfig::default(),
             api_tls: None,
+            data_plane: None,
         }
     }
 }
@@ -220,6 +228,9 @@ pub(crate) struct WorkloadRuntime {
     pub health: Option<Health>,
     /// When the process was last seen running, for process readiness.
     pub running_since: Option<DateTime<Utc>>,
+    /// The data-plane unit running it, and its process.
+    pub unit_id: Option<String>,
+    pub pid: Option<u32>,
 }
 
 /// Desired state as last read from control state.
@@ -411,7 +422,10 @@ pub struct Daemon {
     cache: Mutex<CapabilityCache>,
     sequence: AtomicU64,
     events: broadcast::Sender<EventRecord>,
-    endpoints: Endpoints,
+    data_plane: Arc<dyn crate::dataplane::DataPlane>,
+    /// The routes this controller assigned, mirrored so a reconcile that
+    /// changes nothing sends nothing to the data plane.
+    routes: std::sync::Mutex<BTreeMap<u16, compute_network::Route>>,
     ingress: Option<Arc<Ingress>>,
     ingress_http: Option<SocketAddr>,
     ingress_https: Option<SocketAddr>,
@@ -420,7 +434,11 @@ pub struct Daemon {
     dns: BTreeMap<String, Result<Arc<dyn DnsProvider>, String>>,
     wake: Notify,
     shutdown: tokio::sync::watch::Sender<bool>,
+    /// Set once a shutdown or detach has finished its work.
+    stopped: tokio::sync::watch::Sender<bool>,
     authority: crate::auth::Authority,
+    /// What this controller found on the data plane when it started.
+    recovery: std::sync::Mutex<Recovery>,
     _lock: std::fs::File,
 }
 
@@ -429,6 +447,10 @@ pub(crate) enum Outcome {
     /// Nothing executed. The error says why: a workload's own failure is
     /// never reported as an infrastructure failure, or the reverse.
     Failed(EnvironmentError),
+    /// The data plane lost it (its supervisor died): its result is
+    /// unknown, and it is started again whatever its restart policy,
+    /// because the failure was Compute's, not the workload's.
+    Lost(String),
     Executed(
         Box<compute_core::ExecutionResult>,
         Option<String>,
@@ -503,9 +525,17 @@ impl Daemon {
     pub async fn start(config: DaemonConfig) -> Result<Arc<Self>, EnvironmentError> {
         std::fs::create_dir_all(&config.state_dir)?;
         let lock = lock_state_dir(&config.state_dir)?;
-        // Services a killed predecessor left running on this node would
-        // otherwise run twice.
-        let reaped = processes::reap(&config.state_dir).await;
+        // Services a killed in-process predecessor left running on this
+        // node would otherwise run twice. A supervisor keeps its own.
+        let reaped = if config
+            .data_plane
+            .as_ref()
+            .is_some_and(|plane| plane.independent())
+        {
+            vec![]
+        } else {
+            processes::reap(&config.state_dir).await
+        };
         let control = ControlState::new(config.state.clone());
         // The first read proves the control state is reachable and ours.
         let last = control
@@ -559,7 +589,29 @@ impl Daemon {
                 )
             })
             .collect();
-        let endpoints = Endpoints::new(config.network.endpoint_address);
+        let data_plane: Arc<dyn crate::dataplane::DataPlane> = match &config.data_plane {
+            Some(plane) => plane.clone(),
+            None => Arc::new(crate::dataplane::LocalDataPlane::in_process(
+                config.provider.clone(),
+                Endpoints::new(config.network.endpoint_address),
+            )),
+        };
+        // The data plane's current routes: after a controller restart they
+        // are still being served.
+        let routes = data_plane
+            .routes()
+            .await?
+            .into_iter()
+            .map(|route| {
+                (
+                    route.port,
+                    compute_network::Route {
+                        instance_id: route.instance_id,
+                        target_port: route.target_port,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         if config.security.mode == crate::auth::SecurityMode::Production
             && config.security.legacy_token.is_some()
         {
@@ -572,6 +624,7 @@ impl Daemon {
             config.state_dir.join("credentials.json"),
         );
         let (shutdown, _) = tokio::sync::watch::channel(false);
+        let (stopped, _) = tokio::sync::watch::channel(false);
         let (events, _) = broadcast::channel(1024);
         let daemon = Arc::new(Self {
             config,
@@ -597,7 +650,8 @@ impl Daemon {
             cache: Mutex::new(CapabilityCache::default()),
             sequence: AtomicU64::new(sequence),
             events,
-            endpoints,
+            data_plane,
+            routes: std::sync::Mutex::new(routes),
             ingress,
             ingress_http,
             ingress_https,
@@ -606,7 +660,9 @@ impl Daemon {
             dns,
             wake: Notify::new(),
             shutdown,
+            stopped,
             authority,
+            recovery: std::sync::Mutex::new(Recovery::default()),
             _lock: lock,
         });
         daemon.register_providers().await?;
@@ -625,7 +681,41 @@ impl Daemon {
             }),
         );
         daemon.apply(started).await?;
+        // Supervise again whatever the data plane still runs before
+        // reconciling, so nothing healthy is started twice or restarted.
+        let _ = daemon.refresh().await;
+        let recovery = daemon.reattach().await?;
+        let plane = daemon.data_plane().info().await?;
+        let change = daemon.event(
+            Change::new(),
+            compute_state::events::CONTROLLER_STARTED,
+            Scope::default(),
+            format!(
+                "Compute controller {} started ({} data plane, pid {}); reattached {}, collected {}, orphaned {}",
+                daemon.instance_id,
+                plane.kind,
+                plane.pid,
+                recovery.reattached.len(),
+                recovery.collected.len(),
+                recovery.orphaned.len()
+            ),
+            serde_json::json!({
+                "controller": crate::identity::ControllerIdentity::current(),
+                "data_plane": plane,
+                "recovery": recovery,
+            }),
+        );
+        let _ = daemon.apply(change).await;
+        *daemon.recovery.lock().expect("recovery") = recovery;
         daemon.reconcile().await;
+        let change = daemon.event(
+            Change::new(),
+            compute_state::events::CONTROLLER_READY,
+            Scope::default(),
+            format!("Compute controller {} is ready", daemon.instance_id),
+            serde_json::json!({}),
+        );
+        let _ = daemon.apply(change).await;
         daemon.spawn_reconciler();
         Ok(daemon)
     }
@@ -653,6 +743,23 @@ impl Daemon {
         }
     }
 
+    /// Resolves once a shutdown (or detach) has finished: workloads are
+    /// stopped (or left running), and the final events are written. A
+    /// process hosting the daemon waits for this before it exits.
+    pub async fn wait_stopped(&self) {
+        let mut receiver = self.stopped.subscribe();
+        while !*receiver.borrow_and_update() {
+            if receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Whether a shutdown or detach has begun.
+    pub fn is_stopping(&self) -> bool {
+        self.is_shutting_down()
+    }
+
     fn is_shutting_down(&self) -> bool {
         *self.shutdown.borrow()
     }
@@ -672,6 +779,10 @@ impl Daemon {
             .collect::<Vec<_>>();
         self.stop_units(&units).await;
         let _ = self.observe().await;
+        // Everything stopped: the supervisor process goes too.
+        if self.data_plane().independent() {
+            let _ = self.data_plane().shutdown().await;
+        }
         let change = self.event(
             Change::new(),
             compute_state::events::DAEMON_STOPPED,
@@ -680,6 +791,7 @@ impl Daemon {
             Value::Null,
         );
         let _ = self.apply(change).await;
+        let _ = self.stopped.send(true);
     }
 
     pub async fn status(&self) -> DaemonStatus {
@@ -706,6 +818,11 @@ impl Daemon {
         }
     }
 
+    /// What this controller found on the data plane when it started.
+    pub fn recovery(&self) -> Recovery {
+        self.recovery.lock().expect("recovery").clone()
+    }
+
     /// The API's TLS acceptor, when it terminates TLS.
     pub fn api_tls(&self) -> Option<Arc<crate::tls::ApiTls>> {
         self.config.api_tls.clone()
@@ -716,7 +833,13 @@ impl Daemon {
     pub async fn health(&self) -> Value {
         let inner = self.inner.lock().await;
         serde_json::json!({
-            "status": if inner.state_error.is_none() { "ok" } else { "degraded_control_plane" },
+            "status": if self.is_shutting_down() {
+                "stopping"
+            } else if inner.state_error.is_none() {
+                "ok"
+            } else {
+                "degraded_control_plane"
+            },
             "instance_id": self.instance_id,
             "pid": std::process::id(),
         })
@@ -732,6 +855,13 @@ impl Daemon {
                 }
                 Err(error) => serde_json::json!({ "error": error.to_string() }),
             };
+        let plane = self.data_plane.info().await;
+        let data_plane = DataPlaneView {
+            independent: self.data_plane.independent(),
+            error: plane.as_ref().err().map(|error| error.message()),
+            info: plane.ok(),
+            recovery: self.recovery(),
+        };
         let inner = self.inner.lock().await;
         let security = &self.authority.config;
         ControllerInfo {
@@ -770,6 +900,7 @@ impl Daemon {
                 error: inner.state_error.clone(),
                 last_reconciled_at: inner.last_reconciled_at,
             },
+            data_plane,
             runtimes,
         }
     }
@@ -1003,8 +1134,29 @@ impl Daemon {
             .join(&key.2)
     }
 
-    pub(crate) fn endpoints(&self) -> &Endpoints {
-        &self.endpoints
+    pub(crate) fn data_plane(&self) -> &Arc<dyn crate::dataplane::DataPlane> {
+        &self.data_plane
+    }
+
+    /// Where an endpoint sends new connections, as this controller last
+    /// assigned it.
+    pub(crate) fn route(&self, host_port: u16) -> Option<compute_network::Route> {
+        self.routes.lock().expect("routes").get(&host_port).cloned()
+    }
+
+    pub(crate) fn routes_snapshot(&self) -> BTreeMap<u16, compute_network::Route> {
+        self.routes.lock().expect("routes").clone()
+    }
+
+    /// Connections open to an instance through any endpoint. Unknown when
+    /// the data plane does not answer: treated as open, so nothing that
+    /// may still serve traffic is stopped.
+    pub(crate) async fn open_connections(&self, instance_id: &str) -> usize {
+        self.data_plane
+            .connections(instance_id)
+            .await
+            .map(|(open, _)| open)
+            .unwrap_or(usize::MAX)
     }
 
     fn cache_path(&self, digest: &str) -> PathBuf {

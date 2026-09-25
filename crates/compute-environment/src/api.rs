@@ -161,7 +161,9 @@ pub async fn serve(
                     let _ = handle(stream, daemon).await;
                 });
             }
-            () = daemon.wait_for_shutdown() => return Ok(()),
+            // The listener stays until the shutdown has finished, so a
+            // caller can tell "stopping" from "stopped".
+            () = daemon.wait_stopped() => return Ok(()),
         }
     }
 }
@@ -379,6 +381,11 @@ async fn dispatch(
             return Ok(Response::Static("text/css; charset=utf-8", UI_STYLE));
         }
         ("GET", ["health"]) => return Ok(Response::Json(200, daemon.health().await)),
+        _ if daemon.is_stopping() => {
+            return Err(EnvironmentError::ControllerUnavailable(
+                "the controller is stopping".into(),
+            ));
+        }
         _ => {}
     }
     let mutation = method != "GET";
@@ -740,9 +747,19 @@ async fn route(
                 .await?,
         )?),
         ("POST", ["shutdown"]) => {
+            // `{"workloads": "keep"}` stops only the controller, for a
+            // restart or an upgrade; by default everything stops.
+            let request: serde_json::Value = parse(body)?;
+            let keep = request["workloads"].as_str() == Some("keep");
             let daemon = daemon.clone();
-            tokio::spawn(async move { daemon.shutdown().await });
-            ok(serde_json::json!({ "shutdown": true }))
+            if keep {
+                daemon.detach().await?;
+            } else {
+                tokio::spawn(async move { daemon.shutdown().await });
+            }
+            ok(
+                serde_json::json!({ "shutdown": true, "workloads": if keep { "kept" } else { "stopped" } }),
+            )
         }
 
         // Environments.

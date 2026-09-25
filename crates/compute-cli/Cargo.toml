@@ -21,7 +21,9 @@ compute-placement = { path = "../compute-placement" }
 compute-policy = { path = "../compute-policy" }
 compute-provider = { path = "../compute-provider" }
 compute-runtime = { path = "../compute-runtime" }
+compute-network = { path = "../compute-network" }
 chrono.workspace = true
+libc.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

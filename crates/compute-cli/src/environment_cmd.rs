@@ -134,9 +134,27 @@ pub struct StartCommand {
     pub endpoint_address: Option<std::net::IpAddr>,
     #[command(flatten)]
     pub state: crate::control_state::StateOptions,
+    /// Where services run and endpoints listen: `supervisor` (default on
+    /// Unix) runs them in the node's supervisor process, which outlives
+    /// controller restarts and upgrades; `in-process` runs them inside
+    /// this controller, and they stop with it.
+    #[arg(long, default_value = "supervisor", value_parser = ["supervisor", "in-process"])]
+    pub data_plane: String,
     /// Run in the background and return once the API answers.
     #[arg(long)]
     pub detach: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct StopCommand {
+    /// Stop only the controller: services and their endpoints keep running
+    /// on the supervisor, and the next controller reattaches to them.
+    #[arg(long)]
+    pub keep_workloads: bool,
+    #[command(flatten)]
+    pub daemon: DaemonLocation,
     #[arg(long)]
     pub json: bool,
 }
@@ -181,6 +199,91 @@ pub(crate) fn security_mode(
     Err(ComputeError::InvalidWorkload(format!(
         "refusing to serve plaintext without credentials on {listen}: configure TLS (--tls-cert, --tls-key) for production, or pass --insecure for development"
     )))
+}
+
+/// The node's supervisor: the running one when it answers, otherwise a
+/// new one started from this executable in its own session, so it
+/// outlives this controller.
+pub(crate) async fn ensure_supervisor(
+    state_dir: &std::path::Path,
+    endpoint_address: std::net::IpAddr,
+) -> compute_core::Result<std::sync::Arc<dyn compute_environment::dataplane::DataPlane>> {
+    use compute_environment::dataplane::{Launcher, SupervisorClient};
+    let (client, info, started) = SupervisorClient::ensure(Launcher {
+        executable: std::env::current_exe()?,
+        state_dir: state_dir.to_path_buf(),
+        endpoint_address,
+    })
+    .await
+    .map_err(error)?;
+    if started {
+        eprintln!("Data plane: started supervisor pid {}", info.pid);
+    } else {
+        eprintln!(
+            "Data plane: supervisor pid {} (running since {}, {} units, {} endpoints)",
+            info.pid,
+            info.started_at.to_rfc3339(),
+            info.units,
+            info.routes
+        );
+    }
+    Ok(std::sync::Arc::new(client))
+}
+
+#[derive(Args, Debug)]
+pub struct SupervisorCommand {
+    /// The node directory of the controller it serves.
+    #[arg(long, default_value = ".compute/daemon")]
+    pub state_dir: PathBuf,
+    /// The address endpoints listen on.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub endpoint_address: std::net::IpAddr,
+}
+
+/// Run the node's supervisor: service processes and endpoint listeners,
+/// behind a node-local socket. `compute start` starts it when needed.
+pub async fn supervisor(command: SupervisorCommand) -> compute_core::Result<()> {
+    use compute_environment::dataplane::{LocalDataPlane, serve_supervisor, socket_path};
+    std::fs::create_dir_all(&command.state_dir)?;
+    // One supervisor per node directory.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(command.state_dir.join("supervisor.lock"))?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: an advisory lock on a file this process holds open.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(ComputeError::Runtime(format!(
+                "another supervisor runs for {}",
+                command.state_dir.display()
+            )));
+        }
+    }
+    let plane = LocalDataPlane::supervisor(
+        std::sync::Arc::new(compute_provider::LocalProvider::new()),
+        compute_network::Endpoints::new(command.endpoint_address),
+        command.state_dir.join("supervisor"),
+    )
+    .await
+    .map_err(error)?;
+    let info = compute_environment::dataplane::DataPlane::info(&plane)
+        .await
+        .map_err(error)?;
+    eprintln!(
+        "Compute supervisor pid {} serving {} ({} endpoints restored, {} orphans stopped)",
+        info.pid,
+        socket_path(&command.state_dir).display(),
+        info.routes,
+        info.orphans_stopped
+    );
+    let result = serve_supervisor(std::sync::Arc::new(plane), socket_path(&command.state_dir))
+        .await
+        .map_err(error);
+    drop(lock);
+    result
 }
 
 fn port_range(value: &str, what: &str) -> compute_core::Result<(u16, u16)> {
@@ -289,6 +392,10 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
             .transpose()?,
     };
     config.api_tls = tls.clone();
+    if command.data_plane == "supervisor" {
+        config.data_plane =
+            Some(ensure_supervisor(&command.state_dir, config.network.endpoint_address).await?);
+    }
     let listener = tokio::net::TcpListener::bind(command.listen).await?;
     let daemon = compute_environment::Daemon::start(config)
         .await
@@ -336,6 +443,9 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
             daemon.shutdown().await;
         }
     }
+    // The API stops answering as soon as a shutdown begins; the process
+    // stays until the shutdown has stopped (or detached from) everything.
+    let _ = tokio::time::timeout(Duration::from_secs(300), daemon.wait_stopped()).await;
     Ok(())
 }
 
@@ -368,6 +478,7 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
     if command.insecure {
         child.arg("--insecure");
     }
+    child.arg("--data-plane").arg(&command.data_plane);
     if command.production {
         child.arg("--production");
     }
@@ -445,21 +556,35 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
     }
 }
 
-pub async fn stop(command: DaemonCommand) -> compute_core::Result<()> {
+pub async fn stop(command: StopCommand) -> compute_core::Result<()> {
     let client = command.daemon.client()?;
     let _: serde_json::Value = client
-        .post::<(), _>("/shutdown", None)
+        .post(
+            "/shutdown",
+            Some(&serde_json::json!({
+                "workloads": if command.keep_workloads { "keep" } else { "stop" },
+            })),
+        )
         .await
         .map_err(error)?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    while client.get::<DaemonStatus>("/status").await.is_ok() {
+    // Stopped when nothing answers any more: the controller keeps /health
+    // until its workloads are stopped (or left running) and its last
+    // events are written.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    while client.get::<serde_json::Value>("/health").await.is_ok() {
         if tokio::time::Instant::now() >= deadline {
             return Err(ComputeError::Runtime("the daemon did not stop".into()));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     if command.json {
-        print_json(&serde_json::json!({ "stopped": true }));
+        print_json(
+            &serde_json::json!({ "stopped": true, "workloads_kept": command.keep_workloads }),
+        );
+    } else if command.keep_workloads {
+        println!(
+            "Compute controller stopped; workloads and endpoints keep running for the next controller"
+        );
     } else {
         println!("Compute daemon stopped; desired state is kept for the next start");
     }

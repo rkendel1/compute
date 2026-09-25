@@ -213,11 +213,12 @@ impl Daemon {
         self: &Arc<Self>,
         unit: &Unit,
         service: Option<(u64, ExecutionControl)>,
-    ) -> (Outcome, Option<String>) {
+    ) -> (Outcome, Option<String>, Option<String>) {
         let deployment = Some(unit.deployment_id.clone());
+        let mut started_unit = None;
         let prepared = match self.prepare_unit(unit).await {
             Ok(prepared) => prepared,
-            Err(error) => return (Outcome::Failed(error), deployment),
+            Err(error) => return (Outcome::Failed(error), deployment, None),
         };
         let Prepared {
             request,
@@ -226,7 +227,11 @@ impl Daemon {
         } = prepared;
         let Some(selected) = report.selected.clone() else {
             let (message, decision) = placement_failure(&report);
-            return (Outcome::Denied(message, decision.map(Box::new)), deployment);
+            return (
+                Outcome::Denied(message, decision.map(Box::new)),
+                deployment,
+                None,
+            );
         };
         let placement = PlacementView {
             placement_id: Some(report.placement_id.clone()),
@@ -244,6 +249,7 @@ impl Daemon {
                             selected.provider_id
                         ))),
                         deployment,
+                        None,
                     );
                 }
                 let binding = report.receipt_binding().expect("placed");
@@ -263,6 +269,7 @@ impl Daemon {
                                 error.to_string(),
                             )),
                             deployment,
+                            None,
                         );
                     }
                 };
@@ -277,6 +284,7 @@ impl Daemon {
                     return (
                         Outcome::Denied(reasons, Some(Box::new(admission.decision))),
                         deployment,
+                        None,
                     );
                 }
                 {
@@ -290,6 +298,7 @@ impl Daemon {
                                     "stopped before starting".into(),
                                 )),
                                 deployment,
+                                None,
                             );
                         }
                         runtime.state = Some(ActualState::Running);
@@ -301,32 +310,45 @@ impl Daemon {
                     }
                 }
                 self.wake();
-                match self
-                    .config
-                    .provider
-                    .execute_controlled(request, admission, &control)
-                    .await
+                let manifest = self
+                    .unit_manifest(unit, &request, &report, &placement, &control)
+                    .await;
+                let unit_id = manifest.unit_id.clone();
+                started_unit = Some(unit_id.clone());
                 {
-                    Ok(response) => {
-                        let warning = match response
-                            .result
-                            .receipt
-                            .as_ref()
-                            .map(|receipt| report.verify_receipt(receipt))
-                        {
-                            Some(Err(error)) => Some(error),
-                            None => Some("execution returned no receipt".into()),
-                            Some(Ok(())) => None,
-                        };
-                        Outcome::Executed(Box::new(response.result), warning, placement)
-                    }
-                    Err(error) if error.admission.is_some() => {
-                        Outcome::Denied(error.message.clone(), error.admission)
-                    }
-                    Err(error) => {
-                        Outcome::Failed(EnvironmentError::RuntimeUnavailable(error.to_string()))
+                    let mut inner = self.inner.lock().await;
+                    if let Some(runtime) = inner.runtime.get_mut(unit)
+                        && runtime.generation == generation
+                    {
+                        runtime.unit_id = Some(unit_id.clone());
                     }
                 }
+                match self.data_plane().start(manifest, request, admission).await {
+                    Ok(process) => {
+                        if let Some(process) = process {
+                            if !self.data_plane().independent() {
+                                super::processes::record(&self.config.state_dir, unit, process.pid);
+                            }
+                            let mut inner = self.inner.lock().await;
+                            if let Some(runtime) = inner.runtime.get_mut(unit)
+                                && runtime.generation == generation
+                            {
+                                runtime.pid = Some(process.pid);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        return (
+                            Outcome::Failed(EnvironmentError::RuntimeUnavailable(error.message())),
+                            deployment,
+                            None,
+                        );
+                    }
+                }
+                let outcome = self.wait_unit(&unit_id, &control).await;
+                // finish() acknowledges the unit once its evidence is
+                // durable.
+                self.unit_outcome(outcome, Some(&report), placement)
             }
             None => {
                 match compute_placement::dispatch::execute(&self.pool, &report, request).await {
@@ -340,7 +362,166 @@ impl Daemon {
                 }
             }
         };
-        (outcome, deployment)
+        (outcome, deployment, started_unit)
+    }
+
+    /// The node-local manifest of a unit about to start: enough to
+    /// recognize and reattach it, and nothing secret.
+    async fn unit_manifest(
+        &self,
+        unit: &Unit,
+        request: &ProviderRequest,
+        report: &PlacementReport,
+        placement: &PlacementView,
+        control: &ExecutionControl,
+    ) -> crate::dataplane::UnitManifest {
+        let (deployment, instance) = {
+            let inner = self.inner.lock().await;
+            (
+                inner.desired.deployments.get(&unit.deployment_id).cloned(),
+                inner
+                    .desired
+                    .instance(&unit.key, &unit.deployment_id)
+                    .map(|instance| instance.value.clone()),
+            )
+        };
+        let requirements = &report.requirements;
+        let started_at = Utc::now();
+        crate::dataplane::UnitManifest {
+            unit_id: format!(
+                "unit_{}_{}",
+                compute_state::short_digest(&[
+                    &unit.key.0,
+                    &unit.key.1,
+                    &unit.key.2,
+                    &unit.deployment_id
+                ]),
+                started_at.timestamp_nanos_opt().unwrap_or_default()
+            ),
+            environment: unit.key.0.clone(),
+            project: unit.key.1.clone(),
+            workload: unit.key.2.clone(),
+            deployment_id: unit.deployment_id.clone(),
+            environment_id: deployment
+                .as_ref()
+                .map(|deployment| deployment.value.environment_id.clone())
+                .unwrap_or_default(),
+            project_id: deployment
+                .as_ref()
+                .map(|deployment| deployment.value.project_id.clone())
+                .unwrap_or_default(),
+            workload_id: request
+                .execution
+                .scope
+                .as_ref()
+                .map(|scope| scope.workload_id.clone())
+                .unwrap_or_default(),
+            revision: deployment
+                .as_ref()
+                .map(|deployment| deployment.value.revision.clone())
+                .unwrap_or_default(),
+            runtime: requirements.runtime.kind.to_string(),
+            bundle_identity: request.expected.bundle_id.clone().unwrap_or_default(),
+            dependency_identity: requirements
+                .dependencies
+                .as_ref()
+                .map(|dependencies| dependencies.id.clone()),
+            ports: instance
+                .map(|instance| {
+                    instance
+                        .ports
+                        .iter()
+                        .map(|binding| (binding.name.clone(), binding.host))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            network: serde_json::to_value(&requirements.network)
+                .ok()
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            isolation: serde_json::to_value(requirements.isolation)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            desired_state: "running".into(),
+            log_directory: control
+                .log_directory()
+                .map(|directory| directory.display().to_string()),
+            placement_id: placement.placement_id.clone(),
+            provider: placement.provider.clone(),
+            started_at,
+        }
+    }
+
+    /// Wait for a unit to end. Stopping it (its control is cancelled) is
+    /// passed on to the data plane.
+    pub(crate) async fn wait_unit(
+        &self,
+        unit_id: &str,
+        control: &ExecutionControl,
+    ) -> Result<crate::dataplane::UnitOutcome, EnvironmentError> {
+        loop {
+            let wait = self.data_plane().wait(unit_id);
+            tokio::pin!(wait);
+            let mut stopping = false;
+            let outcome = loop {
+                tokio::select! {
+                    outcome = &mut wait => break outcome,
+                    () = tokio::time::sleep(std::time::Duration::from_millis(50)), if !stopping => {
+                        if control.is_cancelled() {
+                            stopping = true;
+                            let _ = self.data_plane().stop(unit_id).await;
+                        }
+                    }
+                }
+            };
+            match outcome {
+                // The supervisor is unreachable: it is being replaced, and
+                // the replacement reports what became of this unit.
+                Err(EnvironmentError::RuntimeUnavailable(_)) if !self.is_shutting_down() => {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                // A replacement that never heard of it: lost with the
+                // supervisor that ran it.
+                Err(EnvironmentError::NotFound(_)) => {
+                    return Ok(crate::dataplane::UnitOutcome::Orphaned {
+                        message: "the data plane that ran it was lost".into(),
+                    });
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// What a data-plane outcome means to the controller.
+    pub(crate) fn unit_outcome(
+        &self,
+        outcome: Result<crate::dataplane::UnitOutcome, EnvironmentError>,
+        report: Option<&PlacementReport>,
+        placement: PlacementView,
+    ) -> Outcome {
+        use crate::dataplane::UnitOutcome;
+        match outcome {
+            Ok(UnitOutcome::Executed { response }) => {
+                let warning = match (report, response.result.receipt.as_ref()) {
+                    (_, None) => Some("execution returned no receipt".into()),
+                    (Some(report), Some(receipt)) => report.verify_receipt(receipt).err(),
+                    // Reattached after a controller restart: the receipt
+                    // verifies on its own.
+                    (None, Some(receipt)) => receipt.verify().err().map(|error| error.to_string()),
+                };
+                Outcome::Executed(Box::new(response.result), warning, placement)
+            }
+            Ok(UnitOutcome::Failed {
+                message,
+                admission: Some(decision),
+            }) => Outcome::Denied(message, Some(decision)),
+            Ok(UnitOutcome::Failed { message, .. }) => {
+                Outcome::Failed(EnvironmentError::RuntimeUnavailable(message))
+            }
+            Ok(UnitOutcome::Orphaned { message }) => Outcome::Lost(message),
+            Err(error) => Outcome::Failed(error),
+        }
     }
 
     /// Terminalize one invocation. Its evidence (the execution record, its
@@ -359,6 +540,7 @@ impl Daemon {
         let Invocation {
             generation,
             started_at,
+            unit_id,
         } = invocation;
         let key = &unit.key;
         // Where the execution belongs, from desired state or, when this
@@ -499,6 +681,31 @@ impl Daemon {
                     }
                     execution = Err(failure);
                 }
+                Outcome::Lost(message) => {
+                    if let Some(runtime) = current.as_deref_mut() {
+                        runtime.state = Some(ActualState::Failed);
+                        runtime.error = Some(message.clone());
+                        if !stopping {
+                            runtime.held = true;
+                            // Compute lost it; the workload did not fail.
+                            // It comes back whatever its restart policy.
+                            if service {
+                                restart_after = Some(backoff(runtime, restart_delay, ran_for));
+                            }
+                        }
+                    }
+                    change = self.event(
+                        change,
+                        events::WORKLOAD_ORPHANED,
+                        scope,
+                        format!(
+                            "{} in {}/{} was lost with its supervisor: {message}",
+                            key.2, key.0, key.1
+                        ),
+                        json!({}),
+                    );
+                    execution = Err(EnvironmentError::RuntimeUnavailable(message));
+                }
                 Outcome::Executed(result, warning, placement) => {
                     let succeeded = result.status == ExecutionStatus::Completed
                         && result.exit_code.is_none_or(|code| code == 0);
@@ -626,6 +833,7 @@ impl Daemon {
             record: execution.as_ref().ok().cloned(),
             receipt: None,
             events: std::mem::take(&mut change.events),
+            unit_id,
         };
         if let (Some(record), Some((receipt, receipt_id))) = (&evidence.record, receipt) {
             let artifact = match receipt.encoded_bytes() {
@@ -645,12 +853,16 @@ impl Daemon {
                 created_at: Utc::now(),
             });
         }
-        if let Err(error) = self.persist_evidence(&evidence).await {
-            // Control state is not reachable. The evidence stays pending on
-            // this node and is written once it is; it is never dropped.
-            let mut inner = self.inner.lock().await;
-            inner.state_error = Some(error.to_string());
-            inner.pending_evidence.push(evidence);
+        match self.persist_evidence(&evidence).await {
+            Ok(()) => self.acknowledge(&evidence).await,
+            Err(error) => {
+                // Control state is not reachable. The evidence stays
+                // pending on this node, and the data plane keeps the
+                // outcome, until it is written; it is never dropped.
+                let mut inner = self.inner.lock().await;
+                inner.state_error = Some(error.to_string());
+                inner.pending_evidence.push(evidence);
+            }
         }
         if let Some(delay) = restart_after {
             self.restart_later(unit.clone(), generation, delay);
@@ -725,6 +937,12 @@ impl Daemon {
         Ok(())
     }
 
+    async fn acknowledge(&self, evidence: &PendingEvidence) {
+        if let Some(unit_id) = &evidence.unit_id {
+            let _ = self.data_plane().ack(unit_id).await;
+        }
+    }
+
     /// Write evidence that was held while control state was unreachable.
     pub(crate) async fn flush_pending_evidence(&self) {
         let pending = std::mem::take(&mut self.inner.lock().await.pending_evidence);
@@ -732,6 +950,8 @@ impl Daemon {
         for evidence in pending {
             if self.persist_evidence(&evidence).await.is_err() {
                 failed.push(evidence);
+            } else {
+                self.acknowledge(&evidence).await;
             }
         }
         if !failed.is_empty() {
@@ -751,16 +971,28 @@ impl Daemon {
                 let Some(daemon) = daemon.upgrade() else {
                     return;
                 };
-                {
+                let restarts = {
                     let mut inner = daemon.inner.lock().await;
                     match inner.runtime.get_mut(&unit) {
                         Some(runtime) if runtime.generation == generation => {
                             runtime.held = false;
                             runtime.restarts += 1;
+                            runtime.restarts
                         }
                         _ => return,
                     }
-                }
+                };
+                let change = daemon.event(
+                    Change::new(),
+                    events::WORKLOAD_RESTARTED,
+                    Scope::workload(&unit.key).deployment(&unit.deployment_id),
+                    format!(
+                        "{} in {}/{} is being restarted (restart {restarts})",
+                        unit.key.2, unit.key.0, unit.key.1
+                    ),
+                    json!({ "restarts": restarts }),
+                );
+                let _ = daemon.apply(change).await;
                 daemon.reconcile().await;
             });
         tokio::spawn(future);
@@ -801,9 +1033,10 @@ impl Daemon {
             Invocation {
                 generation: runtime.generation,
                 started_at: runtime.started_at.expect("set"),
+                unit_id: None,
             }
         };
-        let (outcome, deployment_id) = self.execute(&unit, None).await;
+        let (outcome, deployment_id, _) = self.execute(&unit, None).await;
         let record = self
             .finish(&unit, invocation, outcome, deployment_id, false)
             .await?;
@@ -826,10 +1059,14 @@ impl Daemon {
 /// One invocation of a unit: the unit's generation when it started, which
 /// decides whether it may still update the unit's runtime view, and when
 /// it started, which belongs to the execution.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct Invocation {
     pub generation: u64,
     pub started_at: chrono::DateTime<Utc>,
+    /// The data-plane unit that ran it: acknowledged once its evidence is
+    /// durable, so the data plane never forgets an outcome the controller
+    /// has not recorded.
+    pub unit_id: Option<String>,
 }
 
 /// An execution's evidence, as it is written to control state.
@@ -838,6 +1075,7 @@ pub(crate) struct PendingEvidence {
     pub record: Option<ExecutionRecord>,
     pub receipt: Option<ReceiptRecord>,
     pub events: Vec<compute_state::EventRecord>,
+    pub unit_id: Option<String>,
 }
 
 fn status_name(status: &ExecutionStatus) -> String {
@@ -976,6 +1214,7 @@ mod tests {
             receipt: Some(receipt(&record)),
             record: Some(record.clone()),
             events: vec![],
+            unit_id: None,
         };
         daemon.persist_evidence(&evidence).await.unwrap();
         // A duplicate or late terminalization of the same execution.

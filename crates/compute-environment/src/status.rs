@@ -70,8 +70,22 @@ pub struct ControllerInfo {
     pub started_at: DateTime<Utc>,
     pub security: SecurityView,
     pub control_plane: ControlPlaneView,
+    /// Where workloads run and endpoints listen.
+    pub data_plane: DataPlaneView,
     /// Runtimes this node can execute, as its provider reports them.
     pub runtimes: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataPlaneView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<crate::dataplane::DataPlaneInfo>,
+    /// Whether workloads outlive this controller.
+    pub independent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// What this controller found when it started.
+    pub recovery: crate::daemon::Recovery,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

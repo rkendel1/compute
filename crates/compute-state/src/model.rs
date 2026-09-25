@@ -902,6 +902,7 @@ pub mod events {
     pub const WORKLOAD_REATTACHED: &str = "workload.reattached";
     pub const WORKLOAD_RESTARTED: &str = "workload.restarted";
     pub const WORKLOAD_ORPHANED: &str = "workload.orphaned";
+    pub const DATA_PLANE_RESTARTED: &str = "data_plane.restarted";
     pub const RECONCILE_STARTED: &str = "reconcile.started";
     pub const RECONCILE_FINISHED: &str = "reconcile.finished";
     pub const UPGRADE_STARTED: &str = "upgrade.started";

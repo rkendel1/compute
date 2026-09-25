@@ -450,6 +450,7 @@ dependencies = [
  "clap",
  "compute-core",
  "compute-environment",
+ "compute-network",
  "compute-placement",
  "compute-policy",
  "compute-provider",

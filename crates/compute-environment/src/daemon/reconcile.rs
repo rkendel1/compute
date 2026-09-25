@@ -41,6 +41,22 @@ impl Daemon {
         if self.is_shutting_down() {
             return;
         }
+        // A supervisor that died is replaced first: the new one restores
+        // the endpoints and reports what the old one left behind.
+        if self.data_plane().independent()
+            && let Ok(true) = self.data_plane().recover().await
+        {
+            let info = self.data_plane().info().await.ok();
+            let change = self.event(
+                Change::new(),
+                events::DATA_PLANE_RESTARTED,
+                Scope::default(),
+                "the supervisor was unreachable; a new one was started".into(),
+                json!({ "data_plane": info }),
+            );
+            let _ = self.apply(change).await;
+            let _ = self.reattach().await;
+        }
         if self.refresh().await.is_err() {
             return;
         }
@@ -177,33 +193,16 @@ impl Daemon {
             runtime.health = None;
             runtime.log_directory = Some(log_directory);
         }
-        // Record the process group on this node once it exists.
-        {
-            let control = control.clone();
-            let state_dir = self.config.state_dir.clone();
-            let unit = unit.clone();
-            tokio::spawn(async move {
-                for _ in 0..600 {
-                    if let Some(pid) = control.process_id() {
-                        super::processes::record(&state_dir, &unit, pid);
-                        return;
-                    }
-                    if control.is_cancelled() {
-                        return;
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            });
-        }
         let daemon = self.clone();
         let task_unit = unit.clone();
         let handle = tokio::spawn(async move {
-            let (outcome, deployment_id) = daemon
+            let (outcome, deployment_id, unit_id) = daemon
                 .execute(&task_unit, Some((generation, control)))
                 .await;
             let invocation = super::execute::Invocation {
                 generation,
                 started_at,
+                unit_id,
             };
             let _ = daemon
                 .finish(&task_unit, invocation, outcome, deployment_id, true)
@@ -287,29 +286,48 @@ impl Daemon {
             .collect::<Vec<_>>();
         let mut errors = BTreeMap::new();
         let mut keep = BTreeSet::new();
+        let current = self.routes_snapshot();
         for assignment in assignments {
             keep.insert(assignment.host_port);
-            if let Err(error) = self
-                .endpoints()
-                .assign(
-                    assignment.host_port,
-                    Route {
-                        instance_id: assignment.instance_id.clone(),
-                        target_port: assignment.target_port,
-                    },
-                )
+            let route = Route {
+                instance_id: assignment.instance_id.clone(),
+                target_port: assignment.target_port,
+            };
+            if current.get(&assignment.host_port) == Some(&route) {
+                continue;
+            }
+            match self
+                .data_plane()
+                .assign(assignment.host_port, route.clone())
                 .await
             {
-                errors.insert(
-                    assignment.host_port,
-                    format!(
-                        "endpoint {} cannot listen on port {}: {error}",
-                        assignment.endpoint, assignment.host_port
-                    ),
-                );
+                Ok(()) => {
+                    self.routes
+                        .lock()
+                        .expect("routes")
+                        .insert(assignment.host_port, route);
+                }
+                Err(error) => {
+                    errors.insert(
+                        assignment.host_port,
+                        format!(
+                            "endpoint {} cannot listen on port {}: {}",
+                            assignment.endpoint,
+                            assignment.host_port,
+                            error.message()
+                        ),
+                    );
+                }
             }
         }
-        self.endpoints().retain(&keep);
+        if current.keys().any(|port| !keep.contains(port))
+            && self.data_plane().retain(keep.clone()).await.is_ok()
+        {
+            self.routes
+                .lock()
+                .expect("routes")
+                .retain(|port, _| keep.contains(port));
+        }
         self.inner.lock().await.endpoint_errors = errors;
     }
 

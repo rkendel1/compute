@@ -526,6 +526,15 @@ impl Daemon {
     }
 
     pub async fn network_status(&self) -> NetworkStatus {
+        // What the data plane serves right now.
+        let served = self
+            .data_plane()
+            .routes()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|route| (route.port, route))
+            .collect::<std::collections::BTreeMap<_, _>>();
         let inner = self.inner.lock().await;
         NetworkStatus {
             endpoint_address: self.config.network.endpoint_address.to_string(),
@@ -570,10 +579,13 @@ impl Daemon {
                     instance_id: assignment.value.instance_id.clone(),
                     target_port: assignment.value.target_port,
                     revision: assignment.value.revision.clone(),
-                    listening: self.endpoints().route(assignment.value.host_port).is_some(),
-                    open_connections: self
-                        .endpoints()
-                        .open_connections(&assignment.value.instance_id),
+                    listening: served
+                        .get(&assignment.value.host_port)
+                        .is_some_and(|route| route.listening),
+                    open_connections: served
+                        .get(&assignment.value.host_port)
+                        .map(|route| route.open_connections)
+                        .unwrap_or(0),
                     error: inner
                         .endpoint_errors
                         .get(&assignment.value.host_port)

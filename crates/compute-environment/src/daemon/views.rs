@@ -518,6 +518,17 @@ impl Daemon {
                 Query::all(Collection::WorkloadInstance).eq("deployment_id", id.to_string()),
             )
             .await?;
+        let mut connections = std::collections::BTreeMap::new();
+        for instance in &instances {
+            connections.insert(
+                instance.id.clone(),
+                self.data_plane()
+                    .connections(&instance.id)
+                    .await
+                    .map(|(open, _)| open)
+                    .unwrap_or(0),
+            );
+        }
         let inner = self.inner.lock().await;
         let instances = instances
             .into_iter()
@@ -528,7 +539,7 @@ impl Daemon {
                 );
                 InstanceView {
                     actual_state: inner.runtime.get(&unit).and_then(|runtime| runtime.state),
-                    open_connections: self.endpoints().open_connections(&instance.id),
+                    open_connections: connections.get(&instance.id).copied().unwrap_or(0),
                     instance_id: instance.id,
                     record: instance.value,
                 }

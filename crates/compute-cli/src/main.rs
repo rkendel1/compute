@@ -72,7 +72,7 @@ enum Commands {
     /// Run the persistent Compute daemon (environments and services).
     Start(environment_cmd::StartCommand),
     /// Stop the Compute daemon. Desired state is kept.
-    Stop(environment_cmd::DaemonCommand),
+    Stop(environment_cmd::StopCommand),
     /// Show the Compute daemon's status.
     Status(environment_cmd::DaemonCommand),
     /// Create, inspect, and operate environments.
@@ -109,6 +109,9 @@ enum Commands {
     Auth(node_cmd::AuthCommand),
     /// The Compute controller on this node: identity, health, upgrades
     Node(node_cmd::NodeCommand),
+    /// The node's supervisor: service processes and endpoints that outlive
+    /// the controller. `compute start` runs it.
+    Supervisor(environment_cmd::SupervisorCommand),
 }
 
 #[derive(Args, Debug)]
@@ -1263,6 +1266,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Events(command) => environment_cmd::events(command).await?,
         Commands::Auth(command) => node_cmd::auth(command).await?,
         Commands::Node(command) => node_cmd::node(command).await?,
+        Commands::Supervisor(command) => environment_cmd::supervisor(command).await?,
         Commands::Service(command) => environment_cmd::service(command).await?,
         Commands::ControlPlane(command) => control_state::control_plane(command).await?,
         Commands::Remote(command) => match command.command {
