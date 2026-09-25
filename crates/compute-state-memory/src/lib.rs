@@ -87,12 +87,13 @@ impl StateStore for MemoryState {
         let mut inner = self.inner.lock().await;
         let (tables, version) = &mut *inner;
         let before = *version;
+        let written = writes.clone();
         apply_in_memory(tables, writes, version)?;
-        self.transitions.record(Some((before, *version)));
+        self.transitions.record(Some((before, *version)), &written);
         Ok(Some((before, *version)))
     }
 
-    fn take_transitions(&self) -> Option<Vec<(u64, u64)>> {
+    fn take_transitions(&self) -> Option<Vec<compute_state::Transition>> {
         Some(self.transitions.take())
     }
 

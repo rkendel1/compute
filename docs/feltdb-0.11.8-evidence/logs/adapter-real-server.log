@@ -1,42 +1,7 @@
-   Compiling displaydoc v0.2.7
-   Compiling cc v1.4.7
-   Compiling tokio v1.53.1
-   Compiling smallvec v1.16.1
-   Compiling serde_core v1.0.229
-   Compiling tinystr v0.8.4
-   Compiling icu_locale_core v2.3.0
-   Compiling ring v0.17.14
-   Compiling zerotrie v0.2.5
-   Compiling icu_provider v2.3.1
-   Compiling icu_collections v2.3.0
-   Compiling serde v1.0.229
-   Compiling getrandom v0.2.17
-   Compiling slab v0.4.12
-   Compiling num-traits v0.2.19
-   Compiling futures-util v0.3.34
-   Compiling icu_normalizer v2.3.0
-   Compiling icu_properties v2.3.0
-   Compiling rustls v0.23.45
-   Compiling futures-channel v0.3.34
-   Compiling rustls-webpki v0.103.15
-   Compiling idna_adapter v1.2.2
-   Compiling serde_json v1.0.151
-   Compiling hyper v1.11.1
-   Compiling idna v1.1.0
-   Compiling tracing v0.1.44
-   Compiling tower v0.5.3
-   Compiling hyper-util v0.1.21
-   Compiling chrono v0.4.45
-   Compiling url v2.5.8
-   Compiling tower-http v0.6.11
-   Compiling serde_urlencoded v0.7.1
    Compiling compute-state v0.1.0 (/home/user/compute/crates/compute-state)
-   Compiling tokio-rustls v0.26.5
-   Compiling hyper-rustls v0.27.10
-   Compiling reqwest v0.12.28
    Compiling compute-state-memory v0.1.0 (/home/user/compute/crates/compute-state-memory)
    Compiling compute-state-feltdb v0.1.0 (/home/user/compute/crates/compute-state-feltdb)
-    Finished `test` profile [unoptimized] target(s) in 11.59s
+    Finished `test` profile [unoptimized] target(s) in 5.21s
      Running unittests src/lib.rs (target/debug/deps/compute_state_feltdb-ebd4e042c85b8b97)
 
 running 0 tests
@@ -53,7 +18,7 @@ test snapshots_are_authorized_by_the_authority ... ok
 test targeted_reads_are_indexed_and_bounded ... ok
 test the_upgrade_backs_up_migrates_and_verifies ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 2.70s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 3.03s
 
      Running tests/feltdb.rs (target/debug/deps/feltdb-fa5c8b969d7d251f)
 
@@ -63,7 +28,7 @@ test an_older_compute_model_is_upgraded_in_place ... ok
 test compute_speaks_to_feltdb_over_verified_https ... ok
 test feltdb_is_a_conforming_durable_authority ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.71s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.50s
 
      Running tests/model.rs (target/debug/deps/model-aeb499ef44b0aba8)
 
@@ -71,7 +36,7 @@ running 2 tests
 test documents_match_the_declared_fields ... ok
 test every_collection_is_in_the_model ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
 
    Doc-tests compute_state_feltdb
 

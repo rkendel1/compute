@@ -801,7 +801,7 @@ impl StateStore for FeltDbState {
         Some(self.access.lock().expect("access").clone())
     }
 
-    fn take_transitions(&self) -> Option<Vec<(u64, u64)>> {
+    fn take_transitions(&self) -> Option<Vec<compute_state::Transition>> {
         Some(self.transitions.take())
     }
 
@@ -952,7 +952,7 @@ impl StateStore for FeltDbState {
                     let transition = result["state_before"]
                         .as_u64()
                         .zip(result["state_after"].as_u64());
-                    self.transitions.record(transition);
+                    self.transitions.record(transition, &writes);
                     return Ok(transition);
                 }
                 Err(refusal) if refusal.status == 0 && attempts == 1 => continue,

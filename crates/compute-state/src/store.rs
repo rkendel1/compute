@@ -444,12 +444,12 @@ pub trait StateStore: Send + Sync {
             .await
     }
 
-    /// The (before, after) revisions of every commit made through this
-    /// store since the last call, in no particular order. `None` when the
-    /// backend does not record them. A commit whose revisions could not be
-    /// stated is recorded as [`UNCHAINED`], which never chains. One
-    /// consumer (the controller) drains it.
-    fn take_transitions(&self) -> Option<Vec<(u64, u64)>> {
+    /// Every commit made through this store since the last call: its
+    /// revisions before and after, and the collections it wrote, in no
+    /// particular order. `None` when the backend does not record them. A
+    /// commit whose revisions could not be stated is [`UNCHAINED`], which
+    /// never chains. One consumer (the controller) drains it.
+    fn take_transitions(&self) -> Option<Vec<Transition>> {
         None
     }
 
@@ -467,6 +467,14 @@ pub trait StateStore: Send + Sync {
     }
 }
 
+/// One committed transaction, as the store that committed it saw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transition {
+    pub before: u64,
+    pub after: u64,
+    pub collections: std::collections::BTreeSet<Collection>,
+}
+
 /// A commit whose revisions are unknown: it breaks any chain.
 pub const UNCHAINED: (u64, u64) = (u64::MAX - 1, u64::MAX);
 
@@ -474,21 +482,36 @@ pub const UNCHAINED: (u64, u64) = (u64::MAX - 1, u64::MAX);
 /// record is replaced by one [`UNCHAINED`] entry, which only costs the
 /// consumer a full read.
 #[derive(Default)]
-pub struct Transitions(std::sync::Mutex<Vec<(u64, u64)>>);
+pub struct Transitions(std::sync::Mutex<Vec<Transition>>);
 
 impl Transitions {
     const CAPACITY: usize = 65_536;
 
-    pub fn record(&self, transition: Option<(u64, u64)>) {
+    fn unchained() -> Transition {
+        Transition {
+            before: UNCHAINED.0,
+            after: UNCHAINED.1,
+            collections: Collection::ALL.into_iter().collect(),
+        }
+    }
+
+    pub fn record(&self, transition: Option<(u64, u64)>, writes: &[Write]) {
         let mut recorded = self.0.lock().expect("transitions");
         if recorded.len() >= Self::CAPACITY {
             recorded.clear();
-            recorded.push(UNCHAINED);
+            recorded.push(Self::unchained());
         }
-        recorded.push(transition.unwrap_or(UNCHAINED));
+        recorded.push(match transition {
+            Some((before, after)) => Transition {
+                before,
+                after,
+                collections: writes.iter().map(Write::collection).collect(),
+            },
+            None => Self::unchained(),
+        });
     }
 
-    pub fn take(&self) -> Vec<(u64, u64)> {
+    pub fn take(&self) -> Vec<Transition> {
         std::mem::take(&mut *self.0.lock().expect("transitions"))
     }
 }

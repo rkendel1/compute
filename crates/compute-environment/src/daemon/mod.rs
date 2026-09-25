@@ -623,7 +623,11 @@ pub struct Daemon {
     /// for a targeted refresh.
     dirty: std::sync::Mutex<Vec<(Collection, String)>>,
     /// Commit transitions drained from the store and not yet chained.
-    transitions: std::sync::Mutex<Vec<(u64, u64)>>,
+    transitions: std::sync::Mutex<Vec<compute_state::Transition>>,
+    /// This controller's own commits through `apply`, as (before, after):
+    /// the only commits to desired state that may be chained, because
+    /// only their writes are read back.
+    own_commits: std::sync::Mutex<BTreeSet<(u64, u64)>>,
     /// A commit made through `apply` and the queueing of what it wrote for
     /// read-back happen under the read side; draining happens under the
     /// write side. So a commit is never chained before its writes are
@@ -886,6 +890,7 @@ impl Daemon {
             last_mutation_ms: std::sync::atomic::AtomicI64::new(0),
             dirty: std::sync::Mutex::new(Vec::new()),
             transitions: std::sync::Mutex::new(Vec::new()),
+            own_commits: std::sync::Mutex::new(BTreeSet::new()),
             commit_gate: tokio::sync::RwLock::new(()),
             declared: std::sync::Mutex::new(std::collections::HashMap::new()),
             events,
@@ -1439,10 +1444,16 @@ impl Daemon {
     pub(crate) async fn apply(&self, change: Change) -> Result<(), EnvironmentError> {
         let targets = change.batch.targets();
         let gate = self.commit_gate.read().await;
-        let result = self.control.transaction(change.batch).await;
-        if result.is_ok() {
+        let result = self.control.transaction_tracked(change.batch).await;
+        if let Ok(transition) = &result {
             self.last_mutation_ms
                 .store(Utc::now().timestamp_millis(), Ordering::SeqCst);
+            if let Some(transition) = transition {
+                self.own_commits
+                    .lock()
+                    .expect("own commits")
+                    .insert(*transition);
+            }
             self.dirty.lock().expect("dirty").extend(targets);
         } else {
             // Unknown what landed: the next refresh reads everything.
@@ -1500,6 +1511,13 @@ impl Daemon {
                 if let Some((desired, revision)) = desired {
                     inner.desired_from = desired.snapshot_id.clone();
                     inner.desired = Arc::new(desired);
+                    let at = revision
+                        .as_ref()
+                        .map_or(u64::MAX, |revision| revision.value);
+                    self.own_commits
+                        .lock()
+                        .expect("own commits")
+                        .retain(|(_, after)| *after > at);
                     inner.desired_revision = revision;
                 }
                 inner.last_durable_read = Some(Utc::now());
@@ -1603,7 +1621,11 @@ impl Daemon {
             // chained at all.
             match self.control.store().take_transitions() {
                 Some(recorded) => transitions.extend(recorded),
-                None => transitions.push(compute_state::UNCHAINED),
+                None => transitions.push(compute_state::Transition {
+                    before: compute_state::UNCHAINED.0,
+                    after: compute_state::UNCHAINED.1,
+                    collections: Collection::ALL.into_iter().collect(),
+                }),
             }
             (dirty, transitions)
         };
@@ -1653,19 +1675,32 @@ impl Daemon {
             loaded.writes = loaded.writes.max(writes);
         }
         if let Some(revision) = inner.desired_revision.clone() {
+            let mut own = self.own_commits.lock().expect("own commits");
             let mut at = revision.value;
             let mut sorted = transitions;
-            sorted.sort_unstable();
-            for (before, after) in sorted {
-                if after <= at {
+            sorted.sort_unstable_by_key(|transition| (transition.before, transition.after));
+            for transition in sorted {
+                if transition.after <= at {
                     continue;
                 }
-                if before != at {
+                // A commit that did not begin where the working copy stands
+                // means a commit this store did not see: another writer.
+                // One that changed desired state without being this
+                // controller's (whose writes were just read back) is
+                // another writer too, even through this very store.
+                let foreign = !own.contains(&(transition.before, transition.after))
+                    && transition
+                        .collections
+                        .iter()
+                        .any(|collection| DESIRED_COLLECTIONS.contains(collection));
+                if transition.before != at || foreign {
                     inner.desired_revision = None;
+                    own.clear();
                     return Ok(false);
                 }
-                at = after;
+                at = transition.after;
             }
+            own.retain(|(_, after)| *after > at);
             if at != revision.value {
                 inner.desired_revision = Some(compute_state::Revision {
                     value: at,
@@ -2116,6 +2151,22 @@ impl Daemon {
         self.wake.notify_one();
     }
 }
+
+/// The collections desired state is derived from (the desired-state
+/// snapshot's sources and references).
+const DESIRED_COLLECTIONS: [Collection; 11] = [
+    Collection::Environment,
+    Collection::Project,
+    Collection::EnvironmentProject,
+    Collection::Workload,
+    Collection::WorkloadInstance,
+    Collection::TrafficAssignment,
+    Collection::Domain,
+    Collection::DnsRecord,
+    Collection::Certificate,
+    Collection::Deployment,
+    Collection::ProjectRevision,
+];
 
 /// The statuses of a release in flight.
 const IN_FLIGHT: [DeploymentStatus; 7] = [

@@ -189,15 +189,17 @@ impl StateStore for FileState {
         let mut tables = inner.0.clone();
         let before = inner.1;
         let mut next_version = before;
+        let written = writes.clone();
         apply_in_memory(&mut tables, writes, &mut next_version)?;
         // Durable first: memory changes only once the file does.
         self.write(&tables, next_version)?;
         *inner = (tables, next_version);
-        self.transitions.record(Some((before, next_version)));
+        self.transitions
+            .record(Some((before, next_version)), &written);
         Ok(Some((before, next_version)))
     }
 
-    fn take_transitions(&self) -> Option<Vec<(u64, u64)>> {
+    fn take_transitions(&self) -> Option<Vec<compute_state::Transition>> {
         Some(self.transitions.take())
     }
 
