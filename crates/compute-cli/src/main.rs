@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
@@ -178,6 +179,8 @@ struct RemoteJobCommand {
     job_id: String,
     #[arg(long)]
     json: bool,
+    #[command(flatten)]
+    location: pool::PoolLocation,
 }
 
 #[derive(Args, Debug)]
@@ -191,6 +194,8 @@ struct RemoteWaitCommand {
     json: bool,
     #[arg(long)]
     receipt: Option<PathBuf>,
+    #[command(flatten)]
+    location: pool::PoolLocation,
 }
 
 #[derive(Args, Debug)]
@@ -202,6 +207,8 @@ struct RemoteReceiptCommand {
     output: Option<PathBuf>,
     #[arg(long)]
     json: bool,
+    #[command(flatten)]
+    location: pool::PoolLocation,
 }
 
 #[derive(Args, Debug)]
@@ -210,6 +217,8 @@ struct RemoteEndpointCommand {
     provider: String,
     #[arg(long)]
     json: bool,
+    #[command(flatten)]
+    location: pool::PoolLocation,
 }
 
 #[derive(Args, Debug)]
@@ -220,6 +229,8 @@ struct RemoteArtifactCommand {
     bundle: Option<PathBuf>,
     #[arg(long)]
     provider: String,
+    #[command(flatten)]
+    location: pool::PoolLocation,
     #[arg(long)]
     runtime: Option<String>,
     #[arg(long = "env", value_parser = parse_env)]
@@ -1309,21 +1320,25 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::ControlPlane(command) => control_state::control_plane(command).await?,
         Commands::Remote(command) => match command.command {
             RemoteCommands::Capabilities(command) => {
-                let value = RemoteProvider::new(command.provider)
+                let value = command
+                    .location
+                    .provider(&command.provider)?
                     .capabilities()
                     .await
                     .map_err(provider_error)?;
                 print_provider_value(&value, command.json);
             }
             RemoteCommands::Health(command) => {
-                let value = RemoteProvider::new(command.provider)
+                let value = command
+                    .location
+                    .provider(&command.provider)?
                     .health()
                     .await
                     .map_err(provider_error)?;
                 print_provider_value(&value, command.json);
             }
             RemoteCommands::Submit(command) => {
-                let (provider, request, explain) = remote_request(*command)?;
+                let (provider, jobs, request, explain) = remote_request(*command)?;
                 if request.3.is_some() {
                     return Err(compute_core::ComputeError::InvalidWorkload(
                         "--receipt is valid for remote run or remote wait".into(),
@@ -1335,7 +1350,13 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     let response = provider.inspect(request.0).await.map_err(provider_error)?;
                     print_bundle_plan(&response.plan, request.1);
                 } else {
-                    let submission = provider
+                    let submission = jobs
+                        .ok_or_else(|| {
+                            compute_core::ComputeError::InvalidWorkload(
+                                "the selected provider does not support the remote job protocol"
+                                    .into(),
+                            )
+                        })?
                         .submit(request.0, request.4.as_deref())
                         .await
                         .map_err(provider_error)?;
@@ -1343,28 +1364,36 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 }
             }
             RemoteCommands::Status(command) => {
-                let status = RemoteProvider::new(command.provider)
+                let status = command
+                    .location
+                    .remote_provider(&command.provider)?
                     .job_status(&command.job_id)
                     .await
                     .map_err(provider_error)?;
                 print_provider_value(&status, command.json);
             }
             RemoteCommands::Result(command) => {
-                let result = RemoteProvider::new(command.provider)
+                let result = command
+                    .location
+                    .remote_provider(&command.provider)?
                     .job_result(&command.job_id)
                     .await
                     .map_err(provider_error)?;
                 print_provider_value(&result, command.json);
             }
             RemoteCommands::Cancel(command) => {
-                let status = RemoteProvider::new(command.provider)
+                let status = command
+                    .location
+                    .remote_provider(&command.provider)?
                     .cancel_job(&command.job_id)
                     .await
                     .map_err(provider_error)?;
                 print_provider_value(&status, command.json);
             }
             RemoteCommands::Receipt(command) => {
-                let receipt = RemoteProvider::new(command.provider)
+                let receipt = command
+                    .location
+                    .remote_provider(&command.provider)?
                     .job_receipt(&command.job_id)
                     .await
                     .map_err(provider_error)?;
@@ -1375,7 +1404,9 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 }
             }
             RemoteCommands::Artifacts(command) => {
-                let artifacts = RemoteProvider::new(command.provider)
+                let artifacts = command
+                    .location
+                    .remote_provider(&command.provider)?
                     .job_artifacts(&command.job_id)
                     .await
                     .map_err(provider_error)?;
@@ -1383,7 +1414,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
             }
             RemoteCommands::Wait(command) => remote_wait(command).await?,
             RemoteCommands::Inspect(command) => {
-                let (provider, request, explain) = remote_request(*command)?;
+                let (provider, _, request, explain) = remote_request(*command)?;
                 if request.4.is_some() {
                     return Err(compute_core::ComputeError::InvalidWorkload(
                         "--idempotency-key is valid only for remote submit".into(),
@@ -1402,7 +1433,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 }
             }
             RemoteCommands::Run(command) => {
-                let (provider, request, explain) = remote_request(*command)?;
+                let (provider, _, request, explain) = remote_request(*command)?;
                 if request.4.is_some() {
                     return Err(compute_core::ComputeError::InvalidWorkload(
                         "--idempotency-key is valid only for remote submit".into(),
@@ -1489,7 +1520,8 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
 }
 
 type RemotePrepared = (
-    RemoteProvider,
+    Arc<dyn ComputeProvider>,
+    Option<Arc<RemoteProvider>>,
     (ProviderRequest, bool, bool, Option<PathBuf>, Option<String>),
     Option<direct::ResolvedDirect>,
 );
@@ -1499,6 +1531,7 @@ fn remote_request(command: RemoteArtifactCommand) -> compute_core::Result<Remote
         path,
         bundle,
         provider,
+        location,
         runtime,
         env,
         env_file,
@@ -1579,15 +1612,23 @@ fn remote_request(command: RemoteArtifactCommand) -> compute_core::Result<Remote
             .transpose()?;
     }
     request.execution.isolation = isolation;
+    let provider_id = provider;
+    let (provider, jobs) = location.provider_with_jobs(&provider_id)?;
+    if jobs.is_none() {
+        return Err(compute_core::ComputeError::InvalidWorkload(format!(
+            "provider {provider_id} does not support the remote execution protocol"
+        )));
+    }
     Ok((
-        RemoteProvider::new(provider),
+        provider,
+        jobs,
         (request, json, dry_run, receipt, idempotency_key),
         explained,
     ))
 }
 
 async fn remote_wait(command: RemoteWaitCommand) -> compute_core::Result<()> {
-    let provider = RemoteProvider::new(command.provider);
+    let provider = command.location.remote_provider(&command.provider)?;
     let deadline = tokio::time::Instant::now() + command.timeout;
     let mut delay = Duration::from_millis(100);
     loop {

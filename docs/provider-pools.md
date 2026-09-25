@@ -42,6 +42,10 @@ names an environment variable read when the pool is built. Credentials
 embedded in an endpoint URL are rejected. Credentials never appear in output,
 caches, placement IDs, or receipts.
 
+Every `compute remote --provider <id>` command resolves `<id>` through this
+caller-owned pool. Provider endpoints are configuration details, not provider
+identities accepted by the remote CLI.
+
 ```sh
 compute provider pool --json
 ```

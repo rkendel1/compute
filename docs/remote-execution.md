@@ -14,12 +14,19 @@ compute serve --listen 127.0.0.1:8080 \
 Then inspect or execute either a direct file or an existing bundle:
 
 ```sh
-compute remote inspect --provider http://127.0.0.1:8080 script.py --json
-compute remote run --provider http://127.0.0.1:8080 script.py
-compute remote run --provider http://127.0.0.1:8080 \
+compute remote inspect --provider dev script.py --json
+compute remote run --provider dev script.py
+compute remote run --provider dev \
   --bundle workload.compute --receipt receipt.json
-compute remote health --provider http://127.0.0.1:8080
+compute remote health --provider dev
 ```
+
+Here `dev` is a provider ID in the caller-owned pool (for example,
+`[providers.dev]` in `compute-pool.toml`). `--provider` is always resolved
+through that pool; the remote endpoint belongs in provider configuration, not
+in the command invocation. Pool discovery follows `--pool-config`, then
+`$COMPUTE_POOL_CONFIG`, then `./compute-pool.toml`, with the usual local-only
+fallback.
 
 Direct inputs are first resolved into the same deterministic `.compute`
 bundle used locally. The server verifies canonical archive form, workload and

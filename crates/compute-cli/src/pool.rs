@@ -5,6 +5,7 @@
 //! contract. They never retry elsewhere.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -67,6 +68,33 @@ impl PoolLocation {
 
     pub(crate) fn pool(&self) -> compute_core::Result<ProviderPool> {
         ProviderPool::from_config(&self.config()?).map_err(placement_error)
+    }
+
+    /// Resolve a provider ID through the caller-owned pool.
+    pub(crate) fn provider(&self, id: &str) -> compute_core::Result<Arc<dyn ComputeProvider>> {
+        self.provider_with_jobs(id).map(|(provider, _)| provider)
+    }
+
+    pub(crate) fn provider_with_jobs(
+        &self,
+        id: &str,
+    ) -> compute_core::Result<(Arc<dyn ComputeProvider>, Option<Arc<RemoteProvider>>)> {
+        let pool = self.pool()?;
+        let member = pool.member(id).ok_or_else(|| {
+            ComputeError::InvalidWorkload(format!(
+                "provider {id} is not configured in the caller-owned pool"
+            ))
+        })?;
+        Ok((member.provider.clone(), member.jobs.clone()))
+    }
+
+    /// Resolve the durable-job transport for a configured remote provider.
+    pub(crate) fn remote_provider(&self, id: &str) -> compute_core::Result<Arc<RemoteProvider>> {
+        self.provider_with_jobs(id)?.1.ok_or_else(|| {
+            ComputeError::InvalidWorkload(format!(
+                "provider {id} does not support the remote job protocol"
+            ))
+        })
     }
 
     fn cache(&self) -> compute_core::Result<CapabilityCache> {

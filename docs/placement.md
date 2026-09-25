@@ -222,7 +222,7 @@ durable jobs, so it is `incompatible` with `jobs_unsupported`. The output
 names the provider and endpoint that own the job, for example:
 
 ```sh
-compute remote status --provider <endpoint> <job_id>
+compute remote status --provider <provider_id> <job_id>
 ```
 
 ## Failure semantics

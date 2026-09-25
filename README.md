@@ -37,10 +37,10 @@ supplies execution, and the receipt proves what happened. See
 
 ```sh
 compute run script.py
-compute remote run --provider http://127.0.0.1:8080 script.py
-compute remote submit --provider http://127.0.0.1:8080 --bundle script.compute
-compute remote status --provider http://127.0.0.1:8080 job_...
-compute remote wait --provider http://127.0.0.1:8080 job_... --timeout 60s
+compute remote run --provider dev script.py
+compute remote submit --provider dev --bundle script.compute
+compute remote status --provider dev job_...
+compute remote wait --provider dev job_... --timeout 60s
 ```
 
 Durable jobs are documented in [docs/jobs.md](docs/jobs.md).

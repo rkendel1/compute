@@ -6,13 +6,13 @@ receipt semantics. Synchronous execution waits for the result; asynchronous
 execution returns a job ID and lets the caller observe it later.
 
 ```sh
-compute remote submit --provider http://127.0.0.1:8080 \
+compute remote submit --provider dev \
   --bundle workload.compute --idempotency-key deploy-42
-compute remote status --provider http://127.0.0.1:8080 job_...
-compute remote wait --provider http://127.0.0.1:8080 job_... --timeout 60s
-compute remote receipt --provider http://127.0.0.1:8080 job_... --output receipt.json
-compute remote artifacts --provider http://127.0.0.1:8080 job_... --json
-compute remote cancel --provider http://127.0.0.1:8080 job_...
+compute remote status --provider dev job_...
+compute remote wait --provider dev job_... --timeout 60s
+compute remote receipt --provider dev job_... --output receipt.json
+compute remote artifacts --provider dev job_... --json
+compute remote cancel --provider dev job_...
 ```
 
 The lifecycle is `created → accepted → queued → preparing → running`, followed
@@ -47,4 +47,3 @@ terminal evidence is reconciled; otherwise it becomes a structured
 `provider_interrupted` failure. Compute never fabricates success after a
 restart. There are no retries, priorities, schedules, DAGs, or workflow
 semantics.
-
