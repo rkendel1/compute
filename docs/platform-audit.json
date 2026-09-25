@@ -1,0 +1,1489 @@
+{
+  "format": "platform.audit@1",
+  "audited_at": "2026-09-25",
+  "compute_git": "ab61430",
+  "statuses": [
+    "implemented",
+    "verified",
+    "partial",
+    "prototype",
+    "missing",
+    "blocked",
+    "unknown"
+  ],
+  "host": {
+    "cpu": "Intel Xeon @ 2.10GHz",
+    "cpus": 4,
+    "memory_mib": 16095,
+    "kernel": "6.18.44-fc-v37",
+    "build": "release"
+  },
+  "limitations": [
+    "hosted Fly/Vercel apps unreachable (egress denies *.fly.dev): live status unknown",
+    "single host, single run for capacity",
+    "Attn is macOS-only; audit ran on Linux",
+    "deno and dotnet not installed on the audit host"
+  ],
+  "evidence": [
+    "docs/platform-audit-evidence/compute-measurements.json",
+    "docs/platform-audit-evidence/control-plane-drills.json",
+    "docs/platform-audit-evidence/feltdb-backup-drill.txt",
+    "docs/platform-audit-evidence/feltdb-upgrade-workflow.json"
+  ],
+  "components": [
+    {
+      "name": "Compute",
+      "repo": "rkendel1/compute@ab61430",
+      "package": "compute (15 crates); @compute/{state-model,appport,ui-e2e} private",
+      "purpose": "tasks and services across runtimes with admission and receipts; environments, releases, endpoints, ingress, DNS, ACME, remote jobs",
+      "runtime": "Rust daemon (compute start) and job server (compute serve)",
+      "deployment_location": "local; deploy/hetzner systemd kit; no known production node",
+      "dependencies": [
+        "feltdb-server (optional)",
+        "host language runtimes",
+        "ACME CA",
+        "DNS provider API"
+      ],
+      "consumers": [
+        "operators via CLI/UI/API"
+      ],
+      "providers": [
+        "runtime adapters",
+        "state backends memory/file/feltdb",
+        "DNS providers hetzner/cloudflare/file",
+        "node SecretStore"
+      ],
+      "api_cli_surfaces": [
+        "HTTP API 127.0.0.1:8787 + SSE + UI",
+        "compute run/start/environment/project/deploy/release/domain/certificate/dns/serve/submit/bundle/deps/certify"
+      ],
+      "appport_capabilities": [
+        "@compute/appport control-plane capabilities"
+      ],
+      "persistent_state": "control state (memory|file|FeltDB compute.flow); node secret store; workspaces; receipts",
+      "authority_requirements": "single shared bearer token for mutations; reads unauthenticated; no TLS",
+      "shared_or_private": "shared per node",
+      "production_status": "partial",
+      "tests": "20 test binaries passing; CI on tags/manual only",
+      "operational_status": "verified locally",
+      "evidence": [
+        "docs/platform-audit-evidence/compute-measurements.json",
+        "docs/platform-audit-evidence/control-plane-drills.json"
+      ],
+      "notes": []
+    },
+    {
+      "name": "FeltDB",
+      "repo": "rkendel1/flow_db@d751b58",
+      "package": "@feltdb/core 0.11.7, create-feltdb 0.11.7, @feltdb/webllm 0.11.7, feltdb-server; @feltdb/jev 0.1.0 private",
+      "purpose": "schema-first database; .flow compiler, embedded runtime, HTTP server (FeltDB-Protocol: 1)",
+      "runtime": "Rust server; Node library",
+      "deployment_location": "local/embedded; Managed FeltDB on Fly (feltdb-managed, feltdb-control-plane, feltdb-intent-engine); Vercel site",
+      "dependencies": [],
+      "consumers": [
+        "compute",
+        "authboundry",
+        "attn",
+        "factory",
+        "appport-services",
+        "jev-ui",
+        "appboundry",
+        "web-monitor"
+      ],
+      "providers": [],
+      "api_cli_surfaces": [
+        "feltdb validate/compile/backup create|verify|restore",
+        "HTTP /v1"
+      ],
+      "appport_capabilities": [],
+      "persistent_state": "on-disk store; backups",
+      "authority_requirements": "hashed API keys",
+      "shared_or_private": "server shared; library private",
+      "production_status": "partial (self-assessed NOT PRODUCTION READY)",
+      "tests": "284 test files; proof, conformance, monthly disaster-recovery CI",
+      "operational_status": "local verified; managed blocked/unknown",
+      "evidence": [
+        "docs/platform-audit-evidence/feltdb-backup-drill.txt",
+        "docs/platform-audit-evidence/control-plane-drills.json"
+      ],
+      "notes": [
+        "Managed FeltDB: single Fly machine, 1 shared CPU, 2 GB, one 10 GB volume, 7-day snapshots"
+      ]
+    },
+    {
+      "name": "AuthBoundry",
+      "repo": "rkendel1/authboundry@44f6059",
+      "package": "@authboundry/core 1.15.3, authboundry 2.15.3, @authboundry/bridge 0.1.3",
+      "purpose": "identity, sessions, keys, authority decisions, audit",
+      "runtime": "Rust server + Node FeltDB bridge",
+      "deployment_location": "Fly authboundry-api (FELTDB_DEPLOYMENT=local); Vercel web",
+      "dependencies": [
+        "@feltdb/core 0.11.7",
+        "@appport/core",
+        "@appport/services"
+      ],
+      "consumers": [
+        "factory",
+        "jev-ui",
+        "apps choosing it as APPPORT_AUTHORITY"
+      ],
+      "providers": [],
+      "api_cli_surfaces": [
+        "authboundry CLI",
+        "HTTP API"
+      ],
+      "appport_capabilities": [],
+      "persistent_state": "embedded FeltDB on a volume",
+      "authority_requirements": "is the authority",
+      "shared_or_private": "shared (hosted)",
+      "production_status": "partial (README: development references)",
+      "tests": "71 test files; architecture-invariants, cli-smoke, deploy, release CI",
+      "operational_status": "unknown (hosted unreachable)",
+      "evidence": [],
+      "notes": []
+    },
+    {
+      "name": "AppPort",
+      "repo": "rkendel1/appport@1b2132c",
+      "package": "@appport/* 1.0.1, @appport/core 1.0.2, appport 1.1.20, @appport/sdk 1.1.21",
+      "purpose": "capability protocol, schema, transports, SDK, MCP",
+      "runtime": "library in app process",
+      "deployment_location": "npm",
+      "dependencies": [],
+      "consumers": [
+        "compute",
+        "authboundry",
+        "factory",
+        "jev-ui",
+        "attn",
+        "appport-services"
+      ],
+      "providers": [
+        "transports http/websocket/inprocess/electron/tauri/mcp"
+      ],
+      "api_cli_surfaces": [
+        "appport CLI"
+      ],
+      "appport_capabilities": [
+        "defines them"
+      ],
+      "persistent_state": "none",
+      "authority_requirements": "n/a",
+      "shared_or_private": "private (library)",
+      "production_status": "implemented",
+      "tests": "46 test files (not run)",
+      "operational_status": "n/a",
+      "evidence": [],
+      "notes": [
+        "appboundry repo publishes a fork of @appport/* at 1.0.0"
+      ]
+    },
+    {
+      "name": "AppPort Services",
+      "repo": "rkendel1/appport-services@f3a80fe",
+      "package": "@appport/services 0.4.5, @appport/runtime 0.4.5, create-appport 0.1.8",
+      "purpose": "API keys, jobs, schedules, secrets, webhooks, files, notifications; runtime host; scaffolder",
+      "runtime": "library in each app process",
+      "deployment_location": "per app",
+      "dependencies": [
+        "@feltdb/core 0.11.6",
+        "APPPORT_AUTHORITY module"
+      ],
+      "consumers": [
+        "authboundry",
+        "factory",
+        "web-monitor",
+        "create-appport apps"
+      ],
+      "providers": [],
+      "api_cli_surfaces": [
+        "create-appport",
+        "@appport/runtime HTTP"
+      ],
+      "appport_capabilities": [
+        "service capabilities per app"
+      ],
+      "persistent_state": "the app's FeltDB",
+      "authority_requirements": "APPPORT_AUTHORITY module (any; allow-all accepted)",
+      "shared_or_private": "private (per app)",
+      "production_status": "partial",
+      "tests": "31 test files; full suite passed in audit (178 s)",
+      "operational_status": "verified as library",
+      "evidence": [
+        "docs/platform-audit-evidence/feltdb-upgrade-workflow.json"
+      ],
+      "notes": []
+    },
+    {
+      "name": "AppBoundry",
+      "repo": "rkendel1/appboundry@a160d57",
+      "package": "@appport/appboundry 1.1.1 + fork of @appport/* 1.0.0",
+      "purpose": "developer portal and managed-hosting story",
+      "runtime": "Node",
+      "deployment_location": "Fly appboundry; apps/cloud-portal",
+      "dependencies": [
+        "@feltdb/core 0.11.0",
+        "appport 1.1.18 vendored tgz"
+      ],
+      "consumers": [],
+      "providers": [],
+      "api_cli_surfaces": [
+        "portal"
+      ],
+      "appport_capabilities": [],
+      "persistent_state": "FeltDB",
+      "authority_requirements": "unknown",
+      "shared_or_private": "shared (hosted)",
+      "production_status": "prototype",
+      "tests": "202 test files incl. 20 expect(true) placeholders",
+      "operational_status": "unknown",
+      "evidence": [],
+      "notes": [
+        "no integration with Compute in either direction"
+      ]
+    },
+    {
+      "name": "Compute network",
+      "repo": "rkendel1/compute (crates/compute-network)",
+      "package": "compute-network",
+      "purpose": "endpoints, ingress, DNS providers, ACME",
+      "runtime": "inside the Compute daemon",
+      "deployment_location": "with Compute",
+      "dependencies": [
+        "ACME CA",
+        "DNS provider API"
+      ],
+      "consumers": [
+        "Compute"
+      ],
+      "providers": [],
+      "api_cli_surfaces": [
+        "compute domain/certificate/dns"
+      ],
+      "appport_capabilities": [],
+      "persistent_state": "certificate/key material in node SecretStore; references in state",
+      "authority_requirements": "Compute token",
+      "shared_or_private": "shared per node",
+      "production_status": "partial",
+      "tests": "network.rs (Pebble), providers.rs, ingress.rs",
+      "operational_status": "verified locally; never against a real CA/DNS in this audit",
+      "evidence": [],
+      "notes": []
+    },
+    {
+      "name": "PAX",
+      "repo": "rkendel1/pax@6a53d3e",
+      "package": "pax (1 crate)",
+      "purpose": "repo lint/typecheck/drift tooling",
+      "runtime": "CLI",
+      "deployment_location": "developer machines",
+      "dependencies": [],
+      "consumers": [
+        "compute"
+      ],
+      "providers": [],
+      "api_cli_surfaces": [
+        "pax drift",
+        "pax doctor"
+      ],
+      "appport_capabilities": [],
+      "persistent_state": "none",
+      "authority_requirements": "n/a",
+      "shared_or_private": "private",
+      "production_status": "implemented",
+      "tests": "1 test file",
+      "operational_status": "verified on compute (no drift; doctor OK)",
+      "evidence": [],
+      "notes": []
+    },
+    {
+      "name": "Jev",
+      "repo": "rkendel1/simple-jev@3223591, open-jev@b4782a6, jev-ui@b6ebc71; @feltdb/jev",
+      "package": "simple-jev 0.1.0; @feltdb/jev private; external @typesafe-ai/sdk",
+      "purpose": "AI SDK and agent demos",
+      "runtime": "Node/Next.js",
+      "deployment_location": "none",
+      "dependencies": [
+        "@authboundry/core",
+        "@feltdb/core 0.11.6",
+        "@rust-ml-runtime/node"
+      ],
+      "consumers": [],
+      "providers": [],
+      "api_cli_surfaces": [],
+      "appport_capabilities": [],
+      "persistent_state": "per app",
+      "authority_requirements": "AuthBoundry (jev-ui)",
+      "shared_or_private": "private",
+      "production_status": "prototype",
+      "tests": "21/5/14 test files",
+      "operational_status": "not run",
+      "evidence": [],
+      "notes": []
+    },
+    {
+      "name": "Laya",
+      "repo": "rkendel1/rust-ml-runtime (model)",
+      "package": "n/a",
+      "purpose": "local ONNX model from HuggingFace",
+      "runtime": "in-process via @rust-ml-runtime/node",
+      "deployment_location": "inside attn and jev-ui",
+      "dependencies": [
+        "rust-ml-runtime",
+        "HuggingFace download"
+      ],
+      "consumers": [
+        "attn",
+        "jev-ui"
+      ],
+      "providers": [],
+      "api_cli_surfaces": [],
+      "appport_capabilities": [],
+      "persistent_state": "model cache",
+      "authority_requirements": "none",
+      "shared_or_private": "private (in-process)",
+      "production_status": "prototype",
+      "tests": "none specific",
+      "operational_status": "not run",
+      "evidence": [],
+      "notes": []
+    },
+    {
+      "name": "Factory",
+      "repo": "rkendel1/factory@db101e9",
+      "package": "software-factory 1.0.0 (unpublished)",
+      "purpose": "durable software-factory runs and evidence",
+      "runtime": "Node service",
+      "deployment_location": "Fly factory-idvhpa",
+      "dependencies": [
+        "@authboundry/core (hard)",
+        "@appport/*",
+        "@appport/services",
+        "@feltdb/core ^0.11.7"
+      ],
+      "consumers": [],
+      "providers": [],
+      "api_cli_surfaces": [],
+      "appport_capabilities": [],
+      "persistent_state": "FeltDB",
+      "authority_requirements": "AuthBoundry required",
+      "shared_or_private": "shared (hosted)",
+      "production_status": "partial",
+      "tests": "27 test files",
+      "operational_status": "unknown",
+      "evidence": [],
+      "notes": []
+    },
+    {
+      "name": "Attn",
+      "repo": "rkendel1/attn@6b6b227",
+      "package": "id8-macos app; @cline/* embedded",
+      "purpose": "native macOS assistant",
+      "runtime": "macOS desktop",
+      "deployment_location": "user machines",
+      "dependencies": [
+        "@feltdb/core 0.11.7",
+        "@rust-ml-runtime/node",
+        "appport 1.1.19"
+      ],
+      "consumers": [],
+      "providers": [],
+      "api_cli_surfaces": [],
+      "appport_capabilities": [],
+      "persistent_state": "local FeltDB",
+      "authority_requirements": "local",
+      "shared_or_private": "private",
+      "production_status": "prototype",
+      "tests": "473 test files; id8-macos CI",
+      "operational_status": "blocked (macOS only)",
+      "evidence": [],
+      "notes": []
+    },
+    {
+      "name": "rust-ml-runtime",
+      "repo": "rkendel1/rust-ml-runtime@ebb9a95",
+      "package": "@rust-ml-runtime/node 0.2.3 (5 platforms); 19 crates",
+      "purpose": "ONNX inference in-process or over HTTP",
+      "runtime": "library; ml-runtime serve",
+      "deployment_location": "npm/crates",
+      "dependencies": [],
+      "consumers": [
+        "attn",
+        "jev-ui"
+      ],
+      "providers": [],
+      "api_cli_surfaces": [
+        "ml-runtime serve /v1/infer, /v1/infer/stream"
+      ],
+      "appport_capabilities": [],
+      "persistent_state": "model cache",
+      "authority_requirements": "none on HTTP server",
+      "shared_or_private": "private (library)",
+      "production_status": "implemented (library) / prototype (server)",
+      "tests": "10 test files",
+      "operational_status": "not run",
+      "evidence": [],
+      "notes": []
+    },
+    {
+      "name": "llm",
+      "repo": "rkendel1/llm@9ca9e9e",
+      "package": "@easy-llm/llm 0.10.1",
+      "purpose": "model routing",
+      "runtime": "library",
+      "deployment_location": "npm",
+      "dependencies": [],
+      "consumers": [],
+      "providers": [],
+      "api_cli_surfaces": [],
+      "appport_capabilities": [],
+      "persistent_state": "none",
+      "authority_requirements": "n/a",
+      "shared_or_private": "private",
+      "production_status": "implemented",
+      "tests": "17 test files",
+      "operational_status": "not run",
+      "evidence": [],
+      "notes": []
+    },
+    {
+      "name": "web-monitor",
+      "repo": "rkendel1/web-monitor@ebd5d5d",
+      "package": "unpublished",
+      "purpose": "reference AppPort Services consumer",
+      "runtime": "Node service",
+      "deployment_location": "none",
+      "dependencies": [
+        "@appport/services 0.4.4",
+        "@feltdb/core 0.11.2 (transitive)"
+      ],
+      "consumers": [],
+      "providers": [],
+      "api_cli_surfaces": [],
+      "appport_capabilities": [],
+      "persistent_state": "FeltDB",
+      "authority_requirements": "APPPORT_AUTHORITY",
+      "shared_or_private": "private",
+      "production_status": "implemented",
+      "tests": "7 test files",
+      "operational_status": "not run",
+      "evidence": [],
+      "notes": []
+    }
+  ],
+  "application_path": {
+    "intended": "source -> AppBoundry -> Compute -> application",
+    "appboundry_to_compute": "missing",
+    "create_appport_local": "verified",
+    "compute_release_of_appport_app": "verified with workarounds",
+    "build_and_run_without_authboundry": {
+      "compute": "yes",
+      "appport_services": "yes, with any APPPORT_AUTHORITY module (allow-all accepted); contract undocumented",
+      "factory": "no",
+      "jev_ui": "no"
+    }
+  },
+  "shared_infrastructure": {
+    "State": {
+      "exists": "yes",
+      "shared": "yes",
+      "durable": "yes",
+      "remote": "yes",
+      "production_verified": "no",
+      "where": "feltdb-server; Managed FeltDB unknown"
+    },
+    "Execution": {
+      "exists": "yes",
+      "shared": "yes",
+      "durable": "yes",
+      "remote": "yes",
+      "production_verified": "no",
+      "where": "Compute"
+    },
+    "Networking": {
+      "exists": "yes",
+      "shared": "yes",
+      "durable": "yes",
+      "remote": "yes",
+      "production_verified": "no",
+      "where": "Compute endpoints/ingress"
+    },
+    "DNS": {
+      "exists": "yes",
+      "shared": "yes",
+      "durable": "yes",
+      "remote": "yes",
+      "production_verified": "no",
+      "where": "Compute providers (hetzner, cloudflare mocked; file)"
+    },
+    "TLS": {
+      "exists": "yes",
+      "shared": "yes",
+      "durable": "yes",
+      "remote": "yes",
+      "production_verified": "no",
+      "where": "Compute ACME (Pebble-verified)"
+    },
+    "Secrets": {
+      "exists": "partial",
+      "shared": "no",
+      "durable": "yes",
+      "remote": "no",
+      "production_verified": "no",
+      "where": "Compute node SecretStore; AppPort Services per app"
+    },
+    "Webhooks": {
+      "exists": "yes",
+      "shared": "per-app",
+      "durable": "yes",
+      "remote": "yes",
+      "production_verified": "no",
+      "where": "AppPort Services"
+    },
+    "Notifications": {
+      "exists": "yes",
+      "shared": "per-app",
+      "durable": "yes",
+      "remote": "no",
+      "production_verified": "no",
+      "where": "AppPort Services (records only)"
+    },
+    "Jobs": {
+      "exists": "yes",
+      "shared": "both",
+      "durable": "yes",
+      "remote": "yes",
+      "production_verified": "no",
+      "where": "Compute remote jobs; AppPort Services jobs"
+    },
+    "Scheduling": {
+      "exists": "partial",
+      "shared": "per-app",
+      "durable": "yes",
+      "remote": "no",
+      "production_verified": "no",
+      "where": "AppPort Services schedules only"
+    },
+    "Files": {
+      "exists": "yes",
+      "shared": "per-app",
+      "durable": "yes",
+      "remote": "no",
+      "production_verified": "no",
+      "where": "AppPort Services"
+    },
+    "Inference": {
+      "exists": "yes",
+      "shared": "no",
+      "durable": "n/a",
+      "remote": "partial",
+      "production_verified": "no",
+      "where": "rust-ml-runtime (server unauthenticated)"
+    },
+    "Decisions": {
+      "exists": "partial",
+      "shared": "no",
+      "durable": "no",
+      "remote": "no",
+      "production_verified": "no",
+      "where": "Compute policy admission; AuthBoundry decisions"
+    },
+    "Identity": {
+      "exists": "partial",
+      "shared": "yes",
+      "durable": "yes",
+      "remote": "yes",
+      "production_verified": "no",
+      "where": "AuthBoundry (development-grade)"
+    },
+    "Authority": {
+      "exists": "partial",
+      "shared": "yes",
+      "durable": "yes",
+      "remote": "yes",
+      "production_verified": "no",
+      "where": "AuthBoundry; Compute bearer token"
+    },
+    "Observability": {
+      "exists": "partial",
+      "shared": "no",
+      "durable": "partial",
+      "remote": "partial",
+      "production_verified": "no",
+      "where": "Compute events/receipts/logs"
+    },
+    "Logging": {
+      "exists": "partial",
+      "shared": "no",
+      "durable": "partial",
+      "remote": "yes",
+      "production_verified": "no",
+      "where": "Compute per-workload logs"
+    },
+    "Metrics": {
+      "exists": "missing",
+      "shared": null,
+      "durable": null,
+      "remote": null,
+      "production_verified": null,
+      "where": "none"
+    },
+    "Alerts": {
+      "exists": "missing",
+      "shared": null,
+      "durable": null,
+      "remote": null,
+      "production_verified": null,
+      "where": "none"
+    },
+    "Human attention": {
+      "exists": "prototype",
+      "shared": "no",
+      "durable": "local",
+      "remote": "no",
+      "production_verified": "no",
+      "where": "Attn (macOS)"
+    }
+  },
+  "missing_capabilities": [
+    {
+      "capability": "Process sandbox for non-WASM runtimes",
+      "why_it_matters": "workloads run as the daemon user with no enforced limits",
+      "current_substitute": "trust the workload; use WASM",
+      "maturity": "missing",
+      "blocking": "multi-tenant/untrusted workloads",
+      "priority": "P0"
+    },
+    {
+      "capability": "Authenticated reads + TLS on Compute API",
+      "why_it_matters": "anyone reaching the port reads state and logs",
+      "current_substitute": "localhost bind / SSH tunnel",
+      "maturity": "missing",
+      "blocking": "remote operation over untrusted networks",
+      "priority": "P0"
+    },
+    {
+      "capability": "AppBoundry -> Compute integration",
+      "why_it_matters": "product promises managed compute",
+      "current_substitute": "manual compute bundle/release",
+      "maturity": "missing",
+      "blocking": "AppBoundry-hosted apps",
+      "priority": "P1"
+    },
+    {
+      "capability": "Metrics and alerts",
+      "why_it_matters": "failures are invisible",
+      "current_substitute": "poll status, read logs",
+      "maturity": "missing",
+      "blocking": "operating hosted components",
+      "priority": "P1"
+    },
+    {
+      "capability": "Compute HA / data-plane survival",
+      "why_it_matters": "endpoints stop while the daemon is down",
+      "current_substitute": "fast restart (~4.7 s)",
+      "maturity": "missing",
+      "blocking": "availability SLOs",
+      "priority": "P1"
+    },
+    {
+      "capability": "Managed FeltDB redundancy",
+      "why_it_matters": "single machine and volume",
+      "current_substitute": "7-day snapshots",
+      "maturity": "partial",
+      "blocking": "hosted apps on Managed FeltDB",
+      "priority": "P1"
+    },
+    {
+      "capability": "Shared secret service",
+      "why_it_matters": "no rotation, audit, or cross-node sharing",
+      "current_substitute": "node SecretStore; per-app secrets",
+      "maturity": "partial",
+      "blocking": "multi-node Compute",
+      "priority": "P2"
+    },
+    {
+      "capability": "Shared inference with authority",
+      "why_it_matters": "server unauthenticated; Laya in-process only",
+      "current_substitute": "embed per app",
+      "maturity": "prototype",
+      "blocking": "shared model hosting",
+      "priority": "P2"
+    },
+    {
+      "capability": "Documented authority contract",
+      "why_it_matters": "identity shape undocumented",
+      "current_substitute": "read source; use AuthBoundry",
+      "maturity": "partial",
+      "blocking": "non-AuthBoundry adopters",
+      "priority": "P2"
+    },
+    {
+      "capability": "Scheduled workloads in Compute",
+      "why_it_matters": "only per-app schedules exist",
+      "current_substitute": "external cron + compute submit",
+      "maturity": "missing",
+      "blocking": "platform jobs",
+      "priority": "P3"
+    }
+  ],
+  "compute": {
+    "runtimes": [
+      {
+        "runtime": "wasm",
+        "cli_p50_ms": 81.62,
+        "cli_p99_ms": 98.35,
+        "sandbox": "memory+fs+network"
+      },
+      {
+        "runtime": "native",
+        "cli_p50_ms": 80.5,
+        "cli_p99_ms": 90.22,
+        "sandbox": "none"
+      },
+      {
+        "runtime": "shell",
+        "cli_p50_ms": 19.02,
+        "cli_p99_ms": 20.8,
+        "sandbox": "none"
+      },
+      {
+        "runtime": "python",
+        "cli_p50_ms": 32.84,
+        "cli_p99_ms": 46.78,
+        "sandbox": "none"
+      },
+      {
+        "runtime": "node",
+        "cli_p50_ms": 237.34,
+        "cli_p99_ms": 255.14,
+        "sandbox": "none"
+      },
+      {
+        "runtime": "bun",
+        "cli_p50_ms": 166.67,
+        "cli_p99_ms": 177.29,
+        "sandbox": "none"
+      },
+      {
+        "runtime": "ruby",
+        "cli_p50_ms": 101.4,
+        "cli_p99_ms": 106.92,
+        "sandbox": "none"
+      },
+      {
+        "runtime": "php",
+        "cli_p50_ms": 145.03,
+        "cli_p99_ms": 164.52,
+        "sandbox": "none"
+      },
+      {
+        "runtime": "jvm",
+        "cli_p50_ms": 167.59,
+        "cli_p99_ms": 177.25,
+        "sandbox": "none"
+      },
+      {
+        "runtime": "deno",
+        "status": "blocked (not installed)"
+      },
+      {
+        "runtime": "dotnet",
+        "status": "blocked (not installed)"
+      }
+    ],
+    "throughput_per_second": {
+      "shell": [
+        49.92,
+        190.58,
+        206.58
+      ],
+      "python": [
+        29.23,
+        112.41,
+        122.2
+      ],
+      "wasm": [
+        12.08,
+        46.35,
+        48.47
+      ],
+      "node": [
+        4.11,
+        16.18,
+        16.62
+      ],
+      "_concurrency": [
+        1,
+        4,
+        8
+      ]
+    },
+    "capacity": {
+      "workload": "python HTTP services behind stable endpoints",
+      "observed_max_services": 300,
+      "ceiling_reached": false,
+      "bottleneck": "daemon O(n) reconcile and status probes",
+      "confidence": "medium",
+      "duration_s": 235.3,
+      "steps": [
+        {
+          "services": 10,
+          "daemon_rss_mib": 44.4,
+          "view_p50_ms": 3.18,
+          "add_step_s": 3.29
+        },
+        {
+          "services": 50,
+          "daemon_rss_mib": 79.8,
+          "view_p50_ms": 13.62,
+          "add_step_s": 13.49
+        },
+        {
+          "services": 100,
+          "daemon_rss_mib": 117.4,
+          "view_p50_ms": 29.32,
+          "add_step_s": 22.21
+        },
+        {
+          "services": 200,
+          "daemon_rss_mib": 193.4,
+          "view_p50_ms": 62.23,
+          "add_step_s": 63.89
+        },
+        {
+          "services": 300,
+          "daemon_rss_mib": 264.8,
+          "view_p50_ms": 95.39,
+          "add_step_s": 90.34,
+          "memory_available_mib": 12347,
+          "daemon_idle_cpu_percent": 9.6
+        }
+      ]
+    }
+  },
+  "performance": [
+    {
+      "path": "WASM task CLI end-to-end",
+      "current": {
+        "p50_ms": 81.62,
+        "p95_ms": 86.98,
+        "p99_ms": 98.35
+      },
+      "proposed_target": "p50 <= 20 ms",
+      "gap": "-62 ms",
+      "basis": "engine 0 ms; ~75 ms self-hash"
+    },
+    {
+      "path": "Python task via API",
+      "current": {
+        "p50_ms": 35.43,
+        "p95_ms": 38.66,
+        "p99_ms": 41.67
+      },
+      "proposed_target": "p95 <= 50 ms",
+      "gap": "meets",
+      "basis": "interpreter start"
+    },
+    {
+      "path": "Same-task concurrent API runs (8 clients)",
+      "current": {
+        "succeeded": 1,
+        "failed": 79
+      },
+      "proposed_target": "80/80 with receipts",
+      "gap": "defect",
+      "basis": "evidence guarantee"
+    },
+    {
+      "path": "Release switch",
+      "current": {
+        "p50_ms": 1.3,
+        "p95_ms": 2.0,
+        "p99_ms": 2.0
+      },
+      "proposed_target": "p99 <= 10 ms",
+      "gap": "meets",
+      "basis": null
+    },
+    {
+      "path": "Request latency during releases",
+      "current": {
+        "p50_ms": 1.5,
+        "p95_ms": 2.34,
+        "p99_ms": 3.43,
+        "max_ms": 1028.93,
+        "failed": 0,
+        "ok": 23261
+      },
+      "proposed_target": "p99 <= 10 ms, 0 failures",
+      "gap": "meets",
+      "basis": null
+    },
+    {
+      "path": "Release total (trivial service)",
+      "current": {
+        "p50_ms": 444.9,
+        "p95_ms": 961.3,
+        "p99_ms": 961.3
+      },
+      "proposed_target": "p95 <= 2 s",
+      "gap": "meets",
+      "basis": "readiness probe interval"
+    },
+    {
+      "path": "Control-plane read, FeltDB backend",
+      "current": {
+        "range_ms": [
+          390,
+          461
+        ]
+      },
+      "proposed_target": "p95 <= 100 ms",
+      "gap": "-300 ms or more",
+      "basis": "full desired-state refresh per request"
+    },
+    {
+      "path": "Control-plane mutation, FeltDB backend",
+      "current": {
+        "range_ms": [
+          1215,
+          4937
+        ]
+      },
+      "proposed_target": "p95 <= 1 s excl. readiness",
+      "gap": "-1 to -4 s",
+      "basis": "same"
+    },
+    {
+      "path": "Daemon restart to serving endpoints",
+      "current": {
+        "ms": 4699
+      },
+      "proposed_target": "<= 1 s or no data-plane outage",
+      "gap": "-3.7 s",
+      "basis": "endpoints live in the daemon"
+    },
+    {
+      "path": "Add service at 300 services",
+      "current": {
+        "s_per_add": 0.9
+      },
+      "proposed_target": "<= 100 ms",
+      "gap": "-0.8 s",
+      "basis": "O(n) reconcile"
+    },
+    {
+      "path": "Environment view at 300 services",
+      "current": {
+        "p50_ms": 95.39,
+        "p95_ms": 102.93,
+        "p99_ms": 102.93
+      },
+      "proposed_target": "p95 <= 50 ms",
+      "gap": "-53 ms",
+      "basis": "per-service probes"
+    },
+    {
+      "path": "Graceful shutdown, 300 services",
+      "current": {
+        "s": ">30"
+      },
+      "proposed_target": "<= 10 s",
+      "gap": "> -20 s",
+      "basis": "sequential stop"
+    }
+  ],
+  "control_plane_drills": [
+    {
+      "drill": "Compute SIGKILL",
+      "invariant": "state reconstructed, services restored",
+      "observed": "API back and endpoints restored in 4.7 s; new PIDs; same revision",
+      "holds": true
+    },
+    {
+      "drill": "Compute down: data plane",
+      "invariant": "traffic continues",
+      "observed": "endpoints stop answering",
+      "holds": false
+    },
+    {
+      "drill": "SIGKILL mid-release",
+      "invariant": "release resumes",
+      "observed": "recovery.rs passes",
+      "holds": true
+    },
+    {
+      "drill": "FeltDB killed",
+      "invariant": "services serve; mutations fail cleanly",
+      "observed": "503 state_unavailable; services answered; daemon up",
+      "holds": true
+    },
+    {
+      "drill": "FeltDB restart",
+      "invariant": "automatic recovery",
+      "observed": "99 ms; mutations recovered",
+      "holds": true
+    },
+    {
+      "drill": "Network interruption to FeltDB",
+      "invariant": "as outage",
+      "observed": "connection-error path only; no half-open partition tested",
+      "holds": "partial"
+    },
+    {
+      "drill": "Compute start without FeltDB",
+      "invariant": "start degraded or wait",
+      "observed": "exit 1",
+      "holds": false
+    },
+    {
+      "drill": "Fresh node restore",
+      "invariant": "environments and running projects restored",
+      "observed": "3 environments + running project in 1.2 s",
+      "holds": true
+    }
+  ],
+  "remote_control": {
+    "operations_tested": 25,
+    "succeeded": 25,
+    "production_safe": false,
+    "reasons": [
+      "reads unauthenticated",
+      "single shared token",
+      "no TLS",
+      "no actor attribution"
+    ]
+  },
+  "feltdb_upgrade": {
+    "registry": "scripts/platform/feltdb-consumers.json",
+    "tool": "scripts/platform/feltdb.mjs",
+    "latest": "0.11.7",
+    "consumers": {
+      "compute": "0.11.7",
+      "authboundry": "0.11.7",
+      "attn": "0.11.7",
+      "factory": "^0.11.7",
+      "appport-services": "0.11.6",
+      "jev-ui": "0.11.6",
+      "web-monitor": "0.11.2 (transitive)",
+      "appboundry": "0.11.0"
+    },
+    "aligned": false,
+    "verified": [
+      "appport-services 0.11.6->0.11.7 apply/verify/rollback",
+      "compute verify"
+    ],
+    "not_exercised": [
+      "pnpm and bun apply",
+      "verify for authboundry, attn, factory, jev-ui, appboundry, web-monitor",
+      "feltdb-server cross-version data upgrade"
+    ],
+    "status": "partial"
+  },
+  "security": [
+    {
+      "id": "S1",
+      "location": "Compute process runtimes (docs/isolation.md)",
+      "current": "no enforced memory/CPU/FS/network limits",
+      "intended": "declared boundary enforced",
+      "risk": "high",
+      "follow_up": "P0 OS sandbox or trusted-only"
+    },
+    {
+      "id": "S2",
+      "location": "crates/compute-cli/src/environment_cmd.rs:136",
+      "current": "reads allowed without token",
+      "intended": "authorized reads",
+      "risk": "high if exposed",
+      "follow_up": "P0"
+    },
+    {
+      "id": "S3",
+      "location": "Compute API",
+      "current": "one shared bearer token; plain HTTP",
+      "intended": "per-operator scoped identity; TLS",
+      "risk": "high off localhost",
+      "follow_up": "P0"
+    },
+    {
+      "id": "S4",
+      "location": "Compute events",
+      "current": "what, not who",
+      "intended": "attributable audit",
+      "risk": "medium",
+      "follow_up": "P2"
+    },
+    {
+      "id": "S5",
+      "location": "Compute SecretStore",
+      "current": "references only in state/receipts; material in node-local files",
+      "intended": "as intended",
+      "risk": "low",
+      "follow_up": "P2 shared backend"
+    },
+    {
+      "id": "S6",
+      "location": "rust-ml-runtime/providers/server/src/lib.rs:123",
+      "current": "/v1/infer unauthenticated",
+      "intended": "authorized inference",
+      "risk": "high if exposed",
+      "follow_up": "P2"
+    },
+    {
+      "id": "S7",
+      "location": "AuthBoundry README",
+      "current": "development-reference identity/signatures",
+      "intended": "production identity",
+      "risk": "high for hosted use",
+      "follow_up": "P1 owner decision"
+    },
+    {
+      "id": "S8",
+      "location": "AppPort Services APPPORT_AUTHORITY",
+      "current": "any module trusted; allow-all accepted; contract undocumented",
+      "intended": "documented contract",
+      "risk": "medium",
+      "follow_up": "P2"
+    },
+    {
+      "id": "S9",
+      "location": "AppBoundry proof doc",
+      "current": "20 expect(true) placeholders",
+      "intended": "real assertions",
+      "risk": "medium",
+      "follow_up": "P2"
+    },
+    {
+      "id": "S10",
+      "location": "@appport/* from appport (1.0.1) and appboundry (1.0.0)",
+      "current": "two sources",
+      "intended": "single source",
+      "risk": "medium",
+      "follow_up": "P1"
+    },
+    {
+      "id": "S11",
+      "location": "Managed FeltDB",
+      "current": "single machine",
+      "intended": "redundant",
+      "risk": "availability",
+      "follow_up": "P1"
+    },
+    {
+      "id": "S12",
+      "location": "Compute CI",
+      "current": "tags/manual only",
+      "intended": "every change validated",
+      "risk": "medium",
+      "follow_up": "P2"
+    },
+    {
+      "id": "S13",
+      "location": "Compute FeltDB API key",
+      "current": "env var only; never in config or state",
+      "intended": "as intended",
+      "risk": "low",
+      "follow_up": null
+    }
+  ],
+  "readiness": {
+    "Compute": "needs_hardening",
+    "feltdb-server": "needs_hardening",
+    "Managed FeltDB": "unknown",
+    "AuthBoundry": "needs_hardening",
+    "AppPort": "ready (library)",
+    "AppPort Services": "needs_hardening",
+    "AppBoundry": "missing (no Compute path)",
+    "Factory": "needs_hardening",
+    "rust-ml-runtime": "ready (in-process); missing (as service)",
+    "Laya": "prototype",
+    "Jev": "prototype",
+    "Attn": "prototype",
+    "PAX": "ready",
+    "llm": "ready (library)"
+  },
+  "backlog": [
+    {
+      "priority": "P0",
+      "problem": "Process runtimes unsandboxed",
+      "evidence": "runtimes table; S1",
+      "components": [
+        "Compute"
+      ],
+      "customer_impact": "cross-tenant data and secret exposure",
+      "platform_impact": "blocks multi-tenant",
+      "scope": "L",
+      "dependency": null
+    },
+    {
+      "priority": "P0",
+      "problem": "Compute API open reads, single token, no TLS",
+      "evidence": "remote drill; S2,S3",
+      "components": [
+        "Compute"
+      ],
+      "customer_impact": "config/log exposure",
+      "platform_impact": "blocks remote operation",
+      "scope": "M",
+      "dependency": null
+    },
+    {
+      "priority": "P0",
+      "problem": "Same-task concurrent runs lose receipts (79/80 403)",
+      "evidence": "api.api_same_task_concurrency_8; execute.rs:697",
+      "components": [
+        "Compute"
+      ],
+      "customer_impact": "work runs but reported as denied",
+      "platform_impact": "receipt guarantee broken",
+      "scope": "S",
+      "dependency": null
+    },
+    {
+      "priority": "P1",
+      "problem": "Endpoints die with the daemon",
+      "evidence": "compute_sigkill drill",
+      "components": [
+        "Compute",
+        "compute-network"
+      ],
+      "customer_impact": "~4.7 s outage per restart/upgrade",
+      "platform_impact": "no zero-downtime platform upgrade",
+      "scope": "L",
+      "dependency": null
+    },
+    {
+      "priority": "P1",
+      "problem": "Compute refuses to start while FeltDB down",
+      "evidence": "compute_start_without_feltdb drill",
+      "components": [
+        "Compute"
+      ],
+      "customer_impact": "reboot during outage = total outage",
+      "platform_impact": "availability coupling",
+      "scope": "M",
+      "dependency": null
+    },
+    {
+      "priority": "P1",
+      "problem": "FeltDB-backend control-plane latency 0.4-5 s",
+      "evidence": "remote_operation_latency_ms",
+      "components": [
+        "Compute",
+        "compute-state-feltdb"
+      ],
+      "customer_impact": "slow CLI/UI",
+      "platform_impact": "limits automation",
+      "scope": "M",
+      "dependency": null
+    },
+    {
+      "priority": "P1",
+      "problem": "AppBoundry -> Compute path missing",
+      "evidence": "repository inspection",
+      "components": [
+        "AppBoundry",
+        "Compute"
+      ],
+      "customer_impact": "portal promise unmet",
+      "platform_impact": "product gap",
+      "scope": "L",
+      "dependency": "P0 API auth"
+    },
+    {
+      "priority": "P1",
+      "problem": "Two sources for @appport/*",
+      "evidence": "inventory",
+      "components": [
+        "AppPort",
+        "AppBoundry"
+      ],
+      "customer_impact": "version confusion",
+      "platform_impact": "supply chain",
+      "scope": "S",
+      "dependency": null
+    },
+    {
+      "priority": "P1",
+      "problem": "Managed FeltDB single machine",
+      "evidence": "deploy/managed/fly.toml",
+      "components": [
+        "Managed FeltDB"
+      ],
+      "customer_impact": "outage/data-loss window",
+      "platform_impact": null,
+      "scope": "M",
+      "dependency": null
+    },
+    {
+      "priority": "P1",
+      "problem": "Metrics and alerts absent",
+      "evidence": "matrix",
+      "components": [
+        "all"
+      ],
+      "customer_impact": "failures unseen",
+      "platform_impact": "operability",
+      "scope": "M",
+      "dependency": null
+    },
+    {
+      "priority": "P2",
+      "problem": "Self-hash ~75 ms per WASM/native run",
+      "evidence": "strace; compute-runtime/src/lib.rs:856",
+      "components": [
+        "compute-runtime"
+      ],
+      "customer_impact": "latency",
+      "platform_impact": "~4x WASM throughput loss",
+      "scope": "S",
+      "dependency": null
+    },
+    {
+      "priority": "P2",
+      "problem": "O(n) reconcile/views; sequential shutdown",
+      "evidence": "capacity",
+      "components": [
+        "Compute"
+      ],
+      "customer_impact": "slow at scale",
+      "platform_impact": "density ceiling",
+      "scope": "M",
+      "dependency": null
+    },
+    {
+      "priority": "P2",
+      "problem": "Node ESM apps vs dependency capsules; .bin symlinks rejected",
+      "evidence": "DX test",
+      "components": [
+        "Compute"
+      ],
+      "customer_impact": "onboarding friction",
+      "platform_impact": "DX",
+      "scope": "S",
+      "dependency": null
+    },
+    {
+      "priority": "P2",
+      "problem": "create-appport fixed port, PORT ignored, listJobs template bug, undocumented authority",
+      "evidence": "DX test",
+      "components": [
+        "AppPort Services"
+      ],
+      "customer_impact": "first app fails",
+      "platform_impact": "DX",
+      "scope": "S",
+      "dependency": null
+    },
+    {
+      "priority": "P2",
+      "problem": "FeltDB version drift (0.11.0/0.11.2/0.11.6/0.11.7)",
+      "evidence": "feltdb-upgrade-workflow.json",
+      "components": [
+        "8 consumers"
+      ],
+      "customer_impact": "behavior skew",
+      "platform_impact": "upgrade risk",
+      "scope": "S each",
+      "dependency": "scripts/platform/feltdb.mjs"
+    },
+    {
+      "priority": "P2",
+      "problem": "feltdb backup create/restore exit 1 with bare relative path",
+      "evidence": "feltdb-backup-drill.txt",
+      "components": [
+        "feltdb-server"
+      ],
+      "customer_impact": "scripts misreport success",
+      "platform_impact": "operability",
+      "scope": "S",
+      "dependency": null
+    },
+    {
+      "priority": "P2",
+      "problem": "Unauthenticated inference server",
+      "evidence": "S6",
+      "components": [
+        "rust-ml-runtime"
+      ],
+      "customer_impact": null,
+      "platform_impact": "blocks shared Laya",
+      "scope": "S",
+      "dependency": null
+    },
+    {
+      "priority": "P2",
+      "problem": "AppBoundry placeholder tests",
+      "evidence": "S9",
+      "components": [
+        "AppBoundry"
+      ],
+      "customer_impact": null,
+      "platform_impact": "false confidence",
+      "scope": "S",
+      "dependency": null
+    },
+    {
+      "priority": "P2",
+      "problem": "Compute CI not run on push",
+      "evidence": "S12",
+      "components": [
+        "Compute"
+      ],
+      "customer_impact": null,
+      "platform_impact": "regressions",
+      "scope": "S",
+      "dependency": null
+    },
+    {
+      "priority": "P2",
+      "problem": "App state lost on release without FELTDB_URL",
+      "evidence": "DX test",
+      "components": [
+        "Compute",
+        "AppPort Services"
+      ],
+      "customer_impact": "data loss",
+      "platform_impact": null,
+      "scope": "S",
+      "dependency": null
+    },
+    {
+      "priority": "P3",
+      "problem": "No scheduled workloads in Compute",
+      "evidence": "matrix",
+      "components": [
+        "Compute"
+      ],
+      "customer_impact": null,
+      "platform_impact": "external cron needed",
+      "scope": "M",
+      "dependency": null
+    },
+    {
+      "priority": "P3",
+      "problem": "Operation attribution (who)",
+      "evidence": "S4",
+      "components": [
+        "Compute"
+      ],
+      "customer_impact": null,
+      "platform_impact": "audit",
+      "scope": "M",
+      "dependency": "P0 API auth"
+    },
+    {
+      "priority": "P3",
+      "problem": "Exercise pnpm/bun upgrade paths and cross-version server data upgrade",
+      "evidence": "feltdb-upgrade-workflow.json",
+      "components": [
+        "FeltDB"
+      ],
+      "customer_impact": null,
+      "platform_impact": "upgrade confidence",
+      "scope": "S",
+      "dependency": null
+    }
+  ]
+}

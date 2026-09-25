@@ -1,0 +1,770 @@
+{
+ "api": {
+  "measured_seconds": 6.4,
+  "results": {
+   "api_same_task_concurrency_8": {
+    "failed": 79,
+    "failure_example": "environments/e0/projects/tasks/workloads/py/run: 403 b'{\"kind\":\"admission_denied\",\"message\":\"the task did not execute\"}'",
+    "latency_ms": {
+     "max": 156.32,
+     "mean": 156.32,
+     "min": 156.32,
+     "n": 1,
+     "p50": 156.32,
+     "p95": 156.32,
+     "p99": 156.32
+    },
+    "per_second": 0.64,
+    "succeeded": 1
+   },
+   "api_task_run_ms_py": {
+    "max": 41.67,
+    "mean": 35.97,
+    "min": 33.24,
+    "n": 40,
+    "p50": 35.43,
+    "p95": 38.66,
+    "p99": 41.67
+   },
+   "api_task_run_ms_wasm": {
+    "max": 88.37,
+    "mean": 81.06,
+    "min": 78.28,
+    "n": 40,
+    "p50": 80.4,
+    "p95": 86.33,
+    "p99": 88.37
+   },
+   "api_task_run_receipts_py": "40/40",
+   "api_task_run_receipts_wasm": "40/40",
+   "environment_create_ms": {
+    "max": 0.82,
+    "mean": 0.51,
+    "min": 0.32,
+    "n": 30,
+    "p50": 0.5,
+    "p95": 0.82,
+    "p99": 0.82
+   },
+   "environment_list_ms_30_environments": {
+    "max": 0.97,
+    "mean": 0.73,
+    "min": 0.63,
+    "n": 50,
+    "p50": 0.71,
+    "p95": 0.93,
+    "p99": 0.97
+   },
+   "project_add_task_only_ms": 112.93
+  }
+ },
+ "build": "release",
+ "capacity": {
+  "measured_seconds": 235.3,
+  "results": {
+   "daemon_idle_cpu_percent_at_max": 9.6,
+   "shutdown_seconds": 30.0,
+   "steps": [
+    {
+     "daemon_cpu_seconds_during_step": 0.42,
+     "daemon_rss_mib": 44.4,
+     "endpoints_answering": 10,
+     "environment_view_ms": {
+      "max": 3.6,
+      "mean": 3.2,
+      "min": 2.8,
+      "n": 5,
+      "p50": 3.18,
+      "p95": 3.6,
+      "p99": 3.6
+     },
+     "load_average_1m": 5.31,
+     "memory_available_mib": 15001,
+     "running_services": 10,
+     "seconds_to_add_step": 3.29,
+     "service_processes": 10,
+     "service_rss_mib_total": 178.7,
+     "services": 10
+    },
+    {
+     "daemon_cpu_seconds_during_step": 4.56,
+     "daemon_rss_mib": 79.8,
+     "endpoints_answering": 50,
+     "environment_view_ms": {
+      "max": 16.4,
+      "mean": 14.02,
+      "min": 12.76,
+      "n": 5,
+      "p50": 13.62,
+      "p95": 16.4,
+      "p99": 16.4
+     },
+     "load_average_1m": 4.13,
+     "memory_available_mib": 14751,
+     "running_services": 50,
+     "seconds_to_add_step": 13.49,
+     "service_processes": 50,
+     "service_rss_mib_total": 895.5,
+     "services": 50
+    },
+    {
+     "daemon_cpu_seconds_during_step": 13.74,
+     "daemon_rss_mib": 117.4,
+     "endpoints_answering": 100,
+     "environment_view_ms": {
+      "max": 30.28,
+      "mean": 28.68,
+      "min": 26.94,
+      "n": 5,
+      "p50": 29.32,
+      "p95": 30.28,
+      "p99": 30.28
+     },
+     "load_average_1m": 3.74,
+     "memory_available_mib": 14269,
+     "running_services": 100,
+     "seconds_to_add_step": 22.21,
+     "service_processes": 100,
+     "service_rss_mib_total": 1797.1,
+     "services": 100
+    },
+    {
+     "daemon_cpu_seconds_during_step": 55.23,
+     "daemon_rss_mib": 193.4,
+     "endpoints_answering": 200,
+     "environment_view_ms": {
+      "max": 66.2,
+      "mean": 62.71,
+      "min": 60.35,
+      "n": 5,
+      "p50": 62.23,
+      "p95": 66.2,
+      "p99": 66.2
+     },
+     "load_average_1m": 3.17,
+     "memory_available_mib": 13296,
+     "running_services": 200,
+     "seconds_to_add_step": 63.89,
+     "service_processes": 200,
+     "service_rss_mib_total": 3595.3,
+     "services": 200
+    },
+    {
+     "daemon_cpu_seconds_during_step": 85.41,
+     "daemon_rss_mib": 264.8,
+     "endpoints_answering": 300,
+     "environment_view_ms": {
+      "max": 102.93,
+      "mean": 97.14,
+      "min": 95.01,
+      "n": 5,
+      "p50": 95.39,
+      "p95": 102.93,
+      "p99": 102.93
+     },
+     "load_average_1m": 8.16,
+     "memory_available_mib": 12347,
+     "running_services": 300,
+     "seconds_to_add_step": 90.34,
+     "service_processes": 300,
+     "service_rss_mib_total": 5403.0,
+     "services": 300
+    }
+   ]
+  }
+ },
+ "compute_version": "compute 0.1.0",
+ "daemon": {
+  "measured_seconds": 0.2,
+  "results": {
+   "idle_rss_kib": 14592,
+   "startup_to_api_ms_file_state_20_environments": {
+    "max": 9.65,
+    "mean": 7.5,
+    "min": 6.29,
+    "n": 10,
+    "p50": 6.79,
+    "p95": 9.65,
+    "p99": 9.65
+   },
+   "startup_to_api_ms_memory_state": {
+    "max": 9.45,
+    "mean": 6.59,
+    "min": 6.2,
+    "n": 10,
+    "p50": 6.22,
+    "p95": 9.45,
+    "p99": 9.45
+   }
+  }
+ },
+ "format": "compute.platform-audit.measurements@1",
+ "git": "ab61430",
+ "host": {
+  "cpu_model": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+  "cpus": 4,
+  "kernel": "6.18.44-fc-v37",
+  "machine": "x86_64",
+  "memory_mib": 16095
+ },
+ "measured_at": "2026-09-25T01:37:12Z",
+ "release": {
+  "measured_seconds": 10.0,
+  "results": {
+   "failed_readiness_crash": {
+    "failure": "web failed before it was ready: exited with status 3",
+    "status": "failed",
+    "wall_ms": 3268.9
+   },
+   "first_release": {
+    "phases_ms": {
+     "deployment.draining \u2192 deployment.completed": 0.4,
+     "deployment.placed \u2192 deployment.ready": 326.6,
+     "deployment.ready \u2192 deployment.switched": 0.4,
+     "deployment.started \u2192 deployment.placed": 103.3,
+     "deployment.switched \u2192 deployment.draining": 0.5,
+     "total": 431.2
+    },
+    "status": "complete",
+    "wall_ms": 442.2
+   },
+   "load": {
+    "errors": [],
+    "request_latency_ms": {
+     "max": 1028.93,
+     "mean": 1.63,
+     "min": 0.34,
+     "n": 23261,
+     "p50": 1.5,
+     "p95": 2.34,
+     "p99": 3.43
+    },
+    "requests_failed": 0,
+    "requests_ok": 23261
+   },
+   "operator_rollback_complete_release": {
+    "status": "complete",
+    "wall_ms": 380.8
+   },
+   "readiness_timeout_3s": {
+    "status": "failed",
+    "wall_ms": 3025.6
+   },
+   "release_total_ms": {
+    "max": 961.3,
+    "mean": 546.86,
+    "min": 426.9,
+    "n": 5,
+    "p50": 444.9,
+    "p95": 961.3,
+    "p99": 961.3
+   },
+   "releases_under_load": [
+    {
+     "phases_ms": {
+      "deployment.draining \u2192 deployment.completed": 102.7,
+      "deployment.placed \u2192 deployment.ready": 328.0,
+      "deployment.ready \u2192 deployment.switched": 1.1,
+      "deployment.started \u2192 deployment.placed": 1.2,
+      "deployment.switched \u2192 deployment.draining": 0.9,
+      "total": 433.7
+     },
+     "revision": "v2",
+     "status": "complete",
+     "wall_ms": 444.9
+    },
+    {
+     "phases_ms": {
+      "deployment.draining \u2192 deployment.completed": 103.4,
+      "deployment.placed \u2192 deployment.ready": 332.2,
+      "deployment.ready \u2192 deployment.switched": 1.0,
+      "deployment.started \u2192 deployment.placed": 1.2,
+      "deployment.switched \u2192 deployment.draining": 0.8,
+      "total": 438.6
+     },
+     "revision": "v3",
+     "status": "complete",
+     "wall_ms": 443.3
+    },
+    {
+     "phases_ms": {
+      "deployment.draining \u2192 deployment.completed": 608.3,
+      "deployment.placed \u2192 deployment.ready": 309.2,
+      "deployment.ready \u2192 deployment.switched": 1.3,
+      "deployment.started \u2192 deployment.placed": 1.4,
+      "deployment.switched \u2192 deployment.draining": 1.1,
+      "total": 921.4
+     },
+     "revision": "v4",
+     "status": "complete",
+     "wall_ms": 961.3
+    },
+    {
+     "phases_ms": {
+      "deployment.draining \u2192 deployment.completed": 103.8,
+      "deployment.placed \u2192 deployment.ready": 310.3,
+      "deployment.ready \u2192 deployment.switched": 2.0,
+      "deployment.started \u2192 deployment.placed": 1.7,
+      "deployment.switched \u2192 deployment.draining": 1.3,
+      "total": 419.1
+     },
+     "revision": "v5",
+     "status": "complete",
+     "wall_ms": 457.9
+    },
+    {
+     "phases_ms": {
+      "deployment.draining \u2192 deployment.completed": 105.0,
+      "deployment.placed \u2192 deployment.ready": 309.6,
+      "deployment.ready \u2192 deployment.switched": 1.7,
+      "deployment.started \u2192 deployment.placed": 1.8,
+      "deployment.switched \u2192 deployment.draining": 1.5,
+      "total": 419.6
+     },
+     "revision": "v6",
+     "status": "complete",
+     "wall_ms": 426.9
+    }
+   ],
+   "switch_ms": {
+    "max": 2.0,
+    "mean": 1.42,
+    "min": 1.0,
+    "n": 5,
+    "p50": 1.3,
+    "p95": 2.0,
+    "p99": 2.0
+   }
+  }
+ },
+ "remote": {
+  "measured_seconds": 1.9,
+  "results": {
+   "remote_queue_40_jobs_drain_seconds_after_submit": 0.23,
+   "remote_run_ms_python": {
+    "max": 42.76,
+    "mean": 38.17,
+    "min": 35.84,
+    "n": 20,
+    "p50": 37.33,
+    "p95": 41.19,
+    "p99": 42.76
+   },
+   "remote_submit_ms": {
+    "max": 32.7,
+    "mean": 21.95,
+    "min": 11.14,
+    "n": 40,
+    "p50": 23.59,
+    "p95": 30.97,
+    "p99": 32.7
+   }
+  }
+ },
+ "runtimes": {
+  "measured_seconds": 22.7,
+  "results": [
+   {
+    "available": true,
+    "cli_end_to_end_ms": {
+     "max": 98.35,
+     "mean": 82.77,
+     "min": 79.62,
+     "n": 20,
+     "p50": 81.62,
+     "p95": 86.98,
+     "p99": 98.35
+    },
+    "cpu_enforced": false,
+    "engine_duration_ms": {
+     "max": 0.0,
+     "mean": 0.0,
+     "min": 0.0,
+     "n": 20,
+     "p50": 0.0,
+     "p95": 0.0,
+     "p99": 0.0
+    },
+    "error": null,
+    "filesystem_boundary": true,
+    "first_run_ms": 90.04,
+    "memory_enforced": true,
+    "network_boundary": true,
+    "receipt": true,
+    "runtime": "wasm",
+    "source": "embedded",
+    "version": "wasi"
+   },
+   {
+    "available": true,
+    "cli_end_to_end_ms": {
+     "max": 255.14,
+     "mean": 240.01,
+     "min": 229.8,
+     "n": 20,
+     "p50": 237.34,
+     "p95": 254.04,
+     "p99": 255.14
+    },
+    "cpu_enforced": false,
+    "engine_duration_ms": {
+     "max": 43.0,
+     "mean": 34.5,
+     "min": 31.0,
+     "n": 20,
+     "p50": 33.0,
+     "p95": 42.0,
+     "p99": 43.0
+    },
+    "error": null,
+    "filesystem_boundary": false,
+    "first_run_ms": 242.24,
+    "memory_enforced": false,
+    "network_boundary": false,
+    "receipt": true,
+    "runtime": "node",
+    "source": "host_development",
+    "version": "v22.22.2"
+   },
+   {
+    "available": true,
+    "cli_end_to_end_ms": {
+     "max": 177.29,
+     "mean": 168.52,
+     "min": 164.5,
+     "n": 20,
+     "p50": 166.67,
+     "p95": 176.45,
+     "p99": 177.29
+    },
+    "cpu_enforced": false,
+    "engine_duration_ms": {
+     "max": 20.0,
+     "mean": 12.4,
+     "min": 11.0,
+     "n": 20,
+     "p50": 12.0,
+     "p95": 13.0,
+     "p99": 20.0
+    },
+    "error": null,
+    "filesystem_boundary": false,
+    "first_run_ms": 193.07,
+    "memory_enforced": false,
+    "network_boundary": false,
+    "receipt": true,
+    "runtime": "bun",
+    "source": "host_development",
+    "version": "1.3.11"
+   },
+   {
+    "available": false,
+    "cpu_enforced": false,
+    "filesystem_boundary": true,
+    "memory_enforced": false,
+    "network_boundary": true,
+    "runtime": "deno",
+    "source": "unavailable",
+    "version": null
+   },
+   {
+    "available": true,
+    "cli_end_to_end_ms": {
+     "max": 46.78,
+     "mean": 34.19,
+     "min": 31.8,
+     "n": 20,
+     "p50": 32.84,
+     "p95": 40.24,
+     "p99": 46.78
+    },
+    "cpu_enforced": false,
+    "engine_duration_ms": {
+     "max": 16.0,
+     "mean": 11.8,
+     "min": 11.0,
+     "n": 20,
+     "p50": 12.0,
+     "p95": 12.0,
+     "p99": 16.0
+    },
+    "error": null,
+    "filesystem_boundary": false,
+    "first_run_ms": 33.3,
+    "memory_enforced": false,
+    "network_boundary": false,
+    "receipt": true,
+    "runtime": "python",
+    "source": "host_development",
+    "version": "Python 3.11.15"
+   },
+   {
+    "available": true,
+    "cli_end_to_end_ms": {
+     "max": 106.92,
+     "mean": 101.37,
+     "min": 96.24,
+     "n": 20,
+     "p50": 101.4,
+     "p95": 105.86,
+     "p99": 106.92
+    },
+    "cpu_enforced": false,
+    "engine_duration_ms": {
+     "max": 66.0,
+     "mean": 61.7,
+     "min": 58.0,
+     "n": 20,
+     "p50": 61.0,
+     "p95": 66.0,
+     "p99": 66.0
+    },
+    "error": null,
+    "filesystem_boundary": false,
+    "first_run_ms": 105.85,
+    "memory_enforced": false,
+    "network_boundary": false,
+    "receipt": true,
+    "runtime": "ruby",
+    "source": "host_development",
+    "version": "ruby 3.3.6 (2024-11-05 revision 75015d4c1f) [x86_64-linux]"
+   },
+   {
+    "available": true,
+    "cli_end_to_end_ms": {
+     "max": 164.52,
+     "mean": 145.4,
+     "min": 136.04,
+     "n": 20,
+     "p50": 145.03,
+     "p95": 154.96,
+     "p99": 164.52
+    },
+    "cpu_enforced": false,
+    "engine_duration_ms": {
+     "max": 39.0,
+     "mean": 31.7,
+     "min": 29.0,
+     "n": 20,
+     "p50": 31.0,
+     "p95": 36.0,
+     "p99": 39.0
+    },
+    "error": null,
+    "filesystem_boundary": false,
+    "first_run_ms": 148.79,
+    "memory_enforced": false,
+    "network_boundary": false,
+    "receipt": true,
+    "runtime": "php",
+    "source": "host_development",
+    "version": "PHP 8.4.19 (cli) (built: Mar 30 2026 19:28:35) (NTS)"
+   },
+   {
+    "available": true,
+    "cli_end_to_end_ms": {
+     "max": 177.25,
+     "mean": 168.28,
+     "min": 160.99,
+     "n": 20,
+     "p50": 167.59,
+     "p95": 176.94,
+     "p99": 177.25
+    },
+    "cpu_enforced": false,
+    "engine_duration_ms": {
+     "max": 47.0,
+     "mean": 42.5,
+     "min": 40.0,
+     "n": 20,
+     "p50": 42.0,
+     "p95": 46.0,
+     "p99": 47.0
+    },
+    "error": null,
+    "filesystem_boundary": false,
+    "first_run_ms": 173.9,
+    "memory_enforced": false,
+    "network_boundary": false,
+    "receipt": true,
+    "runtime": "jvm",
+    "source": "host_development",
+    "version": "openjdk 21.0.10 2026-01-20"
+   },
+   {
+    "available": false,
+    "cpu_enforced": false,
+    "filesystem_boundary": false,
+    "memory_enforced": false,
+    "network_boundary": false,
+    "runtime": "dotnet",
+    "source": "unavailable",
+    "version": null
+   },
+   {
+    "available": true,
+    "cli_end_to_end_ms": {
+     "max": 90.22,
+     "mean": 81.39,
+     "min": 78.67,
+     "n": 20,
+     "p50": 80.5,
+     "p95": 86.51,
+     "p99": 90.22
+    },
+    "cpu_enforced": false,
+    "engine_duration_ms": {
+     "max": 1.0,
+     "mean": 1.0,
+     "min": 1.0,
+     "n": 20,
+     "p50": 1.0,
+     "p95": 1.0,
+     "p99": 1.0
+    },
+    "error": null,
+    "filesystem_boundary": false,
+    "first_run_ms": 82.42,
+    "memory_enforced": false,
+    "network_boundary": false,
+    "receipt": true,
+    "runtime": "native",
+    "source": "embedded",
+    "version": "linux-v1"
+   },
+   {
+    "available": true,
+    "cli_end_to_end_ms": {
+     "max": 20.8,
+     "mean": 19.04,
+     "min": 18.29,
+     "n": 20,
+     "p50": 19.02,
+     "p95": 19.73,
+     "p99": 20.8
+    },
+    "cpu_enforced": false,
+    "engine_duration_ms": {
+     "max": 1.0,
+     "mean": 1.0,
+     "min": 1.0,
+     "n": 20,
+     "p50": 1.0,
+     "p95": 1.0,
+     "p99": 1.0
+    },
+    "error": null,
+    "filesystem_boundary": false,
+    "first_run_ms": 21.14,
+    "memory_enforced": false,
+    "network_boundary": false,
+    "receipt": true,
+    "runtime": "shell",
+    "source": "host_development",
+    "version": "BusyBox v1.36.1 (Ubuntu 1:1.36.1-6ubuntu3.1) multi-call binary."
+   }
+  ]
+ },
+ "throughput": {
+  "measured_seconds": 121.0,
+  "results": {
+   "node/1": {
+    "completed": 42,
+    "concurrency": 1,
+    "failed": 0,
+    "per_second": 4.11,
+    "runtime": "node",
+    "seconds": 10.21
+   },
+   "node/4": {
+    "completed": 165,
+    "concurrency": 4,
+    "failed": 0,
+    "per_second": 16.18,
+    "runtime": "node",
+    "seconds": 10.2
+   },
+   "node/8": {
+    "completed": 171,
+    "concurrency": 8,
+    "failed": 0,
+    "per_second": 16.62,
+    "runtime": "node",
+    "seconds": 10.29
+   },
+   "python/1": {
+    "completed": 293,
+    "concurrency": 1,
+    "failed": 0,
+    "per_second": 29.23,
+    "runtime": "python",
+    "seconds": 10.02
+   },
+   "python/4": {
+    "completed": 1127,
+    "concurrency": 4,
+    "failed": 0,
+    "per_second": 112.41,
+    "runtime": "python",
+    "seconds": 10.03
+   },
+   "python/8": {
+    "completed": 1228,
+    "concurrency": 8,
+    "failed": 0,
+    "per_second": 122.2,
+    "runtime": "python",
+    "seconds": 10.05
+   },
+   "shell/1": {
+    "completed": 500,
+    "concurrency": 1,
+    "failed": 0,
+    "per_second": 49.92,
+    "runtime": "shell",
+    "seconds": 10.02
+   },
+   "shell/4": {
+    "completed": 1910,
+    "concurrency": 4,
+    "failed": 0,
+    "per_second": 190.58,
+    "runtime": "shell",
+    "seconds": 10.02
+   },
+   "shell/8": {
+    "completed": 2071,
+    "concurrency": 8,
+    "failed": 0,
+    "per_second": 206.58,
+    "runtime": "shell",
+    "seconds": 10.03
+   },
+   "wasm/1": {
+    "completed": 121,
+    "concurrency": 1,
+    "failed": 0,
+    "per_second": 12.08,
+    "runtime": "wasm",
+    "seconds": 10.02
+   },
+   "wasm/4": {
+    "completed": 466,
+    "concurrency": 4,
+    "failed": 0,
+    "per_second": 46.35,
+    "runtime": "wasm",
+    "seconds": 10.05
+   },
+   "wasm/8": {
+    "completed": 490,
+    "concurrency": 8,
+    "failed": 0,
+    "per_second": 48.47,
+    "runtime": "wasm",
+    "seconds": 10.11
+   }
+  }
+ },
+ "total_seconds_last_run": 397.7
+}

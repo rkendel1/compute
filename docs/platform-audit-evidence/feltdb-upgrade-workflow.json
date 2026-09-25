@@ -1,0 +1,301 @@
+{
+ "format": "platform.feltdb-upgrade-evidence@1",
+ "recorded_at": "2026-09-25T02:00:31Z",
+ "workflow": "scripts/platform/feltdb.mjs with scripts/platform/feltdb-consumers.json",
+ "status_before": {
+  "package": "@feltdb/core",
+  "latest_published": "0.11.7",
+  "distinct_resolved_versions": [
+   "0.11.0",
+   "0.11.2",
+   "0.11.6",
+   "0.11.7"
+  ],
+  "aligned": false,
+  "consumers": [
+   {
+    "consumer": "compute",
+    "repository": "rkendel1/compute",
+    "head": "ab61430",
+    "manager": "npm",
+    "declared": [
+     {
+      "manifest": "packages/compute-state-model/package.json",
+      "section": "devDependencies",
+      "specifier": "0.11.7"
+     }
+    ],
+    "resolved": [
+     "0.11.7"
+    ],
+    "transitive_via": null,
+    "schema_affecting": true,
+    "runtime": "none at runtime for the model package; compute-state-feltdb depends on FeltDB-Protocol: 1 of feltdb-server",
+    "current": true
+   },
+   {
+    "consumer": "authboundry",
+    "repository": "rkendel1/authboundry",
+    "head": "44f6059",
+    "manager": "npm",
+    "declared": [
+     {
+      "manifest": "package.json",
+      "section": "dependencies",
+      "specifier": "0.11.7"
+     },
+     {
+      "manifest": "package.json",
+      "section": "overrides",
+      "specifier": "0.11.7"
+     },
+     {
+      "manifest": "apps/web/package.json",
+      "section": "dependencies",
+      "specifier": "0.11.7"
+     },
+     {
+      "manifest": "apps/web/package.json",
+      "section": "overrides",
+      "specifier": "0.11.7"
+     },
+     {
+      "manifest": "examples/nextjs-stack/package.json",
+      "section": "dependencies",
+      "specifier": "0.11.7"
+     },
+     {
+      "manifest": "examples/nextjs-stack/package.json",
+      "section": "overrides",
+      "specifier": "0.11.7"
+     }
+    ],
+    "resolved": [
+     "0.11.7"
+    ],
+    "transitive_via": null,
+    "schema_affecting": true,
+    "runtime": "Node bridge process at runtime",
+    "current": true
+   },
+   {
+    "consumer": "attn",
+    "repository": "rkendel1/attn",
+    "head": "6b6b227",
+    "manager": "bun",
+    "declared": [
+     {
+      "manifest": "sdk/packages/core/package.json",
+      "section": "dependencies",
+      "specifier": "0.11.7"
+     },
+     {
+      "manifest": "id8-macos/Backend/package.json",
+      "section": "dependencies",
+      "specifier": "0.11.7"
+     }
+    ],
+    "resolved": [
+     "0.11.7"
+    ],
+    "transitive_via": null,
+    "schema_affecting": true,
+    "runtime": "embedded in a bundled helper binary (bun compile)",
+    "current": true
+   },
+   {
+    "consumer": "factory",
+    "repository": "rkendel1/factory",
+    "head": "db101e9",
+    "manager": "npm",
+    "declared": [
+     {
+      "manifest": "package.json",
+      "section": "dependencies",
+      "specifier": "^0.11.7"
+     },
+     {
+      "manifest": "package.json",
+      "section": "overrides",
+      "specifier": "$@feltdb/core"
+     }
+    ],
+    "resolved": [
+     "0.11.7"
+    ],
+    "transitive_via": null,
+    "schema_affecting": false,
+    "runtime": "Node service",
+    "current": true
+   },
+   {
+    "consumer": "appport-services",
+    "repository": "rkendel1/appport-services",
+    "head": "f3a80fe",
+    "manager": "npm",
+    "declared": [
+     {
+      "manifest": "package.json",
+      "section": "dependencies",
+      "specifier": "0.11.6"
+     }
+    ],
+    "resolved": [
+     "0.11.6"
+    ],
+    "transitive_via": null,
+    "schema_affecting": true,
+    "runtime": "Node library inside each application's process",
+    "current": false
+   },
+   {
+    "consumer": "jev-ui",
+    "repository": "rkendel1/jev-ui",
+    "head": "b6ebc71",
+    "manager": "bun",
+    "declared": [
+     {
+      "manifest": "package.json",
+      "section": "dependencies",
+      "specifier": "0.11.6"
+     }
+    ],
+    "resolved": [
+     "0.11.6"
+    ],
+    "transitive_via": null,
+    "schema_affecting": true,
+    "runtime": "Next.js application",
+    "current": false
+   },
+   {
+    "consumer": "appboundry",
+    "repository": "rkendel1/appboundry",
+    "head": "a160d57",
+    "manager": "pnpm",
+    "declared": [
+     {
+      "manifest": "integrations/feltdb/package.json",
+      "section": "dependencies",
+      "specifier": "0.11.0"
+     }
+    ],
+    "resolved": [
+     "0.11.0"
+    ],
+    "transitive_via": null,
+    "schema_affecting": true,
+    "runtime": "library",
+    "current": false
+   },
+   {
+    "consumer": "web-monitor",
+    "repository": "rkendel1/web-monitor",
+    "head": "ebd5d5d",
+    "manager": "npm",
+    "declared": [],
+    "resolved": [
+     "0.11.2"
+    ],
+    "transitive_via": "@appport/services",
+    "schema_affecting": true,
+    "runtime": "Node service",
+    "current": false
+   }
+  ]
+ },
+ "upgrade_appport_services_0_11_6_to_0_11_7_apply": {
+  "package": "@feltdb/core",
+  "target": "0.11.7",
+  "dry_run": false,
+  "results": [
+   {
+    "consumer": "appport-services",
+    "resolved_before": [
+     "0.11.6"
+    ],
+    "changes": [
+     {
+      "manifest": "package.json",
+      "section": "dependencies",
+      "specifier": "0.11.6",
+      "to": "0.11.7"
+     }
+    ],
+    "lock_command": "npm install --package-lock-only --ignore-scripts --no-audit --no-fund",
+    "applied": true,
+    "lock_exit": 0,
+    "resolved_after": [
+     "0.11.7"
+    ]
+   }
+  ]
+ },
+ "verify_appport_services_after_upgrade": {
+  "package": "@feltdb/core",
+  "results": [
+   {
+    "consumer": "appport-services",
+    "installed": "0.11.7",
+    "passed": true,
+    "checks": [
+     {
+      "check": "install from the lockfile",
+      "command": "npm ci --ignore-scripts --no-audit --no-fund",
+      "passed": true
+     },
+     {
+      "check": "validate appport.flow with @feltdb/core@0.11.7",
+      "passed": true
+     },
+     {
+      "check": "the services' tests",
+      "command": "npm test",
+      "passed": true
+     }
+    ]
+   }
+  ]
+ },
+ "rollback_appport_services": {
+  "restored": [
+   "package.json",
+   "package-lock.json"
+  ],
+  "matches_git_head": true,
+  "resolved_after_rollback": [
+   "0.11.6"
+  ]
+ },
+ "verify_compute": {
+  "package": "@feltdb/core",
+  "results": [
+   {
+    "consumer": "compute",
+    "installed": "0.11.7",
+    "passed": true,
+    "checks": [
+     {
+      "check": "validate crates/compute-state-feltdb/model/compute.flow with @feltdb/core@0.11.7",
+      "passed": true
+     },
+     {
+      "check": "compute.flow compiles to the checked-in manifest with this FeltDB",
+      "command": "npm test",
+      "passed": true
+     },
+     {
+      "check": "the conformance suite against a real feltdb-server",
+      "command": "cargo test -q -p compute-state-feltdb -- --include-ignored",
+      "passed": true
+     }
+    ]
+   }
+  ]
+ },
+ "not_exercised": [
+  "upgrade --apply for pnpm (appboundry) and bun (attn, jev-ui) consumers",
+  "verify for authboundry, attn, factory, jev-ui, appboundry, web-monitor (their suites were not run in this audit)",
+  "committing the upgrade in each repository (the workflow edits local checkouts only)"
+ ]
+}

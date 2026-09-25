@@ -73,6 +73,14 @@ struct Cli {
     window: u16,
 }
 
+/// A test that fails must not leave its detached daemon (and its services)
+/// running.
+impl Drop for Cli {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 fn window() -> u16 {
     static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
     23000 + NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) * 100
