@@ -1,0 +1,10 @@
+# /etc/compute/compute.toml — the Compute control plane on this host.
+[state]
+backend = "feltdb"
+
+[state.feltdb]
+url = "https://feltdb.example.com"        # your Managed FeltDB
+application = "app_REPLACE_ME"            # from: compute control-plane provision
+environment = "production"                # the FeltDB environment holding Compute's state
+token_env = "COMPUTE_FELTDB_TOKEN"        # set in /etc/compute/compute.env
+# ca_file = "/etc/compute/feltdb-ca.pem"  # only for a private CA

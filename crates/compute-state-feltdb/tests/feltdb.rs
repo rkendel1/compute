@@ -513,3 +513,77 @@ async fn compute_speaks_to_feltdb_over_verified_https() {
     drop(server);
     let _ = std::fs::remove_dir_all(data);
 }
+
+/// Wire level: a replayed transaction ID returns the original result and
+/// applies nothing twice.
+#[tokio::test]
+#[ignore = "requires FELTDB_SERVER_BIN"]
+async fn a_replayed_transaction_id_applies_once() {
+    let data = tempfile_dir();
+    let token = create_key(&data);
+    let server = start(&data);
+    let provisioned = provision(ProvisionRequest {
+        url: server.url.clone(),
+        token: token.clone(),
+        application_id: None,
+        tenant_id: None,
+        tenant_name: "compute-replay".into(),
+        environment: "production".into(),
+        ca_certificate: None,
+    })
+    .await
+    .unwrap();
+    let http = reqwest::Client::new();
+    let body = serde_json::json!({
+        "application_id": provisioned.application_id,
+        "environment": "production",
+        "revision_id": provisioned.revision_id,
+        "transaction": {
+            "transaction_id": "replay-1",
+            "tenant_id": "", "application_id": "", "revision_id": "", "schema_version": 0,
+            "authorization": { "subject": "", "tenant_id": "", "application_id": "", "revision_id": "", "capabilities": [] },
+            "operations": [{
+                "kind": "insert", "collection": "Project", "id": "prj_replay",
+                "value": { "name": "replay", "created_at": "2026-09-25T00:00:00Z" },
+            }],
+        },
+    });
+    let mut results = vec![];
+    for _ in 0..2 {
+        let response = http
+            .post(format!("{}/v1/transactions", server.url))
+            .bearer_auth(&token)
+            .header("FeltDB-Protocol", "1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "{}",
+            response.text().await.unwrap()
+        );
+        results.push(response.json::<serde_json::Value>().await.unwrap());
+    }
+    assert_eq!(results[0]["duplicate"], false);
+    assert_eq!(results[1]["duplicate"], true, "the replay is recognized");
+    assert_eq!(results[0]["commit_revision"], results[1]["commit_revision"]);
+    let state = FeltDbState::connect(FeltDbConfig {
+        url: server.url.clone(),
+        token,
+        application_id: provisioned.application_id,
+        environment: "production".into(),
+        ca_certificate: None,
+    })
+    .await
+    .unwrap();
+    let projects = state
+        .query(&compute_state::Query::all(
+            compute_state::Collection::Project,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(projects.len(), 1, "applied once");
+    drop(server);
+    let _ = std::fs::remove_dir_all(data);
+}

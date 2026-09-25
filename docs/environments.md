@@ -57,14 +57,14 @@ environment are all `running`. Stopping a parent keeps each child's own
 desired state, so starting the parent again restores exactly what was
 running before.
 
-A service that exits on its own stays down until you start it again, unless
-its restart policy says otherwise. The daemon does not loop a crashing
-process.
+A service that exits cleanly on its own stays down until you start it
+again. A service that fails or is killed is restored, unless its restart
+policy says otherwise:
 
 | `restart` | Behavior |
 | --- | --- |
-| `never` (default) | An exit is final until an explicit start or restart |
-| `on_failure` | A non-zero exit or timeout restarts the service after a short delay. A denial never restarts |
+| `on_failure` (default) | A non-zero exit, a timeout, or being killed restarts the service with backoff: 1s, doubling to at most 60s, reset once a run lasts a minute. A denial never restarts |
+| `never` | An exit is final until an explicit start or restart |
 
 ## Lifecycle invariant
 
@@ -75,7 +75,7 @@ process.
 | `compute stop` (daemon) | Every service, which stops. Desired state is kept, and `compute start` restores it | Stored definitions |
 | `environment stop/restart` | That environment's services | Other environments |
 | `project stop/restart` | That project's services | Sibling projects, and the environment |
-| `project add` (new revision) | That project, which is replaced and restarted | Sibling projects |
+| a deployment (new revision) | That project in that environment, which is replaced and restarted | Sibling projects, and the project in other environments |
 | `project remove` | That project, which is stopped and deleted | Sibling projects |
 | `workload stop/restart` | That service | Sibling workloads |
 | a service failure | That service | Anything else |
@@ -87,9 +87,9 @@ The certification suite checks every row
 
 Each environment has its own:
 
-- **Filesystem.** State, bundles, logs, and receipts live under
-  `<state>/environments/<name>/`. Every execution also runs in its own
-  isolated Compute workspace.
+- **Filesystem.** Logs live under `<state-dir>/logs/<environment>/`, and
+  desired state and evidence are scoped to the environment in control
+  state. Every execution also runs in its own isolated Compute workspace.
 - **Configuration.** Environment and project `env` values are visible only
   to that environment's workloads.
 - **Dependencies.** Each workload is a self-contained bundle. Dependency
@@ -193,8 +193,9 @@ admission:
 }
 ```
 
-Receipts are stored under `<state>/environments/<name>/receipts/` and can be
-checked with `compute receipt verify`.
+Receipt documents are durable artifacts. Control state keeps their
+references, which `compute project receipts` lists. `GET /receipts/:id`
+serves a receipt, which can be checked with `compute receipt verify`.
 
 ## Manifests
 
@@ -294,5 +295,8 @@ In `compute.environment@1`:
 - There are no persistent volumes. Each execution gets a fresh workspace, so
   keep state in external services.
 - Health is process liveness plus a TCP check of each declared port.
-- One daemon per state directory. There is no multi-node control plane,
+- One daemon per control plane. There is no multi-node control plane,
   autoscaling, or multi-region.
+
+Desired state lives in durable control state (a file, or Managed FeltDB):
+see [docs/control-plane.md](control-plane.md).

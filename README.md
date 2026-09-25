@@ -80,8 +80,11 @@ Compute also operates long-running software. A persistent daemon holds
 tasks that run to completion. Environments are isolated from each other in
 filesystem, configuration, policy, ports, and processes. Stopping a child
 never stops its parent or its siblings. The CLI, AppPort, and the UI are
-all clients of one Compute API. See [docs/environments.md](docs/environments.md)
-and [docs/daemon.md](docs/daemon.md).
+all clients of one Compute API, and the daemon serves a control-plane UI.
+Desired state is durable: in a local file, or in Managed FeltDB as the
+control-plane authority. The daemon reconciles toward it, and restores it
+after a crash or on a new node. See [docs/environments.md](docs/environments.md),
+[docs/daemon.md](docs/daemon.md), and [docs/control-plane.md](docs/control-plane.md).
 
 ```sh
 compute start --detach
@@ -89,6 +92,8 @@ compute environment apply compute.environment.toml
 compute environment status staging
 compute workload run authboundry/migrate --environment staging
 compute project restart authboundry --environment staging
+compute deploy authboundry --environment preprod --source ./authboundry --revision abc123 --wait
+compute promote authboundry --from preprod --to production --wait
 ```
 
 ## Universal runtime distribution
