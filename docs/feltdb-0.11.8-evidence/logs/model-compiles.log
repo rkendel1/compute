@@ -1,0 +1,31 @@
+
+> @compute/state-model@0.1.0 check
+> node src/compile.mjs --check
+
+compute.manifest.json matches compute.flow
+
+> @compute/state-model@0.1.0 test
+> node --test src/*.test.mjs
+
+TAP version 13
+# Subtest: the checked-in manifest is exactly compute.flow compiled
+ok 1 - the checked-in manifest is exactly compute.flow compiled
+  ---
+  duration_ms: 6.347561
+  type: 'test'
+  ...
+# Subtest: every Compute collection is in the model with an access policy
+ok 2 - every Compute collection is in the model with an access policy
+  ---
+  duration_ms: 4.92296
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 177.759957

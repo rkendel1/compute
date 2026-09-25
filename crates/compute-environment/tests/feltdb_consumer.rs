@@ -697,6 +697,26 @@ async fn benchmark() {
     let target = compute_state::ids::execution(&format!("bench_{}", history / 2));
     let project_id = compute_state::ids::project("p7");
 
+    // Early: placement's capability cache is not re-discovered after its
+    // TTL (a pre-existing placement issue), so adds are measured first.
+    let mut index = projects;
+    results
+        .measure(
+            &state,
+            "add project/service",
+            "end-to-end",
+            "after",
+            n.min(10),
+            || {
+                index += 1;
+                let daemon = daemon.clone();
+                let definition = task(&format!("p{index}"), &bundle);
+                async move {
+                    daemon.add_project("prod", definition).await.unwrap();
+                }
+            },
+        )
+        .await;
     // Reads.
     results
         .measure(
@@ -1047,24 +1067,6 @@ async fn benchmark() {
             n,
             || async {
                 daemon.reconcile().await;
-            },
-        )
-        .await;
-    let mut index = projects;
-    results
-        .measure(
-            &state,
-            "add project/service",
-            "end-to-end",
-            "after",
-            n.min(10),
-            || {
-                index += 1;
-                let daemon = daemon.clone();
-                let definition = task(&format!("p{index}"), &bundle);
-                async move {
-                    daemon.add_project("prod", definition).await.unwrap();
-                }
             },
         )
         .await;

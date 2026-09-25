@@ -1,0 +1,3 @@
+[
+  {"check": "resolved-version", "status": "PASS", "command": "node scripts/feltdb/verify-version.mjs --json", "log": "logs/resolved-version.log"},
+  {"check": "model-compiles", "status": "PASS", "command": "bash -c cd packages/compute-state-model && npm run check && npm test", "log": "logs/model-compiles.log"}
