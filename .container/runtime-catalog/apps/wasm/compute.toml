@@ -1,0 +1,6 @@
+[run]
+runtime = "wasm"
+entrypoint = "app.wat"
+
+[network]
+mode = "none"

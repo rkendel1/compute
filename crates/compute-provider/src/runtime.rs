@@ -8,8 +8,8 @@ use std::sync::Mutex;
 
 use compute_core::{
     PlatformIdentity, ProviderRuntimeRequirement, RuntimeCapabilities, RuntimeDistribution,
-    RuntimeKind, RuntimeLifecycleStatus, RuntimePreparation, RuntimePreparationStep,
-    RuntimeResolution, sha256_identity,
+    RuntimeLifecycleStatus, RuntimePreparation, RuntimePreparationStep, RuntimeResolution,
+    sha256_identity,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -141,22 +141,12 @@ impl RuntimeManager {
                 platform.label()
             ));
         }
-        // Node is intentionally the first acquired runtime. The catalog can
-        // grow without changing the provider contract.
-        if requirement.runtime != RuntimeKind::Node {
-            return unsupported(format!(
-                "{} has no provider-managed distribution",
-                requirement.runtime
-            ));
-        }
         let Some(locked) = self.lock.runtimes.get(requirement.runtime.as_str()) else {
             return unsupported("runtime is absent from the provider catalog".into());
         };
-        if requirement
-            .version
-            .as_ref()
-            .is_some_and(|version| !locked.version.contains(version))
-        {
+        if requirement.version.as_ref().is_some_and(|version| {
+            !compute_core::runtime_version_matches(requirement.runtime, version, &locked.version)
+        }) {
             return unsupported(format!(
                 "requested {}, catalog contains {}",
                 requirement.version.as_deref().unwrap_or_default(),
@@ -392,7 +382,6 @@ impl RuntimeManager {
                 capabilities: Some(distribution.capabilities.clone()),
             },
         );
-        manifest.distribution_id = manifest_identity(&manifest)?;
         write_json_atomic(&self.root.join("runtime-manifest.json"), &manifest)?;
         write_json_atomic(
             &self.root.join("runtime-inventory.json"),
@@ -429,10 +418,21 @@ impl RuntimeManager {
     fn empty_manifest(&self) -> RuntimeManifest {
         let platform = PlatformIdentity::current();
         let lock = include_bytes!("../../../distribution/runtime-lock.json");
+        // Runtime preparation is mutable provider state, not a new Compute
+        // distribution. Keep the provider distribution identity stable while
+        // exact runtime distribution identities are recorded independently.
+        let lock_identity = sha256_identity(lock);
+        let descriptor = serde_json::to_vec(&serde_json::json!({
+            "kind": "source-development",
+            "compute_version": env!("CARGO_PKG_VERSION"),
+            "platform": platform.label(),
+            "runtime_lock": lock_identity,
+        }))
+        .expect("source distribution descriptor serializes");
         RuntimeManifest {
             schema_version: 2,
             compute_version: env!("CARGO_PKG_VERSION").into(),
-            distribution_id: String::new(),
+            distribution_id: sha256_identity(&descriptor),
             distribution_version: format!(
                 "compute-{}-{}",
                 env!("CARGO_PKG_VERSION"),
@@ -458,18 +458,6 @@ impl RuntimeManager {
             .join("failures")
             .join(id.trim_start_matches("sha256:"))
     }
-}
-
-fn manifest_identity(manifest: &RuntimeManifest) -> Result<String, ProviderError> {
-    Ok(sha256_identity(
-        &serde_json::to_vec(&(
-            &manifest.compute_version,
-            &manifest.platform,
-            &manifest.runtime_lock_sha256,
-            &manifest.runtimes,
-        ))
-        .map_err(|error| unavailable(error.to_string()))?,
-    ))
 }
 
 fn acquire(url: &str, cached: &Path, expected: &str) -> Result<(), ProviderError> {
@@ -723,6 +711,7 @@ fn io_error(error: std::io::Error) -> ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use compute_core::RuntimeKind;
 
     fn fixture() -> (tempfile::TempDir, RuntimeManager, RuntimeDistribution) {
         let directory = tempfile::tempdir().unwrap();
@@ -784,9 +773,14 @@ mod tests {
     #[test]
     fn preparation_is_verified_persistent_and_tamper_evident() {
         let (_directory, manager, distribution) = fixture();
+        let compute = compute_runtime::Compute::with_distribution_root(manager.root.clone());
+        let identity_before = compute.installed_distribution_identity().unwrap();
         let prepared = manager.prepare(&distribution).unwrap();
         assert!(prepared.verified);
         assert_eq!(prepared.status, RuntimeLifecycleStatus::Ready);
+        let identity_after = compute.installed_distribution_identity().unwrap();
+        assert_eq!(identity_after.id, identity_before.id);
+        assert_eq!(identity_after.platform, identity_before.platform);
 
         let restarted = RuntimeManager {
             root: manager.root.clone(),
@@ -840,5 +834,79 @@ mod tests {
             RuntimeCapabilities::process(),
         );
         assert_eq!(wrong_version.status, RuntimeLifecycleStatus::Unsupported);
+    }
+
+    #[test]
+    fn catalog_resolution_is_runtime_agnostic_and_accepts_constraints() {
+        let (_directory, mut manager, _) = fixture();
+        let node = manager.lock.runtimes["node"].clone();
+        manager.lock.runtimes.extend([
+            (
+                "python".into(),
+                LockedRuntime {
+                    version: "3.13.15".into(),
+                    ..node.clone()
+                },
+            ),
+            (
+                "deno".into(),
+                LockedRuntime {
+                    version: "2.9.7".into(),
+                    ..node.clone()
+                },
+            ),
+            (
+                "bun".into(),
+                LockedRuntime {
+                    version: "1.4.2".into(),
+                    ..node
+                },
+            ),
+        ]);
+        let platform = PlatformIdentity {
+            runtime_abi: None,
+            ..PlatformIdentity::current()
+        };
+        for (runtime, requirement) in [
+            (RuntimeKind::Python, ">=3.12,<3.14"),
+            (RuntimeKind::Deno, ">=2.9,<3"),
+            (RuntimeKind::Bun, ">=1.4,<2"),
+        ] {
+            let resolution = manager.resolve(
+                ProviderRuntimeRequirement {
+                    runtime,
+                    version: Some(requirement.into()),
+                    platform: Some(platform.clone()),
+                },
+                RuntimeCapabilities::process(),
+            );
+            assert_eq!(resolution.status, RuntimeLifecycleStatus::Available);
+            assert_eq!(resolution.distribution.unwrap().runtime, runtime);
+        }
+    }
+
+    #[test]
+    fn portable_catalog_covers_both_linux_architectures() {
+        let lock: RuntimeLock =
+            serde_json::from_slice(include_bytes!("../../../distribution/runtime-lock.json"))
+                .unwrap();
+        for runtime in ["node", "python", "deno", "bun"] {
+            let entry = &lock.runtimes[runtime];
+            for platform in ["linux-x86_64", "linux-aarch64"] {
+                let artifact = entry
+                    .artifacts
+                    .get(platform)
+                    .unwrap_or_else(|| panic!("catalog is missing {runtime} for {platform}"));
+                assert_eq!(artifact.sha256.len(), 64);
+                assert!(
+                    artifact
+                        .sha256
+                        .chars()
+                        .all(|character| character.is_ascii_hexdigit())
+                );
+                assert!(artifact.url.starts_with("https://"));
+                assert!(!artifact.install.is_empty());
+            }
+        }
     }
 }

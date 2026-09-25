@@ -87,6 +87,7 @@ Directories can define a deliberately small `compute.toml`:
 ```toml
 [run]
 runtime = "node"
+version = ">=24,<25"
 entrypoint = "src/index.js"
 isolation = "process"
 

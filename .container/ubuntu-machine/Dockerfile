@@ -12,6 +12,8 @@ RUN apt-get update && \
         iputils-ping \
         curl \
         wget \
+        unzip \
+        xz-utils \
         vim-tiny \
         man \
         sudo \

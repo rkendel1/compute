@@ -56,6 +56,9 @@ struct ProjectConfig {
 #[serde(default, deny_unknown_fields)]
 struct RunConfig {
     runtime: Option<String>,
+    /// A workload-layer alias or constraint. Distribution identity remains
+    /// exact and is chosen by placement.
+    version: Option<String>,
     entrypoint: Option<PathBuf>,
     isolation: Option<String>,
 }
@@ -260,7 +263,7 @@ pub fn resolve(options: DirectOptions) -> compute_core::Result<ResolvedDirect> {
     let workload = WorkloadSpec {
         version: WORKLOAD_SPEC_VERSION.into(),
         runtime,
-        runtime_version: None,
+        runtime_version: config.run.version,
         entrypoint,
         args: options.args,
         env: environment,

@@ -65,7 +65,9 @@ A provider may advertise a pinned runtime as `available` before it is
 installed. Compute resolves, acquires, verifies, and prepares that exact
 distribution before admission, then records its distribution ID, artifact
 digest, payload identity, and executable identity in the receipt. Node 24 is
-the first provider-acquired runtime.
+joined by catalog-managed Python 3.13, Deno, and Bun distributions on Linux
+x86-64 and arm64. Workload version constraints resolve to exact catalog
+versions; distributions and receipts never use aliases.
 
 Capability asks "can it run?"; policy asks "may it run?". Compute executes
 only when both answers are yes. Every execution is admitted by a
@@ -147,7 +149,8 @@ compute distribution inspect dist/compute-distribution --json
 compute distribution verify dist/compute-distribution --json
 ```
 
-The currently locked official payload targets `linux-x86_64`; unsupported OS
+The catalog includes pinned `linux-x86_64` and `linux-aarch64` distributions
+for Node, Python, Deno, and Bun; unsupported OS
 or architecture combinations fail explicitly. See `distribution/README.md`
 for cache, offline, reproducibility, certification, and Docker details.
 

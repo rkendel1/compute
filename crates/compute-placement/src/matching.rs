@@ -506,11 +506,7 @@ fn host_offered(offer: Option<&crate::RuntimeOffer>, requirements: &PlacementReq
 }
 
 pub fn runtime_version_matches(kind: RuntimeKind, requested: &str, offered: &str) -> bool {
-    if kind == RuntimeKind::Wasm {
-        requested.eq_ignore_ascii_case("wasi")
-    } else {
-        offered.contains(requested)
-    }
+    compute_core::runtime_version_matches(kind, requested, offered)
 }
 
 fn offered_runtimes(descriptor: &ProviderDescriptor) -> Vec<RuntimeKind> {

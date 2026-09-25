@@ -414,7 +414,9 @@ fn discover_executable(
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let version = if stdout.is_empty() { stderr } else { stdout };
-    if require_pinned_version && !version.contains(&definition.version) {
+    if require_pinned_version
+        && !compute_core::runtime_version_matches(definition.kind, &definition.version, &version)
+    {
         return DiscoveredRuntime {
             path: Some(path.to_path_buf()),
             version: Some(version.clone()),
@@ -453,10 +455,9 @@ impl RuntimeAdapter for ProcessRuntime {
         let compatible = discovered.available
             && requested
                 .map(|requested| {
-                    discovered
-                        .version
-                        .as_deref()
-                        .is_some_and(|version| version.contains(requested))
+                    discovered.version.as_deref().is_some_and(|version| {
+                        compute_core::runtime_version_matches(self.kind, requested, version)
+                    })
                 })
                 .unwrap_or(true);
         RuntimeAvailability {
@@ -481,7 +482,7 @@ impl RuntimeAdapter for ProcessRuntime {
         }
 
         if let (Some(requested), Some(found)) = (&workload.runtime.version, &runtime.version)
-            && !found.contains(requested)
+            && !compute_core::runtime_version_matches(self.kind, requested, found)
         {
             return Err(ComputeError::RuntimeVersionMismatch {
                 kind: self.kind,

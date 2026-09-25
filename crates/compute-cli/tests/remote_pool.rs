@@ -94,15 +94,17 @@ fn remote_commands_resolve_named_providers_from_the_caller_owned_pool() {
         .unwrap();
     assert!(runtimes.status.success());
     let runtimes: serde_json::Value = serde_json::from_slice(&runtimes.stdout).unwrap();
-    assert!(runtimes["platform"].as_str().is_some());
+    assert_eq!(runtimes["schema_version"], "compute.runtime-catalog@1");
+    assert!(runtimes["provider_platform"].as_str().is_some());
     assert!(
         runtimes["runtimes"]
             .as_array()
             .unwrap()
             .iter()
             .all(|runtime| {
-                runtime["lifecycle"].as_str().is_some()
-                    && runtime["platform"] == runtimes["platform"]
+                runtime["status"].as_str().is_some()
+                    && runtime["platform"].as_str().is_some()
+                    && runtime["architecture"].as_str().is_some()
             })
     );
 

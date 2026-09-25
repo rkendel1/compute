@@ -1056,10 +1056,23 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Runtimes(command) => {
             let inventory = match command.provider.as_deref() {
                 Some(provider) => pool::runtime_inventory(&command.location, provider).await?,
-                None => compute.inventory().await?,
+                // The local provider consumes the canonical runtime catalog,
+                // so this includes prepareable distributions as well as
+                // runtimes that happen to be installed on the CLI host.
+                None => {
+                    compute_provider::ComputeProvider::capabilities(
+                        &compute_provider::LocalProvider::new(),
+                    )
+                    .await
+                    .map_err(provider_error)?
+                    .inventory
+                }
             };
             if command.json {
-                println!("{}", serde_json::to_string_pretty(&inventory).unwrap());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&runtime_catalog_json(&inventory)).unwrap()
+                );
             } else {
                 println!("Runtime\tVersion\tPlatform\tDistribution\tStatus");
                 for runtime in inventory.runtimes {
@@ -1583,6 +1596,49 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
     }
 
     Ok(())
+}
+
+fn runtime_catalog_json(inventory: &compute_core::RuntimeInventory) -> serde_json::Value {
+    let runtimes = inventory
+        .runtimes
+        .iter()
+        .map(|runtime| {
+            let (platform, architecture) = runtime
+                .distribution
+                .as_ref()
+                .map(|distribution| {
+                    (
+                        distribution.platform.os.as_str(),
+                        distribution.platform.architecture.as_str(),
+                    )
+                })
+                .or_else(|| runtime.platform.rsplit_once('-'))
+                .unwrap_or((runtime.platform.as_str(), "unknown"));
+            let status = runtime.lifecycle.unwrap_or(if runtime.available {
+                compute_core::RuntimeLifecycleStatus::Installed
+            } else {
+                compute_core::RuntimeLifecycleStatus::Unavailable
+            });
+            serde_json::json!({
+                "runtime": runtime.id,
+                "version": runtime.version,
+                "platform": platform,
+                "architecture": architecture,
+                "status": status,
+                "source": runtime.source,
+                "executable": runtime.executable,
+                "executable_identity": runtime.executable_identity,
+                "distribution": runtime.distribution,
+                "capabilities": runtime.capabilities,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema_version": "compute.runtime-catalog@1",
+        "compute_version": inventory.compute_version,
+        "provider_platform": inventory.platform,
+        "runtimes": runtimes,
+    })
 }
 
 async fn run_with_provider(command: RunCommand) -> compute_core::Result<()> {

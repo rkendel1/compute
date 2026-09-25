@@ -1,6 +1,6 @@
 [run]
-runtime = "node"
-version = ">=24,<25"
+runtime = "bun"
+version = ">=1.4,<2"
 entrypoint = "app.js"
 
 [network]

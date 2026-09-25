@@ -970,12 +970,29 @@ fn receipt_environment(
             serde_json::from_value(manifest.get("runtimes").cloned().ok_or_else(|| {
                 ComputeError::InvalidReceipt("distribution manifest is missing runtimes".into())
             })?)?;
-        let expected_distribution = sha256_identity(&serde_json::to_vec(&(
-            compute_version,
-            declared_platform,
-            lock.clone(),
-            &runtimes,
-        ))?);
+        let provider_prepared = manifest
+            .get("build")
+            .and_then(|build| build.get("format"))
+            .and_then(serde_json::Value::as_str)
+            == Some("compute-runtime-provider-v1");
+        let expected_distribution = if provider_prepared {
+            // A provider's catalog cache is mutable preparation state. Its
+            // Compute distribution identity remains stable while each exact
+            // runtime distribution is bound separately in the receipt.
+            sha256_identity(&serde_json::to_vec(&serde_json::json!({
+                "kind": "source-development",
+                "compute_version": compute_version,
+                "platform": declared_platform,
+                "runtime_lock": prefixed_digest(&lock)?,
+            }))?)
+        } else {
+            sha256_identity(&serde_json::to_vec(&(
+                compute_version,
+                declared_platform,
+                lock.clone(),
+                &runtimes,
+            ))?)
+        };
         if id != expected_distribution {
             return Err(ComputeError::InvalidReceipt(
                 "distribution identity mismatch".into(),

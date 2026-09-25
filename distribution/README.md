@@ -1,9 +1,12 @@
 # Reproducible Compute distribution
 
-`runtime-lock.json` is the authoritative runtime artifact set. Each downloadable
-runtime is pinned by platform, immutable URL, SHA-256 digest, archive format,
-and installation layout. The builder never discovers or substitutes a host
-language runtime.
+`runtime-lock.json` is Compute's canonical runtime catalog. Each entry names a
+runtime and exact version, executable, supported OS/architecture distributions,
+immutable source artifacts, SHA-256 digests, archive format, and installation
+layout. Runtime adapters declare execution capabilities; providers consume this
+catalog to resolve and materialize distributions without runtime-specific
+lifecycle branches. The builder never discovers or substitutes a host language
+runtime.
 
 Build and certify the Linux distribution with the same command used by release
 CI:

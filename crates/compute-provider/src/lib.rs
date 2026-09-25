@@ -611,12 +611,29 @@ impl LocalProvider {
 
     async fn facts(&self, bundle: &WorkloadBundle) -> ProviderFacts {
         let distribution = self.compute.installed_distribution_identity().ok();
-        let runtime_version = self
+        let installed_version = self
             .compute
             .runtime(bundle.workload.runtime, None)
             .await
             .ok()
             .and_then(|runtime| runtime.version);
+        let managed = self.runtimes.resolve(
+            ProviderRuntimeRequirement {
+                runtime: bundle.workload.runtime,
+                version: bundle.workload.runtime_version.clone(),
+                platform: Some(compute_core::PlatformIdentity {
+                    runtime_abi: None,
+                    ..compute_core::PlatformIdentity::current()
+                }),
+            },
+            self.compute
+                .capabilities(bundle.workload.runtime)
+                .unwrap_or_else(|_| compute_core::RuntimeCapabilities::process()),
+        );
+        let runtime_version = managed
+            .distribution
+            .map(|distribution| distribution.version)
+            .or(installed_version);
         ProviderFacts {
             identity: self.identity(),
             distribution_id: distribution.as_ref().map(|value| value.id.clone()),
@@ -929,13 +946,25 @@ impl ComputeProvider for LocalProvider {
                 },
                 entry.capabilities.clone(),
             );
-            if resolution.distribution.is_some()
-                && (!entry.available || resolution.status == RuntimeLifecycleStatus::Ready)
-            {
+            if resolution.distribution.is_some() {
                 entry.lifecycle = Some(resolution.status);
                 entry.distribution = resolution.distribution;
+                entry.available = resolution.status.can_satisfy();
                 entry.compatible = resolution.status.can_satisfy();
                 entry.remediation = resolution.detail;
+                // A catalog distribution is authoritative even when a
+                // coincidentally compatible host executable exists. Until it
+                // is ready, do not attach the host executable's identity to
+                // the provider-managed offer. The observed `--version` text
+                // is receipt evidence, not placement identity: keeping the
+                // exact catalog version here makes admission stable across
+                // the available -> ready transition.
+                entry.source = compute_core::RuntimeSource::Distribution;
+                entry.detected_version = None;
+                if resolution.status != RuntimeLifecycleStatus::Ready {
+                    entry.executable_identity = None;
+                    entry.detected_executable = None;
+                }
             }
         }
         inventory

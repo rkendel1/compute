@@ -8,6 +8,10 @@
         "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
         "sha256": "8a689a077337bea6d1c4bc0b7df1d52fcaa28f5f67e50df8bf417c1e3f9d8874", "format": "tar_gz",
         "install": [{ "source": "python", "destination": "runtimes/python" }]
+      }, "linux-aarch64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz",
+        "sha256": "01ce0ce9189feaead3298abf10d4efe998c55a489b3d5d38ca4f83dda7e7977e", "format": "tar_gz",
+        "install": [{ "source": "python", "destination": "runtimes/python" }]
       }}
     },
     "node": {
@@ -28,6 +32,10 @@
         "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip",
         "sha256": "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913", "format": "zip",
         "install": [{ "source": "bun-linux-x64/bun", "destination": "runtimes/bun/bin/bun" }]
+      }, "linux-aarch64": {
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-aarch64.zip",
+        "sha256": "54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7", "format": "zip",
+        "install": [{ "source": "bun-linux-aarch64/bun", "destination": "runtimes/bun/bin/bun" }]
       }}
     },
     "deno": {
@@ -35,6 +43,10 @@
       "artifacts": { "linux-x86_64": {
         "url": "https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip",
         "sha256": "c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490", "format": "zip",
+        "install": [{ "source": "deno", "destination": "runtimes/deno/bin/deno" }]
+      }, "linux-aarch64": {
+        "url": "https://github.com/denoland/deno/releases/download/v2.9.7/deno-aarch64-unknown-linux-gnu.zip",
+        "sha256": "c832298b1ad4422481334855f6003e0f54145762c5a134f20a489511d2f65bbf", "format": "zip",
         "install": [{ "source": "deno", "destination": "runtimes/deno/bin/deno" }]
       }}
     },

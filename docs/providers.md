@@ -117,8 +117,14 @@ digest into expected execution evidence. Failed staging data is never
 runnable; successful preparation survives provider restarts in
 `COMPUTE_RUNTIME_STORE`.
 
-Node 24 is the first acquired runtime. Linux x86-64 and arm64 artifacts are
-pinned to official release digests in `distribution/runtime-lock.json`.
+The canonical catalog currently makes Node 24, Python 3.13, Deno, and Bun
+provider-acquired runtimes on Linux x86-64 and arm64. Every artifact is pinned
+to its upstream release URL and SHA-256 digest in
+`distribution/runtime-lock.json`; the provider lifecycle contains no
+runtime-specific acquisition branch. Workload aliases such as
+`python >=3.12,<3.14` resolve to an exact catalog distribution before
+preparation, and receipts bind that exact identity, digest, payload, and
+executable.
 
 ## AppPort
 

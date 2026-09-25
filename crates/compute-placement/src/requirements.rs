@@ -15,7 +15,8 @@ pub const REQUIREMENTS_VERSION: &str = "compute.placement.requirements@1";
 #[serde(deny_unknown_fields)]
 pub struct RuntimeRequirement {
     pub kind: RuntimeKind,
-    /// Requested runtime version, matched exactly as execution matches it.
+    /// Workload-layer version alias or constraint. Placement resolves this to
+    /// an exact distribution version before execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// Required runtime artifact identity, when the caller pins it.

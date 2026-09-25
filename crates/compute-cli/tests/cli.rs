@@ -232,18 +232,19 @@ fn runtimes_json_lists_wasm() {
     let output = command.args(["runtimes", "--json"]).output().unwrap();
     assert!(output.status.success());
     let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["schema_version"], "compute.runtime-catalog@1");
     let runtimes = document["runtimes"].as_array().unwrap();
     assert_eq!(runtimes.len(), 11);
-    assert!(runtimes.iter().any(|runtime| {
-        runtime["id"] == "wasm"
-            && runtime["version"].is_string()
-            && runtime["platform"] == document["platform"]
-            && runtime["distribution_id"].is_string()
-            && runtime["distribution_runtime_id"].is_string()
-            && runtime["executable_identity"].is_string()
-            && runtime["capabilities"].is_object()
-            && runtime["available"] == true
-    }));
+    for expected in ["wasm", "node", "python", "deno", "bun"] {
+        assert!(runtimes.iter().any(|runtime| {
+            runtime["runtime"] == expected
+                && runtime["version"].is_string()
+                && runtime["platform"].is_string()
+                && runtime["architecture"].is_string()
+                && runtime["status"].is_string()
+                && runtime["capabilities"].is_object()
+        }));
+    }
 }
 
 #[test]
@@ -790,7 +791,7 @@ fn direct_javascript_is_ambiguous_and_compute_toml_resolves_it() {
 
     std::fs::write(
         temp.path().join("compute.toml"),
-        "[run]\nruntime = \"node\"\nentrypoint = \"app.js\"\n[network]\nmode = \"disabled\"\n",
+        "[run]\nruntime = \"node\"\nversion = \">=24,<25\"\nentrypoint = \"app.js\"\n[network]\nmode = \"disabled\"\n",
     )
     .unwrap();
     Command::cargo_bin("compute")
@@ -799,6 +800,9 @@ fn direct_javascript_is_ambiguous_and_compute_toml_resolves_it() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"runtime\": \"node\""))
+        .stdout(predicate::str::contains(
+            "\"runtime_version\": \">=24,<25\"",
+        ))
         .stdout(predicate::str::contains(
             "\"configuration\": \"compute.toml\"",
         ));

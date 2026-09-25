@@ -1,0 +1,7 @@
+[run]
+runtime = "python"
+version = ">=3.12,<3.14"
+entrypoint = "app.py"
+
+[network]
+mode = "network"

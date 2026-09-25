@@ -71,6 +71,71 @@ impl RuntimeKind {
     }
 }
 
+/// Match a workload runtime requirement against a concrete distribution
+/// version. Bare versions retain the existing prefix/substring behavior;
+/// comma-separated numeric comparators make workload requirements expressive
+/// without changing the exact version recorded by distributions and receipts.
+pub fn runtime_version_matches(kind: RuntimeKind, requested: &str, offered: &str) -> bool {
+    if kind == RuntimeKind::Wasm {
+        return requested.eq_ignore_ascii_case("wasi") || offered.contains(requested);
+    }
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return true;
+    }
+    if !requested.contains(',') && !requested.starts_with(['<', '>', '=']) {
+        return offered.contains(requested);
+    }
+    let Some(offered) = numeric_version(offered) else {
+        return false;
+    };
+    requested.split(',').all(|clause| {
+        let clause = clause.trim();
+        let (operator, version) = [">=", "<=", ">", "<", "="]
+            .into_iter()
+            .find_map(|operator| clause.strip_prefix(operator).map(|value| (operator, value)))
+            .unwrap_or(("=", clause));
+        let Some(required) = numeric_version(version) else {
+            return false;
+        };
+        let ordering = compare_numeric_versions(&offered, &required);
+        match operator {
+            ">=" => ordering.is_ge(),
+            "<=" => ordering.is_le(),
+            ">" => ordering.is_gt(),
+            "<" => ordering.is_lt(),
+            "=" => ordering.is_eq(),
+            _ => false,
+        }
+    })
+}
+
+fn numeric_version(value: &str) -> Option<Vec<u64>> {
+    let start = value.find(|character: char| character.is_ascii_digit())?;
+    let numeric = value[start..]
+        .split(|character: char| !character.is_ascii_digit() && character != '.')
+        .next()?;
+    let components = numeric
+        .split('.')
+        .map(str::parse)
+        .collect::<std::result::Result<Vec<u64>, _>>()
+        .ok()?;
+    (!components.is_empty()).then_some(components)
+}
+
+fn compare_numeric_versions(left: &[u64], right: &[u64]) -> std::cmp::Ordering {
+    let length = left.len().max(right.len());
+    (0..length)
+        .map(|index| {
+            left.get(index)
+                .copied()
+                .unwrap_or_default()
+                .cmp(&right.get(index).copied().unwrap_or_default())
+        })
+        .find(|ordering| !ordering.is_eq())
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
 impl std::fmt::Display for RuntimeKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -2665,6 +2730,31 @@ pub mod schema_version {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_versions_support_ranges_without_weakening_exact_identity() {
+        assert!(runtime_version_matches(
+            RuntimeKind::Python,
+            ">=3.12,<3.14",
+            "Python 3.13.15"
+        ));
+        assert!(!runtime_version_matches(
+            RuntimeKind::Python,
+            ">=3.14,<4",
+            "3.13.15"
+        ));
+        assert!(runtime_version_matches(
+            RuntimeKind::Node,
+            ">=24",
+            "v24.18.0"
+        ));
+        assert!(runtime_version_matches(RuntimeKind::Node, "24", "v24.18.0"));
+        assert!(runtime_version_matches(
+            RuntimeKind::Wasm,
+            "wasi",
+            "wasmtime-36.0.10+wasi-preview1"
+        ));
+    }
 
     #[test]
     fn stage_workload_copies_entrypoint() {

@@ -1,0 +1,7 @@
+[run]
+runtime = "deno"
+version = ">=2.9,<3"
+entrypoint = "app.ts"
+
+[network]
+mode = "none"
