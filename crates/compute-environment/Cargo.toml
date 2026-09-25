@@ -34,6 +34,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 libc.workspace = true
 compute-state-memory = { path = "../compute-state-memory" }
 compute-state-file = { path = "../compute-state-file" }
+# Certification against a real feltdb-server only; the engine never
+# depends on it.
+compute-state-feltdb = { path = "../compute-state-feltdb" }
 async-trait.workspace = true
 compute-runtime = { path = "../compute-runtime" }
 compute-core = { path = "../compute-core" }

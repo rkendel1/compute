@@ -204,6 +204,7 @@ app compute {
     data: json?
     index sequence using sorted(sequence)
     index kind using hash(kind)
+    index environment using hash(environment)
     index project using hash(project)
     index deployment_id using hash(deployment_id)
     record_id: text?

@@ -21,8 +21,11 @@
       "schema_affecting": true,
       "runtime": "none at runtime for the model package; compute-state-feltdb depends on FeltDB-Protocol: 1 of feltdb-server",
       "verify": [
+        {"cwd": ".", "run": "node scripts/feltdb/verify-version.mjs", "proves": "exactly the certified @feltdb/core (CERTIFIED_FELTDB_VERSION) is resolved"},
         {"cwd": "packages/compute-state-model", "run": "npm test", "proves": "compute.flow compiles to the checked-in manifest with this FeltDB"},
-        {"cwd": ".", "run": "cargo test -q -p compute-state-feltdb -- --include-ignored", "requires": ["FELTDB_SERVER_BIN"], "proves": "the conformance suite against a real feltdb-server"}
+        {"cwd": ".", "run": "cargo test -q -p compute-state-feltdb -- --include-ignored --test-threads 1 --skip state_written_by_the_previous_server", "requires": ["FELTDB_SERVER_BIN"], "proves": "conformance, indexed access plans, snapshots, outage, upgrade, and backup/restore against a real feltdb-server"},
+        {"cwd": ".", "run": "cargo test -q -p compute-state-feltdb --test consumer state_written_by_the_previous_server -- --ignored", "requires": ["FELTDB_SERVER_BIN", "FELTDB_PREVIOUS_SERVER_BIN"], "proves": "state moves between the previous and the certified feltdb-server in both directions"},
+        {"cwd": ".", "run": "cargo test -q -p compute-environment --test feltdb_consumer -- --ignored --test-threads 1 --skip benchmark", "requires": ["FELTDB_SERVER_BIN"], "proves": "the controller on a real feltdb-server: bounded access paths, outage and recovery, concurrency"}
       ]
     },
     {

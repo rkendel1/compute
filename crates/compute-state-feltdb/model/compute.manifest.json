@@ -1648,6 +1648,14 @@
       "unique": false
     },
     {
+      "name": "Event.environment",
+      "collection": "Event",
+      "fields": [
+        "environment"
+      ],
+      "unique": false
+    },
+    {
       "name": "Event.project",
       "collection": "Event",
       "fields": [

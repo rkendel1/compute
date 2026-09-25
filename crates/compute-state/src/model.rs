@@ -34,8 +34,8 @@ pub const STATE_VERSION: &str = "compute.state@1";
 ///   `Execution.failure`).
 /// - 2: FeltDB 0.11.8 consumption: an indexed `record_id` identity on
 ///   every collection, and indexes for the filters Compute's views use
-///   (`Execution.project_id`, `Receipt.project_id`, `Event.project`,
-///   `Event.deployment_id`).
+///   (`Execution.project_id`, `Receipt.project_id`, `Event.environment`,
+///   `Event.project`, `Event.deployment_id`).
 pub const MODEL_GENERATION: u32 = 2;
 
 /// A typed document of one collection.

@@ -179,14 +179,19 @@ impl StateStore for FileState {
     }
 
     async fn commit(&self, writes: Vec<Write>) -> Result<(), StateError> {
+        self.commit_tracked(writes).await.map(|_| ())
+    }
+
+    async fn commit_tracked(&self, writes: Vec<Write>) -> Result<Option<(u64, u64)>, StateError> {
         let mut inner = self.inner.lock().await;
         let mut tables = inner.0.clone();
-        let mut next_version = inner.1;
+        let before = inner.1;
+        let mut next_version = before;
         apply_in_memory(&mut tables, writes, &mut next_version)?;
         // Durable first: memory changes only once the file does.
         self.write(&tables, next_version)?;
         *inner = (tables, next_version);
-        Ok(())
+        Ok(Some((before, next_version)))
     }
 
     /// Every committed write advances the version counter, which the file

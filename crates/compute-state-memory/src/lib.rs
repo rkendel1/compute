@@ -78,9 +78,15 @@ impl StateStore for MemoryState {
     }
 
     async fn commit(&self, writes: Vec<Write>) -> Result<(), StateError> {
+        self.commit_tracked(writes).await.map(|_| ())
+    }
+
+    async fn commit_tracked(&self, writes: Vec<Write>) -> Result<Option<(u64, u64)>, StateError> {
         let mut inner = self.inner.lock().await;
         let (tables, version) = &mut *inner;
-        apply_in_memory(tables, writes, version)
+        let before = *version;
+        apply_in_memory(tables, writes, version)?;
+        Ok(Some((before, *version)))
     }
 
     /// Every committed write advances the version counter.

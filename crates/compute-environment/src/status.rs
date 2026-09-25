@@ -227,6 +227,15 @@ pub struct CacheView {
     /// The snapshot it was derived from, when derived whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
+    /// The durable revision it provably represents, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    /// Refreshes answered by that revision alone (nothing else read).
+    #[serde(default)]
+    pub reused: u64,
+    /// This controller's own commits carried onto it without a re-read.
+    #[serde(default)]
+    pub rolled_forward: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -214,10 +214,19 @@ impl ControlState {
 
     /// Apply a batch atomically.
     pub async fn transaction(&self, batch: Batch) -> Result<(), StateError> {
+        self.transaction_tracked(batch).await.map(|_| ())
+    }
+
+    /// Apply a batch atomically, returning the revisions immediately before
+    /// and after it when the backend states them.
+    pub async fn transaction_tracked(
+        &self,
+        batch: Batch,
+    ) -> Result<Option<(u64, u64)>, StateError> {
         let writes = batch.into_writes()?;
         if writes.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
-        self.store.commit(writes).await
+        self.store.commit_tracked(writes).await
     }
 }

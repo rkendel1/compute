@@ -588,6 +588,11 @@ impl Daemon {
             Ok(record) => record.value,
             Err(failure) => {
                 let inner = self.inner.lock().await;
+                // This controller's own evidence, not confirmed by durable
+                // state: the response says so.
+                if let Some(loaded) = inner.loaded {
+                    crate::auth::set_freshness("stale", loaded.as_of);
+                }
                 inner
                     .terminal
                     .get(execution_id)

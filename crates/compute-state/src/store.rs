@@ -358,6 +358,10 @@ pub struct AccessReport {
     pub revision_reads: u64,
     pub transactions: u64,
     pub failed_transactions: u64,
+    /// Queries the authority answered by scanning, by shape: collection,
+    /// filtered fields, and ordering. Field names only, never values.
+    #[serde(default)]
+    pub scans: std::collections::BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,6 +412,16 @@ pub trait StateStore: Send + Sync {
 
     /// Apply every write or none.
     async fn commit(&self, writes: Vec<Write>) -> Result<(), StateError>;
+
+    /// [`StateStore::commit`], also returning the revisions immediately
+    /// before and after this commit, when the backend can state them
+    /// exactly (read inside its commit critical section). A caller that
+    /// holds state proven current at `before` knows it is current at
+    /// `after` once it applies its own writes; any other writer in between
+    /// breaks that chain.
+    async fn commit_tracked(&self, writes: Vec<Write>) -> Result<Option<(u64, u64)>, StateError> {
+        self.commit(writes).await.map(|()| None)
+    }
 
     /// The current authoritative revision. `None` when the backend cannot
     /// report one: then a snapshot is `refresh`-validated and never

@@ -280,7 +280,7 @@ pub(crate) struct Desired {
 ///   history of finished releases is never read here.
 /// - Revisions: only those deployments name, by identity; immutable, so a
 ///   revision the previous snapshot holds is reused.
-pub(crate) fn desired_snapshot() -> compute_state::SnapshotDefinition {
+pub fn desired_snapshot() -> compute_state::SnapshotDefinition {
     use compute_state::{SnapshotDefinition, SnapshotSource};
     SnapshotDefinition::new(
         "compute.controller.desired",
@@ -323,7 +323,7 @@ pub(crate) fn desired_snapshot() -> compute_state::SnapshotDefinition {
 
 /// Observed state this controller writes back: one status per workload.
 /// Bounded by the workloads the control plane has run.
-pub(crate) fn observed_snapshot() -> compute_state::SnapshotDefinition {
+pub fn observed_snapshot() -> compute_state::SnapshotDefinition {
     compute_state::SnapshotDefinition::new(
         "compute.controller.observed",
         vec![compute_state::SnapshotSource::all(
@@ -552,6 +552,14 @@ pub(crate) struct Inner {
     /// The snapshot `desired` was derived from whole; `None` once a
     /// targeted refresh patched it.
     pub desired_from: Option<String>,
+    /// The durable revision `desired` provably represents: the snapshot's,
+    /// carried forward by this controller's own commits. `None` when
+    /// unknown (another writer, an unproven snapshot, an outage).
+    pub desired_revision: Option<compute_state::Revision>,
+    /// Refreshes answered by `desired_revision` alone, and own commits
+    /// chained onto it.
+    pub desired_reused: u64,
+    pub rolled_forward: u64,
     /// When durable state last answered a read.
     pub last_durable_read: Option<DateTime<Utc>>,
     /// The last outage that ended: (began, ended).
@@ -614,6 +622,9 @@ pub struct Daemon {
     /// Documents this controller wrote since desired state was last read,
     /// for a targeted refresh.
     dirty: std::sync::Mutex<Vec<(Collection, String)>>,
+    /// The revisions just before and after each of this controller's
+    /// commits since, to carry its working copy's revision forward.
+    transitions: std::sync::Mutex<Vec<(u64, u64)>>,
     /// What each bundle declares, by bundle identity.
     declared:
         std::sync::Mutex<std::collections::HashMap<String, (Option<u64>, Option<u64>, String)>>,
@@ -857,6 +868,9 @@ impl Daemon {
                 reconcile: ReconcileMetrics::default(),
                 cycle_changes: 0,
                 desired_from: None,
+                desired_revision: None,
+                desired_reused: 0,
+                rolled_forward: 0,
                 last_durable_read: None,
                 last_recovery: None,
             }),
@@ -867,6 +881,7 @@ impl Daemon {
             writes: AtomicU64::new(0),
             last_mutation_ms: std::sync::atomic::AtomicI64::new(0),
             dirty: std::sync::Mutex::new(Vec::new()),
+            transitions: std::sync::Mutex::new(Vec::new()),
             declared: std::sync::Mutex::new(std::collections::HashMap::new()),
             events,
             data_plane,
@@ -1202,6 +1217,12 @@ impl Daemon {
             }
             .into(),
             snapshot_id: inner.desired_from.clone(),
+            revision: inner
+                .desired_revision
+                .as_ref()
+                .map(|revision| revision.value),
+            reused: inner.desired_reused,
+            rolled_forward: inner.rolled_forward,
         };
         let mutation_ms = self.last_mutation_ms.load(Ordering::SeqCst);
         AuthorityView {
@@ -1412,11 +1433,19 @@ impl Daemon {
     /// a change that did not commit.
     pub(crate) async fn apply(&self, change: Change) -> Result<(), EnvironmentError> {
         let targets = change.batch.targets();
-        let result = self.control.transaction(change.batch).await;
-        if result.is_ok() {
+        let result = self.control.transaction_tracked(change.batch).await;
+        if let Ok(transition) = &result {
             self.last_mutation_ms
                 .store(Utc::now().timestamp_millis(), Ordering::SeqCst);
-            self.dirty.lock().expect("dirty").extend(targets);
+            let mut dirty = self.dirty.lock().expect("dirty");
+            if !targets.is_empty() {
+                // A commit whose revisions are not stated cannot be chained.
+                self.transitions
+                    .lock()
+                    .expect("transitions")
+                    .push(transition.unwrap_or((u64::MAX - 1, u64::MAX)));
+            }
+            dirty.extend(targets);
         } else {
             // Unknown what landed: the next refresh reads everything.
             self.dirty
@@ -1436,25 +1465,42 @@ impl Daemon {
 
     /// Read desired state. On failure, the snapshot is kept and the error
     /// is reported; nothing is started or stopped from stale intent.
+    ///
+    /// First this controller's own writes are read back and its own
+    /// commits are chained onto the revision its working copy represents
+    /// ([`Daemon::catch_up`]). Then one revision read decides: unchanged
+    /// means no other writer committed, and nothing else is read;
+    /// changed means the desired-state snapshot is rebuilt.
     pub(crate) async fn refresh(&self) -> Result<(), EnvironmentError> {
         let writes = self.writes.load(Ordering::SeqCst);
-        let dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty"));
         // After an outage nothing derived before it is trusted: the
         // snapshot is rebuilt from durable state, whatever its revision.
         let outage = self.inner.lock().await.degraded_since.is_some();
+        let mut dirty = vec![];
         if outage {
             self.control.snapshots().invalidate_all();
+            dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty"));
+            self.transitions.lock().expect("transitions").clear();
+            self.inner.lock().await.desired_revision = None;
         }
-        let loaded = self.load_desired(outage).await;
+        let loaded = match if outage {
+            Ok(false)
+        } else {
+            self.catch_up(writes).await
+        } {
+            Ok(_) => self.load_desired(outage).await,
+            Err(error) => Err(error),
+        };
         if loaded.is_err() {
             self.dirty.lock().expect("dirty").extend(dirty);
         }
         let mut inner = self.inner.lock().await;
         match loaded {
             Ok(desired) => {
-                if let Some(desired) = desired {
+                if let Some((desired, revision)) = desired {
                     inner.desired_from = desired.snapshot_id.clone();
                     inner.desired = Arc::new(desired);
+                    inner.desired_revision = revision;
                 }
                 inner.last_durable_read = Some(Utc::now());
                 inner.state_error = None;
@@ -1480,10 +1526,10 @@ impl Daemon {
     }
 
     /// Desired state for a read: this controller's last read when it is
-    /// recent and nothing was written since, otherwise a fresh read. When
-    /// durable state is unreachable, the last read is served and the
-    /// response says how old it is; with no read at all, the request
-    /// fails with `state_unavailable`.
+    /// recent (its own writes since are read back by identity), otherwise
+    /// a refresh. When durable state is unreachable, the last read is
+    /// served and the response says how old it is; with no read at all,
+    /// the request fails with `state_unavailable`.
     pub(crate) async fn refresh_for_read(&self) -> Result<(), EnvironmentError> {
         let (cached, degraded) = {
             let inner = self.inner.lock().await;
@@ -1491,11 +1537,15 @@ impl Daemon {
         };
         if let Some(loaded) = cached
             && !degraded
-            && loaded.writes == self.writes.load(Ordering::SeqCst)
             && loaded.at.elapsed() < self.config.read_cache
         {
-            crate::auth::set_freshness("cached", loaded.as_of);
-            return Ok(());
+            let writes = self.writes.load(Ordering::SeqCst);
+            let current =
+                loaded.writes == writes || matches!(self.catch_up(writes).await, Ok(false));
+            if current {
+                crate::auth::set_freshness("cached", loaded.as_of);
+                return Ok(());
+            }
         }
         match self.refresh().await {
             Ok(()) => {
@@ -1521,7 +1571,29 @@ impl Daemon {
     /// which every reconciliation cycle begins with.
     pub(crate) async fn refresh_targeted(&self) -> Result<(), EnvironmentError> {
         let writes = self.writes.load(Ordering::SeqCst);
+        match self.catch_up(writes).await {
+            Ok(false) => Ok(()),
+            // An unknown write, or too many to be worth it: read everything.
+            Ok(true) => self.refresh().await,
+            Err(error) => {
+                self.inner.lock().await.state_error = Some(error.to_string());
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Bring the working copy up to this controller's own writes, without
+    /// reading anything else: read back, by identity, the desired-state
+    /// records it wrote, then chain its commits onto the revision the
+    /// working copy represents. A commit that began exactly where the
+    /// working copy stood moves it to where that commit ended; any gap is
+    /// another writer, and the working copy's revision becomes unknown.
+    ///
+    /// Returns whether a full read is needed (a write whose outcome is
+    /// unknown, or too many to read back).
+    async fn catch_up(&self, writes: u64) -> Result<bool, compute_state::StateError> {
         let dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty"));
+        let transitions = std::mem::take(&mut *self.transitions.lock().expect("transitions"));
         let relevant = dirty
             .iter()
             .filter(|(collection, _)| {
@@ -1541,34 +1613,55 @@ impl Daemon {
             })
             .cloned()
             .collect::<BTreeSet<_>>();
-        if relevant.is_empty() {
-            return Ok(());
-        }
-        // An unknown write, or too many to be worth it: read everything.
         if relevant.iter().any(|(_, id)| id.is_empty()) || relevant.len() > 64 {
-            return self.refresh().await;
+            self.inner.lock().await.desired_revision = None;
+            return Ok(true);
         }
-        let result = self.apply_targets(&relevant).await;
-        match result {
-            Ok(desired) => {
-                let mut inner = self.inner.lock().await;
-                inner.desired_from = None;
-                inner.last_durable_read = Some(Utc::now());
-                inner.desired = Arc::new(desired);
-                inner.loaded = Some(Loaded {
-                    writes,
-                    at: std::time::Instant::now(),
-                    as_of: Utc::now(),
+        if !relevant.is_empty() {
+            match self.apply_targets(&relevant).await {
+                Ok(desired) => {
+                    let mut inner = self.inner.lock().await;
+                    inner.desired_from = None;
+                    inner.last_durable_read = Some(Utc::now());
+                    inner.desired = Arc::new(desired);
+                }
+                Err(error) => {
+                    self.dirty.lock().expect("dirty").extend(dirty);
+                    self.transitions
+                        .lock()
+                        .expect("transitions")
+                        .extend(transitions);
+                    return Err(error);
+                }
+            }
+        }
+        let mut inner = self.inner.lock().await;
+        if let Some(loaded) = &mut inner.loaded {
+            loaded.writes = loaded.writes.max(writes);
+        }
+        if let Some(revision) = inner.desired_revision.clone() {
+            let mut at = revision.value;
+            let mut sorted = transitions;
+            sorted.sort_unstable();
+            for (before, after) in sorted {
+                if after <= at {
+                    continue;
+                }
+                if before != at {
+                    inner.desired_revision = None;
+                    return Ok(false);
+                }
+                at = after;
+            }
+            if at != revision.value {
+                inner.desired_revision = Some(compute_state::Revision {
+                    value: at,
+                    scope: revision.scope,
                 });
-                Ok(())
-            }
-            Err(error) => {
-                self.dirty.lock().expect("dirty").extend(dirty);
-                let mut inner = self.inner.lock().await;
-                inner.state_error = Some(error.to_string());
-                Err(error.into())
+                inner.rolled_forward += 1;
             }
         }
+        Ok(false)
     }
 
     async fn apply_targets(
@@ -1827,26 +1920,29 @@ impl Daemon {
             .and_then(|inner| inner.degraded_since)
     }
 
-    /// Read desired state as one coherent, bounded snapshot of durable
-    /// state (see [`desired_snapshot`]). `None` when the authoritative
-    /// revision has not moved since the last snapshot and the desired
-    /// state already derived from it stands: then one revision read is
-    /// the whole cost.
+    /// Desired state as one coherent, bounded snapshot of durable state
+    /// (see [`desired_snapshot`]), with the revision it represents (none
+    /// when coherence could not be proven). `None` when the authoritative
+    /// revision is the one the working copy already represents: then one
+    /// revision read is the whole cost.
+    #[allow(clippy::type_complexity)]
     async fn load_desired(
         &self,
         force: bool,
-    ) -> Result<Option<Desired>, compute_state::StateError> {
-        let handle = self.control.snapshot(desired_snapshot())?;
-        let (snapshot, refreshed) = handle.refresh(force).await?;
-        let derived = self.inner.lock().await.desired_from.clone();
-        if refreshed == compute_state::Refreshed::Reused
-            && derived.as_deref() == Some(snapshot.identity.id.as_str())
-        {
-            return Ok(None);
+    ) -> Result<Option<(Desired, Option<compute_state::Revision>)>, compute_state::StateError> {
+        let current = self.control.store().revision().await?;
+        if !force && current.is_some() {
+            let mut inner = self.inner.lock().await;
+            if inner.desired_revision == current {
+                inner.desired_reused += 1;
+                return Ok(None);
+            }
         }
+        let handle = self.control.snapshot(desired_snapshot())?;
+        let (snapshot, _) = handle.refresh_at(force, current).await?;
         let mut desired = Desired::from_snapshot(&snapshot)?;
         desired.snapshot_id = Some(snapshot.identity.id.clone());
-        Ok(Some(desired))
+        Ok(Some((desired, snapshot.basis.revision.clone())))
     }
 
     /// Read-your-writes: refresh desired state after a change, then
@@ -1860,7 +1956,20 @@ impl Daemon {
     async fn register_providers(&self) -> Result<(), EnvironmentError> {
         let now = Utc::now();
         let mut change = Change::new();
-        for (id, provider) in &self.pool.configs() {
+        let configs = self.pool.configs();
+        // Every provider's record in one bounded identity read.
+        let ids = configs
+            .keys()
+            .map(|id| ids::provider(id))
+            .collect::<Vec<_>>();
+        let mut existing = self
+            .control
+            .get_many::<ProviderRecord>(&ids)
+            .await?
+            .into_iter()
+            .map(|stored| (stored.id.clone(), stored))
+            .collect::<BTreeMap<_, _>>();
+        for (id, provider) in &configs {
             let record = ProviderRecord {
                 provider_id: id.clone(),
                 kind: match provider.kind {
@@ -1873,7 +1982,7 @@ impl Daemon {
                 observed_at: now,
             };
             let record_id = ids::provider(id);
-            change.batch = match self.control.get::<ProviderRecord>(&record_id).await? {
+            change.batch = match existing.remove(&record_id) {
                 Some(existing) => change.batch.replace(&existing, &record),
                 None => change.batch.create(&record_id, &record),
             };

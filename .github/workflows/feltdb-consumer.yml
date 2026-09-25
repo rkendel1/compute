@@ -1,0 +1,57 @@
+name: feltdb-consumer
+
+# Compute as a consumer of the certified FeltDB release. The feltdb-server
+# the tests run is built from the source shipped inside the @feltdb/core
+# package npm actually resolved, so the build, the model compiler, and the
+# authority under test are one version.
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  certify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the model compiler (lockfile only)
+        working-directory: packages/compute-state-model
+        run: npm ci
+
+      - name: Verify the resolved @feltdb/core is the certified one
+        run: node scripts/feltdb/verify-version.mjs --json
+
+      - name: The checked-in manifest is compute.flow compiled by it
+        working-directory: packages/compute-state-model
+        run: npm run check && npm test
+
+      - name: Build feltdb-server from the resolved package
+        run: |
+          source=packages/compute-state-model/node_modules/@feltdb/core/dist/create/server-source
+          CARGO_TARGET_DIR="$RUNNER_TEMP/feltdb" cargo build --release --manifest-path "$source/Cargo.toml" -p feltdb-server
+          echo "FELTDB_SERVER_BIN=$RUNNER_TEMP/feltdb/release/feltdb-server" >> "$GITHUB_ENV"
+
+      - name: Build the previous FeltDB release, for compatibility
+        run: |
+          mkdir -p "$RUNNER_TEMP/previous"
+          cd "$RUNNER_TEMP/previous"
+          npm pack @feltdb/core@0.11.7 >/dev/null
+          tar xzf feltdb-core-0.11.7.tgz
+          CARGO_TARGET_DIR="$RUNNER_TEMP/feltdb-previous" cargo build --release --manifest-path package/dist/create/server-source/Cargo.toml -p feltdb-server
+          echo "FELTDB_PREVIOUS_SERVER_BIN=$RUNNER_TEMP/feltdb-previous/release/feltdb-server" >> "$GITHUB_ENV"
+
+      - name: State backends conform
+        run: cargo test --locked -p compute-state -p compute-state-memory -p compute-state-file -p compute-state-feltdb
+
+      - name: The FeltDB backend against the certified feltdb-server
+        run: cargo test --locked -p compute-state-feltdb -- --ignored --test-threads 1
+
+      - name: The controller against the certified feltdb-server
+        run: cargo test --locked -p compute-environment --test feltdb_consumer -- --ignored --test-threads 1 --skip benchmark

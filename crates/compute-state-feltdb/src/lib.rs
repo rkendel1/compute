@@ -533,7 +533,10 @@ impl FeltDbState {
             access.last_read_at = Some(chrono::Utc::now());
             match plan["access_method"].as_str() {
                 Some("index" | "index_lookup" | "maintained_count") => access.indexed_queries += 1,
-                Some(_) => access.scanned_queries += 1,
+                Some(_) => {
+                    access.scanned_queries += 1;
+                    *access.scans.entry(shape(query)).or_default() += 1;
+                }
                 None => access.unplanned_queries += 1,
             }
             access.rows_scanned += count("actual_rows_scanned");
@@ -595,6 +598,36 @@ fn record(value: Value) -> Result<Record, StateError> {
     map.retain(|key, _| !key.starts_with('_') && key != "id" && key != IDENTITY_FIELD);
     let value: Map<String, Value> = map;
     Ok(Record { id, version, value })
+}
+
+/// A query's shape, for diagnostics: `Collection[field=,field>] by field`.
+/// Field names and operators only; never values.
+fn shape(query: &Query) -> String {
+    let filters = query
+        .filters
+        .iter()
+        .map(|filter| {
+            format!(
+                "{}{}",
+                filter.field,
+                match filter.comparison {
+                    Comparison::Eq => "=",
+                    Comparison::Gt => ">",
+                    Comparison::Gte => ">=",
+                    Comparison::Lt => "<",
+                    Comparison::Lte => "<=",
+                    Comparison::In => " in",
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let order = query
+        .order_by
+        .as_ref()
+        .map(|(field, descending)| format!(" by {field}{}", if *descending { " desc" } else { "" }))
+        .unwrap_or_default();
+    format!("{}[{filters}]{order}", query.collection.name())
 }
 
 /// A document as FeltDB stores it: with its identity as the indexed
@@ -797,6 +830,12 @@ impl StateStore for FeltDbState {
     }
 
     async fn commit(&self, writes: Vec<Write>) -> Result<(), StateError> {
+        self.commit_tracked(writes).await.map(|_| ())
+    }
+
+    /// FeltDB reports the committed state version immediately before and
+    /// after the transaction, read inside its commit critical section.
+    async fn commit_tracked(&self, writes: Vec<Write>) -> Result<Option<(u64, u64)>, StateError> {
         let mut operations = vec![];
         for write in &writes {
             match write {
@@ -872,12 +911,14 @@ impl StateStore for FeltDbState {
                 .scoped("/v1/transactions", "transaction", transaction.clone())
                 .await
             {
-                Ok(_) => {
+                Ok(result) => {
                     self.account(|access| {
                         access.transactions += 1;
                         access.last_mutation_at = Some(chrono::Utc::now());
                     });
-                    return Ok(());
+                    return Ok(result["state_before"]
+                        .as_u64()
+                        .zip(result["state_after"].as_u64()));
                 }
                 Err(refusal) if refusal.status == 0 && attempts == 1 => continue,
                 Err(refusal) => {

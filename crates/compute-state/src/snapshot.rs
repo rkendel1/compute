@@ -447,8 +447,18 @@ impl SnapshotHandle {
     /// authoritative revision has not moved since it was built (`force`
     /// skips that check). A failed build leaves the active one in place.
     pub async fn refresh(&self, force: bool) -> Result<(Arc<Snapshot>, Refreshed), StateError> {
+        self.refresh_at(force, None).await
+    }
+
+    /// [`SnapshotHandle::refresh`], with the current revision already read
+    /// by the caller, so it is not read twice.
+    pub async fn refresh_at(
+        &self,
+        force: bool,
+        current: Option<Revision>,
+    ) -> Result<(Arc<Snapshot>, Refreshed), StateError> {
         let _single = self.building.lock().await;
-        let result = self.build(force).await;
+        let result = self.build(force, current).await;
         let mut state = self.state.lock().expect("snapshot");
         match result {
             Ok((snapshot, Refreshed::Reused)) => {
@@ -478,11 +488,17 @@ impl SnapshotHandle {
         }
     }
 
-    async fn build(&self, force: bool) -> Result<(Arc<Snapshot>, Refreshed), StateError> {
+    async fn build(
+        &self,
+        force: bool,
+        current: Option<Revision>,
+    ) -> Result<(Arc<Snapshot>, Refreshed), StateError> {
         let started = Instant::now();
         let previous = self.current();
-        let mut before = self.read_revision().await?;
-        let mut reads = 1;
+        let (mut before, mut reads) = match current {
+            Some(current) => (Some(current), 0),
+            None => (self.read_revision().await?, 1),
+        };
         if !force
             && let (Some(previous), Some(current)) = (&previous, &before)
             && previous.basis.revision.as_ref() == Some(current)

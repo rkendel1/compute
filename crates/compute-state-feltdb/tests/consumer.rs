@@ -114,6 +114,7 @@ fn generation_one_manifest() -> String {
     let added = [
         "Execution.project_id",
         "Receipt.project_id",
+        "Event.environment",
         "Event.project",
         "Event.deployment_id",
     ];
@@ -934,4 +935,126 @@ async fn state_written_by_the_previous_server_opens_on_this_one() {
     );
     drop(old_again);
     let _ = std::fs::remove_dir_all(data);
+}
+
+/// FeltDB's own cost per request, by the size of the state it holds:
+/// `/health` (no state), `/v1/state/version` (a revision read), and an
+/// indexed identity lookup, timed from the client, beside the execution
+/// time FeltDB reports for the query itself. FeltDB-only: Compute does
+/// nothing but send the request. Measures; asserts nothing about time.
+#[tokio::test]
+#[ignore = "requires FELTDB_SERVER_BIN; measures"]
+async fn feltdb_request_cost_by_state_size() {
+    let authority = authority("compute-request-cost").await;
+    let store = connect(&authority.config).await;
+    let state = ControlState::new(store.clone());
+    let http = reqwest::Client::new();
+    let revision = http
+        .get(format!(
+            "{}/v1/application?application_id={}&environment=production",
+            authority.config.url, authority.config.application_id
+        ))
+        .bearer_auth(&authority.token)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["revision_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut rows = vec![];
+    let mut written = 0usize;
+    for size in [0usize, 500, 1000, 2000, 4000] {
+        while written < size {
+            let mut batch = Batch::new();
+            for index in written..(written + 200).min(size) {
+                batch = batch.create(
+                    &compute_state::ids::execution(&format!("cost_{index}")),
+                    &execution(index % 20, index),
+                );
+            }
+            written = (written + 200).min(size);
+            state.transaction(batch).await.unwrap();
+        }
+        let time = |started: std::time::Instant| started.elapsed().as_secs_f64() * 1000.0;
+        let median = |mut values: Vec<f64>| {
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            (values[values.len() / 2] * 100.0).round() / 100.0
+        };
+        let (mut health, mut version, mut lookup, mut server) = (vec![], vec![], vec![], vec![]);
+        for _ in 0..15 {
+            let started = std::time::Instant::now();
+            http.get(format!("{}/health", authority.config.url))
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            health.push(time(started));
+            let started = std::time::Instant::now();
+            http.get(format!(
+                "{}/v1/state/version?application_id={}&environment=production&revision_id={}",
+                authority.config.url, authority.config.application_id, revision
+            ))
+            .bearer_auth(&authority.token)
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+            version.push(time(started));
+            let started = std::time::Instant::now();
+            let response = http
+                .post(format!("{}/v1/query", authority.config.url))
+                .bearer_auth(&authority.token)
+                .json(&json!({
+                    "application_id": authority.config.application_id,
+                    "environment": "production",
+                    "revision_id": revision,
+                    "query": { "collection": "Execution", "limit": 1,
+                               "filter": { "operator": "eq", "field": "record_id", "value": "exe_absent" } },
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap();
+            lookup.push(time(started));
+            server.push(
+                response["plan"]["execution_timing"]["total_ms"]
+                    .as_f64()
+                    .or_else(|| response["plan"]["timing"]["total_ms"].as_f64())
+                    .unwrap_or(-1.0),
+            );
+        }
+        let row = json!({
+            "executions": size,
+            "revision": StateStore::revision(&*store).await.unwrap().unwrap().value,
+            "health_p50_ms": median(health),
+            "state_version_p50_ms": median(version),
+            "indexed_lookup_p50_ms": median(lookup),
+            "indexed_lookup_server_reported_p50_ms": median(server),
+        });
+        println!("{row}");
+        rows.push(row);
+    }
+    if let Ok(path) = std::env::var("COMPUTE_CERTIFICATION_OUT") {
+        std::fs::write(
+            std::path::Path::new(&path).join("feltdb-request-cost.json"),
+            serde_json::to_string_pretty(&json!({
+                "format": "compute.feltdb-request-cost@1",
+                "scope": "feltdb-only",
+                "samples_per_size": 15,
+                "rows": rows,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&authority.data);
 }

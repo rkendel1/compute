@@ -357,12 +357,19 @@ async fn revisions_and_snapshots(state: &ControlState, run: &str) {
         .await
         .unwrap()
         .unwrap();
-    state
-        .transaction(Batch::new().delete(&stored))
+    let transition = state
+        .transaction_tracked(Batch::new().delete(&stored))
         .await
         .unwrap();
     let deleted = store.revision().await.unwrap().unwrap();
     assert!(deleted.value > created.value, "a delete moves the revision");
+    if let Some((before, after)) = transition {
+        assert_eq!(
+            before, created.value,
+            "a commit states the revision just before it"
+        );
+        assert_eq!(after, deleted.value, "and the revision it produced");
+    }
 
     // A bounded snapshot: two environments of this run and the events of
     // this run, nothing else.
