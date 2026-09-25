@@ -297,6 +297,35 @@ app compute {
     index domain using hash(domain)
   }
 
+  collection OperatorCredential {
+    credential_id: text
+    operator_id: text
+    scopes: json
+    verifier: text
+    description: text?
+    created_at: datetime
+    expires_at: datetime?
+    revoked_at: datetime?
+    rotated_from: text?
+    created_by: text?
+    index operator_id using hash(operator_id)
+  }
+
+  collection Audit {
+    request_id: text
+    operator_id: text
+    credential_id: text?
+    operation: text
+    resource: text
+    resource_id: text?
+    result: text
+    status: integer
+    error_kind: text?
+    detail: json
+    at: datetime
+    index operator_id using hash(operator_id)
+  }
+
   policy Project {
     read: authenticated
     write: authenticated
@@ -370,6 +399,14 @@ app compute {
     write: authenticated
   }
   policy Certificate {
+    read: authenticated
+    write: authenticated
+  }
+  policy OperatorCredential {
+    read: authenticated
+    write: authenticated
+  }
+  policy Audit {
     read: authenticated
     write: authenticated
   }

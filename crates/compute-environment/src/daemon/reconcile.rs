@@ -45,6 +45,15 @@ impl Daemon {
             return;
         }
         self.flush_pending_evidence().await;
+        self.flush_pending_audit().await;
+        // Credentials revoked or created elsewhere reach this node's cache.
+        if self
+            .authority
+            .loaded_at()
+            .is_none_or(|at| Utc::now() - at > chrono::TimeDelta::seconds(30))
+        {
+            let _ = self.load_credentials().await;
+        }
         if self.advance_releases().await && self.refresh().await.is_err() {
             return;
         }

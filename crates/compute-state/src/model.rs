@@ -785,6 +785,62 @@ pub struct CertificateRecord {
 }
 document!(CertificateRecord, Certificate);
 
+/// An operator's credential for the Compute API. The secret is shown once,
+/// when the credential is created or rotated; control state keeps only its
+/// SHA-256 verifier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorCredentialRecord {
+    pub credential_id: String,
+    pub operator_id: String,
+    /// `compute.read`, `compute.execute`, `compute.deploy`,
+    /// `compute.operate`, `compute.admin`.
+    pub scopes: Vec<String>,
+    /// Hex SHA-256 of the secret. Never the secret.
+    pub verifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<DateTime<Utc>>,
+    /// The credential this one replaced by rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotated_from: Option<String>,
+    /// Who created it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+}
+document!(OperatorCredentialRecord, OperatorCredential);
+
+/// One remote operation: who asked for what, and what happened. It never
+/// carries secret material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditRecord {
+    pub request_id: String,
+    pub operator_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+    /// The API operation, `METHOD /route/{template}`.
+    pub operation: String,
+    /// The kind of resource acted on, and which one.
+    pub resource: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    /// `accepted`, `rejected` (authentication or authorization), or
+    /// `failed` (the operation itself).
+    pub result: String,
+    pub status: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    /// Identifiers the operation produced or named: deployment, revision,
+    /// execution, credential.
+    #[serde(default)]
+    pub detail: serde_json::Map<String, serde_json::Value>,
+    pub at: DateTime<Utc>,
+}
+document!(AuditRecord, Audit);
+
 /// Lifecycle event kinds.
 pub mod events {
     pub const ENVIRONMENT_CREATED: &str = "environment.created";
@@ -837,6 +893,31 @@ pub mod events {
     pub const ROUTE_SWITCHED: &str = "network.route.switched";
     pub const DAEMON_STARTED: &str = "daemon.started";
     pub const DAEMON_STOPPED: &str = "daemon.stopped";
+    // The controller: its lifecycle, recovery, and upgrades.
+    pub const CONTROLLER_STARTED: &str = "controller.started";
+    pub const CONTROLLER_READY: &str = "controller.ready";
+    pub const CONTROLLER_DEGRADED: &str = "controller.degraded";
+    pub const CONTROLLER_STOPPED: &str = "controller.stopped";
+    pub const WORKLOAD_DISCOVERED: &str = "workload.discovered";
+    pub const WORKLOAD_REATTACHED: &str = "workload.reattached";
+    pub const WORKLOAD_RESTARTED: &str = "workload.restarted";
+    pub const WORKLOAD_ORPHANED: &str = "workload.orphaned";
+    pub const RECONCILE_STARTED: &str = "reconcile.started";
+    pub const RECONCILE_FINISHED: &str = "reconcile.finished";
+    pub const UPGRADE_STARTED: &str = "upgrade.started";
+    pub const UPGRADE_READY: &str = "upgrade.ready";
+    pub const UPGRADE_COMPLETED: &str = "upgrade.completed";
+    pub const UPGRADE_FAILED: &str = "upgrade.failed";
+    pub const UPGRADE_ROLLED_BACK: &str = "upgrade.rolled_back";
+    pub const FELTDB_UNAVAILABLE: &str = "feltdb.unavailable";
+    pub const FELTDB_RECOVERED: &str = "feltdb.recovered";
+    // Operators.
+    pub const AUTHENTICATION_FAILED: &str = "auth.authentication_failed";
+    pub const AUTHORIZATION_DENIED: &str = "auth.authorization_denied";
+    pub const CREDENTIAL_CREATED: &str = "credential.created";
+    pub const CREDENTIAL_REVOKED: &str = "credential.revoked";
+    pub const CREDENTIAL_ROTATED: &str = "credential.rotated";
+    pub const CREDENTIAL_BOOTSTRAPPED: &str = "credential.bootstrapped";
 }
 
 /// A 24-hex-digit digest of length-prefixed parts.
@@ -908,6 +989,15 @@ pub mod ids {
 
     pub fn domain(name: &str) -> String {
         format!("dom_{}", short_digest(&[name]))
+    }
+
+    /// Credentials keep their generated ID.
+    pub fn credential(credential_id: &str) -> String {
+        credential_id.to_string()
+    }
+
+    pub fn audit(request_id: &str) -> String {
+        format!("aud_{}", request_id.trim_start_matches("req_"))
     }
 
     pub fn dns_record(domain: &str, record_type: &str) -> String {

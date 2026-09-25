@@ -848,8 +848,10 @@ async function refreshDaemon() {
     box.replaceChildren(
       state(status.state_available ? 'healthy' : 'failed', status.state_available ? `${status.state.kind} state` : 'control state unavailable'),
       h('span', { class: 'chip', title: status.state.location }, status.instance_id));
-  } catch {
-    box.replaceChildren(state('failed', 'daemon unreachable'));
+  } catch (error) {
+    box.replaceChildren(state('failed', error.kind === 'authentication_failed'
+      ? 'credential required: set a token'
+      : error.kind === 'authorization_denied' ? 'credential lacks compute.read' : 'daemon unreachable'));
   }
 }
 
@@ -860,17 +862,44 @@ function scheduleRefresh() {
   refreshTimer = setTimeout(render, 250);
 }
 
-function listen() {
-  const source = new EventSource('/events/stream');
-  source.onmessage = scheduleRefresh;
-  source.addEventListener('lagged', scheduleRefresh);
-  source.onerror = () => { setTimeout(refreshDaemon, 1000); };
+// Lifecycle events over fetch rather than EventSource, so the stream
+// carries the same Authorization header as every other request and the
+// credential never appears in a URL.
+async function listen() {
+  let after = 0;
+  for (;;) {
+    try {
+      const headers = { Accept: 'text/event-stream' };
+      if (token()) headers.Authorization = `Bearer ${token()}`;
+      const response = await fetch(`/events/stream?after=${after}`, { headers });
+      if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let end;
+        while ((end = buffer.indexOf('\n\n')) >= 0) {
+          const message = buffer.slice(0, end);
+          buffer = buffer.slice(end + 2);
+          for (const line of message.split('\n')) {
+            if (line.startsWith('id: ')) after = Math.max(after, Number(line.slice(4)) || 0);
+          }
+          if (message.includes('data: ') || message.startsWith('event: lagged')) scheduleRefresh();
+        }
+      }
+    } catch { /* reconnect below */ }
+    refreshDaemon();
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
 }
 
 document.getElementById('token').addEventListener('click', () => {
   const input = h('input', { id: 'token-input', type: 'password', value: token(), autocomplete: 'off' });
   modal('API token', h('div', {},
-    h('p', {}, 'When the daemon requires a bearer token for changes, enter it here. It is kept for this browser tab only.'),
+    h('p', {}, 'A production daemon requires an operator credential (compute auth create) on every request. It is kept for this browser tab only.'),
     h('label', { for: 'token-input' }, 'Token'), input), [
     h('button', { onclick: close }, 'Cancel'),
     h('button', { class: 'primary', onclick: () => {

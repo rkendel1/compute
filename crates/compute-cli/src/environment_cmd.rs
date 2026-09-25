@@ -90,10 +90,26 @@ pub struct StartCommand {
     /// Host ports available for logical port bindings, as LOW-HIGH.
     #[arg(long, default_value = "20000-29999")]
     pub port_range: String,
-    /// Environment variable holding the token required for mutations.
-    /// Without it, the API accepts every request; bind to localhost.
+    /// Development only: environment variable holding a shared token that
+    /// every request must carry. Production uses operator credentials
+    /// (`compute auth create`) instead and refuses this.
     #[arg(long)]
     pub require_token_env: Option<String>,
+    /// Explicit development mode: plaintext HTTP, and requests without a
+    /// credential are admitted as the `development` operator.
+    #[arg(long, conflicts_with = "production")]
+    pub insecure: bool,
+    /// Production mode: TLS and an operator credential on every request,
+    /// reads included. Implied by --tls-cert. Defaults to `[api] mode`.
+    #[arg(long)]
+    pub production: bool,
+    /// PEM certificate chain for the API. Reloaded when the file changes.
+    /// Defaults to `[api] tls_cert`.
+    #[arg(long, requires = "tls_key")]
+    pub tls_cert: Option<PathBuf>,
+    /// PEM private key for the API. Defaults to `[api] tls_key`.
+    #[arg(long, requires = "tls_cert")]
+    pub tls_key: Option<PathBuf>,
     /// How often the reconciler rereads desired state, in milliseconds.
     #[arg(long, default_value_t = 5000)]
     pub reconcile_interval_ms: u64,
@@ -133,30 +149,38 @@ pub struct DaemonCommand {
     pub json: bool,
 }
 
-/// Mutations require the configured token; reads are open to anyone who
-/// can reach the API.
-struct TokenAuthorizer {
-    token: String,
-}
-
-#[async_trait::async_trait]
-impl compute_provider::ProviderAuthorizer for TokenAuthorizer {
-    async fn authorize(
-        &self,
-        operation: compute_provider::ProviderOperation,
-        authorization: Option<&str>,
-    ) -> Result<(), compute_provider::ProviderError> {
-        if operation == compute_provider::ProviderOperation::EnvironmentRead
-            || authorization == Some(format!("Bearer {}", self.token).as_str())
-        {
-            Ok(())
-        } else {
-            Err(compute_provider::ProviderError::new(
-                compute_provider::ProviderErrorKind::Unauthorized,
-                "this daemon requires a bearer token for changes",
-            ))
-        }
+/// Decide how the API is secured, failing closed. Plaintext without
+/// credentials is allowed only when asked for (`--insecure`) or on a
+/// loopback listener; a reachable listener needs TLS.
+pub(crate) fn security_mode(
+    listen: std::net::SocketAddr,
+    insecure: bool,
+    production: bool,
+    tls: bool,
+) -> compute_core::Result<(compute_environment::auth::SecurityMode, String)> {
+    use compute_environment::auth::SecurityMode;
+    if production && !tls {
+        return Err(ComputeError::InvalidWorkload(
+            "production mode requires TLS: pass --tls-cert and --tls-key (or [api] tls_cert and tls_key); Compute does not downgrade to plaintext".into(),
+        ));
     }
+    if insecure {
+        return Ok((SecurityMode::Development, "--insecure".into()));
+    }
+    if tls {
+        return Ok((SecurityMode::Production, "TLS is configured".into()));
+    }
+    if listen.ip().is_loopback() {
+        return Ok((
+            SecurityMode::Development,
+            format!(
+                "loopback listener {listen} without TLS; pass --production with TLS for a reachable node"
+            ),
+        ));
+    }
+    Err(ComputeError::InvalidWorkload(format!(
+        "refusing to serve plaintext without credentials on {listen}: configure TLS (--tls-cert, --tls-key) for production, or pass --insecure for development"
+    )))
 }
 
 fn port_range(value: &str, what: &str) -> compute_core::Result<(u16, u16)> {
@@ -225,33 +249,83 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
         .map(compute_placement::PoolConfig::load)
         .transpose()
         .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
-    let authorizer: std::sync::Arc<dyn compute_provider::ProviderAuthorizer> =
-        match &command.require_token_env {
-            Some(name) => std::sync::Arc::new(TokenAuthorizer {
-                token: std::env::var(name)
-                    .map_err(|_| ComputeError::InvalidWorkload(format!("{name} is not set")))?,
-            }),
-            None => std::sync::Arc::new(compute_provider::AllowAllAuthorizer),
-        };
+    let api = command.state.api()?;
+    let production =
+        command.production || (!command.insecure && api.mode.as_deref() == Some("production"));
+    if let Some(mode) = api.mode.as_deref()
+        && !matches!(mode, "production" | "development")
+    {
+        return Err(ComputeError::InvalidWorkload(format!(
+            "[api] mode must be production or development, not {mode}"
+        )));
+    }
+    let tls = match (
+        command.tls_cert.clone().or(api.tls_cert),
+        command.tls_key.clone().or(api.tls_key),
+    ) {
+        (Some(certificate), Some(key)) => {
+            Some(compute_environment::tls::ApiTls::load(certificate, key).map_err(error)?)
+        }
+        (None, None) => None,
+        _ => {
+            return Err(ComputeError::InvalidWorkload(
+                "TLS needs both a certificate and a key".into(),
+            ));
+        }
+    };
+    let (mode, reason) =
+        security_mode(command.listen, command.insecure, production, tls.is_some())?;
+    config.security = compute_environment::auth::SecurityConfig {
+        mode,
+        reason,
+        tls: tls.is_some(),
+        legacy_token: command
+            .require_token_env
+            .as_deref()
+            .map(|name| {
+                std::env::var(name)
+                    .map_err(|_| ComputeError::InvalidWorkload(format!("{name} is not set")))
+            })
+            .transpose()?,
+    };
+    config.api_tls = tls.clone();
     let listener = tokio::net::TcpListener::bind(command.listen).await?;
     let daemon = compute_environment::Daemon::start(config)
         .await
         .map_err(error)?;
     let status = daemon.status().await;
+    let scheme = if tls.is_some() { "https" } else { "http" };
     if command.json {
         print_json(&status);
     } else {
         eprintln!(
-            "Compute daemon {} listening on http://{} (control state: {} {}; UI: http://{}/ui/)",
+            "Compute daemon {} listening on {scheme}://{} (control state: {} {}; UI: {scheme}://{}/ui/)",
             status.instance_id,
             command.listen,
             status.state.kind,
             status.state.location,
             command.listen
         );
+        match mode {
+            compute_environment::auth::SecurityMode::Production => {
+                let bootstrap = command.state_dir.join("bootstrap-admin.token");
+                if bootstrap.is_file() {
+                    eprintln!(
+                        "Production mode: every request needs an operator credential. The bootstrap admin token is in {}; create operator credentials with it and revoke it.",
+                        bootstrap.display()
+                    );
+                } else {
+                    eprintln!("Production mode: every request needs an operator credential.");
+                }
+            }
+            compute_environment::auth::SecurityMode::Development => eprintln!(
+                "WARNING: development mode ({}): requests without a credential are admitted. Never expose this listener.",
+                daemon.info().await.security.reason
+            ),
+        }
     }
     let server: tokio::task::JoinHandle<std::io::Result<()>> = tokio::spawn(
-        compute_environment::api::serve(listener, daemon.clone(), authorizer),
+        compute_environment::api::serve(listener, daemon.clone(), tls),
     );
     tokio::select! {
         result = server => match result {
@@ -291,6 +365,19 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
     if let Some(name) = &command.require_token_env {
         child.arg("--require-token-env").arg(name);
     }
+    if command.insecure {
+        child.arg("--insecure");
+    }
+    if command.production {
+        child.arg("--production");
+    }
+    if let (Some(certificate), Some(key)) = (&command.tls_cert, &command.tls_key) {
+        child
+            .arg("--tls-cert")
+            .arg(certificate)
+            .arg("--tls-key")
+            .arg(key);
+    }
     if let Some(range) = &command.instance_port_range {
         child.arg("--instance-port-range").arg(range);
     }
@@ -316,20 +403,33 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
         child.process_group(0);
     }
     let spawned = child.spawn()?;
-    let endpoint = format!("http://{}", command.listen);
-    let client = DaemonClient::new(&endpoint).map_err(error)?;
+    // Readiness is `/health`: it needs no credential, so a production
+    // daemon can be detached too. The daemon's own certificate is trusted
+    // for this check.
+    let tls = command.tls_cert.is_some();
+    let endpoint = format!(
+        "{}://{}",
+        if tls { "https" } else { "http" },
+        command.listen
+    );
+    let mut client = DaemonClient::new(&endpoint).map_err(error)?;
+    if let Some(certificate) = &command.tls_cert {
+        client = client
+            .trusting_pem(&std::fs::read(certificate)?)
+            .map_err(error)?;
+    }
     let runtime = tokio::runtime::Handle::current();
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
-        let status: Result<DaemonStatus, _> =
-            tokio::task::block_in_place(|| runtime.block_on(client.get("/status")));
-        if let Ok(status) = status {
+        let health: Result<serde_json::Value, _> =
+            tokio::task::block_in_place(|| runtime.block_on(client.get("/health")));
+        if let Ok(health) = health {
             if command.json {
-                print_json(&status);
+                print_json(&health);
             } else {
                 println!(
                     "Compute daemon {} started (pid {}) at {endpoint}",
-                    status.instance_id,
+                    health["instance_id"].as_str().unwrap_or_default(),
                     spawned.id()
                 );
             }
@@ -1813,24 +1913,10 @@ pub async fn events(command: EventsCommand) -> compute_core::Result<()> {
         return Ok(());
     }
     // Follow the event stream the UI uses.
-    let endpoint = command.daemon.endpoint();
-    let authority = endpoint
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-    let mut stream = tokio::net::TcpStream::connect(&authority).await?;
-    stream
-        .write_all(
-            format!(
-                "GET /events/stream?after={last}&{query} HTTP/1.1\r\nHost: {authority}\r\nAccept: text/event-stream\r\n\r\n"
-            )
-            .as_bytes(),
-        )
-        .await?;
-    let mut lines = tokio::io::BufReader::new(stream).lines();
+    let mut lines = client
+        .stream_lines(&format!("/events/stream?after={last}&{query}"))
+        .await
+        .map_err(error)?;
     while let Some(line) = lines.next_line().await? {
         if let Some(data) = line.strip_prefix("data: ")
             && let Ok(event) = serde_json::from_str::<EventRecord>(data)
@@ -1970,4 +2056,34 @@ pub async fn service(command: ServiceCommand) -> compute_core::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::security_mode;
+    use compute_environment::auth::SecurityMode;
+
+    #[test]
+    fn the_api_fails_closed_rather_than_downgrading() {
+        let loopback = "127.0.0.1:8787".parse().unwrap();
+        let reachable = "0.0.0.0:8787".parse().unwrap();
+        // Production without TLS material never starts.
+        assert!(security_mode(loopback, false, true, false).is_err());
+        assert!(security_mode(reachable, false, true, false).is_err());
+        // A reachable listener needs TLS unless development is explicit.
+        assert!(security_mode(reachable, false, false, false).is_err());
+        assert_eq!(
+            security_mode(reachable, true, false, false).unwrap().0,
+            SecurityMode::Development
+        );
+        // TLS means production.
+        assert_eq!(
+            security_mode(reachable, false, false, true).unwrap().0,
+            SecurityMode::Production
+        );
+        // Loopback without TLS is development, and says why.
+        let (mode, reason) = security_mode(loopback, false, false, false).unwrap();
+        assert_eq!(mode, SecurityMode::Development);
+        assert!(reason.contains("loopback"));
+    }
 }

@@ -18,6 +18,7 @@ mod direct;
 mod distribution;
 mod environment_cmd;
 mod network_cmd;
+mod node_cmd;
 mod placement_certification;
 mod policy_certification;
 mod policy_cmd;
@@ -104,6 +105,10 @@ enum Commands {
     ControlPlane(control_state::ControlPlaneCommand),
     /// Serve compute.remote@1 with durable filesystem-backed jobs.
     Serve(ServeCommand),
+    /// Operator credentials and the audit trail
+    Auth(node_cmd::AuthCommand),
+    /// The Compute controller on this node: identity, health, upgrades
+    Node(node_cmd::NodeCommand),
 }
 
 #[derive(Args, Debug)]
@@ -1256,6 +1261,8 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Certificate(command) => network_cmd::certificate(command).await?,
         Commands::Network(command) => network_cmd::network(command).await?,
         Commands::Events(command) => environment_cmd::events(command).await?,
+        Commands::Auth(command) => node_cmd::auth(command).await?,
+        Commands::Node(command) => node_cmd::node(command).await?,
         Commands::Service(command) => environment_cmd::service(command).await?,
         Commands::ControlPlane(command) => control_state::control_plane(command).await?,
         Commands::Remote(command) => match command.command {

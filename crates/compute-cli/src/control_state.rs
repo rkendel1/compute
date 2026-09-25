@@ -70,6 +70,21 @@ struct ConfigFile {
     network: Option<NetworkSection>,
     #[serde(default)]
     release: Option<ReleaseSection>,
+    #[serde(default)]
+    api: Option<ApiSection>,
+}
+
+/// `[api]`: how the Compute API is secured.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiSection {
+    /// `production` requires TLS and operator credentials.
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub tls_cert: Option<PathBuf>,
+    #[serde(default)]
+    pub tls_key: Option<PathBuf>,
 }
 
 /// `[network]`: endpoints, ingress, DNS providers, and certificates.
@@ -212,6 +227,23 @@ impl StateOptions {
             }
         }
         Ok((network, file.release.unwrap_or_default()))
+    }
+
+    /// The `[api]` section, with paths resolved against the file.
+    pub fn api(&self) -> compute_core::Result<ApiSection> {
+        let (path, file) = self.file()?;
+        let mut api = file.api.unwrap_or_default();
+        let base = path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        for path in [&mut api.tls_cert, &mut api.tls_key].into_iter().flatten() {
+            if path.is_relative() {
+                *path = base.join(&*path);
+            }
+        }
+        Ok(api)
     }
 
     /// The FeltDB CA certificate, when one is configured.

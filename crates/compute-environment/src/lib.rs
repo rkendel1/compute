@@ -17,11 +17,14 @@
 //! operation.
 
 pub mod api;
+pub mod auth;
 pub mod client;
 pub mod daemon;
+pub mod identity;
 pub mod manifest;
 pub mod model;
 pub mod status;
+pub mod tls;
 
 pub use compute_network::acme::AcmeConfig;
 pub use compute_network::dns::DnsProviderConfig;

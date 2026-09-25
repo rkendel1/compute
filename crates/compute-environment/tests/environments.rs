@@ -815,38 +815,31 @@ async fn environment_placement_participates_in_provider_selection() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_api_is_the_only_path_and_it_is_authorized() {
-    struct ReadOnly;
-    #[async_trait::async_trait]
-    impl compute_provider::ProviderAuthorizer for ReadOnly {
-        async fn authorize(
-            &self,
-            operation: compute_provider::ProviderOperation,
-            authorization: Option<&str>,
-        ) -> Result<(), compute_provider::ProviderError> {
-            match (operation, authorization) {
-                (compute_provider::ProviderOperation::EnvironmentRead, _) => Ok(()),
-                (_, Some("Bearer operator")) => Ok(()),
-                _ => Err(compute_provider::ProviderError::new(
-                    compute_provider::ProviderErrorKind::Unauthorized,
-                    "operator token required",
-                )),
-            }
-        }
-    }
-    let harness = harness().await;
+    // A development daemon with a shared token: every request, reads
+    // included, must carry it.
+    let state = tempfile::tempdir().unwrap();
+    let provider = Arc::new(LocalProvider::new());
+    let mut config = memory_config(state.path());
+    config.provider = provider.clone();
+    config.security.legacy_token = Some("operator".into());
+    let harness = Harness {
+        daemon: Daemon::start(config).await.unwrap(),
+        provider,
+        _state: state,
+    };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(api::serve(
-        listener,
-        harness.daemon.clone(),
-        Arc::new(ReadOnly),
-    ));
+    let server = tokio::spawn(api::serve(listener, harness.daemon.clone(), None));
     let anonymous = client::DaemonClient::new(&endpoint).unwrap();
     let operator = client::DaemonClient::new(&endpoint)
         .unwrap()
         .with_bearer_token("operator");
 
-    let status: DaemonStatus = anonymous.get("/status").await.unwrap();
+    assert!(matches!(
+        anonymous.get::<DaemonStatus>("/status").await,
+        Err(EnvironmentError::Unauthorized(_))
+    ));
+    let status: DaemonStatus = operator.get("/status").await.unwrap();
     assert_eq!(status.instance_id, harness.daemon.instance_id());
     assert!(matches!(
         anonymous
@@ -867,12 +860,12 @@ async fn the_api_is_the_only_path_and_it_is_authorized() {
         .unwrap();
     assert_eq!(added.name, "authboundry");
     running(&harness.daemon, &[("prod", "authboundry", "api")]).await;
-    let by_id: EnvironmentView = anonymous
+    let by_id: EnvironmentView = operator
         .get(&format!("/environments/{}", created.environment_id))
         .await
         .unwrap();
     assert_eq!(by_id.name, "prod");
-    let listed: Vec<EnvironmentSummary> = anonymous.get("/environments").await.unwrap();
+    let listed: Vec<EnvironmentSummary> = operator.get("/environments").await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].project_count, 1);
     let stopped: ProjectView = operator
@@ -880,21 +873,21 @@ async fn the_api_is_the_only_path_and_it_is_authorized() {
         .await
         .unwrap();
     assert_eq!(stopped.actual_state, ActualState::Stopped);
-    let first: EnvironmentView = anonymous.get("/environments/prod/status").await.unwrap();
-    let second: EnvironmentView = anonymous.get("/environments/prod/status").await.unwrap();
+    let first: EnvironmentView = operator.get("/environments/prod/status").await.unwrap();
+    let second: EnvironmentView = operator.get("/environments/prod/status").await.unwrap();
     assert_eq!(
         serde_json::to_string(&first).unwrap(),
         serde_json::to_string(&second).unwrap(),
         "deterministic JSON"
     );
     assert!(matches!(
-        anonymous
+        operator
             .get::<EnvironmentView>("/environments/missing")
             .await,
         Err(EnvironmentError::NotFound(_))
     ));
     let _: serde_json::Value = operator.delete("/environments/prod").await.unwrap();
-    let listed: Vec<EnvironmentSummary> = anonymous.get("/environments").await.unwrap();
+    let listed: Vec<EnvironmentSummary> = operator.get("/environments").await.unwrap();
     assert!(listed.is_empty());
     let _: serde_json::Value = operator.post::<(), _>("/shutdown", None).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), server)

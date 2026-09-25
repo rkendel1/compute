@@ -33,10 +33,12 @@ pub enum Collection {
     Domain,
     DnsRecord,
     Certificate,
+    OperatorCredential,
+    Audit,
 }
 
 impl Collection {
-    pub const ALL: [Collection; 19] = [
+    pub const ALL: [Collection; 21] = [
         Self::Project,
         Self::ProjectRevision,
         Self::Environment,
@@ -56,6 +58,8 @@ impl Collection {
         Self::Domain,
         Self::DnsRecord,
         Self::Certificate,
+        Self::OperatorCredential,
+        Self::Audit,
     ];
 
     /// The collection's name in every backend, and in `compute.flow`.
@@ -80,6 +84,8 @@ impl Collection {
             Self::Domain => "Domain",
             Self::DnsRecord => "DnsRecord",
             Self::Certificate => "Certificate",
+            Self::OperatorCredential => "OperatorCredential",
+            Self::Audit => "Audit",
         }
     }
 

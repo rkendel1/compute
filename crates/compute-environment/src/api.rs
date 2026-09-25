@@ -2,22 +2,23 @@
 //! the UI, and AppPort. [`ROUTES`] lists every operation; the UI uses no
 //! other.
 //!
-//! Every request passes through the provider authorization boundary: reads
-//! as `EnvironmentRead`, every mutation as `EnvironmentMutate`. Every
-//! execution a mutation causes passes through admission. There is no other
-//! path into the daemon.
+//! Every request is authenticated to an operator and authorized against
+//! the scope its route declares ([`crate::auth::required_scope`]); reads
+//! included. Every mutation is recorded in the audit trail with its request
+//! ID, operator, and credential. Every execution a mutation causes passes
+//! through admission. There is no other path into the daemon.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use compute_provider::{ProviderAuthorizer, ProviderOperation};
 use serde::Serialize;
 use serde_json::Value;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 use crate::EnvironmentError;
+use crate::auth::{Principal, RequestContext, required_scope};
 use crate::daemon::{Daemon, EventFilter};
 use crate::model::*;
 
@@ -27,7 +28,15 @@ const MAX_BODY_BYTES: usize = 512 * 1024 * 1024;
 /// Every operation of the Compute API, as `(method, path)`. Parameters are
 /// written `{name}`. The UI/API parity test holds the UI to this list.
 pub const ROUTES: &[(&str, &str)] = &[
+    ("GET", "/health"),
+    ("GET", "/info"),
     ("GET", "/status"),
+    ("GET", "/auth/whoami"),
+    ("GET", "/auth/credentials"),
+    ("POST", "/auth/credentials"),
+    ("POST", "/auth/credentials/{credential}/revoke"),
+    ("POST", "/auth/credentials/{credential}/rotate"),
+    ("GET", "/audit"),
     ("POST", "/shutdown"),
     ("GET", "/environments"),
     ("POST", "/environments"),
@@ -123,20 +132,33 @@ const UI_HTML: &str = include_str!("../ui/index.html");
 const UI_SCRIPT: &str = include_str!("../ui/app.js");
 const UI_STYLE: &str = include_str!("../ui/app.css");
 
-/// Serve the API until the daemon shuts down.
+/// A connection: plaintext or TLS.
+trait Connection: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Connection for T {}
+type Stream = Box<dyn Connection>;
+
+/// Serve the API until the daemon shuts down. With `tls`, every connection
+/// is TLS; a handshake that fails never reaches the API.
 pub async fn serve(
     listener: TcpListener,
     daemon: Arc<Daemon>,
-    authorizer: Arc<dyn ProviderAuthorizer>,
+    tls: Option<Arc<crate::tls::ApiTls>>,
 ) -> std::io::Result<()> {
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
                 let daemon = daemon.clone();
-                let authorizer = authorizer.clone();
+                let tls = tls.clone();
                 tokio::spawn(async move {
-                    let _ = handle(stream, daemon, authorizer).await;
+                    let stream: Stream = match tls {
+                        Some(tls) => match tls.accept(stream).await {
+                            Ok(stream) => Box::new(stream),
+                            Err(_) => return,
+                        },
+                        None => Box::new(stream),
+                    };
+                    let _ = handle(stream, daemon).await;
                 });
             }
             () = daemon.wait_for_shutdown() => return Ok(()),
@@ -173,7 +195,7 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
-async fn read_request(stream: &mut TcpStream) -> Result<Request, EnvironmentError> {
+async fn read_request(stream: &mut Stream) -> Result<Request, EnvironmentError> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 8192];
     let header_end = loop {
@@ -258,13 +280,14 @@ fn reason(status: u16) -> &'static str {
 }
 
 async fn write_response(
-    stream: &mut TcpStream,
+    stream: &mut Stream,
     status: u16,
     content_type: &str,
     body: &[u8],
+    request_id: &str,
 ) -> std::io::Result<()> {
     let head = format!(
-        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nX-Compute-Api: {API_VERSION}\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nX-Compute-Api: {API_VERSION}\r\nX-Request-Id: {request_id}\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         reason(status),
         body.len()
     );
@@ -274,12 +297,13 @@ async fn write_response(
 }
 
 async fn write_json(
-    stream: &mut TcpStream,
+    stream: &mut Stream,
     status: u16,
     value: &impl Serialize,
+    request_id: &str,
 ) -> std::io::Result<()> {
     let body = serde_json::to_vec(value).unwrap_or_default();
-    write_response(stream, status, "application/json", &body).await
+    write_response(stream, status, "application/json", &body, request_id).await
 }
 
 enum Response {
@@ -289,19 +313,18 @@ enum Response {
     Stream(EventFilter),
 }
 
-async fn handle(
-    mut stream: TcpStream,
-    daemon: Arc<Daemon>,
-    authorizer: Arc<dyn ProviderAuthorizer>,
-) -> std::io::Result<()> {
+async fn handle(mut stream: Stream, daemon: Arc<Daemon>) -> std::io::Result<()> {
+    let request_id = crate::auth::request_id();
     let result = match read_request(&mut stream).await {
-        Ok(request) => route(&daemon, authorizer.as_ref(), request).await,
+        Ok(request) => dispatch(&daemon, request, &request_id).await,
         Err(error) => Err(error),
     };
     match result {
-        Ok(Response::Json(status, value)) => write_json(&mut stream, status, &value).await,
+        Ok(Response::Json(status, value)) => {
+            write_json(&mut stream, status, &value, &request_id).await
+        }
         Ok(Response::Static(content_type, body)) => {
-            write_response(&mut stream, 200, content_type, body.as_bytes()).await
+            write_response(&mut stream, 200, content_type, body.as_bytes(), &request_id).await
         }
         Ok(Response::Redirect(location)) => {
             let head = format!(
@@ -315,17 +338,295 @@ async fn handle(
             write_json(
                 &mut stream,
                 error.status(),
-                &serde_json::json!({ "kind": error.kind(), "message": error.message() }),
+                &serde_json::json!({
+                    "kind": error.kind(),
+                    "message": error.message(),
+                    "request_id": request_id,
+                }),
+                &request_id,
             )
             .await
         }
     }
 }
 
+/// Authenticate, authorize, run, and audit one request.
+async fn dispatch(
+    daemon: &Arc<Daemon>,
+    request: Request,
+    request_id: &str,
+) -> Result<Response, EnvironmentError> {
+    let segments = request
+        .path
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(percent_decode)
+        .collect::<Vec<_>>();
+    let segments = segments.iter().map(String::as_str).collect::<Vec<_>>();
+    let method = request.method.clone();
+    // The UI's static assets and liveness carry no state.
+    match (method.as_str(), segments.as_slice()) {
+        ("GET", []) => return Ok(Response::Redirect("/ui/")),
+        ("GET", ["ui"]) => return Ok(Response::Static("text/html; charset=utf-8", UI_HTML)),
+        ("GET", ["ui", "app.js"]) => {
+            return Ok(Response::Static(
+                "text/javascript; charset=utf-8",
+                UI_SCRIPT,
+            ));
+        }
+        ("GET", ["ui", "app.css"]) => {
+            return Ok(Response::Static("text/css; charset=utf-8", UI_STYLE));
+        }
+        ("GET", ["health"]) => return Ok(Response::Json(200, daemon.health().await)),
+        _ => {}
+    }
+    let mutation = method != "GET";
+    let operation = operation_name(&method, &segments);
+    let (resource, resource_id) = resource_of(&segments);
+    let audit = |operator: &str,
+                 credential: Option<String>,
+                 result: &str,
+                 status: u16,
+                 error: Option<&EnvironmentError>,
+                 detail: serde_json::Map<String, Value>| {
+        compute_state::AuditRecord {
+            request_id: request_id.to_string(),
+            operator_id: operator.to_string(),
+            credential_id: credential,
+            operation: operation.clone(),
+            resource: resource.clone(),
+            resource_id: resource_id.clone(),
+            result: result.into(),
+            status,
+            error_kind: error.map(|error| error.kind().to_string()),
+            detail,
+            at: chrono::Utc::now(),
+        }
+    };
+    let principal = match daemon.authenticate(request.authorization.as_deref()) {
+        Ok(principal) => principal,
+        Err(error) => {
+            daemon
+                .refused(
+                    compute_state::events::AUTHENTICATION_FAILED,
+                    format!("{operation}: {}", error.message()),
+                    serde_json::json!({ "request_id": request_id, "operation": operation }),
+                )
+                .await;
+            if mutation {
+                daemon
+                    .audit(audit(
+                        "anonymous",
+                        None,
+                        "rejected",
+                        error.status(),
+                        Some(&error),
+                        Default::default(),
+                    ))
+                    .await;
+            }
+            return Err(error);
+        }
+    };
+    let scope = required_scope(&method, &segments);
+    if !principal.allows(scope) {
+        let error = EnvironmentError::Forbidden(format!(
+            "{operation} needs {}; {} has {}",
+            scope.as_str(),
+            principal.operator_id,
+            principal
+                .scopes
+                .iter()
+                .map(|scope| scope.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        daemon
+            .refused(
+                compute_state::events::AUTHORIZATION_DENIED,
+                format!("{} was denied {operation}", principal.operator_id),
+                serde_json::json!({
+                    "request_id": request_id,
+                    "operator_id": principal.operator_id,
+                    "credential_id": principal.credential_id,
+                    "operation": operation,
+                    "scope": scope.as_str(),
+                }),
+            )
+            .await;
+        if mutation {
+            daemon
+                .audit(audit(
+                    &principal.operator_id,
+                    principal.credential_id.clone(),
+                    "rejected",
+                    error.status(),
+                    Some(&error),
+                    Default::default(),
+                ))
+                .await;
+        }
+        return Err(error);
+    }
+    let context = RequestContext {
+        request_id: request_id.to_string(),
+        operator_id: principal.operator_id.clone(),
+        credential_id: principal.credential_id.clone(),
+    };
+    let result = crate::auth::REQUEST
+        .scope(context, route(daemon, &principal, request, &segments))
+        .await;
+    if mutation {
+        let record = match &result {
+            Ok(Response::Json(status, value)) => audit(
+                &principal.operator_id,
+                principal.credential_id.clone(),
+                "accepted",
+                *status,
+                None,
+                detail_of(value),
+            ),
+            Ok(_) => audit(
+                &principal.operator_id,
+                principal.credential_id.clone(),
+                "accepted",
+                200,
+                None,
+                Default::default(),
+            ),
+            Err(error) => audit(
+                &principal.operator_id,
+                principal.credential_id.clone(),
+                "failed",
+                error.status(),
+                Some(error),
+                Default::default(),
+            ),
+        };
+        daemon.audit(record).await;
+    }
+    result
+}
+
+/// `METHOD /route/{template}`: the route with identifiers replaced by the
+/// names of their parameters, as [`ROUTES`] lists it.
+fn operation_name(method: &str, segments: &[&str]) -> String {
+    for (route_method, route) in ROUTES {
+        if *route_method != method {
+            continue;
+        }
+        let template = route
+            .trim_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        if template.len() == segments.len()
+            && template
+                .iter()
+                .zip(segments)
+                .all(|(expected, actual)| expected.starts_with('{') || expected == actual)
+        {
+            return format!("{method} {route}");
+        }
+    }
+    format!("{method} /{}", segments.join("/"))
+}
+
+/// The resource a route acts on and its identifier: the innermost named
+/// collection with an identifier after it.
+fn resource_of(segments: &[&str]) -> (String, Option<String>) {
+    let singular = |name: &str| {
+        match name {
+            "environments" => "environment",
+            "projects" => "project",
+            "workloads" => "workload",
+            "deployments" => "deployment",
+            "domains" => "domain",
+            "certificates" => "certificate",
+            "credentials" => "credential",
+            "services" => "service",
+            "executions" => "execution",
+            "receipts" => "receipt",
+            other => other,
+        }
+        .to_string()
+    };
+    let mut resource = (
+        segments
+            .first()
+            .map(|name| singular(name))
+            .unwrap_or_default(),
+        None,
+    );
+    let mut path = vec![];
+    let mut index = 0;
+    while index < segments.len() {
+        let name = segments[index];
+        if let Some(id) = segments.get(index + 1)
+            && [
+                "environments",
+                "projects",
+                "workloads",
+                "deployments",
+                "domains",
+                "certificates",
+                "credentials",
+                "services",
+            ]
+            .contains(&name)
+            && !matches!(*id, "promote" | "reconcile")
+        {
+            path.push(id.to_string());
+            resource = (singular(name), Some(path.join("/")));
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    resource
+}
+
+/// Identifiers a mutation's response names, for the audit record. Never
+/// a token: credential responses carry one, and it is left out.
+fn detail_of(value: &Value) -> serde_json::Map<String, Value> {
+    const KEYS: &[&str] = &[
+        "deployment_id",
+        "revision",
+        "revision_id",
+        "project",
+        "environment",
+        "execution_id",
+        "credential_id",
+        "status",
+    ];
+    let mut detail = serde_json::Map::new();
+    let mut collect = |object: &serde_json::Map<String, Value>| {
+        for key in KEYS {
+            if let Some(value) = object.get(*key)
+                && (value.is_string() || value.is_number())
+                && !detail.contains_key(*key)
+            {
+                detail.insert((*key).into(), value.clone());
+            }
+        }
+    };
+    if let Some(object) = value.as_object() {
+        collect(object);
+        for nested in ["credential", "record", "deployment"] {
+            if let Some(object) = object.get(nested).and_then(Value::as_object) {
+                collect(object);
+            }
+        }
+    }
+    detail.remove("token");
+    detail
+}
+
 /// Server-sent events: the events after `after`, then new ones as they are
 /// recorded. The UI refreshes what an event names.
 async fn stream_events(
-    mut stream: TcpStream,
+    mut stream: Stream,
     daemon: Arc<Daemon>,
     filter: EventFilter,
 ) -> std::io::Result<()> {
@@ -375,7 +676,7 @@ async fn stream_events(
 }
 
 async fn write_event(
-    stream: &mut TcpStream,
+    stream: &mut Stream,
     event: &compute_state::EventRecord,
 ) -> std::io::Result<()> {
     let data = serde_json::to_string(event).unwrap_or_default();
@@ -400,42 +701,11 @@ fn parse<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, EnvironmentEr
 
 async fn route(
     daemon: &Arc<Daemon>,
-    authorizer: &dyn ProviderAuthorizer,
+    principal: &Principal,
     request: Request,
+    segments: &[&str],
 ) -> Result<Response, EnvironmentError> {
-    let segments = request
-        .path
-        .trim_matches('/')
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .map(percent_decode)
-        .collect::<Vec<_>>();
-    let segments = segments.iter().map(String::as_str).collect::<Vec<_>>();
     let method = request.method.as_str();
-    // The UI's static assets carry no state.
-    match (method, segments.as_slice()) {
-        ("GET", []) => return Ok(Response::Redirect("/ui/")),
-        ("GET", ["ui"]) => return Ok(Response::Static("text/html; charset=utf-8", UI_HTML)),
-        ("GET", ["ui", "app.js"]) => {
-            return Ok(Response::Static(
-                "text/javascript; charset=utf-8",
-                UI_SCRIPT,
-            ));
-        }
-        ("GET", ["ui", "app.css"]) => {
-            return Ok(Response::Static("text/css; charset=utf-8", UI_STYLE));
-        }
-        _ => {}
-    }
-    let operation = if method == "GET" {
-        ProviderOperation::EnvironmentRead
-    } else {
-        ProviderOperation::EnvironmentMutate
-    };
-    authorizer
-        .authorize(operation, request.authorization.as_deref())
-        .await
-        .map_err(|error| EnvironmentError::Unauthorized(error.message))?;
     let body = request.body.as_slice();
     let query = &request.query;
     let ok = |value: Value| Ok(Response::Json(200, value));
@@ -446,8 +716,29 @@ async fn route(
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(default)
     };
-    match (method, segments.as_slice()) {
+    match (method, segments) {
+        ("GET", ["info"]) => ok(to_value(daemon.info().await)?),
         ("GET", ["status"]) => ok(to_value(daemon.status().await)?),
+
+        // Operators.
+        ("GET", ["auth", "whoami"]) => ok(to_value(principal)?),
+        ("GET", ["auth", "credentials"]) => ok(to_value(daemon.credentials().await?)?),
+        ("POST", ["auth", "credentials"]) => created(to_value(
+            daemon.create_credential(principal, parse(body)?).await?,
+        )?),
+        ("POST", ["auth", "credentials", id, "revoke"]) => {
+            ok(to_value(daemon.revoke_credential(id).await?)?)
+        }
+        ("POST", ["auth", "credentials", id, "rotate"]) => created(to_value(
+            daemon
+                .rotate_credential(principal, id, parse(body)?)
+                .await?,
+        )?),
+        ("GET", ["audit"]) => ok(to_value(
+            daemon
+                .audit_records(query.get("operator").map(String::as_str), limit(100))
+                .await?,
+        )?),
         ("POST", ["shutdown"]) => {
             let daemon = daemon.clone();
             tokio::spawn(async move { daemon.shutdown().await });

@@ -58,6 +58,45 @@ pub struct DaemonStatus {
     pub running_services: usize,
 }
 
+/// Which controller is running, how its API is secured, and what it can
+/// run: `GET /info`, `compute node info`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControllerInfo {
+    pub api: String,
+    pub controller: crate::identity::ControllerIdentity,
+    pub instance_id: String,
+    pub node_id: String,
+    pub pid: u32,
+    pub started_at: DateTime<Utc>,
+    pub security: SecurityView,
+    pub control_plane: ControlPlaneView,
+    /// Runtimes this node can execute, as its provider reports them.
+    pub runtimes: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityView {
+    pub mode: crate::auth::SecurityMode,
+    pub reason: String,
+    /// Whether requests without a credential are refused.
+    pub authentication_required: bool,
+    pub tls: crate::tls::TlsStatus,
+    pub active_credentials: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlPlaneView {
+    pub state: BackendInfo,
+    /// `normal`, or `degraded_control_plane` while durable control state is
+    /// unreachable: workloads keep running, reads are served from the last
+    /// snapshot, and mutations are refused with `state_unavailable`.
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reconciled_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Evidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]

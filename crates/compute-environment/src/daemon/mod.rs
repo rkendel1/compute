@@ -16,6 +16,7 @@ mod deploy;
 mod execute;
 mod lifecycle;
 pub(crate) mod network;
+mod operators;
 mod processes;
 mod reconcile;
 mod release;
@@ -88,6 +89,10 @@ pub struct DaemonConfig {
     pub restart_delay: Duration,
     /// How often the reconciler rereads desired state.
     pub reconcile_interval: Duration,
+    /// How the API authenticates operators.
+    pub security: crate::auth::SecurityConfig,
+    /// The API's TLS, when it terminates TLS.
+    pub api_tls: Option<Arc<crate::tls::ApiTls>>,
 }
 
 impl DaemonConfig {
@@ -110,6 +115,8 @@ impl DaemonConfig {
             network: NetworkConfig::default(),
             restart_delay: Duration::from_secs(1),
             reconcile_interval: Duration::from_secs(5),
+            security: crate::auth::SecurityConfig::default(),
+            api_tls: None,
         }
     }
 }
@@ -356,6 +363,10 @@ pub(crate) struct Inner {
     /// Execution records whose evidence could not be written yet because
     /// control state was unreachable; written once it is.
     pub pending_evidence: Vec<execute::PendingEvidence>,
+    /// Audit records not yet written to control state.
+    pub pending_audit: Vec<compute_state::AuditRecord>,
+    /// Refused requests recorded as events this minute: (minute, count).
+    pub refusals: (i64, u32),
 }
 
 /// The most recently terminalized executions, by execution ID.
@@ -409,6 +420,7 @@ pub struct Daemon {
     dns: BTreeMap<String, Result<Arc<dyn DnsProvider>, String>>,
     wake: Notify,
     shutdown: tokio::sync::watch::Sender<bool>,
+    authority: crate::auth::Authority,
     _lock: std::fs::File,
 }
 
@@ -548,6 +560,17 @@ impl Daemon {
             })
             .collect();
         let endpoints = Endpoints::new(config.network.endpoint_address);
+        if config.security.mode == crate::auth::SecurityMode::Production
+            && config.security.legacy_token.is_some()
+        {
+            return Err(EnvironmentError::Invalid(
+                "a shared token is not a production credential; issue operator credentials with `compute auth create`".into(),
+            ));
+        }
+        let authority = crate::auth::Authority::new(
+            config.security.clone(),
+            config.state_dir.join("credentials.json"),
+        );
         let (shutdown, _) = tokio::sync::watch::channel(false);
         let (events, _) = broadcast::channel(1024);
         let daemon = Arc::new(Self {
@@ -566,6 +589,8 @@ impl Daemon {
                 network: network::NetworkRuntime::default(),
                 terminal: TerminalLog::default(),
                 pending_evidence: Vec::new(),
+                pending_audit: Vec::new(),
+                refusals: (0, 0),
             }),
             reconciling: Mutex::new(()),
             pool,
@@ -581,9 +606,12 @@ impl Daemon {
             dns,
             wake: Notify::new(),
             shutdown,
+            authority,
             _lock: lock,
         });
         daemon.register_providers().await?;
+        daemon.load_credentials().await?;
+        daemon.bootstrap_admin().await?;
         let started = Change::new();
         let started = daemon.event(
             started,
@@ -678,6 +706,74 @@ impl Daemon {
         }
     }
 
+    /// The API's TLS acceptor, when it terminates TLS.
+    pub fn api_tls(&self) -> Option<Arc<crate::tls::ApiTls>> {
+        self.config.api_tls.clone()
+    }
+
+    /// Liveness without authentication: whether this controller answers,
+    /// and whether its control plane is degraded. Nothing else.
+    pub async fn health(&self) -> Value {
+        let inner = self.inner.lock().await;
+        serde_json::json!({
+            "status": if inner.state_error.is_none() { "ok" } else { "degraded_control_plane" },
+            "instance_id": self.instance_id,
+            "pid": std::process::id(),
+        })
+    }
+
+    pub async fn info(&self) -> ControllerInfo {
+        let runtimes =
+            match compute_provider::ComputeProvider::capabilities(self.config.provider.as_ref())
+                .await
+            {
+                Ok(capabilities) => {
+                    serde_json::to_value(&capabilities.inventory).unwrap_or_default()
+                }
+                Err(error) => serde_json::json!({ "error": error.to_string() }),
+            };
+        let inner = self.inner.lock().await;
+        let security = &self.authority.config;
+        ControllerInfo {
+            api: crate::api::API_VERSION.into(),
+            controller: crate::identity::ControllerIdentity::current(),
+            instance_id: self.instance_id.clone(),
+            node_id: self.node_id.clone(),
+            pid: std::process::id(),
+            started_at: self.started_at,
+            security: SecurityView {
+                mode: security.mode,
+                reason: security.reason.clone(),
+                authentication_required: security.mode == crate::auth::SecurityMode::Production
+                    || security.legacy_token.is_some(),
+                tls: self
+                    .config
+                    .api_tls
+                    .as_ref()
+                    .map_or_else(crate::tls::TlsStatus::disabled, |tls| tls.status()),
+                active_credentials: self
+                    .authority
+                    .records()
+                    .iter()
+                    .filter(|record| {
+                        crate::auth::CredentialView::of(record, Utc::now()).status == "active"
+                    })
+                    .count(),
+            },
+            control_plane: ControlPlaneView {
+                state: self.config.state.backend(),
+                mode: if inner.state_error.is_none() {
+                    "normal".into()
+                } else {
+                    "degraded_control_plane".into()
+                },
+                error: inner.state_error.clone(),
+                last_reconciled_at: inner.last_reconciled_at,
+            },
+            runtimes,
+        }
+    }
+
     // ---- Control-state changes --------------------------------------------
 
     /// Add an event to a change. Sequences increase across daemon restarts.
@@ -690,6 +786,24 @@ impl Daemon {
         data: Value,
     ) -> Change {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        // Who asked for it, when a request caused it.
+        let data = match (crate::auth::RequestContext::current(), data) {
+            (Some(request), Value::Object(mut map)) => {
+                map.entry("request_id")
+                    .or_insert_with(|| request.request_id.clone().into());
+                map.entry("operator_id")
+                    .or_insert_with(|| request.operator_id.clone().into());
+                if let Some(credential) = request.credential_id {
+                    map.entry("credential_id").or_insert(credential.into());
+                }
+                Value::Object(map)
+            }
+            (Some(request), Value::Null) => serde_json::json!({
+                "request_id": request.request_id,
+                "operator_id": request.operator_id,
+            }),
+            (_, data) => data,
+        };
         let record = EventRecord {
             sequence,
             kind: kind.into(),

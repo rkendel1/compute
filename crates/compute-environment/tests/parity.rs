@@ -65,9 +65,10 @@ fn ui_operations() -> BTreeSet<(String, String)> {
         let path = &rest[1..rest[1..].find(quote).unwrap() + 1];
         operations.insert((method.to_string(), normalize(path)));
     }
-    for (index, _) in UI.match_indices("new EventSource('") {
-        let rest = &UI[index + "new EventSource('".len()..];
-        operations.insert(("GET".into(), normalize(&rest[..rest.find('\'').unwrap()])));
+    // The event stream is read with fetch, so it carries the credential.
+    for (index, _) in UI.match_indices("fetch(`") {
+        let rest = &UI[index + "fetch(`".len()..];
+        operations.insert(("GET".into(), normalize(&rest[..rest.find('`').unwrap()])));
     }
     operations
 }
@@ -122,11 +123,7 @@ async fn every_api_route_is_served() {
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(api::serve(
-        listener,
-        daemon.clone(),
-        Arc::new(compute_provider::AllowAllAuthorizer),
-    ));
+    tokio::spawn(api::serve(listener, daemon.clone(), None));
     let client = client::DaemonClient::new(&endpoint).unwrap();
     for (method, path) in ROUTES {
         if *path == "/shutdown" || *path == "/events/stream" {
@@ -140,7 +137,8 @@ async fn every_api_route_is_served() {
             .replace("{execution}", "exec_none")
             .replace("{receipt}", "sha256:none")
             .replace("{service}", "none")
-            .replace("{domain}", "none.example.com");
+            .replace("{domain}", "none.example.com")
+            .replace("{credential}", "cred_none");
         let result = match *method {
             "GET" => client.get::<serde_json::Value>(&concrete).await.map(|_| ()),
             "POST" => client
