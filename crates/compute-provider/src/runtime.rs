@@ -18,10 +18,105 @@ use walkdir::WalkDir;
 
 use crate::{ProviderError, ProviderErrorKind};
 
+const EMBEDDED_LOCK: &[u8] = include_bytes!("../../../distribution/runtime-lock.json");
+
+/// Where a provider may acquire each pinned runtime distribution from.
+///
+/// Production uses the embedded `distribution/runtime-lock.json`. Another
+/// catalog can be supplied (tests, air-gapped mirrors) only as an artifact
+/// overlay: it may name fewer runtimes and different artifacts, but every
+/// runtime it names keeps the embedded version and executable, because
+/// execution checks prepared runtimes against those. Artifacts it names are
+/// acquired, digest-verified, and prepared exactly as the embedded ones are,
+/// and the prepared manifest records its lock digest, so receipts show which
+/// catalog a runtime came from.
+#[derive(Debug, Clone)]
+pub struct RuntimeCatalog {
+    bytes: Vec<u8>,
+    lock: RuntimeLock,
+    embedded: bool,
+}
+
+impl RuntimeCatalog {
+    /// Environment variable naming a catalog file to use instead of the
+    /// embedded one.
+    pub const ENV: &'static str = "COMPUTE_RUNTIME_CATALOG";
+
+    pub fn embedded() -> Self {
+        Self {
+            bytes: EMBEDDED_LOCK.to_vec(),
+            lock: serde_json::from_slice(EMBEDDED_LOCK).expect("valid embedded runtime lock"),
+            embedded: true,
+        }
+    }
+
+    /// A catalog with no managed runtimes.
+    pub fn empty() -> Self {
+        let bytes = br#"{"schema_version":2,"runtimes":{}}"#.to_vec();
+        Self {
+            lock: serde_json::from_slice(&bytes).expect("valid empty catalog"),
+            bytes,
+            embedded: false,
+        }
+    }
+
+    /// `$COMPUTE_RUNTIME_CATALOG` when it is set, otherwise the embedded
+    /// catalog. An invalid catalog is an error, never a silent fallback.
+    pub fn from_environment() -> Result<Self, ProviderError> {
+        match std::env::var_os(Self::ENV) {
+            Some(path) => Self::from_path(Path::new(&path)),
+            None => Ok(Self::embedded()),
+        }
+    }
+
+    pub fn from_path(path: &Path) -> Result<Self, ProviderError> {
+        let bytes = fs::read(path)
+            .map_err(|error| unavailable(format!("runtime catalog {}: {error}", path.display())))?;
+        Self::from_bytes(bytes)
+    }
+
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ProviderError> {
+        let lock: RuntimeLock = serde_json::from_slice(&bytes)
+            .map_err(|error| unavailable(format!("invalid runtime catalog: {error}")))?;
+        if lock.schema_version != 2 {
+            return Err(unavailable(format!(
+                "unsupported runtime catalog schema {}",
+                lock.schema_version
+            )));
+        }
+        let embedded = Self::embedded();
+        for (name, runtime) in &lock.runtimes {
+            let Some(pinned) = embedded.lock.runtimes.get(name) else {
+                return Err(unavailable(format!(
+                    "runtime catalog names {name}, which Compute does not pin"
+                )));
+            };
+            if runtime.version != pinned.version || runtime.executable != pinned.executable {
+                return Err(unavailable(format!(
+                    "runtime catalog changes {name} to {} at {}; a catalog may replace artifacts only, not the pinned {} at {}",
+                    runtime.version, runtime.executable, pinned.version, pinned.executable
+                )));
+            }
+        }
+        let embedded = bytes == EMBEDDED_LOCK;
+        Ok(Self {
+            bytes,
+            lock,
+            embedded,
+        })
+    }
+
+    /// `sha256:` identity of the catalog document.
+    pub fn identity(&self) -> String {
+        sha256_identity(&self.bytes)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct RuntimeManager {
     root: PathBuf,
     lock: RuntimeLock,
+    catalog: RuntimeCatalog,
     mutation: Mutex<()>,
 }
 
@@ -95,20 +190,28 @@ struct PreparedRuntime {
 }
 
 impl RuntimeManager {
-    pub(crate) fn new(provider_key: &str) -> Self {
-        let lock: RuntimeLock =
-            serde_json::from_slice(include_bytes!("../../../distribution/runtime-lock.json"))
-                .expect("valid embedded runtime lock");
-        assert_eq!(lock.schema_version, 2, "supported runtime lock schema");
+    pub(crate) fn new(provider_key: &str, catalog: RuntimeCatalog) -> Self {
+        assert_eq!(
+            catalog.lock.schema_version, 2,
+            "supported runtime lock schema"
+        );
         let root = std::env::var_os("COMPUTE_RUNTIME_STORE")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                let key = format!("{:x}", Sha256::digest(provider_key.as_bytes()));
+                // Runtimes prepared from another catalog never share a store
+                // with the embedded catalog's.
+                let key = if catalog.embedded {
+                    provider_key.to_owned()
+                } else {
+                    format!("{provider_key}{}", catalog.identity())
+                };
+                let key = format!("{:x}", Sha256::digest(key.as_bytes()));
                 std::env::temp_dir().join("compute-runtime-store").join(key)
             });
         Self {
             root,
-            lock,
+            lock: catalog.lock.clone(),
+            catalog,
             mutation: Mutex::new(()),
         }
     }
@@ -266,6 +369,10 @@ impl RuntimeManager {
             .mutation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Other processes on this node (a daemon and its supervisor, or two
+        // daemons) share the store: one prepares, the rest find it ready.
+        fs::create_dir_all(&self.root).map_err(io_error)?;
+        let _store = StoreLock::exclusive(&self.root.join(".prepare.lock"))?;
         let status = self.status(distribution);
         if status.status == RuntimeLifecycleStatus::Ready {
             return Ok(RuntimePreparation {
@@ -387,11 +494,7 @@ impl RuntimeManager {
             &self.root.join("runtime-inventory.json"),
             &manifest.runtimes,
         )?;
-        fs::write(
-            self.root.join("runtime-lock.json"),
-            include_bytes!("../../../distribution/runtime-lock.json"),
-        )
-        .map_err(io_error)?;
+        fs::write(self.root.join("runtime-lock.json"), &self.catalog.bytes).map_err(io_error)?;
         let _ = fs::remove_file(self.failure_path(&distribution.id));
         let final_status = self.status(distribution);
         if final_status.status != RuntimeLifecycleStatus::Ready {
@@ -417,10 +520,13 @@ impl RuntimeManager {
 
     fn empty_manifest(&self) -> RuntimeManifest {
         let platform = PlatformIdentity::current();
-        let lock = include_bytes!("../../../distribution/runtime-lock.json");
+        let lock = EMBEDDED_LOCK;
         // Runtime preparation is mutable provider state, not a new Compute
         // distribution. Keep the provider distribution identity stable while
         // exact runtime distribution identities are recorded independently.
+        // A supplied catalog changes artifacts only: the artifact digest each
+        // receipt carries identifies what was prepared, and `build` names the
+        // catalog.
         let lock_identity = sha256_identity(lock);
         let descriptor = serde_json::to_vec(&serde_json::json!({
             "kind": "source-development",
@@ -442,8 +548,20 @@ impl RuntimeManager {
             os: platform.os,
             architecture: platform.architecture,
             runtime_lock_sha256: format!("{:x}", Sha256::digest(lock)),
-            certification_status: "runtime-prepared".into(),
-            build: serde_json::json!({"format": "compute-runtime-provider-v1", "reproducible": true}),
+            certification_status: if self.catalog.embedded {
+                "runtime-prepared".into()
+            } else {
+                "runtime-prepared-from-supplied-catalog".into()
+            },
+            build: if self.catalog.embedded {
+                serde_json::json!({"format": "compute-runtime-provider-v1", "reproducible": true})
+            } else {
+                serde_json::json!({
+                    "format": "compute-runtime-provider-v1",
+                    "reproducible": true,
+                    "runtime_catalog": self.catalog.identity(),
+                })
+            },
             runtimes: BTreeMap::new(),
         }
     }
@@ -457,6 +575,32 @@ impl RuntimeManager {
         self.root
             .join("failures")
             .join(id.trim_start_matches("sha256:"))
+    }
+}
+
+/// An exclusive, advisory lock on a runtime store, held across processes
+/// until dropped.
+struct StoreLock {
+    _file: File,
+}
+
+impl StoreLock {
+    fn exclusive(path: &Path) -> Result<Self, ProviderError> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)
+            .map_err(io_error)?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // Released when the file is closed.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(io_error(std::io::Error::last_os_error()));
+            }
+        }
+        Ok(Self { _file: file })
     }
 }
 
@@ -713,6 +857,68 @@ mod tests {
     use super::*;
     use compute_core::RuntimeKind;
 
+    #[test]
+    fn a_supplied_catalog_may_replace_artifacts_but_not_pinned_runtimes() {
+        assert!(RuntimeCatalog::embedded().embedded);
+        let replaced = br#"{"schema_version":2,"runtimes":{"node":{"version":"24.18.0","executable":"runtimes/node/bin/node","artifacts":{}}}}"#;
+        let catalog = RuntimeCatalog::from_bytes(replaced.to_vec()).unwrap();
+        assert!(!catalog.embedded);
+        assert_ne!(catalog.identity(), RuntimeCatalog::embedded().identity());
+        for (document, refusal) in [
+            (
+                r#"{"schema_version":2,"runtimes":{"node":{"version":"22.0.0","executable":"runtimes/node/bin/node"}}}"#,
+                "replace artifacts only",
+            ),
+            (
+                r#"{"schema_version":2,"runtimes":{"node":{"version":"24.18.0","executable":"bin/node"}}}"#,
+                "replace artifacts only",
+            ),
+            (
+                r#"{"schema_version":2,"runtimes":{"cobol":{"version":"1","executable":"runtimes/cobol"}}}"#,
+                "does not pin",
+            ),
+            (r#"{"schema_version":1,"runtimes":{}}"#, "schema"),
+        ] {
+            let error = RuntimeCatalog::from_bytes(document.as_bytes().to_vec()).unwrap_err();
+            assert!(error.message.contains(refusal), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn a_fixture_catalog_prepares_through_the_full_lifecycle_without_a_network() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = crate::testing::host_fixture_catalog(directory.path()).unwrap();
+        let manager = RuntimeManager {
+            root: directory.path().join("store"),
+            lock: fixture.catalog.lock.clone(),
+            catalog: fixture.catalog,
+            mutation: Mutex::new(()),
+        };
+        let resolution = manager.resolve(
+            ProviderRuntimeRequirement {
+                runtime: compute_core::RuntimeKind::Shell,
+                version: None,
+                platform: None,
+            },
+            RuntimeCapabilities::process(),
+        );
+        assert_eq!(resolution.status, RuntimeLifecycleStatus::Available);
+        let distribution = resolution.distribution.unwrap();
+        assert!(distribution.artifact.starts_with("file://"));
+        let prepared = manager.prepare(&distribution).unwrap();
+        assert_eq!(prepared.status, RuntimeLifecycleStatus::Ready);
+        assert!(prepared.verified);
+        let manifest = manager.read_manifest().unwrap();
+        assert_eq!(
+            manifest.build["runtime_catalog"],
+            serde_json::json!(manager.catalog.identity())
+        );
+        assert_eq!(
+            manifest.certification_status,
+            "runtime-prepared-from-supplied-catalog"
+        );
+    }
+
     fn fixture() -> (tempfile::TempDir, RuntimeManager, RuntimeDistribution) {
         let directory = tempfile::tempdir().unwrap();
         let artifact = directory.path().join("node");
@@ -756,6 +962,7 @@ mod tests {
         let manager = RuntimeManager {
             root: directory.path().join("store"),
             lock,
+            catalog: RuntimeCatalog::embedded(),
             mutation: Mutex::new(()),
         };
         let resolution = manager.resolve(
@@ -785,6 +992,7 @@ mod tests {
         let restarted = RuntimeManager {
             root: manager.root.clone(),
             lock: manager.lock.clone(),
+            catalog: RuntimeCatalog::embedded(),
             mutation: Mutex::new(()),
         };
         assert_eq!(

@@ -110,6 +110,20 @@ pub fn runtime_version_matches(kind: RuntimeKind, requested: &str, offered: &str
     })
 }
 
+/// Whether two reports name the same runtime version, whatever surrounds
+/// the number: `Python 3.13.15`, `3.13.15`, and `v3.13.15` are one version.
+/// A dependency capsule binds a runtime version, not a runtime's banner, so
+/// placement (which offers the pinned catalog version) and execution (which
+/// observes the runtime's own report) must agree through this.
+pub fn same_runtime_version(left: &str, right: &str) -> bool {
+    left == right
+        || numeric_version(left).is_some_and(|left| {
+            numeric_version(right).is_some_and(|right| {
+                compare_numeric_versions(&left, &right).is_eq() && left.len() == right.len()
+            })
+        })
+}
+
 fn numeric_version(value: &str) -> Option<Vec<u64>> {
     let start = value.find(|character: char| character.is_ascii_digit())?;
     let numeric = value[start..]
@@ -2835,6 +2849,17 @@ pub mod schema_version {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runtime_version_is_the_same_whatever_banner_reports_it() {
+        assert!(same_runtime_version("Python 3.13.15", "3.13.15"));
+        assert!(same_runtime_version("v24.18.0", "24.18.0"));
+        assert!(same_runtime_version("wasmtime-36", "wasmtime-36"));
+        assert!(!same_runtime_version("Python 3.13.15", "3.13.14"));
+        assert!(!same_runtime_version("3.13", "3.13.0"));
+        assert!(!same_runtime_version("Python 3.11.15", "3.13.15"));
+        assert!(!same_runtime_version("unknown", "3.13.15"));
+    }
 
     #[test]
     fn runtime_versions_support_ranges_without_weakening_exact_identity() {

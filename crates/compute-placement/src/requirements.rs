@@ -93,6 +93,9 @@ pub enum SubmissionMode {
     Synchronous,
     /// `compute pool submit`: a durable asynchronous job.
     Job,
+    /// `compute deploy`: a durable application deployment, owned by the
+    /// provider's Compute daemon (revisions, releases, endpoint, evidence).
+    Deployment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

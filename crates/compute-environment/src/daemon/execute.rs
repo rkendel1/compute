@@ -144,6 +144,7 @@ impl Daemon {
                 workload_id: target.workload_id.into(),
                 workload: target.workload.name.clone(),
                 workload_kind: target.workload.kind.as_str().into(),
+                deployment_id: None,
             },
         })
     }
@@ -239,6 +240,13 @@ impl Daemon {
             node: Some(identity_label(&selected.provider_identity)),
         };
         let mut request = request;
+        let mut scope = scope;
+        // Every execution names the deployment it is an instance of and the
+        // application (the project) it belongs to, so its receipt proves
+        // application → deployment → execution on its own.
+        scope.deployment_id = Some(unit.deployment_id.clone());
+        request.execution.application =
+            compute_core::ApplicationIdentity::new(&scope.project, None).ok();
         request.execution.scope = Some(scope);
         let outcome = match service {
             Some((generation, control)) => {
@@ -937,8 +945,19 @@ impl Daemon {
                 receipts.push(receipt.receipt_id.clone());
                 let excess = receipts.len().saturating_sub(32);
                 receipts.drain(..excess);
-                let change = Change::new()
-                    .with(|batch| batch.update(&deployment, json!({ "receipt_ids": receipts })));
+                let mut update = json!({ "receipt_ids": receipts });
+                // A service's execution ends after its release did, so the
+                // deployment receipt already issued is reissued to bind it.
+                // (Tasks run on demand are the membership's, not the
+                // release's, and do not reissue it.)
+                if record.kind == WorkloadKind::Service && deployment.value.receipt.is_some() {
+                    let mut record = deployment.value.clone();
+                    record.receipt_ids = receipts.clone();
+                    if let Ok(digest) = self.deployment_receipt(deployment_id, &record).await {
+                        update["receipt"] = json!(digest);
+                    }
+                }
+                let change = Change::new().with(|batch| batch.update(&deployment, update));
                 match self.apply(change).await {
                     Err(EnvironmentError::Conflict(_)) => continue,
                     other => {

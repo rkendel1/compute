@@ -3,6 +3,8 @@
 //! issued by ACME (Pebble), served by SNI, and renewed — with keys and
 //! credentials kept out of control state.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -105,6 +107,7 @@ fn daemon_config(node: &Path, network: NetworkConfig) -> DaemonConfig {
         compute_state::ControlState::new(store.clone()),
     ));
     let mut config = DaemonConfig::new(node, store, artifacts);
+    config.provider = std::sync::Arc::new(common::provider());
     config.reconcile_interval = Duration::from_millis(200);
     config.network = network;
     port_windows(&mut config);
@@ -136,6 +139,7 @@ async fn released(daemon: &Arc<Daemon>, environment: &str, revision: &str) {
             revision: Some(revision.into()),
             config: None,
             desired_state: None,
+            placement: None,
         })
         .await
         .unwrap();
@@ -582,6 +586,7 @@ async fn certificates_are_issued_served_and_renewed_by_acme() {
         compute_state::ControlState::new(store.clone()),
     ));
     let mut config = DaemonConfig::new(work.path().join("node"), store.clone(), artifacts);
+    config.provider = std::sync::Arc::new(common::provider());
     config.reconcile_interval = Duration::from_millis(200);
     port_windows(&mut config);
     config.network = NetworkConfig {

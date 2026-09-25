@@ -375,6 +375,23 @@ pub struct DeploymentWorkload {
     /// keep serving across releases.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<PortBinding>,
+    /// How a caller's provider pool chose this node for the deployment,
+    /// when one did (`compute deploy`). The node's own placement and
+    /// admission are the fields above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_placement: Option<PoolPlacement>,
+}
+
+/// A caller's placement decision that sent a deployment to this node:
+/// which pool member it selected and the placement that proves why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PoolPlacement {
+    pub placement_id: String,
+    /// The provider's name in the caller's pool.
+    pub provider_id: String,
+    /// `pool` when requirements chose it, `explicit` when the caller named it.
+    pub selection_mode: String,
 }
 
 /// A revision delivered to an environment, with its evidence.

@@ -88,6 +88,8 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
         ("GET", _) => Scope::Read,
         ("POST", ["environments", _, "projects", _, "workloads", _, "run"]) => Scope::Execute,
         ("POST", ["projects", _, "revisions"])
+        | ("POST", ["applications", _, "deployments"])
+        | ("POST", ["applications", _, "rollback"])
         | ("POST", ["deployments"])
         | ("POST", ["deployments", "promote"])
         | ("POST", ["deployments", _, "rollback"])
@@ -124,6 +126,7 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
         | ("POST", ["certificates", _, "renew"])
         | ("POST", ["services"])
         | ("DELETE", ["services", _])
+        | ("POST", ["applications", _, "stop"])
         | ("POST", ["node", "reconcile"]) => Scope::Operate,
         _ => Scope::Admin,
     }
@@ -717,6 +720,22 @@ mod tests {
             Scope::Execute
         );
         assert_eq!(required_scope("POST", &["deployments"]), Scope::Deploy);
+        assert_eq!(
+            required_scope("POST", &["applications", "a", "deployments"]),
+            Scope::Deploy
+        );
+        assert_eq!(
+            required_scope("POST", &["applications", "a", "rollback"]),
+            Scope::Deploy
+        );
+        assert_eq!(
+            required_scope("POST", &["applications", "a", "stop"]),
+            Scope::Operate
+        );
+        assert_eq!(
+            required_scope("GET", &["compute", "capabilities"]),
+            Scope::Read
+        );
         assert_eq!(
             required_scope("POST", &["deployments", "d", "rollback"]),
             Scope::Deploy

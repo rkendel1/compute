@@ -394,6 +394,28 @@ fn artifact_size_and_output_limits() {
 }
 
 #[test]
+fn deployment_requires_a_provider_that_hosts_deployments() {
+    // A job-capable provider that cannot host a durable application is
+    // rejected for deployment; one that hosts deployments is not.
+    let jobs_only = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Python]).descriptor("jobs");
+    let mut hosting = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Python]);
+    hosting.deployments = true;
+    let hosting = hosting.descriptor("daemon");
+    let mut requirements = requirements(RuntimeKind::Python);
+    requirements.artifact.submission = SubmissionMode::Deployment;
+    assert_eq!(
+        codes(&requirements, &jobs_only),
+        [ReasonCode::DeploymentUnsupported]
+    );
+    assert_eq!(ReasonCode::DeploymentUnsupported.dimension(), "deployment");
+    assert!(match_provider(&requirements, &hosting).compatible);
+    // Hosting deployments changes nothing for other submissions.
+    requirements.artifact.submission = SubmissionMode::Synchronous;
+    assert!(match_provider(&requirements, &jobs_only).compatible);
+    assert!(match_provider(&requirements, &hosting).compatible);
+}
+
+#[test]
 fn job_submission_requires_a_job_capable_provider() {
     let local = Synthetic::new(ProviderKind::Local, &[RuntimeKind::Python]).descriptor("local");
     let mut requirements = requirements(RuntimeKind::Python);

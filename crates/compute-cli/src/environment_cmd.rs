@@ -144,6 +144,15 @@ pub struct StartCommand {
     /// instead of starting with a degraded control plane.
     #[arg(long)]
     pub require_state_at_start: bool,
+    /// The URL callers reach this node's API at. It is the node's identity
+    /// when it serves as a provider in a caller's pool. Defaults to the
+    /// listen address.
+    #[arg(long)]
+    pub public_url: Option<String>,
+    /// The host applications' endpoints are reached at. Defaults to the
+    /// endpoint address, or the public URL's host when that is unspecified.
+    #[arg(long)]
+    pub application_host: Option<String>,
     /// Run in the background and return once the API answers.
     #[arg(long)]
     pub detach: bool,
@@ -515,6 +524,14 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
     };
     config.api_tls = tls.clone();
     config.require_state_at_start = command.require_state_at_start;
+    config.public_url = Some(command.public_url.clone().unwrap_or_else(|| {
+        format!(
+            "{}://{}",
+            if tls.is_some() { "https" } else { "http" },
+            command.listen
+        )
+    }));
+    config.application_host = command.application_host.clone();
     if command.data_plane == "supervisor" {
         config.data_plane =
             Some(ensure_supervisor(&command.state_dir, config.network.endpoint_address).await?);
@@ -669,6 +686,12 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
     }
     if let Some(address) = command.endpoint_address {
         child.arg("--endpoint-address").arg(address.to_string());
+    }
+    if let Some(url) = &command.public_url {
+        child.arg("--public-url").arg(url);
+    }
+    if let Some(host) = &command.application_host {
+        child.arg("--application-host").arg(host);
     }
     child
         .stdin(std::process::Stdio::null())
@@ -1709,6 +1732,11 @@ pub struct DeployCommand {
     /// Follow the release until it completes, fails, or rolls back.
     #[arg(long)]
     pub wait: bool,
+    /// For an application: the provider to deploy to (`auto`,
+    /// `provider:<id>`, or a pool provider ID). Placement chooses by
+    /// default.
+    #[arg(long)]
+    pub provider: Option<String>,
     #[command(flatten)]
     pub daemon: DaemonLocation,
     #[command(flatten)]
@@ -1769,6 +1797,7 @@ pub async fn deploy(command: DeployCommand) -> compute_core::Result<()> {
         revision,
         config,
         desired_state: None,
+        placement: None,
     };
     let deployment: DeploymentView = client
         .post("/deployments", Some(&request))

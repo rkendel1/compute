@@ -192,12 +192,28 @@ impl DaemonClient {
         Ok(tokio::io::BufReader::new(reader).lines())
     }
 
+    /// A GET whose response body is returned exactly as the daemon sent
+    /// it, such as a canonical receipt.
+    pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>, EnvironmentError> {
+        self.send_raw::<()>("GET", path, None).await
+    }
+
     async fn send<B: Serialize, T: DeserializeOwned>(
         &self,
         method: &str,
         path: &str,
         body: Option<&B>,
     ) -> Result<T, EnvironmentError> {
+        let body = self.send_raw(method, path, body).await?;
+        Ok(serde_json::from_slice(&body)?)
+    }
+
+    async fn send_raw<B: Serialize>(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&B>,
+    ) -> Result<Vec<u8>, EnvironmentError> {
         let payload = match body {
             Some(value) => serde_json::to_vec(value)?,
             None => vec![],
@@ -258,6 +274,6 @@ impl DaemonClient {
                 _ => EnvironmentError::Invalid(message),
             });
         }
-        Ok(serde_json::from_slice(body)?)
+        Ok(body.to_vec())
     }
 }

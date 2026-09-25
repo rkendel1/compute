@@ -276,6 +276,9 @@ pub struct ReceiptScope {
     pub workload: String,
     /// `service` or `task`.
     pub workload_kind: String,
+    /// The deployment whose instance this execution is, when it is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
 }
 
 impl ReceiptScope {
@@ -300,6 +303,15 @@ impl ReceiptScope {
         }
         if !matches!(self.workload_kind.as_str(), "service" | "task") {
             return Err(invalid("invalid workload kind in execution scope"));
+        }
+        if self.deployment_id.as_deref().is_some_and(|id| {
+            !id.starts_with("dep_")
+                || id.len() > 128
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        }) {
+            return Err(invalid("invalid deployment in execution scope"));
         }
         Ok(())
     }

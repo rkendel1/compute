@@ -54,9 +54,9 @@ pub struct ProviderConfig {
     pub kind: ProviderKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
-    /// Public URL where applications published by this provider are reached.
-    /// This is explicit because it cannot be inferred safely through proxies,
-    /// NAT, or container port mappings.
+    /// Accepted for compatibility and not used: an application's endpoint
+    /// is the one the provider's Compute daemon returns when it deploys it
+    /// (`compute start --application-host` sets what that daemon reports).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application_endpoint: Option<String>,
     #[serde(default)]
@@ -262,7 +262,14 @@ impl ProviderPool {
         for (id, provider) in &config.providers {
             match provider.kind {
                 ProviderKind::Local => {
-                    pool.add(id.clone(), provider.clone(), Arc::new(LocalProvider::new()))?;
+                    // This machine hosts deployments through its local
+                    // Compute daemon, which `compute deploy` starts on
+                    // demand.
+                    pool.add(
+                        id.clone(),
+                        provider.clone(),
+                        Arc::new(LocalProvider::new().with_application_deployments(true)),
+                    )?;
                 }
                 ProviderKind::Remote => {
                     let mut remote =

@@ -12,6 +12,7 @@
 //! only starts what should run and is not running, and only stops what is
 //! running and should not.
 
+mod applications;
 mod deploy;
 mod execute;
 mod lifecycle;
@@ -26,7 +27,12 @@ mod upgrades;
 pub use supervision::Recovery;
 mod views;
 
+pub use applications::{APPLICATION_WORKLOAD, APPLICATIONS_ENVIRONMENT};
 pub use views::EventFilter;
+
+/// A bundle's memory limit, wall-time limit, network policy, required CPUs,
+/// and required memory.
+type DeclaredResources = (Option<u64>, Option<u64>, String, Option<u32>, Option<u64>);
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -108,6 +114,13 @@ pub struct DaemonConfig {
     /// Refuse to start while durable control state is unreachable,
     /// instead of starting with a degraded control plane.
     pub require_state_at_start: bool,
+    /// The URL callers reach this daemon at. It is this node's identity
+    /// when it serves as a provider in a caller's pool.
+    pub public_url: Option<String>,
+    /// The host applications' endpoints are reached at. Defaults to the
+    /// endpoint address, or, when that is unspecified (`0.0.0.0`), the
+    /// public URL's host.
+    pub application_host: Option<String>,
 }
 
 impl DaemonConfig {
@@ -135,6 +148,8 @@ impl DaemonConfig {
             data_plane: None,
             read_cache: Duration::from_millis(1000),
             require_state_at_start: false,
+            public_url: None,
+            application_host: None,
         }
     }
 }
@@ -634,8 +649,7 @@ pub struct Daemon {
     /// queued to be read back.
     commit_gate: tokio::sync::RwLock<()>,
     /// What each bundle declares, by bundle identity.
-    declared:
-        std::sync::Mutex<std::collections::HashMap<String, (Option<u64>, Option<u64>, String)>>,
+    declared: std::sync::Mutex<std::collections::HashMap<String, DeclaredResources>>,
     events: broadcast::Sender<EventRecord>,
     data_plane: Arc<dyn crate::dataplane::DataPlane>,
     /// The routes this controller assigned, mirrored so a reconcile that

@@ -2,7 +2,9 @@
 
 The five applications under `apps/` exercise the same placement, runtime
 resolution, preparation, verification, execution, and receipt path. Run each
-against both `auto` and an explicit Apple Container provider:
+with placement choosing (`auto`) and with the provider named `remote` in
+`pool.toml`, which is any `compute serve` endpoint (for example one running
+in an Apple Container VM):
 
 ```sh
 for runtime in wasm node python deno bun; do

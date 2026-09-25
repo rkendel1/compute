@@ -47,9 +47,12 @@ nothing executes.
 Use `compute run APP` or `compute run APP --policy auto` for automatic
 placement. `--policy local` prefers an eligible local provider.
 `--prefer-provider ID` expresses affinity but falls back when that provider
-is ineligible or temporarily lacks capacity. `--provider ID` is strict: the
-named provider must run the workload or explain why it cannot, with no
-fallback. The established
+is ineligible or temporarily lacks capacity. `--provider ID` (or
+`provider:ID`) is strict: the named provider must run the workload or
+explain why it cannot, with no fallback; `--provider auto` is automatic
+placement. `compute deploy APP` places an application the same way, and
+also requires a provider that hosts deployments (`deployment_unsupported`
+otherwise; see [applications.md](applications.md)). The established
 read-only forms are `compute placement APP` (an alias for
 `compute placement inspect APP`) and `compute placement explain APP`.
 

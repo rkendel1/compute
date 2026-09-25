@@ -2,6 +2,8 @@
 //! scopes, rotation, revocation, expiry, and the audit trail, against a
 //! real daemon serving real TLS.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +42,7 @@ async fn production_node() -> Node {
         compute_state::ControlState::new(store.clone()),
     ));
     let mut config = DaemonConfig::new(dir.path().join("node"), store, artifacts);
+    config.provider = std::sync::Arc::new(common::provider());
     config.port_range = (27000, 27099);
     config.instance_port_range = (47000, 47099);
     let tls = ApiTls::load(certificate.clone(), key.clone()).unwrap();
@@ -415,6 +418,7 @@ async fn development_mode_is_explicit() {
         compute_state::ControlState::new(store.clone()),
     ));
     let mut config = DaemonConfig::new(dir.path(), store, artifacts);
+    config.provider = std::sync::Arc::new(common::provider());
     config.port_range = (27100, 27199);
     config.instance_port_range = (47100, 47199);
     let daemon = Daemon::start(config).await.unwrap();
@@ -445,6 +449,7 @@ async fn development_mode_is_explicit() {
         compute_state::ControlState::new(store.clone()),
     ));
     let mut config = DaemonConfig::new(other.path(), store, artifacts);
+    config.provider = std::sync::Arc::new(common::provider());
     config.security = SecurityConfig {
         mode: SecurityMode::Production,
         reason: "test".into(),

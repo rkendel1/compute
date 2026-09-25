@@ -156,6 +156,10 @@ pub struct DeployRequest {
     /// current desired state, or running for a new membership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desired_state: Option<DesiredState>,
+    /// The caller's pool placement that chose this node, recorded as
+    /// evidence with the release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<compute_state::PoolPlacement>,
 }
 
 /// Deploy the exact revision current in one environment to another.
@@ -276,4 +280,34 @@ pub fn validate_revision_label(revision: &str) -> Result<(), EnvironmentError> {
         ));
     }
     Ok(())
+}
+
+/// Deploy a new version of an application on this node: `POST
+/// /applications/{name}/deployments`. The daemon owns everything after
+/// this: the revision, the release, the stable endpoint, and the evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationDeployRequest {
+    /// The canonical `.compute` bundle of the application.
+    #[serde(with = "compute_core::bytes_json")]
+    pub bundle: Vec<u8>,
+    /// The port the application listens on (it is also given `PORT`).
+    pub port: u16,
+    /// Where the source came from, for people reading history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The caller's pool placement that chose this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<compute_state::PoolPlacement>,
+}
+
+/// Deploy an earlier version again, as the next version: `POST
+/// /applications/{name}/rollback`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationRollbackRequest {
+    /// A version (`3`, `v3`) or a deployment ID (`dep_…`).
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<compute_state::PoolPlacement>,
 }

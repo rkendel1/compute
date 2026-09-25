@@ -760,6 +760,15 @@ The gap is one arrow: *deployment → placed provider*.
 
 ## Build Next
 
+> **Status (portable application deployment change):** 1 and 2 are
+> implemented, with the injectable runtime catalog. 4 is implemented:
+> application commands no longer fall back to jobs. 5 is implemented:
+> history and UI states, the active marker, `--provider auto`, canonical API
+> receipts, and the deployment ↔ execution receipt link. 3 is partly
+> implemented: the daemon's `/applications` resource exists; AppPort
+> capabilities over it do not yet. See [applications.md](applications.md).
+> The audit below is the snapshot that motivated them.
+
 1. **Deploy onto a placed provider.** Let `compute deploy` use placement to pick a provider and run the release on the node that provider represents. The smallest version gives each pool member an optional daemon address and deploys to the selected one. Endpoint, versions, rollback and receipts then come from that node's daemon unchanged. This is the one arrow between the two halves.
 2. **A provider-neutral product acceptance test in CI** that does exactly the vertical slice (init → deploy → curl → status/logs → deploy v2 → history → rollback → stop → verify receipts) against two `compute serve`/daemon processes on the CI Linux runner, with an injected runtime catalog so it needs no CDN. The Apple Container script then becomes one more target for the same scenario.
 3. **An application resource in the daemon API, with AppPort capabilities** (`application.{deploy,get,list,status,logs,history,rollback,stop}`, `receipt.get` returning canonical bytes), owning the convention now hard-coded in `application.rs`. The CLI verbs become thin clients of it. The UI's project view shows it as an application with versions and a URL.

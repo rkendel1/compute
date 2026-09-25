@@ -139,6 +139,9 @@ pub struct ArtifactLimits {
     pub max_output_bytes: u64,
     /// Whether the provider accepts durable asynchronous jobs.
     pub jobs: bool,
+    /// Whether the provider hosts durable application deployments.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deployments: bool,
 }
 
 /// When the capability data was observed and until when it is valid.
@@ -487,6 +490,7 @@ impl ProviderDescriptor {
                 max_request_bytes: capabilities.max_request_bytes,
                 max_output_bytes: capabilities.max_output_bytes,
                 jobs: capabilities.max_concurrent_jobs.is_some(),
+                deployments: capabilities.application_deployments,
             },
             policy: capabilities
                 .policy

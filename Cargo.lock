@@ -590,6 +590,7 @@ dependencies = [
  "tokio",
  "walkdir",
  "wat",
+ "which",
 ]
 
 [[package]]

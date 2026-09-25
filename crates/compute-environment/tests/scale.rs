@@ -3,6 +3,8 @@
 //! the targets (environment view p95 <= 50 ms, one add <= 100 ms) on the
 //! reference 4 vCPU host with a debug build's margin.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -50,6 +52,7 @@ async fn three_hundred_projects() {
         compute_state::ControlState::new(store.clone()),
     ));
     let mut config = DaemonConfig::new(dir.path(), store, artifacts);
+    config.provider = std::sync::Arc::new(common::provider());
     config.port_range = (29700, 29799);
     config.instance_port_range = (49700, 49799);
     config.reconcile_interval = Duration::from_secs(3600);
@@ -124,6 +127,7 @@ async fn three_hundred_projects() {
                 revision: Some(revision.revision_id),
                 config: Some(BTreeMap::new()),
                 desired_state: Some(DesiredState::Running),
+                placement: None,
             })
             .await
             .unwrap();

@@ -1124,6 +1124,7 @@ fn explain(
         match requirements.artifact.submission {
             crate::SubmissionMode::Synchronous => "synchronous",
             crate::SubmissionMode::Job => "job",
+            crate::SubmissionMode::Deployment => "deployment",
         }
     ));
 

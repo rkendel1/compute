@@ -341,14 +341,17 @@ impl Daemon {
                     .as_ref()
                     .map(|declared| declared.2.clone())
                     .unwrap_or_default(),
+                cpu_required: declared.as_ref().and_then(|declared| declared.3),
+                memory_required_bytes: declared.as_ref().and_then(|declared| declared.4),
             },
             log_directory,
         })
     }
 
-    /// A bundle's declared memory limit, wall-time limit, and network
-    /// policy. Bundles are immutable, so each is parsed once.
-    fn declared_resources(&self, digest: &str) -> Option<(Option<u64>, Option<u64>, String)> {
+    /// A bundle's declared memory limit, wall-time limit, network policy,
+    /// and required CPUs and memory. Bundles are immutable, so each is
+    /// parsed once.
+    fn declared_resources(&self, digest: &str) -> Option<super::DeclaredResources> {
         if let Some(declared) = self.declared.lock().expect("declared").get(digest) {
             return Some(declared.clone());
         }
@@ -368,6 +371,8 @@ impl Daemon {
                 .wall_time
                 .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX)),
             bundle.workload.network.to_string(),
+            bundle.workload.resources.cpu_count,
+            bundle.workload.resources.memory_required_bytes,
         );
         self.declared
             .lock()
@@ -666,7 +671,9 @@ impl Daemon {
     }
 
     /// The receipt document itself, from durable artifacts.
-    pub async fn receipt(&self, receipt_id: &str) -> Result<serde_json::Value, EnvironmentError> {
+    /// A receipt exactly as it was stored: its canonical encoding, which
+    /// `compute receipt verify` checks byte for byte.
+    pub async fn receipt(&self, receipt_id: &str) -> Result<Vec<u8>, EnvironmentError> {
         let reference = self
             .get_required::<ReceiptRecord>(&ids::receipt(receipt_id))
             .await?;
@@ -679,7 +686,7 @@ impl Daemon {
             .get(&digest)
             .await?
             .ok_or_else(|| EnvironmentError::NotFound(format!("receipt artifact {digest}")))?;
-        Ok(serde_json::from_slice(&bytes)?)
+        Ok(bytes)
     }
 
     /// A deployment's receipt document.
