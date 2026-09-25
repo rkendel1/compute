@@ -507,3 +507,286 @@ pub(crate) fn print_info(info: &ControllerInfo) {
             .unwrap_or_default()
     );
 }
+
+/// The controller's side of `compute doctor`: every item the node's
+/// operator needs to know is well, or why it is not. A controller that
+/// is not running, or a credential that is missing, is a finding, not an
+/// error.
+pub async fn controller_diagnosis(location: &DaemonLocation) -> serde_json::Value {
+    use compute_environment::EnvironmentError;
+    use serde_json::json;
+    let endpoint = location.endpoint();
+    let client = match location.client() {
+        Ok(client) => client,
+        Err(failure) => {
+            return json!({ "endpoint": endpoint, "reachable": false, "error": failure.to_string() });
+        }
+    };
+    let health = match client.get::<serde_json::Value>("/health").await {
+        Ok(health) => health,
+        Err(failure) => {
+            return json!({
+                "endpoint": endpoint,
+                "reachable": false,
+                "error": failure.to_string(),
+                "remediation": "start the controller with `compute start`",
+            });
+        }
+    };
+    let info = match client.get::<ControllerInfo>("/info").await {
+        Ok(info) => info,
+        Err(failure) => {
+            let authentication = match &failure {
+                EnvironmentError::Unauthorized(_) => format!(
+                    "a credential is required: set ${} to an operator token with compute.read",
+                    location.token_env
+                ),
+                EnvironmentError::Forbidden(_) => {
+                    "the credential lacks the compute.read scope".to_string()
+                }
+                _ => failure.to_string(),
+            };
+            return json!({
+                "endpoint": endpoint,
+                "reachable": true,
+                "status": health["status"],
+                "authentication": authentication,
+            });
+        }
+    };
+    let runtimes = serde_json::from_value::<compute_core::RuntimeInventory>(info.runtimes.clone())
+        .map(|inventory| {
+            inventory
+                .runtimes
+                .iter()
+                .map(|runtime| {
+                    (
+                        runtime.id.as_str().to_string(),
+                        json!(if runtime.available && runtime.compatible {
+                            "available"
+                        } else {
+                            "unavailable"
+                        }),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>()
+        })
+        .unwrap_or_default();
+    let isolation = info
+        .isolation
+        .as_ref()
+        .map(|report| {
+            report
+                .profiles
+                .iter()
+                .map(|support| {
+                    (
+                        support.profile.as_str().to_string(),
+                        match &support.enforcement {
+                            Some(plan) => json!({
+                                "filesystem": plan.filesystem,
+                                "network": plan.network,
+                                "memory": plan.memory,
+                                "cpu": plan.cpu,
+                                "process": plan.process,
+                            }),
+                            None => json!({
+                                "unsupported": support.refusal.as_ref().map(|r| r.message.clone()),
+                            }),
+                        },
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>()
+        })
+        .unwrap_or_default();
+    let security = &info.security;
+    let control = &info.control_plane;
+    json!({
+        "endpoint": endpoint,
+        "reachable": true,
+        "status": health["status"],
+        "controller": {
+            "version": info.controller.version,
+            "git_commit": info.controller.git_commit,
+            "build_id": info.controller.build_id,
+            "platform": info.controller.platform,
+            "instance_id": info.instance_id,
+            "pid": info.pid,
+            "started_at": info.started_at,
+        },
+        "data_plane": {
+            "kind": info.data_plane.info.as_ref().map(|plane| plane.kind.clone()),
+            "independent": info.data_plane.independent,
+            "status": if info.data_plane.error.is_some() { "unreachable" } else { "ok" },
+            "error": info.data_plane.error,
+            "pid": info.data_plane.info.as_ref().map(|plane| plane.pid),
+            "units": info.data_plane.info.as_ref().map(|plane| plane.units),
+        },
+        "control_plane": {
+            "mode": control.mode,
+            "error": control.error,
+            "last_reconciled_at": control.last_reconciled_at,
+        },
+        "state": {
+            "kind": control.state.kind,
+            "location": control.state.location,
+            "connected": control.mode == "normal",
+        },
+        "workloads": {
+            "total": info.workloads.total,
+            "running": info.workloads.running,
+            "failed": info.workloads.failed,
+            "unhealthy": info.workloads.unhealthy,
+        },
+        "endpoints": {
+            "routed": info.workloads.endpoints,
+            "errors": info.workloads.endpoint_errors,
+        },
+        "tls": security.tls,
+        "authentication": {
+            "mode": security.mode,
+            "required": security.authentication_required,
+            "active_credentials": security.active_credentials,
+            "reason": security.reason,
+        },
+        "runtimes": runtimes,
+        "isolation": isolation,
+        "upgrade": info.upgrade.as_ref().map(|record| json!({
+            "upgrade_id": record.upgrade_id,
+            "kind": record.kind,
+            "status": record.status,
+            "to": record.to.version,
+            "reason": record.reason,
+        })),
+    })
+}
+
+/// Print the controller diagnosis for people.
+pub fn print_diagnosis(diagnosis: &serde_json::Value) {
+    let text = |value: &serde_json::Value| match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Null => "-".into(),
+        other => other.to_string(),
+    };
+    println!("\nController ({})", text(&diagnosis["endpoint"]));
+    if diagnosis["reachable"] != true {
+        println!("  not reachable: {}", text(&diagnosis["error"]));
+        if let Some(remediation) = diagnosis["remediation"].as_str() {
+            println!("  Remediation: {remediation}");
+        }
+        return;
+    }
+    if diagnosis["controller"].is_null() {
+        println!("  status: {}", text(&diagnosis["status"]));
+        println!("  authentication: {}", text(&diagnosis["authentication"]));
+        return;
+    }
+    let controller = &diagnosis["controller"];
+    println!(
+        "  version: {} ({}), build {}",
+        text(&controller["version"]),
+        text(&controller["git_commit"]),
+        text(&controller["build_id"])
+    );
+    let plane = &diagnosis["data_plane"];
+    println!(
+        "  data plane: {} {} (pid {}, {} units, independent {})",
+        text(&plane["status"]),
+        text(&plane["kind"]),
+        text(&plane["pid"]),
+        text(&plane["units"]),
+        text(&plane["independent"])
+    );
+    let control = &diagnosis["control_plane"];
+    println!(
+        "  control plane: {}{}",
+        text(&control["mode"]),
+        control["error"]
+            .as_str()
+            .map(|error| format!(" ({error})"))
+            .unwrap_or_default()
+    );
+    let state = &diagnosis["state"];
+    println!(
+        "  state: {} at {} ({})",
+        text(&state["kind"]),
+        text(&state["location"]),
+        if state["connected"] == true {
+            "connected"
+        } else {
+            "unreachable"
+        }
+    );
+    let workloads = &diagnosis["workloads"];
+    println!(
+        "  workloads: {} ({} running, {} failed, {} unhealthy)",
+        text(&workloads["total"]),
+        text(&workloads["running"]),
+        text(&workloads["failed"]),
+        workloads["unhealthy"].as_array().map_or(0, Vec::len)
+    );
+    for unhealthy in workloads["unhealthy"].as_array().into_iter().flatten() {
+        println!("    unhealthy: {}", text(unhealthy));
+    }
+    let endpoints = &diagnosis["endpoints"];
+    println!(
+        "  endpoints: {} routed, {} failing",
+        text(&endpoints["routed"]),
+        endpoints["errors"]
+            .as_object()
+            .map_or(0, serde_json::Map::len)
+    );
+    let tls = &diagnosis["tls"];
+    println!(
+        "  TLS: {}",
+        if tls["enabled"] == true {
+            format!("on until {}", text(&tls["not_after"]))
+        } else {
+            "off".into()
+        }
+    );
+    let authentication = &diagnosis["authentication"];
+    println!(
+        "  authentication: {} mode, {} ({} active credentials)",
+        text(&authentication["mode"]),
+        if authentication["required"] == true {
+            "required"
+        } else {
+            "not required"
+        },
+        text(&authentication["active_credentials"])
+    );
+    if let Some(runtimes) = diagnosis["runtimes"].as_object() {
+        let available = runtimes
+            .iter()
+            .filter(|(_, status)| *status == "available")
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        println!("  runtimes: {}", available.join(", "));
+    }
+    if let Some(isolation) = diagnosis["isolation"].as_object() {
+        for (profile, support) in isolation {
+            if let Some(reason) = support.get("unsupported") {
+                println!("  isolation {profile}: unsupported ({})", text(reason));
+            } else {
+                println!(
+                    "  isolation {profile}: filesystem {}, network {}, memory {}, cpu {}, process {}",
+                    text(&support["filesystem"]),
+                    text(&support["network"]),
+                    text(&support["memory"]),
+                    text(&support["cpu"]),
+                    text(&support["process"])
+                );
+            }
+        }
+    }
+    match diagnosis["upgrade"].as_object() {
+        Some(upgrade) => println!(
+            "  upgrade: {} {} to {}",
+            text(&upgrade["kind"]),
+            text(&upgrade["status"]),
+            text(&upgrade["to"])
+        ),
+        None => println!("  upgrade: none has run"),
+    }
+}

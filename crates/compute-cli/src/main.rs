@@ -49,7 +49,8 @@ enum Commands {
     /// Show the versioned isolation profiles and runtime support matrix.
     Isolation(JsonFlag),
     Exec(ExecCommand),
-    Doctor(JsonFlag),
+    /// Diagnose this host's runtimes and, when one runs, its controller.
+    Doctor(DoctorCommand),
     Certify(CertifyCommand),
     /// Build, inspect, or verify a portable Compute distribution.
     Distribution(DistributionCommand),
@@ -302,6 +303,17 @@ enum DistributionCommands {
 struct JsonFlag {
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args, Debug)]
+struct DoctorCommand {
+    #[arg(long)]
+    json: bool,
+    /// Only the runtimes of this host; do not contact a controller.
+    #[arg(long)]
+    runtimes_only: bool,
+    #[command(flatten)]
+    daemon: environment_cmd::DaemonLocation,
 }
 
 #[derive(Args, Debug)]
@@ -1113,6 +1125,11 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Doctor(json_flag) => {
             let reports = compute.doctor().await;
             let provenance = distribution::doctor_provenance();
+            let controller = if json_flag.runtimes_only {
+                None
+            } else {
+                Some(node_cmd::controller_diagnosis(&json_flag.daemon).await)
+            };
             if json_flag.json {
                 let reports = reports
                     .into_iter()
@@ -1127,8 +1144,11 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     .collect::<Vec<_>>();
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({ "runtimes": reports }))
-                        .unwrap()
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "runtimes": reports,
+                        "controller": controller,
+                    }))
+                    .unwrap()
                 );
             } else {
                 println!("Compute runtime capabilities");
@@ -1162,6 +1182,9 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                         );
                     }
                     print_capabilities(&report.capabilities, "  ");
+                }
+                if let Some(controller) = &controller {
+                    node_cmd::print_diagnosis(controller);
                 }
             }
         }

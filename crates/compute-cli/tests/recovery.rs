@@ -141,9 +141,18 @@ impl Cli {
 
     /// SIGKILL the daemon: no shutdown, no cleanup.
     fn kill(&self) {
+        self.signal(libc::SIGKILL);
+    }
+
+    /// What a service manager sends to restart the controller.
+    fn terminate(&self) {
+        self.signal(libc::SIGTERM);
+    }
+
+    fn signal(&self, signal: i32) {
         let pid = self.daemon_pid();
-        // SAFETY: killing the daemon process this test started.
-        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        // SAFETY: signalling the daemon process this test started.
+        assert_eq!(unsafe { libc::kill(pid, signal) }, 0);
         let deadline = Instant::now() + Duration::from_secs(10);
         // SAFETY: probing for existence with signal 0.
         while unsafe { libc::kill(pid, 0) } == 0 {
@@ -433,9 +442,21 @@ fn a_controller_stopped_for_an_upgrade_keeps_its_workloads() {
     std::thread::sleep(Duration::from_millis(500));
     cli.start(&node, &[]);
     std::thread::sleep(Duration::from_millis(500));
+    // A service manager's restart (SIGTERM) keeps them too.
+    cli.terminate();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(alive(service_pid), "SIGTERM stopped the workload");
+    cli.start(&node, &[]);
+    std::thread::sleep(Duration::from_millis(500));
     let (ok, failed, pids) = prober.finish();
     assert_eq!(failed, 0, "{failed} of {} failed", ok + failed);
     assert_eq!(pids, [service_pid].into());
+    let info = cli.run(&["node", "info"]);
+    assert_eq!(
+        info["data_plane"]["recovery"]["reattached"],
+        serde_json::json!(["production/app/api"]),
+        "{info}"
+    );
     cli.stop();
 }
 
@@ -803,16 +824,13 @@ fn feltdb_key(data: &Path) -> String {
 }
 
 fn feltdb_start(data: &Path) -> FeltDb {
+    feltdb_start_on(data, 0)
+}
+
+fn feltdb_start_on(data: &Path, port: u16) -> FeltDb {
     let mut child = Command::new(feltdb_binary())
-        .args([
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "0",
-            "--namespace",
-            "compute",
-            "--auth",
-        ])
+        .args(["--host", "127.0.0.1", "--port", &port.to_string()])
+        .args(["--namespace", "compute", "--auth"])
         .arg("--data")
         .arg(data.join("state.log"))
         .arg("--keys")
@@ -963,8 +981,17 @@ fn managed_feltdb_is_the_durable_authority() {
         );
     }
 
-    // FeltDB unavailable: Compute refuses to start rather than diverge.
+    // FeltDB unavailable, and the operator requires it at start: Compute
+    // refuses to start rather than diverge.
     cli.stop();
+    let feltdb_port = feltdb
+        .url
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .trim_end_matches('/')
+        .parse::<u16>()
+        .unwrap();
     drop(feltdb);
     let listen = format!("127.0.0.1:{}", free_port());
     let refused = compute()
@@ -972,6 +999,7 @@ fn managed_feltdb_is_the_durable_authority() {
             "start",
             "--listen",
             &listen,
+            "--require-state-at-start",
             "--config",
             config.to_str().unwrap(),
         ])
@@ -990,4 +1018,64 @@ fn managed_feltdb_is_the_durable_authority() {
         !root.path().join("node-3/control-state.json").exists(),
         "no local fallback"
     );
+
+    // By default it starts in degraded_control_plane: it answers, refuses
+    // changes with state_unavailable, and never writes local state.
+    let degraded = root.path().join("node-4");
+    cli.start(&degraded, &config_arg);
+    let info = cli.run(&["node", "info"]);
+    assert_eq!(
+        info["control_plane"]["mode"], "degraded_control_plane",
+        "{info}"
+    );
+    let change = compute()
+        .args(["environment", "create", "while-degraded"])
+        .args(["--daemon", &cli.endpoint, "--json"])
+        .output()
+        .unwrap();
+    assert!(!change.status.success());
+    assert!(
+        String::from_utf8_lossy(&change.stderr).contains("unavailable"),
+        "{}",
+        String::from_utf8_lossy(&change.stderr)
+    );
+    assert!(
+        !degraded.join("control-state.json").exists(),
+        "no local fallback"
+    );
+    // FeltDB comes back: the controller recovers, reconciles, and
+    // restores what desired state says should run.
+    let _feltdb = feltdb_start_on(&data, feltdb_port);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let info = cli.run(&["node", "info"]);
+        if info["control_plane"]["mode"] == "normal" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never recovered: {info}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    cli.run(&["environment", "create", "after-recovery"]);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let port = cli.run(&["project", "status", "app", "--environment", "production"]);
+        if port["workloads"][0]["actual_state"] == "running" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "production was not restored: {port}"
+        );
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(answer(cli.host_port("production")).starts_with("revision=abc123"));
+    let kinds = cli.run(&["events", "--limit", "500"]);
+    let kinds = kinds
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["kind"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&"feltdb.recovered".to_string()), "{kinds:?}");
+    cli.stop();
 }

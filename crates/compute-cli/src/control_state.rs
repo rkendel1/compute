@@ -315,8 +315,11 @@ impl StateOptions {
         arguments
     }
 
-    /// Open the configured backend. Fails closed.
-    pub async fn open(&self, state_dir: &Path) -> compute_core::Result<Backend> {
+    /// Open the configured backend. Fails closed: a misconfigured backend
+    /// is refused. An unreachable FeltDB is refused only when `required`;
+    /// otherwise the backend connects when FeltDB answers, and the
+    /// controller starts in `degraded_control_plane` until then.
+    pub async fn open(&self, state_dir: &Path, required: bool) -> compute_core::Result<Backend> {
         let (config_path, section) = self.section()?;
         let relative = |path: PathBuf| match &config_path {
             Some(config) if path.is_relative() => config
@@ -368,21 +371,29 @@ impl StateOptions {
                 })?;
                 let token = std::env::var(&token_env)
                     .map_err(|_| invalid(format!("{token_env} must hold the FeltDB API key")))?;
-                let state: Arc<dyn StateStore> = Arc::new(
-                    FeltDbState::connect(FeltDbConfig {
-                        url,
-                        token,
-                        application_id: application,
-                        environment,
-                        ca_certificate: self.feltdb_ca()?,
-                    })
-                    .await
-                    .map_err(|error| {
-                        ComputeError::Runtime(format!(
-                            "refusing to start without the configured control state: {error}"
-                        ))
-                    })?,
-                );
+                let config = FeltDbConfig {
+                    url,
+                    token,
+                    application_id: application,
+                    environment,
+                    ca_certificate: self.feltdb_ca()?,
+                };
+                let refused = |error: compute_state::StateError| {
+                    ComputeError::Runtime(format!(
+                        "refusing to start without the configured control state: {error}"
+                    ))
+                };
+                let state: Arc<dyn StateStore> = if required {
+                    Arc::new(FeltDbState::connect(config).await.map_err(refused)?)
+                } else {
+                    // Unreachable, not wrong: connect when it answers.
+                    Arc::new(
+                        FeltDbState::connect_or_defer(config)
+                            .await
+                            .map_err(refused)?
+                            .0,
+                    )
+                };
                 Ok(Backend {
                     artifacts: Arc::new(StateArtifacts::new(ControlState::new(state.clone()))),
                     state,

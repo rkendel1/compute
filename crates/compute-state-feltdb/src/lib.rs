@@ -97,6 +97,19 @@ impl FeltDbState {
         Ok(state)
     }
 
+    /// Connect, or, when FeltDB cannot be reached at all, return a state
+    /// that discovers the revision on first use (and `false`). A FeltDB
+    /// that answers and refuses (a wrong key, a missing application) is
+    /// still an error: that is misconfiguration, not an outage.
+    pub async fn connect_or_defer(config: FeltDbConfig) -> Result<(Self, bool), StateError> {
+        let state = Self::new(config)?;
+        match state.revision(true).await {
+            Ok(_) => Ok((state, true)),
+            Err(StateError::Unavailable(message)) if is_unreachable(&message) => Ok((state, false)),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn config(&self) -> &FeltDbConfig {
         &self.config
     }
@@ -498,4 +511,10 @@ impl StateStore for FeltDbState {
             }
         }
     }
+}
+
+/// Whether an unavailability is FeltDB not answering, rather than
+/// answering with a refusal.
+fn is_unreachable(message: &str) -> bool {
+    message.contains(" is unreachable: ") || message.starts_with("FeltDB response was interrupted")
 }

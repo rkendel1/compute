@@ -79,6 +79,27 @@ pub struct ControllerInfo {
     /// dimension, or why it is unsupported.
     #[serde(default)]
     pub isolation: Option<compute_core::host::HostIsolationReport>,
+    /// Workloads and endpoints on this node, as last observed.
+    #[serde(default)]
+    pub workloads: WorkloadSummary,
+    /// The upgrade this node last ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade: Option<crate::upgrade::UpgradeRecord>,
+}
+
+/// Counts for `compute doctor`: what runs here and what is not well.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WorkloadSummary {
+    pub total: usize,
+    pub running: usize,
+    pub failed: usize,
+    /// `environment/project/workload` of each running workload whose
+    /// health check fails.
+    pub unhealthy: Vec<String>,
+    /// Host ports routed to a workload.
+    pub endpoints: usize,
+    /// Host ports that could not listen, with why.
+    pub endpoint_errors: std::collections::BTreeMap<u16, String>,
 }
 
 /// Reconciliation, measured: the last cycle and totals since start.

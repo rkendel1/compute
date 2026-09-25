@@ -1054,7 +1054,34 @@ impl Daemon {
             info: plane.ok(),
             recovery: self.recovery(),
         };
+        let endpoints = self.routes_snapshot().len();
         let inner = self.inner.lock().await;
+        let workloads = {
+            let mut summary = crate::status::WorkloadSummary {
+                endpoints,
+                endpoint_errors: inner.endpoint_errors.clone(),
+                ..Default::default()
+            };
+            let mut seen = std::collections::BTreeSet::new();
+            for (unit, runtime) in &inner.runtime {
+                seen.insert(unit.key.clone());
+                match runtime.state {
+                    Some(ActualState::Running) => {
+                        summary.running += 1;
+                        if runtime.health == Some(crate::status::Health::Unhealthy) {
+                            let (environment, project, workload) = &unit.key;
+                            summary
+                                .unhealthy
+                                .push(format!("{environment}/{project}/{workload}"));
+                        }
+                    }
+                    Some(ActualState::Failed) => summary.failed += 1,
+                    _ => {}
+                }
+            }
+            summary.total = seen.len();
+            summary
+        };
         let security = &self.authority.config;
         ControllerInfo {
             api: crate::api::API_VERSION.into(),
@@ -1096,6 +1123,8 @@ impl Daemon {
             reconcile: inner.reconcile.clone(),
             runtimes,
             isolation: Some(compute_core::host::host_isolation_report()),
+            workloads,
+            upgrade: self.upgrade_record(),
         }
     }
 
@@ -1702,6 +1731,11 @@ impl Daemon {
             .join(&key.0)
             .join(&key.1)
             .join(&key.2)
+    }
+
+    /// Whether this controller's workloads outlive it.
+    pub fn data_plane_independent(&self) -> bool {
+        self.data_plane.independent()
     }
 
     pub(crate) fn data_plane(&self) -> &Arc<dyn crate::dataplane::DataPlane> {

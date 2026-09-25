@@ -419,7 +419,10 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
             .unwrap_or("30000-39999"),
         "the instance port range",
     )?;
-    let backend = command.state.open(&command.state_dir).await?;
+    let backend = command
+        .state
+        .open(&command.state_dir, command.require_state_at_start)
+        .await?;
     let mut config = compute_environment::DaemonConfig::new(
         &command.state_dir,
         backend.state,
@@ -537,10 +540,18 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
                     eprintln!("Production mode: every request needs an operator credential.");
                 }
             }
-            compute_environment::auth::SecurityMode::Development => eprintln!(
-                "WARNING: development mode ({}): requests without a credential are admitted. Never expose this listener.",
-                daemon.info().await.security.reason
-            ),
+            compute_environment::auth::SecurityMode::Development => {
+                let security = daemon.info().await.security;
+                eprintln!(
+                    "WARNING: development mode ({}): {}. Never expose this listener.",
+                    security.reason,
+                    if security.authentication_required {
+                        "requests need the development token"
+                    } else {
+                        "requests without a credential are admitted"
+                    }
+                )
+            }
         }
     }
     let server: tokio::task::JoinHandle<std::io::Result<()>> = tokio::spawn(
@@ -554,6 +565,19 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
         _ = tokio::signal::ctrl_c() => {
             daemon.shutdown().await;
         }
+        // A service manager restarting the controller (SIGTERM) leaves the
+        // workloads serving when they run on the supervisor; SIGINT and
+        // `compute stop` stop them.
+        _ = terminated() => {
+            if daemon.data_plane_independent() {
+                if let Err(failure) = daemon.detach().await {
+                    eprintln!("could not detach ({failure}); stopping workloads");
+                    daemon.shutdown().await;
+                }
+            } else {
+                daemon.shutdown().await;
+            }
+        }
     }
     // The API stops answering as soon as a shutdown begins; the process
     // stays until the shutdown has stopped (or detached from) everything.
@@ -564,6 +588,20 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
         return hand_over(record, &command.state_dir).await;
     }
     Ok(())
+}
+
+async fn terminated() {
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    }
+    #[cfg(not(unix))]
+    std::future::pending::<()>().await;
 }
 
 /// Start the daemon as a background process of this executable and wait
