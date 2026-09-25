@@ -1433,7 +1433,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 }
             }
             RemoteCommands::Run(command) => {
-                let (provider, _, request, explain) = remote_request(*command)?;
+                let (provider, jobs, request, explain) = remote_request(*command)?;
                 if request.4.is_some() {
                     return Err(compute_core::ComputeError::InvalidWorkload(
                         "--idempotency-key is valid only for remote submit".into(),
@@ -1446,8 +1446,15 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     print_bundle_plan(&response.plan, request.1);
                 } else {
                     let receipt_path = request.3;
-                    let response = provider.execute(request.0).await.map_err(provider_error)?;
-                    print_execution_result(response.result, request.1, receipt_path.as_deref())?;
+                    let jobs = jobs.expect("remote_request requires a remote provider");
+                    let submission = jobs.submit(request.0, None).await.map_err(provider_error)?;
+                    let result = wait_for_remote_result(&jobs, &submission.job_id.0).await?;
+                    print_remote_execution_result(
+                        &submission.job_id,
+                        result.result,
+                        request.1,
+                        receipt_path.as_deref(),
+                    )?;
                 }
             }
         },
@@ -1665,6 +1672,21 @@ async fn remote_wait(command: RemoteWaitCommand) -> compute_core::Result<()> {
     }
 }
 
+async fn wait_for_remote_result(
+    provider: &RemoteProvider,
+    job_id: &str,
+) -> compute_core::Result<compute_core::JobResult> {
+    let mut delay = Duration::from_millis(100);
+    loop {
+        let status = provider.job_status(job_id).await.map_err(provider_error)?;
+        if status.status.is_terminal() {
+            return provider.job_result(job_id).await.map_err(provider_error);
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_secs(2));
+    }
+}
+
 fn provider_error(error: compute_provider::ProviderError) -> compute_core::ComputeError {
     compute_core::ComputeError::Runtime(error.to_string())
 }
@@ -1681,6 +1703,24 @@ fn print_execution_result(
     json: bool,
     receipt_path: Option<&std::path::Path>,
 ) -> compute_core::Result<()> {
+    print_execution_result_with_job(None, result, json, receipt_path)
+}
+
+fn print_remote_execution_result(
+    job_id: &compute_core::JobId,
+    result: compute_core::ExecutionResult,
+    json: bool,
+    receipt_path: Option<&std::path::Path>,
+) -> compute_core::Result<()> {
+    print_execution_result_with_job(Some(job_id), result, json, receipt_path)
+}
+
+fn print_execution_result_with_job(
+    job_id: Option<&compute_core::JobId>,
+    result: compute_core::ExecutionResult,
+    json: bool,
+    receipt_path: Option<&std::path::Path>,
+) -> compute_core::Result<()> {
     if let Some(path) = receipt_path {
         let receipt = result.receipt.as_ref().ok_or_else(|| {
             compute_core::ComputeError::InvalidReceipt("execution did not produce a receipt".into())
@@ -1688,7 +1728,14 @@ fn print_execution_result(
         std::fs::write(path, receipt.encoded_bytes()?)?;
     }
     if json {
-        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+        let mut value = serde_json::to_value(&result)?;
+        if let Some(job_id) = job_id {
+            value
+                .as_object_mut()
+                .expect("execution result serializes as an object")
+                .insert("job_id".into(), serde_json::to_value(job_id)?);
+        }
+        println!("{}", serde_json::to_string_pretty(&value).unwrap());
     } else {
         if !result.stdout.text.is_empty() {
             print!("{}", result.stdout.text);
@@ -1696,8 +1743,11 @@ fn print_execution_result(
         if !result.stderr.text.is_empty() {
             eprint!("{}", result.stderr.text);
         }
+        if let Some(job_id) = job_id {
+            eprintln!("\njob: {job_id}");
+        }
         eprintln!(
-            "\nexecution {}: {}",
+            "execution {}: {}",
             result.execution_id,
             serde_json::to_string(&result.status)
                 .unwrap()

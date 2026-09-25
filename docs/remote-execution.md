@@ -34,6 +34,10 @@ bundle identities, embedded dependency capsules, paths, and requested
 identities before extraction and execution. Remote inspect performs the same
 planning without starting the workload.
 
+Remote execution is job-backed. `compute remote run` waits synchronously but
+still reports the durable `job_id` required by subsequent lifecycle commands,
+alongside the distinct `execution_id` recorded in its result and receipt.
+
 The protocol exposes `GET /compute/health`, `GET /compute/capabilities`,
 `GET /compute/inspect`, and `POST /compute/execute`. Requests carry a
 deterministic SHA-256 hash over artifact, identities, policy, and optional

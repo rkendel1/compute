@@ -12,12 +12,20 @@ fn free_port() -> u16 {
         .port()
 }
 
-struct Server(Child);
+struct Server(Option<Child>);
+
+impl Server {
+    fn stop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        self.stop();
     }
 }
 
@@ -35,7 +43,7 @@ fn start_server(root: &std::path::Path, port: u16) -> Server {
         assert!(Instant::now() < deadline, "compute serve did not start");
         std::thread::sleep(Duration::from_millis(20));
     }
-    Server(child)
+    Server(Some(child))
 }
 
 fn remote(pool: &std::path::Path, arguments: &[&str]) -> Command {
@@ -52,7 +60,7 @@ fn remote(pool: &std::path::Path, arguments: &[&str]) -> Command {
 fn remote_commands_resolve_named_providers_from_the_caller_owned_pool() {
     let temporary = tempfile::tempdir().unwrap();
     let port = free_port();
-    let _server = start_server(temporary.path(), port);
+    let mut server = start_server(temporary.path(), port);
     let pool = temporary.path().join("compute-pool.toml");
     std::fs::write(
         &pool,
@@ -134,7 +142,7 @@ fn remote_commands_resolve_named_providers_from_the_caller_owned_pool() {
     )
     .assert()
     .success();
-    remote(
+    let run = remote(
         &pool,
         &[
             "run",
@@ -144,29 +152,34 @@ fn remote_commands_resolve_named_providers_from_the_caller_owned_pool() {
             "--json",
         ],
     )
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("compute.remote@1"));
-
-    let submission = remote(
-        &pool,
-        &[
-            "submit",
-            "--provider",
-            "remote-dev",
-            wasm.to_str().unwrap(),
-            "--json",
-        ],
-    )
     .output()
     .unwrap();
     assert!(
-        submission.status.success(),
+        run.status.success(),
         "{}",
-        String::from_utf8_lossy(&submission.stderr)
+        String::from_utf8_lossy(&run.stderr)
     );
-    let submitted: serde_json::Value = serde_json::from_slice(&submission.stdout).unwrap();
-    let job_id = submitted["job_id"].as_str().unwrap();
+    let run: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+    let job_id = run["job_id"].as_str().unwrap();
+    let execution_id = run["execution_id"].as_str().unwrap();
+    assert_ne!(job_id, execution_id);
+    assert_eq!(run["status"], "completed");
+    assert_eq!(run["exit_code"], 0);
+    assert_eq!(run["receipt"]["execution_id"], execution_id);
+    assert_eq!(run["receipt"]["provider_protocol"], "compute.remote@1");
+
+    remote(
+        &pool,
+        &["run", "--provider", "remote-dev", wasm.to_str().unwrap()],
+    )
+    .assert()
+    .success()
+    .stderr(predicate::str::contains("job: job_"));
+
+    remote(&pool, &["status", "--provider", "remote-dev", execution_id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("malformed job identity"));
 
     remote(
         &pool,
@@ -182,6 +195,60 @@ fn remote_commands_resolve_named_providers_from_the_caller_owned_pool() {
     )
     .assert()
     .success();
+    let status = remote(
+        &pool,
+        &["status", "--provider", "remote-dev", job_id, "--json"],
+    )
+    .output()
+    .unwrap();
+    assert!(status.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["job_id"], job_id);
+    assert_eq!(status["execution_id"], execution_id);
+    assert_eq!(status["status"], "succeeded");
+
+    let job_store = temporary.path().join("jobs").join(job_id);
+    for evidence in [
+        "request.json",
+        "status.json",
+        "result.json",
+        "receipt.json",
+        "events.json",
+    ] {
+        assert!(job_store.join(evidence).is_file(), "missing {evidence}");
+    }
+    let stored_request: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(job_store.join("request.json")).unwrap()).unwrap();
+    let stored_status: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(job_store.join("status.json")).unwrap()).unwrap();
+    let stored_result: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(job_store.join("result.json")).unwrap()).unwrap();
+    let stored_receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(job_store.join("receipt.json")).unwrap()).unwrap();
+    assert_eq!(stored_status["job_id"], job_id);
+    assert_eq!(stored_status["execution_id"], execution_id);
+    assert_eq!(stored_status["status"], "succeeded");
+    assert!(stored_status["provider"].is_object());
+    assert!(stored_status["request"]["workload_id"].is_string());
+    assert!(stored_status["request"]["bundle_id"].is_string());
+    assert!(stored_status["created_at"].is_string());
+    assert!(stored_status["updated_at"].is_string());
+    assert_eq!(
+        stored_request["request"]["expected"]["workload_id"],
+        stored_status["request"]["workload_id"]
+    );
+    assert_eq!(
+        stored_request["request"]["expected"]["bundle_id"],
+        stored_status["request"]["bundle_id"]
+    );
+    assert_eq!(stored_result["job_id"], job_id);
+    assert_eq!(stored_result["result"]["execution_id"], execution_id);
+    assert_eq!(stored_receipt["job_id"], job_id);
+    assert_eq!(stored_receipt["receipt"]["execution_id"], execution_id);
+
+    server.stop();
+    server = start_server(temporary.path(), port);
+
     for operation in ["status", "result", "receipt", "artifacts"] {
         remote(
             &pool,
@@ -190,10 +257,37 @@ fn remote_commands_resolve_named_providers_from_the_caller_owned_pool() {
         .assert()
         .success();
     }
+    let result = remote(
+        &pool,
+        &["result", "--provider", "remote-dev", job_id, "--json"],
+    )
+    .output()
+    .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(result["job_id"], job_id);
+    assert_eq!(result["result"]["execution_id"], execution_id);
+    assert_eq!(result["result"]["status"], "completed");
+    assert_eq!(result["result"]["exit_code"], 0);
+    let receipt = remote(
+        &pool,
+        &["receipt", "--provider", "remote-dev", job_id, "--json"],
+    )
+    .output()
+    .unwrap();
+    let receipt: serde_json::Value = serde_json::from_slice(&receipt.stdout).unwrap();
+    assert_eq!(receipt["execution_id"], execution_id);
+    assert_eq!(receipt["receipt_version"], "compute.receipt@1");
+    assert_eq!(receipt["provider_protocol"], "compute.remote@1");
+    assert_eq!(receipt["admission_status"], "admitted");
+    assert_eq!(receipt["execution"]["status"], "completed");
+    assert_eq!(receipt["execution"]["exit_code"], 0);
+
     remote(
         &pool,
         &["cancel", "--provider", "remote-dev", job_id, "--json"],
     )
     .assert()
     .success();
+
+    drop(server);
 }

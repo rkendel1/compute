@@ -5,6 +5,15 @@ execution contract. It does not change workload, runtime, policy, result, or
 receipt semantics. Synchronous execution waits for the result; asynchronous
 execution returns a job ID and lets the caller observe it later.
 
+`job_id` is the durable identity of a submitted remote job. It is used for
+status, result, wait, receipt, artifact, cancellation, and lifecycle queries.
+`execution_id` identifies the Compute execution represented by the job's
+result and receipt; it is used for execution records, provenance, and receipt
+correlation. The two identities are related but are not interchangeable.
+
+`compute remote run` creates a durable job, waits for it, and reports both
+identities. `compute remote submit` returns immediately with the `job_id`.
+
 ```sh
 compute remote submit --provider dev \
   --bundle workload.compute --idempotency-key deploy-42
