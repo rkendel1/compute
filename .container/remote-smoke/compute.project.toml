@@ -1,0 +1,7 @@
+[project]
+name = "remote-smoke"
+
+[[workload]]
+name = "migrate"
+kind = "task"
+workload = "migrate/workload.json"
