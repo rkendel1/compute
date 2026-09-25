@@ -4,6 +4,8 @@
 //! `state_unavailable`; a controller can start without it; and when it
 //! returns, the controller reconciles and records what happened, once.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -115,6 +117,7 @@ fn config(dir: &std::path::Path, store: Arc<Flaky>, window: u16) -> DaemonConfig
         compute_state::ControlState::new(store.clone()),
     ));
     let mut config = DaemonConfig::new(dir, store, artifacts);
+    config.provider = std::sync::Arc::new(common::provider());
     config.port_range = (window, window + 99);
     config.instance_port_range = (window + 20000, window + 20099);
     config.reconcile_interval = Duration::from_millis(200);

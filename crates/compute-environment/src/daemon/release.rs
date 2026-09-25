@@ -284,6 +284,13 @@ impl Daemon {
                 provider: None,
                 reasons: vec![],
                 endpoints,
+                // The caller's pool placement, recorded with the release.
+                pool_placement: release
+                    .value
+                    .workloads
+                    .iter()
+                    .find(|recorded| recorded.name == workload.name)
+                    .and_then(|recorded| recorded.pool_placement.clone()),
             };
             if let Some(distribution) = report
                 .selected
@@ -1659,7 +1666,7 @@ impl Daemon {
     /// Write a deployment receipt: what was released, where, with which
     /// evidence. It holds digests and identifiers, never configuration
     /// values, keys, or credentials.
-    async fn deployment_receipt(
+    pub(crate) async fn deployment_receipt(
         &self,
         deployment_id: &str,
         record: &DeploymentRecord,

@@ -38,6 +38,7 @@ remotely, `LocalProvider::capabilities` locally). The response describes:
 | `dependency_capsule_formats`, `dependency_capsules` | Accepted capsule formats and capsules already resident |
 | `artifact_modes`, `max_request_bytes`, `max_output_bytes` | Artifact transport limits |
 | `max_concurrent_jobs`, `job_retention_seconds` | Present when durable jobs are accepted |
+| `application_deployments` | Present (`true`) when the provider hosts durable application deployments: it is a Compute daemon |
 
 Placement turns this response into a canonical, validated **provider
 descriptor** with a `capability_version` digest. See
@@ -67,6 +68,32 @@ compute runtimes --provider production --json
 
 A configured pool ID yields its descriptor. `local` or an `http(s)://`
 endpoint outside the pool yields the raw capability response.
+
+## Providers that host applications
+
+Two kinds of Compute process can sit behind a remote provider:
+
+| Provider | Started with | Runs | Hosts deployments |
+| --- | --- | --- | --- |
+| Compute server | `compute serve` | workloads and durable jobs | no |
+| Compute daemon | `compute start` | workloads it releases as applications | yes |
+
+A daemon answers `GET /compute/capabilities` and `GET /compute/health` with
+`compute.remote@1` documents, identified by its `--public-url`, and adds
+`application_deployments: true`. `compute deploy` places an application
+with `SubmissionMode::Deployment`: a provider without that capability is
+rejected with `deployment_unsupported`, whatever else it offers. The
+application is then deployed through the daemon's authenticated
+`/applications` API (see [applications.md](applications.md)). The `local`
+pool member hosts deployments through this machine's daemon.
+
+A daemon endpoint is a deployment target, not a `compute run` target: it
+does not accept `POST /compute/execute` or jobs. Placement does not yet tell
+the two apart for synchronous runs, so a run placed on a daemon fails at
+dispatch (nothing executes); name the provider, or keep run providers in
+their own pool. Nothing here is specific to
+where the daemon runs: a laptop, a Linux host, a VM, or an Apple Container
+VM are all the same provider to Compute.
 
 ## Restricting what a provider offers
 

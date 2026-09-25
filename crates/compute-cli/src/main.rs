@@ -507,7 +507,8 @@ struct RunCommand {
     bundle: Option<PathBuf>,
     #[arg(long)]
     runtime: Option<String>,
-    /// Placement policy: auto, local, remote, or provider:<id>.
+    /// Where to run: `auto` (placement chooses), `provider:<id>`, or a
+    /// provider ID from the pool.
     #[arg(long)]
     provider: Option<String>,
     /// Placement preference policy: auto or local.
@@ -607,8 +608,22 @@ struct ExecCommand {
     receipt: Option<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() {
+/// Worker threads' stack. The daemon's request handlers drive whole
+/// releases (registration, admission, placement, start) inside one
+/// request; in unoptimized builds those futures outgrow tokio's 2 MiB
+/// default.
+const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+fn main() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK_BYTES)
+        .build()
+        .expect("tokio runtime");
+    runtime.block_on(async_main());
+}
+
+async fn async_main() {
     let cli = parse_cli();
     let compute = Compute::new();
 
@@ -1475,7 +1490,14 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Deploy(command) => {
             let path = PathBuf::from(&command.project);
             if application::is_application(&path) {
-                application::deploy(path, command.daemon.clone(), command.json).await?;
+                application::deploy(
+                    path,
+                    command.provider.clone(),
+                    command.daemon.clone(),
+                    command.pool.clone(),
+                    command.json,
+                )
+                .await?;
             } else {
                 environment_cmd::deploy(command).await?;
             }
@@ -1805,12 +1827,6 @@ async fn run_with_provider(command: RunCommand) -> compute_core::Result<()> {
             policy: command.policy,
         })
         .await
-    } else if artifact
-        .path
-        .as_deref()
-        .is_some_and(application::is_application)
-    {
-        application::run(artifact, command.location, command.policy).await
     } else {
         pool::pool(pool::PoolCommand {
             command: pool::PoolCommands::Run(Box::new(artifact)),

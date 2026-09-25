@@ -276,6 +276,14 @@ pub struct ResourceView {
     pub timeout_ms: Option<u64>,
     pub disk_bytes: u64,
     pub network: String,
+    /// CPUs the workload requires of the node it is placed on: a placement
+    /// requirement, not an enforced limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_required: Option<u32>,
+    /// Memory the workload requires of the node it is placed on: a
+    /// placement requirement, not an enforced limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_required_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -543,4 +551,90 @@ pub struct ExecutionView {
     pub stdout: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stderr: String,
+}
+
+/// What an application deployment is, in product terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationDeploymentState {
+    /// Being released: starting, checking readiness, switching traffic.
+    Deploying,
+    /// The version the endpoint serves.
+    Active,
+    /// The version the endpoint would serve, with the application stopped.
+    Stopped,
+    /// Served once; a later version replaced it.
+    Superseded,
+    /// Never served; what served before kept serving.
+    Failed,
+    /// Served briefly, failed verification, and traffic went back.
+    RolledBack,
+}
+
+impl ApplicationDeploymentState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deploying => "deploying",
+            Self::Active => "active",
+            Self::Stopped => "stopped",
+            Self::Superseded => "superseded",
+            Self::Failed => "failed",
+            Self::RolledBack => "rolled_back",
+        }
+    }
+}
+
+/// One version of an application.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationDeploymentView {
+    pub application: String,
+    pub version: u64,
+    pub deployment_id: String,
+    pub state: ApplicationDeploymentState,
+    /// Whether the endpoint serves this version (or would, once started).
+    pub active: bool,
+    /// The earlier version whose code this one deployed again, after other
+    /// code had replaced it: a rollback, whether requested as one or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_of: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
+    /// The caller's pool placement that chose this node, when one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<compute_state::PoolPlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+    /// The deployment receipt (an artifact digest), once issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<String>,
+    /// Receipts of this version's executions.
+    #[serde(default)]
+    pub execution_receipts: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// An application as it stands on this node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationView {
+    pub application: compute_core::ApplicationIdentity,
+    /// `running`, `deploying`, `stopped`, `failed`, …
+    pub status: String,
+    /// The node that hosts it: this daemon's public URL.
+    pub node: String,
+    /// Where its traffic is served: stable across versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// The active version, and the one being released, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<ApplicationDeploymentView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploying: Option<ApplicationDeploymentView>,
+    /// Newest first.
+    pub deployments: Vec<ApplicationDeploymentView>,
 }

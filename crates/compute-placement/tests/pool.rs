@@ -48,6 +48,32 @@ impl ComputeProvider for Counting {
     async fn health(&self) -> Result<ProviderHealth, ProviderError> {
         self.inner.health().await
     }
+    async fn resolve_runtime(
+        &self,
+        requirement: compute_core::ProviderRuntimeRequirement,
+    ) -> Result<compute_core::RuntimeResolution, ProviderError> {
+        self.inner.resolve_runtime(requirement).await
+    }
+    async fn prepare_runtime(
+        &self,
+        distribution: compute_core::RuntimeDistribution,
+    ) -> Result<compute_core::RuntimePreparation, ProviderError> {
+        self.inner.prepare_runtime(distribution).await
+    }
+    async fn runtime_status(
+        &self,
+        distribution: compute_core::RuntimeDistribution,
+    ) -> Result<compute_core::RuntimeResolution, ProviderError> {
+        self.inner.runtime_status(distribution).await
+    }
+}
+
+/// Managed runtimes come from a host-backed fixture catalog: no download.
+fn catalog() -> compute_provider::RuntimeCatalog {
+    let directory = tempfile::tempdir().unwrap().keep();
+    compute_provider::testing::host_fixture_catalog(&directory)
+        .unwrap()
+        .catalog
 }
 
 struct Server {
@@ -60,7 +86,15 @@ async fn serve(policy: ProviderPolicy) -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let jobs = tempfile::tempdir().unwrap();
-    let mut config = ServerConfig::local_with_policy(endpoint.clone(), policy);
+    let mut config = ServerConfig::local(endpoint.clone());
+    config.provider = Arc::new(
+        LocalProvider::with_identity(ProviderIdentity::Remote {
+            id: endpoint.clone(),
+            endpoint: endpoint.clone(),
+        })
+        .with_policy(policy)
+        .with_runtime_catalog(catalog()),
+    );
     config.job_store = jobs.path().to_path_buf();
     let handle = tokio::spawn(async move {
         let _ = compute_provider::serve_listener(listener, config).await;
@@ -245,7 +279,7 @@ async fn matrix() -> Matrix {
         "local",
         local(10),
         Arc::new(Counting {
-            inner: LocalProvider::new(),
+            inner: LocalProvider::new().with_runtime_catalog(catalog()),
             executions: executions.clone(),
         }),
     )
@@ -750,7 +784,8 @@ async fn policy_denied_providers_are_excluded_and_never_execute() {
             id: endpoint.clone(),
             endpoint: endpoint.clone(),
         })
-        .with_execution_policy(Some(locked_policy.clone())),
+        .with_execution_policy(Some(locked_policy.clone()))
+        .with_runtime_catalog(catalog()),
     );
     let mut config = ServerConfig::local(endpoint.clone());
     config.provider = locked.clone();

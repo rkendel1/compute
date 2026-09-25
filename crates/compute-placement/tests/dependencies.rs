@@ -136,7 +136,20 @@ async fn dependency_capsule_matrix() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let jobs = tempfile::tempdir().unwrap();
+    // Managed runtimes come from a host-backed fixture catalog: both
+    // providers offer the same pinned versions without a download.
+    let catalog_directory = tempfile::tempdir().unwrap();
+    let catalog = compute_provider::testing::host_fixture_catalog(catalog_directory.path())
+        .unwrap()
+        .catalog;
     let mut config = ServerConfig::local(endpoint.clone());
+    config.provider = Arc::new(
+        LocalProvider::with_identity(compute_core::ProviderIdentity::Remote {
+            id: endpoint.clone(),
+            endpoint: endpoint.clone(),
+        })
+        .with_runtime_catalog(catalog.clone()),
+    );
     config.job_store = jobs.path().to_path_buf();
     let server = tokio::spawn(async move {
         let _ = compute_provider::serve_listener(listener, config).await;
@@ -151,7 +164,7 @@ async fn dependency_capsule_matrix() {
             priority: 0,
             token_env: None,
         },
-        Arc::new(LocalProvider::new()),
+        Arc::new(LocalProvider::new().with_runtime_catalog(catalog)),
     )
     .unwrap();
     pool.add_remote(
@@ -167,23 +180,45 @@ async fn dependency_capsule_matrix() {
     )
     .unwrap();
 
-    let inventory = compute_runtime::Compute::new().inventory().await.unwrap();
+    // Prepare each offered runtime first, so the version a provider offers
+    // is the version it observes, which is what a capsule is checked
+    // against at execution.
+    for member in pool.members() {
+        for kind in [PYTHON.kind, NODE.kind] {
+            let resolution = member
+                .provider
+                .resolve_runtime(compute_core::ProviderRuntimeRequirement {
+                    runtime: kind,
+                    version: None,
+                    platform: None,
+                })
+                .await
+                .unwrap();
+            if let Some(distribution) = resolution.distribution
+                && resolution.status.can_satisfy()
+            {
+                member.provider.prepare_runtime(distribution).await.unwrap();
+            }
+        }
+    }
+    let offers = discover(&pool).await;
+    let local = offers
+        .iter()
+        .find(|record| record.provider_id == "local")
+        .and_then(|record| record.descriptor.clone())
+        .unwrap();
     let mut exercised = 0;
     for fixture in [PYTHON, NODE] {
-        let entry = inventory
-            .runtimes
-            .iter()
-            .find(|entry| entry.id == fixture.kind)
-            .unwrap();
-        if !entry.available {
+        // A capsule is built for the runtime version the providers offer.
+        let Some(offer) = local.runtime(fixture.kind) else {
             eprintln!(
                 "skipping {}: runtime unavailable on this host",
                 fixture.kind
             );
             continue;
-        }
+        };
         exercised += 1;
-        let version = entry.detected_version.clone().unwrap();
+        let version = offer.effective_version().to_owned();
         let wanted = capsule(&fixture, &version, "packaged");
         let wrong = capsule(&fixture, &version, "impostor");
         // Present in transfer: embedded capsules are sent and verified.

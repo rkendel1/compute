@@ -280,7 +280,37 @@ impl Daemon {
             status: DeploymentStatus::Pending,
             promoted_from: promoted_from.clone(),
             previous: previous.clone(),
-            workloads: vec![],
+            // The caller's pool placement is evidence from the start; the
+            // release adds this node's own admission and placement to it.
+            workloads: request
+                .placement
+                .as_ref()
+                .map(|placement| {
+                    revision
+                        .value
+                        .workloads
+                        .iter()
+                        .map(|workload| DeploymentWorkload {
+                            name: workload.name.clone(),
+                            kind: workload.kind,
+                            bundle_id: workload.bundle_id.clone(),
+                            artifact: workload.artifact.clone(),
+                            runtime: workload.runtime.clone(),
+                            runtime_version: workload.runtime_version.clone(),
+                            resolved_runtime_version: None,
+                            distribution: workload.distribution.clone(),
+                            admitted: false,
+                            policy_id: None,
+                            admission_id: None,
+                            placement_id: None,
+                            provider: None,
+                            reasons: vec![],
+                            endpoints: vec![],
+                            pool_placement: Some(placement.clone()),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             failure: None,
             receipt_ids: vec![],
             old_revision: old_revision.clone(),
@@ -440,6 +470,7 @@ impl Daemon {
                             revision: Some(previous.value.revision_id.clone()),
                             config: Some(super::execute::run_config(&previous.value, None)),
                             desired_state: None,
+                            placement: None,
                         },
                         None,
                         json!({ "rollback_of": deployment_id }),
@@ -529,6 +560,7 @@ impl Daemon {
                     revision: Some(source.value.revision_id.clone()),
                     config: request.config.clone(),
                     desired_state: None,
+                    placement: None,
                 },
                 Some(source_id.clone()),
                 json!({}),
@@ -579,6 +611,7 @@ impl Daemon {
                 revision: Some(revision.revision_id),
                 config: Some(definition.env.clone()),
                 desired_state: Some(definition.desired_state),
+                placement: None,
             })
             .await?;
         let deployment = self

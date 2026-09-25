@@ -2,6 +2,8 @@
 //! exactly once with its own record and receipt, however many clients run
 //! the same task at the same time.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,7 +45,7 @@ async fn daemon_with_task(script: &str) -> (Arc<Daemon>, Arc<LocalProvider>, tem
     let artifacts = Arc::new(compute_state::StateArtifacts::new(
         compute_state::ControlState::new(store.clone()),
     ));
-    let provider = Arc::new(LocalProvider::new());
+    let provider = Arc::new(common::provider());
     let mut config = DaemonConfig::new(dir.path(), store, artifacts);
     config.provider = provider.clone();
     config.port_range = (26000, 26099);
@@ -158,8 +160,8 @@ async fn assert_every_execution_has_evidence(
     assert_eq!(references.len(), total, "durable receipt references");
     // Each receipt document is present and verifies.
     for view in views.iter().step_by((total / 20).max(1)) {
-        let receipt: compute_core::ExecutionReceipt = serde_json::from_value(
-            daemon
+        let receipt: compute_core::ExecutionReceipt = serde_json::from_slice(
+            &daemon
                 .receipt(view.record.receipt_id.as_ref().unwrap())
                 .await
                 .unwrap(),

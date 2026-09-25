@@ -1,33 +1,39 @@
-//! Product-level application lifecycle over placed durable provider jobs.
+//! The application lifecycle: `compute init`, `deploy`, `status`, `logs`,
+//! `history`, `rollback`, and `stop` for a directory with an
+//! `[application]` in its `compute.toml`.
 //!
-//! The provider job and receipt remain authoritative. Application commands
-//! discover those records by the identity sealed into each request; there is
-//! no second application database.
+//! ```text
+//! compute deploy APP
+//!   → requirements (compute.toml)
+//!   → provider discovery and placement (the caller-owned pool)
+//!   → the selected provider's Compute daemon: /applications/{name}
+//!   → revision, release, stable endpoint, versions, evidence
+//! ```
+//!
+//! The daemon on the selected provider owns everything after placement;
+//! this module decides where and prints what happened. There is no
+//! application database here: the application's home is found by asking
+//! the pool's providers.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Args;
-use compute_core::{
-    ApplicationIdentity, ComputeError, ExecutionJob, JobStatus, ProviderRuntimeRequirement,
-    WorkloadBundle,
-};
+use compute_core::{ApplicationIdentity, ComputeError};
 use compute_environment::client::DaemonClient;
 use compute_environment::{
-    ActualState, DeployRequest, DeploymentStatus, DeploymentView, DesiredState,
-    EnvironmentDefinition, EnvironmentError, EnvironmentView, PortSpec, ProjectView, Readiness,
-    ReadinessCheck, RestartPolicy, RevisionDefinition, RevisionView, WorkloadDefinition,
-    WorkloadKind,
+    ApplicationDeployRequest, ApplicationDeploymentState, ApplicationDeploymentView,
+    ApplicationRollbackRequest, ApplicationView, EnvironmentError,
 };
-use compute_placement::{PlacementOutcome, SubmissionMode, dispatch};
-use compute_provider::{ComputeProvider, RemoteProvider};
+use compute_placement::{
+    EvaluationStatus, PlacementOutcome, PlacementReport, ProviderKind, SubmissionMode,
+};
+use compute_state::PoolPlacement;
 use serde::{Deserialize, Serialize};
 
+use crate::environment_cmd::DaemonLocation;
 use crate::{admission, pool};
-
-const APPLICATION_ENVIRONMENT: &str = "applications";
-const APPLICATION_WORKLOAD: &str = "app";
 
 #[derive(Args, Debug)]
 pub struct InitCommand {
@@ -43,12 +49,12 @@ pub struct LogsCommand {
     pub application: PathBuf,
     #[arg(long)]
     pub follow: bool,
-    /// Read the selected historical deployment. Historical logs are
-    /// available only while that deployment's instance is retained.
+    /// Read one version's output. Only the active version's instance keeps
+    /// its logs.
     #[arg(long)]
     pub version: Option<u64>,
     #[command(flatten)]
-    pub daemon: crate::environment_cmd::DaemonLocation,
+    pub daemon: DaemonLocation,
     #[command(flatten)]
     pub location: pool::PoolLocation,
     #[arg(long)]
@@ -59,7 +65,7 @@ pub struct LogsCommand {
 pub struct HistoryCommand {
     pub application: PathBuf,
     #[command(flatten)]
-    pub daemon: crate::environment_cmd::DaemonLocation,
+    pub daemon: DaemonLocation,
     #[command(flatten)]
     pub location: pool::PoolLocation,
     #[arg(long)]
@@ -72,7 +78,9 @@ pub struct RollbackCommand {
     /// Deployment ID or application-scoped version.
     pub deployment: String,
     #[command(flatten)]
-    pub daemon: crate::environment_cmd::DaemonLocation,
+    pub daemon: DaemonLocation,
+    #[command(flatten)]
+    pub location: pool::PoolLocation,
     #[arg(long)]
     pub json: bool,
 }
@@ -96,28 +104,17 @@ struct ApplicationSection {
     port: Option<u16>,
 }
 
-#[derive(Debug, Serialize)]
-struct ApplicationView {
-    application: ApplicationIdentity,
-    status: JobStatus,
-    provider: String,
-    runtime: String,
-    runtime_version: Option<String>,
-    platform: Option<String>,
-    endpoint: Option<String>,
-    placement: Option<String>,
-    cpu: Option<u32>,
-    memory_bytes: Option<u64>,
-    network: String,
-    job_id: String,
-    execution_id: Option<String>,
-    created_at: chrono::DateTime<chrono::Utc>,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct ApplicationLogs {
     stdout: String,
     stderr: String,
+}
+
+/// A provider in the pool that hosts deployments, and its daemon.
+struct Host {
+    provider_id: String,
+    kind: ProviderKind,
+    client: DaemonClient,
 }
 
 pub fn definition(path: &Path) -> compute_core::Result<Definition> {
@@ -217,342 +214,189 @@ pub fn init(command: InitCommand) -> compute_core::Result<()> {
     } else {
         println!("Initialized application {}", identity.name);
         println!("Path: {}", command.path.display());
-        println!("Run: compute run {}", command.path.display());
         println!("Deploy: compute deploy {}", command.path.display());
     }
     Ok(())
 }
 
-pub async fn run(
-    mut artifact: pool::PlacementArtifact,
-    location: pool::PoolLocation,
-    policy: admission::PolicyLocation,
-) -> compute_core::Result<()> {
-    let path = artifact
-        .path
-        .as_deref()
-        .ok_or_else(|| ComputeError::InvalidWorkload("applications require a directory".into()))?;
-    let definition = definition(path)?;
-    if let Some((provider_id, provider, job)) = active_job(&location, &definition.identity).await? {
-        let endpoint = location.application_endpoint(&provider_id)?;
-        return print_status(
-            &definition,
-            &provider_id,
-            &provider,
-            &job,
-            endpoint,
-            artifact.json,
-        )
-        .await;
-    }
-    artifact.submit = true;
-    artifact.path = Some(definition.root.clone());
-    let (pool, report, mut request) =
-        pool::evaluate(&location, &policy, &artifact, SubmissionMode::Job).await?;
-    if report.outcome != PlacementOutcome::Placed {
-        if artifact.json {
-            print_json(&report);
-        }
-        return Err(ComputeError::Runtime(
-            report
-                .failure
-                .as_ref()
-                .map(|failure| failure.message.clone())
-                .unwrap_or_else(|| "no provider can run this application durably".into()),
-        ));
-    }
-    request.execution.application = Some(definition.identity.clone());
-    let submission = dispatch::submit(&pool, &report, request, None)
-        .await
-        .map_err(|error| ComputeError::Runtime(error.to_string()))?;
-    let provider = location.remote_provider(&submission.provider_id)?;
-    let endpoint = location.application_endpoint(&submission.provider_id)?;
-    let mut job = provider
-        .job_status(&submission.job.job_id.0)
-        .await
-        .map_err(crate::provider_error)?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !matches!(job.status, JobStatus::Running | JobStatus::Preparing)
-        && !job.status.is_terminal()
-    {
-        if tokio::time::Instant::now() >= deadline {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        job = provider
-            .job_status(&submission.job.job_id.0)
-            .await
-            .map_err(crate::provider_error)?;
-    }
-    print_status(
-        &definition,
-        &submission.provider_id,
-        &provider,
-        &job,
-        endpoint,
-        artifact.json,
-    )
-    .await
-}
-
+/// Deploy a new version: place the application on a provider that can
+/// satisfy its requirements and host it, then release it there.
 pub async fn deploy(
     path: PathBuf,
-    daemon: crate::environment_cmd::DaemonLocation,
+    provider: Option<String>,
+    daemon: DaemonLocation,
+    location: pool::PoolLocation,
     json: bool,
 ) -> compute_core::Result<()> {
     let definition = definition(&path)?;
-    let bundle = application_bundle(&definition)?;
-    let bundle_id = bundle.bundle_id()?;
-    let client = ensure_deployment_daemon(&daemon).await?;
-    ensure_application_environment(&client).await?;
-    let revision = format!("artifact-{}", bundle_id.trim_start_matches("sha256:"));
+    let name = definition.identity.name.clone();
     let port = definition.identity.port.ok_or_else(|| {
         ComputeError::InvalidWorkload(
             "deployable applications must declare application.port".into(),
         )
     })?;
-    let revision: RevisionView = client
+    // An application lives on one provider. A new version goes where the
+    // application already is: moving it is not something deploy does
+    // silently.
+    let home = find_home(&name, &daemon, &location).await?;
+    let requested = provider.filter(|value| value != "auto");
+    let pinned = match (&home, &requested) {
+        (Some(home), Some(requested))
+            if requested.strip_prefix("provider:").unwrap_or(requested) != home.provider_id =>
+        {
+            return Err(ComputeError::InvalidWorkload(format!(
+                "{name} is deployed on {home}, where its versions, endpoint, and evidence live. Compute does not move an application between providers; deploy it to {home}",
+                home = home.provider_id
+            )));
+        }
+        (Some(home), _) => Some(home.provider_id.clone()),
+        (None, requested) => requested.clone(),
+    };
+    let artifact = pool::PlacementArtifact {
+        path: Some(definition.root.clone()),
+        provider: pinned,
+        // Deployment capability is live state: discover it now.
+        refresh: true,
+        ..pool::PlacementArtifact::default()
+    };
+    let (_, report, request) = pool::evaluate(
+        &location,
+        &admission::PolicyLocation::default(),
+        &artifact,
+        SubmissionMode::Deployment,
+    )
+    .await?;
+    let Some(selected) = report
+        .selected
+        .as_ref()
+        .filter(|_| report.outcome == PlacementOutcome::Placed)
+    else {
+        if json {
+            print_json(&report);
+        }
+        return Err(ComputeError::Runtime(explain_no_provider(&name, &report)));
+    };
+    let bundle = match &request.artifact {
+        compute_provider::ArtifactTransport::Bundle { data } => data.clone(),
+        _ => {
+            return Err(ComputeError::Runtime(
+                "placement did not produce a portable bundle".into(),
+            ));
+        }
+    };
+    let host = match home {
+        Some(home) => home,
+        None => Host {
+            client: match selected.provider_kind {
+                ProviderKind::Local => ensure_local_daemon(&daemon).await?,
+                ProviderKind::Remote => remote_client(&location, &selected.provider_id)?,
+            },
+            provider_id: selected.provider_id.clone(),
+            kind: selected.provider_kind,
+        },
+    };
+    let placement = PoolPlacement {
+        placement_id: report.placement_id.clone(),
+        provider_id: selected.provider_id.clone(),
+        selection_mode: serde_json::to_value(report.selection_mode)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default(),
+    };
+    let started: ApplicationDeploymentView = host
+        .client
         .post(
-            &format!("/projects/{}/revisions", definition.identity.name),
-            Some(&RevisionDefinition {
-                revision,
+            &format!("/applications/{name}/deployments"),
+            Some(&ApplicationDeployRequest {
+                bundle,
+                port,
                 source: Some(definition.root.display().to_string()),
-                workloads: vec![WorkloadDefinition {
-                    name: APPLICATION_WORKLOAD.into(),
-                    kind: WorkloadKind::Service,
-                    bundle: bundle.to_bytes()?,
-                    ports: vec![PortSpec {
-                        name: "http".into(),
-                        port,
-                    }],
-                    restart: RestartPolicy::OnFailure,
-                    desired_state: DesiredState::Running,
-                    readiness: Some(Readiness {
-                        check: ReadinessCheck::Http,
-                        port: Some("http".into()),
-                        path: Some("/".into()),
-                        task: None,
-                        timeout_ms: 60_000,
-                        interval_ms: 250,
-                    }),
-                }],
+                placement: Some(placement),
             }),
         )
         .await
-        .map_err(crate::environment_cmd::error)?;
-    let deployment: DeploymentView = client
-        .post(
-            "/deployments",
-            Some(&DeployRequest {
-                project: definition.identity.name.clone(),
-                environment: APPLICATION_ENVIRONMENT.into(),
-                revision: Some(revision.revision_id),
-                config: None,
-                desired_state: Some(DesiredState::Running),
-            }),
-        )
-        .await
-        .map_err(crate::environment_cmd::error)?;
-    let deployment = wait_for_deployment(&client, deployment.deployment_id).await?;
-    print_application_deployment(&daemon, &deployment, None, json);
-    if matches!(
-        deployment.record.status,
-        DeploymentStatus::Failed | DeploymentStatus::RolledBack
-    ) {
-        return Err(ComputeError::Runtime(
-            deployment
-                .record
-                .failure
-                .clone()
-                .or(deployment.record.rollback_reason.clone())
-                .unwrap_or_else(|| "deployment failed".into()),
-        ));
-    }
-    Ok(())
+        .map_err(|error| provider_error(&host, error))?;
+    let deployment = wait_for_release(&host, &name, &started.deployment_id).await?;
+    finish(&host, &name, &deployment, json).await
 }
 
 pub async fn status(
     path: PathBuf,
-    daemon: crate::environment_cmd::DaemonLocation,
+    daemon: DaemonLocation,
     location: pool::PoolLocation,
     json: bool,
 ) -> compute_core::Result<()> {
     let definition = definition(&path)?;
-    if let Some((project, deployment)) =
-        active_deployment(&daemon, &definition.identity.name).await?
-    {
-        print_application_deployment(&daemon, &deployment, Some(project.actual_state), json);
-        return Ok(());
+    let (host, view) = locate(&definition.identity.name, &daemon, &location).await?;
+    if json {
+        print_json(&with_provider(&host, &view));
+    } else {
+        print_application(&host, &view);
     }
-    let (provider_id, provider, job) = latest_job(&location, &definition.identity)
-        .await?
-        .ok_or_else(|| {
-            ComputeError::Runtime(format!(
-                "{} has no execution history",
-                definition.identity.name
-            ))
-        })?;
-    let endpoint = location.application_endpoint(&provider_id)?;
-    print_status(&definition, &provider_id, &provider, &job, endpoint, json).await
+    Ok(())
 }
 
 pub async fn stop(
     path: PathBuf,
-    daemon: crate::environment_cmd::DaemonLocation,
+    daemon: DaemonLocation,
     location: pool::PoolLocation,
     json: bool,
 ) -> compute_core::Result<()> {
     let definition = definition(&path)?;
-    if active_deployment(&daemon, &definition.identity.name)
-        .await?
-        .is_some()
-    {
-        let client = daemon.client()?;
-        let mut project: ProjectView = client
-            .post::<(), _>(
-                &format!(
-                    "/environments/{APPLICATION_ENVIRONMENT}/projects/{}/stop",
-                    definition.identity.name
-                ),
-                None,
-            )
-            .await
-            .map_err(crate::environment_cmd::error)?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        while project.actual_state != ActualState::Stopped {
-            if tokio::time::Instant::now() >= deadline {
-                return Err(ComputeError::Runtime(
-                    "application did not stop within 30s".into(),
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            project = client
-                .get(&format!(
-                    "/environments/{APPLICATION_ENVIRONMENT}/projects/{}",
-                    definition.identity.name
-                ))
-                .await
-                .map_err(crate::environment_cmd::error)?;
-        }
-        if json {
-            print_json(&project);
-        } else {
-            println!("{}", definition.identity.name);
-            println!("Status      stopped");
-            if let Some(deployment) = project.deployment {
-                println!("Version     v{}", deployment.version);
-                println!("Deployment  {}", deployment.deployment_id);
-            }
-        }
-        return Ok(());
-    }
-    let (provider_id, provider, mut job) = active_job(&location, &definition.identity)
-        .await?
-        .ok_or_else(|| {
-            ComputeError::Runtime(format!("{} is not running", definition.identity.name))
-        })?;
-    provider
-        .cancel_job(&job.job_id.0)
+    let name = definition.identity.name.clone();
+    let (host, _) = locate(&name, &daemon, &location).await?;
+    let mut view: ApplicationView = host
+        .client
+        .post::<(), _>(&format!("/applications/{name}/stop"), None)
         .await
-        .map_err(crate::provider_error)?;
+        .map_err(|error| provider_error(&host, error))?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while !job.status.is_terminal() {
+    while view.status != "stopped" {
         if tokio::time::Instant::now() >= deadline {
-            return Err(ComputeError::Runtime(
-                "application did not stop within 30s".into(),
-            ));
+            return Err(ComputeError::Runtime(format!(
+                "{name} did not stop within 30s"
+            )));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-        job = provider
-            .job_status(&job.job_id.0)
-            .await
-            .map_err(crate::provider_error)?;
+        view = application(&host, &name).await?;
     }
     if json {
-        print_json(&serde_json::json!({
-            "application": definition.identity,
-            "provider": provider_id,
-            "job": job,
-        }));
+        print_json(&with_provider(&host, &view));
     } else {
-        println!("{}", definition.identity.name);
-        println!("Status      stopped");
-        println!("Provider    {provider_id}");
-        println!("Job         {}", job.job_id);
-        if let Ok(receipt) = provider.job_receipt(&job.job_id.0).await {
-            println!("Receipt     {}", receipt.receipt.receipt_hash);
-        }
+        print_application(&host, &view);
     }
     Ok(())
 }
 
 pub async fn logs(command: LogsCommand) -> compute_core::Result<()> {
     let definition = definition(&command.application)?;
-    let deployments = application_deployments(&command.daemon, &definition.identity.name).await?;
-    if !deployments.is_empty() {
-        let selected = match command.version {
-            Some(version) => deployments
-                .iter()
-                .find(|deployment| deployment.record.version == version)
-                .ok_or_else(|| ComputeError::Runtime(format!("deployment v{version} not found")))?,
-            None => deployments.first().expect("checked"),
-        };
-        let active = active_deployment(&command.daemon, &definition.identity.name).await?;
-        if active
+    let name = definition.identity.name.clone();
+    let (host, view) = locate(&name, &command.daemon, &command.location).await?;
+    if let Some(version) = command.version
+        && view
+            .active
             .as_ref()
-            .is_none_or(|(_, deployment)| deployment.deployment_id != selected.deployment_id)
-        {
-            return Err(ComputeError::Runtime(
-                "historical deployment logs are available only while its instance is retained"
-                    .into(),
-            ));
-        }
-        let client = command.daemon.client()?;
-        let path = format!(
-            "/environments/{APPLICATION_ENVIRONMENT}/projects/{}/workloads/{APPLICATION_WORKLOAD}/logs",
-            definition.identity.name
-        );
-        let mut stdout_offset = 0;
-        let mut stderr_offset = 0;
-        loop {
-            let logs: ApplicationLogs = client
-                .get(&path)
-                .await
-                .map_err(crate::environment_cmd::error)?;
-            if command.json {
-                print_json(&logs);
-                return Ok(());
-            }
-            print_delta(&logs.stdout, &mut stdout_offset, false)?;
-            print_delta(&logs.stderr, &mut stderr_offset, true)?;
-            if !command.follow {
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
+            .is_none_or(|active| active.version != version)
+    {
+        return Err(ComputeError::Runtime(format!(
+            "{name} v{version} is not the active version; only the active version's output is kept"
+        )));
     }
-    let (_, provider, job) = latest_job(&command.location, &definition.identity)
-        .await?
-        .ok_or_else(|| {
-            ComputeError::Runtime(format!(
-                "{} has no execution history",
-                definition.identity.name
-            ))
-        })?;
     let mut stdout_offset = 0;
     let mut stderr_offset = 0;
     loop {
-        let logs = provider
-            .job_logs(&job.job_id.0)
+        let logs: ApplicationLogs = host
+            .client
+            .get(&format!("/applications/{name}/logs"))
             .await
-            .map_err(crate::provider_error)?;
+            .map_err(|error| provider_error(&host, error))?;
         if command.json {
             print_json(&logs);
             return Ok(());
         }
         print_delta(&logs.stdout, &mut stdout_offset, false)?;
         print_delta(&logs.stderr, &mut stderr_offset, true)?;
-        if !command.follow || logs.complete {
+        if !command.follow {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -561,301 +405,204 @@ pub async fn logs(command: LogsCommand) -> compute_core::Result<()> {
 
 pub async fn history(command: HistoryCommand) -> compute_core::Result<()> {
     let definition = definition(&command.application)?;
-    let deployments = application_deployments(&command.daemon, &definition.identity.name).await?;
-    if !deployments.is_empty() {
-        if command.json {
-            print_json(&deployments);
-        } else {
-            println!("APPLICATION  {}", definition.identity.name);
-            println!("VERSION\tSTATUS\tPROVIDER\tCREATED\tDEPLOYMENT");
-            for deployment in deployments {
-                let provider = deployment
-                    .record
-                    .workloads
-                    .first()
-                    .and_then(|workload| workload.provider.as_deref())
-                    .unwrap_or("-");
-                println!(
-                    "v{}\t{}\t{}\t{}\t{}",
-                    deployment.record.version,
-                    deployment_status(deployment.record.status),
-                    provider,
-                    deployment.record.created_at.to_rfc3339(),
-                    deployment.deployment_id
-                );
-            }
-        }
+    let name = definition.identity.name.clone();
+    let (host, view) = locate(&name, &command.daemon, &command.location).await?;
+    if command.json {
+        print_json(&view.deployments);
         return Ok(());
     }
-    let jobs = application_jobs(&command.location, &definition.identity).await?;
-    if command.json {
-        print_json(
-            &jobs
-                .iter()
-                .map(|(provider, _, job)| {
-                    serde_json::json!({
-                        "provider": provider,
-                        "job": job,
-                    })
-                })
-                .collect::<Vec<_>>(),
+    println!("{name} on {}", host.provider_id);
+    println!("VERSION\tSTATE\tCREATED\tNOTE\tDEPLOYMENT");
+    for deployment in &view.deployments {
+        let note = deployment
+            .rollback_of
+            .map(|version| format!("rollback to v{version}"))
+            .or_else(|| deployment.failure.clone())
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "v{}\t{}\t{}\t{}\t{}",
+            deployment.version,
+            deployment.state.as_str(),
+            deployment.created_at.to_rfc3339(),
+            note,
+            deployment.deployment_id
         );
-    } else {
-        println!("TIME\tPROVIDER\tRUNTIME\tSTATUS\tJOB");
-        for (provider, _, job) in jobs {
-            println!(
-                "{}\t{}\t{}\t{:?}\t{}",
-                job.created_at.to_rfc3339(),
-                provider,
-                job.request.runtime,
-                job.status,
-                job.job_id
-            );
-        }
     }
     Ok(())
 }
 
 pub async fn rollback(command: RollbackCommand) -> compute_core::Result<()> {
     let definition = definition(&command.application)?;
-    let deployments = application_deployments(&command.daemon, &definition.identity.name).await?;
-    let target = if command.deployment.starts_with("dep_") {
-        deployments
-            .iter()
-            .find(|deployment| deployment.deployment_id == command.deployment)
-    } else {
-        let version = command
-            .deployment
-            .trim_start_matches('v')
-            .parse::<u64>()
-            .map_err(|_| {
-                ComputeError::InvalidWorkload(
-                    "rollback target must be a deployment ID or version".into(),
-                )
-            })?;
-        deployments
-            .iter()
-            .find(|deployment| deployment.record.version == version)
-    }
-    .ok_or_else(|| ComputeError::Runtime("rollback deployment not found".into()))?;
-    let client = command.daemon.client()?;
-    let activation: DeploymentView = client
+    let name = definition.identity.name.clone();
+    let (host, _) = locate(&name, &command.daemon, &command.location).await?;
+    let started: ApplicationDeploymentView = host
+        .client
         .post(
-            "/deployments",
-            Some(&DeployRequest {
-                project: definition.identity.name.clone(),
-                environment: APPLICATION_ENVIRONMENT.into(),
-                revision: Some(target.record.revision_id.clone()),
-                config: Some(target.record.config.clone()),
-                desired_state: Some(DesiredState::Running),
+            &format!("/applications/{name}/rollback"),
+            Some(&ApplicationRollbackRequest {
+                target: command.deployment,
+                placement: None,
             }),
         )
         .await
-        .map_err(crate::environment_cmd::error)?;
-    let activation = wait_for_deployment(&client, activation.deployment_id).await?;
-    print_application_deployment(&command.daemon, &activation, None, command.json);
-    Ok(())
+        .map_err(|error| provider_error(&host, error))?;
+    let deployment = wait_for_release(&host, &name, &started.deployment_id).await?;
+    finish(&host, &name, &deployment, command.json).await
 }
 
-async fn print_status(
-    definition: &Definition,
-    provider_id: &str,
-    provider: &RemoteProvider,
-    job: &ExecutionJob,
-    endpoint: Option<String>,
+/// Print a finished release, and fail when it did not become active.
+async fn finish(
+    host: &Host,
+    name: &str,
+    deployment: &ApplicationDeploymentView,
     json: bool,
 ) -> compute_core::Result<()> {
-    let runtime = provider
-        .resolve_runtime(ProviderRuntimeRequirement {
-            runtime: job.request.runtime,
-            version: None,
-            platform: None,
-        })
-        .await
-        .ok()
-        .and_then(|resolution| resolution.distribution);
-    let runtime_version = runtime.as_ref().map(|runtime| runtime.version.clone());
-    let platform = runtime.as_ref().map(|runtime| runtime.platform.label());
-    let view = ApplicationView {
-        application: definition.identity.clone(),
-        status: job.status,
-        provider: provider_id.into(),
-        runtime: job.request.runtime.to_string(),
-        runtime_version,
-        platform,
-        endpoint,
-        placement: job
-            .placement
-            .as_ref()
-            .map(|placement| placement.policy.mode.clone()),
-        cpu: job.request.requested_execution.resources.cpu_count,
-        memory_bytes: job
-            .request
-            .requested_execution
-            .resources
-            .memory_required_bytes
-            .or(job.request.requested_execution.resources.memory_bytes),
-        network: job.request.requested_execution.network.to_string(),
-        job_id: job.job_id.to_string(),
-        execution_id: job.execution_id.clone(),
-        created_at: job.created_at,
-    };
+    let view = application(host, name).await?;
     if json {
-        print_json(&view);
-        return Ok(());
+        let mut value = with_provider(host, &view);
+        value["deployment"] = serde_json::to_value(deployment)?;
+        print_json(&value);
+    } else {
+        print_release(host, &view, deployment);
     }
-    println!("{}", definition.identity.name);
-    println!("Status      {}", status_label(job.status));
-    println!("Provider    {provider_id}");
-    println!(
-        "Runtime     {}{}",
-        view.runtime,
-        view.runtime_version
-            .as_deref()
-            .map(|version| format!(" {version}"))
-            .unwrap_or_default()
-    );
-    if let Some(platform) = &view.platform {
-        println!("Platform    {platform}");
-    }
-    if let Some(endpoint) = &view.endpoint {
-        println!("Endpoint    {endpoint}");
-    }
-    println!(
-        "Placement   {}",
-        view.placement.as_deref().unwrap_or("automatic")
-    );
-    println!(
-        "Resources   {} CPU / {}",
-        view.cpu.unwrap_or_default(),
-        format_bytes(view.memory_bytes.unwrap_or_default())
-    );
-    println!("Network     {}", view.network);
-    println!(
-        "Admission   {}",
-        if job.admission.is_some() {
-            "admitted"
-        } else {
-            "pending"
-        }
-    );
-    println!("Job         {}", job.job_id);
-    if let Some(execution) = &job.execution_id {
-        println!("Execution   {execution}");
-    }
-    if job.status.is_terminal()
-        && let Ok(receipt) = provider.job_receipt(&job.job_id.0).await
-    {
-        println!("Receipt     {}", receipt.receipt.receipt_hash);
+    if !deployment.active {
+        return Err(ComputeError::Runtime(format!(
+            "{name} v{} did not become active: {}",
+            deployment.version,
+            deployment
+                .failure
+                .clone()
+                .unwrap_or_else(|| deployment.state.as_str().into())
+        )));
     }
     Ok(())
 }
 
-async fn application_jobs(
-    location: &pool::PoolLocation,
-    application: &ApplicationIdentity,
-) -> compute_core::Result<Vec<(String, std::sync::Arc<RemoteProvider>, ExecutionJob)>> {
-    let pool = location.pool()?;
-    let mut found = Vec::new();
-    for member in pool.members() {
-        let Some(provider) = &member.jobs else {
-            continue;
-        };
-        let jobs = provider.jobs().await.map_err(crate::provider_error)?;
-        found.extend(
-            jobs.into_iter()
-                .filter(|job| {
-                    job.application
-                        .as_ref()
-                        .is_some_and(|candidate| candidate.id == application.id)
-                })
-                .map(|job| (member.id.clone(), provider.clone(), job)),
-        );
-    }
-    found.sort_by(|left, right| {
-        right
-            .2
-            .created_at
-            .cmp(&left.2.created_at)
-            .then_with(|| left.2.job_id.cmp(&right.2.job_id))
-    });
-    Ok(found)
-}
-
-async fn latest_job(
-    location: &pool::PoolLocation,
-    application: &ApplicationIdentity,
-) -> compute_core::Result<Option<(String, std::sync::Arc<RemoteProvider>, ExecutionJob)>> {
-    Ok(application_jobs(location, application)
-        .await?
-        .into_iter()
-        .next())
-}
-
-async fn active_job(
-    location: &pool::PoolLocation,
-    application: &ApplicationIdentity,
-) -> compute_core::Result<Option<(String, std::sync::Arc<RemoteProvider>, ExecutionJob)>> {
-    Ok(application_jobs(location, application)
-        .await?
-        .into_iter()
-        .find(|(_, _, job)| !job.status.is_terminal()))
-}
-
-fn application_bundle(definition: &Definition) -> compute_core::Result<WorkloadBundle> {
-    let resolved = crate::direct::resolve(crate::direct::DirectOptions {
-        path: definition.root.clone(),
-        runtime: None,
-        args: Vec::new(),
-        env: Vec::new(),
-        env_file: None,
-        inputs: Vec::new(),
-        outputs: Vec::new(),
-        cwd: None,
-        entrypoint: None,
-        deps: None,
-        network: None,
-        isolation: None,
-        memory: None,
-        timeout: None,
-        defaults: admission::PolicyLocation::default().defaults()?,
-    })?;
-    WorkloadBundle::create_from_with_capsule(
-        resolved.workload,
-        &resolved.root,
-        resolved.dependency_capsule,
-    )
-}
-
-async fn ensure_application_environment(client: &DaemonClient) -> compute_core::Result<()> {
-    match client
-        .get::<EnvironmentView>(&format!("/environments/{APPLICATION_ENVIRONMENT}"))
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(EnvironmentError::NotFound(_)) => {
-            client
-                .post::<_, EnvironmentView>(
-                    "/environments",
-                    Some(&EnvironmentDefinition {
-                        name: APPLICATION_ENVIRONMENT.into(),
-                        desired_state: DesiredState::Running,
-                        env: Default::default(),
-                        policy: None,
-                        provider: None,
-                    }),
-                )
-                .await
-                .map_err(crate::environment_cmd::error)?;
-            Ok(())
+async fn wait_for_release(
+    host: &Host,
+    name: &str,
+    deployment_id: &str,
+) -> compute_core::Result<ApplicationDeploymentView> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let deployment: ApplicationDeploymentView = host
+            .client
+            .get(&format!("/applications/{name}/deployments/{deployment_id}"))
+            .await
+            .map_err(|error| provider_error(host, error))?;
+        if deployment.state != ApplicationDeploymentState::Deploying {
+            return Ok(deployment);
         }
-        Err(error) => Err(crate::environment_cmd::error(error)),
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ComputeError::Runtime(format!(
+                "{name} v{} did not finish releasing within 180s",
+                deployment.version
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-async fn ensure_deployment_daemon(
-    daemon: &crate::environment_cmd::DaemonLocation,
+async fn application(host: &Host, name: &str) -> compute_core::Result<ApplicationView> {
+    host.client
+        .get(&format!("/applications/{name}"))
+        .await
+        .map_err(|error| provider_error(host, error))
+}
+
+/// The provider an application is deployed on, and its view there.
+async fn locate(
+    name: &str,
+    daemon: &DaemonLocation,
+    location: &pool::PoolLocation,
+) -> compute_core::Result<(Host, ApplicationView)> {
+    let host = find_home(name, daemon, location).await?.ok_or_else(|| {
+        ComputeError::Runtime(format!(
+            "{name} is not deployed on any provider in the pool; deploy it with `compute deploy`"
+        ))
+    })?;
+    let view = application(&host, name).await?;
+    Ok((host, view))
+}
+
+/// Ask each provider that could host deployments whether the application
+/// is there. A local daemon that is not running hosts nothing that runs; a
+/// remote provider that cannot be reached might, so it fails closed.
+async fn find_home(
+    name: &str,
+    daemon: &DaemonLocation,
+    location: &pool::PoolLocation,
+) -> compute_core::Result<Option<Host>> {
+    let mut found = vec![];
+    let mut unreachable = vec![];
+    for (provider_id, config) in location.pool()?.configs() {
+        let client = match config.kind {
+            ProviderKind::Local => daemon.client()?,
+            ProviderKind::Remote => remote_client(location, &provider_id)?,
+        };
+        match client
+            .get::<ApplicationView>(&format!("/applications/{name}"))
+            .await
+        {
+            Ok(_) => found.push(Host {
+                provider_id,
+                kind: config.kind,
+                client,
+            }),
+            Err(EnvironmentError::ControllerUnavailable(_))
+                if config.kind == ProviderKind::Remote =>
+            {
+                unreachable.push(provider_id)
+            }
+            // Not there, not a daemon, or no local daemon running.
+            Err(_) => {}
+        }
+    }
+    match found.len() {
+        0 if !unreachable.is_empty() => Err(ComputeError::Runtime(format!(
+            "cannot tell where {name} is deployed: {} cannot be reached",
+            unreachable.join(", ")
+        ))),
+        0 => Ok(None),
+        1 => Ok(found.pop()),
+        _ => Err(ComputeError::Runtime(format!(
+            "{name} is deployed on more than one provider ({}); stop all but one",
+            found
+                .iter()
+                .map(|host| host.provider_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+/// The daemon of a remote provider, authenticated with the pool's
+/// credential for it.
+fn remote_client(
+    location: &pool::PoolLocation,
+    provider_id: &str,
 ) -> compute_core::Result<DaemonClient> {
+    let configs = location.pool()?.configs();
+    let config = configs.get(provider_id).ok_or_else(|| {
+        ComputeError::InvalidWorkload(format!("provider {provider_id} is not in the pool"))
+    })?;
+    let endpoint = config.endpoint.as_deref().ok_or_else(|| {
+        ComputeError::InvalidWorkload(format!("provider {provider_id} has no endpoint"))
+    })?;
+    let mut client = DaemonClient::new(endpoint).map_err(crate::environment_cmd::error)?;
+    if let Some(name) = &config.token_env {
+        let token = std::env::var(name).map_err(|_| {
+            ComputeError::InvalidWorkload(format!(
+                "provider {provider_id}: environment variable {name} is not set"
+            ))
+        })?;
+        client = client.with_bearer_token(token);
+    }
+    Ok(client)
+}
+
+/// This machine's daemon, started in the background when none runs.
+async fn ensure_local_daemon(daemon: &DaemonLocation) -> compute_core::Result<DaemonClient> {
     let client = daemon.client()?;
     match client
         .get::<compute_environment::DaemonStatus>("/status")
@@ -870,7 +617,7 @@ async fn ensure_deployment_daemon(
         .status()?;
     if !status.success() {
         return Err(ComputeError::Runtime(
-            "could not start the local Compute deployment daemon".into(),
+            "could not start the local Compute daemon".into(),
         ));
     }
     let client = daemon.client()?;
@@ -881,140 +628,168 @@ async fn ensure_deployment_daemon(
     Ok(client)
 }
 
-async fn application_deployments(
-    daemon: &crate::environment_cmd::DaemonLocation,
-    application: &str,
-) -> compute_core::Result<Vec<DeploymentView>> {
-    let client = daemon.client()?;
-    let query = format!(
-        "/deployments?environment={APPLICATION_ENVIRONMENT}&project={application}&limit=50"
-    );
-    match client.get(&query).await {
-        Ok(deployments) => Ok(deployments),
-        Err(EnvironmentError::ControllerUnavailable(_) | EnvironmentError::NotFound(_)) => {
-            Ok(Vec::new())
-        }
-        Err(error) => Err(crate::environment_cmd::error(error)),
-    }
-}
-
-async fn active_deployment(
-    daemon: &crate::environment_cmd::DaemonLocation,
-    application: &str,
-) -> compute_core::Result<Option<(ProjectView, DeploymentView)>> {
-    let client = daemon.client()?;
-    let project: ProjectView = match client
-        .get(&format!(
-            "/environments/{APPLICATION_ENVIRONMENT}/projects/{application}"
-        ))
-        .await
-    {
-        Ok(project) => project,
-        Err(EnvironmentError::ControllerUnavailable(_) | EnvironmentError::NotFound(_)) => {
-            return Ok(None);
-        }
-        Err(error) => return Err(crate::environment_cmd::error(error)),
+fn provider_error(host: &Host, error: EnvironmentError) -> ComputeError {
+    let kind = match host.kind {
+        ProviderKind::Local => "local",
+        ProviderKind::Remote => "remote",
     };
-    let Some(deployment) = project.deployment.as_ref() else {
-        return Ok(None);
-    };
-    let view = client
-        .get(&format!("/deployments/{}", deployment.deployment_id))
-        .await
-        .map_err(crate::environment_cmd::error)?;
-    Ok(Some((project, view)))
+    ComputeError::Runtime(format!("provider {} ({kind}): {error}", host.provider_id))
 }
 
-async fn wait_for_deployment(
-    client: &DaemonClient,
-    deployment_id: String,
-) -> compute_core::Result<DeploymentView> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-    loop {
-        let deployment: DeploymentView = client
-            .get(&format!("/deployments/{deployment_id}"))
-            .await
-            .map_err(crate::environment_cmd::error)?;
-        if deployment.record.status.is_terminal() {
-            return Ok(deployment);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(ComputeError::Runtime(format!(
-                "deployment {deployment_id} did not settle within 120s"
-            )));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+/// Why no provider can take this application, in terms of what it asks
+/// for and what each provider lacks, and what to change.
+fn explain_no_provider(name: &str, report: &PlacementReport) -> String {
+    let requirements = &report.requirements;
+    let mut lines = vec![
+        format!("No compatible provider found for {name}."),
+        String::new(),
+    ];
+    lines.push(format!("{name} requires:"));
+    lines.push(format!(
+        "  runtime:      {}{}",
+        requirements.runtime.kind,
+        requirements
+            .runtime
+            .version
+            .as_deref()
+            .map(|version| format!(" {version}"))
+            .unwrap_or_default()
+    ));
+    if let Some(architecture) = &requirements.architecture {
+        lines.push(format!("  architecture: {architecture}"));
     }
-}
-
-fn print_application_deployment(
-    daemon: &crate::environment_cmd::DaemonLocation,
-    deployment: &DeploymentView,
-    actual_state: Option<compute_environment::ActualState>,
-    json: bool,
-) {
-    let workload = deployment.record.workloads.first();
-    let endpoint = workload
-        .and_then(|workload| workload.endpoints.first())
-        .map(|endpoint| application_endpoint(&daemon.endpoint(), endpoint.host));
-    let status = actual_state.map_or_else(
-        || deployment_status(deployment.record.status),
-        |state| state.as_str(),
+    if let Some(cpu) = requirements.resources.cpu_count {
+        lines.push(format!("  cpu:          {cpu}"));
+    }
+    if let Some(memory) = requirements.resources.memory_bytes {
+        lines.push(format!("  memory:       {}", format_bytes(memory)));
+    }
+    lines.push(format!("  network:      {}", requirements.network));
+    lines.push("  deployment:   a provider that hosts applications".into());
+    lines.push(String::new());
+    if report.providers.is_empty() {
+        lines.push(
+            report
+                .failure
+                .as_ref()
+                .map(|failure| failure.message.clone())
+                .unwrap_or_else(|| "The pool has no providers.".into()),
+        );
+    } else {
+        lines.push("Rejected providers:".into());
+    }
+    for provider in &report.providers {
+        lines.push(format!("  {}", provider.provider_id));
+        match provider.status {
+            EvaluationStatus::Compatible if provider.capacity_reasons.is_empty() => {
+                lines.push("    compatible, but not selected".into());
+            }
+            EvaluationStatus::ProviderUnavailable
+            | EvaluationStatus::CapabilitiesUnknown
+            | EvaluationStatus::CapabilitiesInvalid => {
+                lines.push(format!(
+                    "    unreachable: {}",
+                    provider
+                        .error
+                        .as_ref()
+                        .map(|error| error.message.clone())
+                        .unwrap_or_else(|| "capabilities could not be established".into())
+                ));
+            }
+            _ => {}
+        }
+        for reason in provider.reasons.iter().chain(&provider.capacity_reasons) {
+            lines.push(format!(
+                "    {}: requires {}, provider offers {}{}",
+                reason.dimension,
+                plain(&reason.required),
+                plain(&reason.available),
+                reason
+                    .detail
+                    .as_deref()
+                    .map(|detail| format!(" ({detail})"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    lines.push(String::new());
+    lines.push(
+        "Change the requirements in compute.toml, or add a provider that satisfies them to the pool (a Compute daemon: `compute start`)."
+            .into(),
     );
-    if json {
-        print_json(&serde_json::json!({
-            "application": deployment.record.project,
-            "status": status,
-            "version": deployment.record.version,
-            "endpoint": endpoint,
-            "provider": workload.and_then(|workload| workload.provider.as_deref()),
-            "deployment_id": deployment.deployment_id,
-            "deployment": deployment,
-        }));
-        return;
-    }
-    println!("{}", deployment.record.project);
-    println!("Status       {status}");
-    println!("Version      v{}", deployment.record.version);
-    if let Some(endpoint) = endpoint {
-        println!("Endpoint     {endpoint}");
-    }
-    if let Some(provider) = workload.and_then(|workload| workload.provider.as_deref()) {
-        println!("Provider     {provider}");
-    }
-    println!("Deployment   {}", deployment.deployment_id);
-    if let Some(instance) = deployment.instances.first() {
-        if let Some(started) = instance.record.started_at {
-            println!("Started      {}", started.to_rfc3339());
-        }
-    }
-    if let Some(receipt) = &deployment.record.receipt {
-        println!("Receipt      {receipt}");
+    lines.join("\n")
+}
+
+fn plain(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(items) => items.iter().map(plain).collect::<Vec<_>>().join(", "),
+        other => other.to_string(),
     }
 }
 
-fn application_endpoint(daemon_endpoint: &str, port: u16) -> String {
-    let (scheme, rest) = daemon_endpoint
-        .split_once("://")
-        .unwrap_or(("http", daemon_endpoint));
-    let authority = rest.split('/').next().unwrap_or(rest);
-    let host = authority
-        .rsplit_once(':')
-        .map_or(authority, |(host, _)| host);
-    format!("{scheme}://{host}:{port}")
+fn with_provider(host: &Host, view: &ApplicationView) -> serde_json::Value {
+    let mut value = serde_json::to_value(view).unwrap_or_default();
+    value["provider"] = serde_json::json!(host.provider_id);
+    if let Some(active) = &view.active {
+        value["version"] = serde_json::json!(active.version);
+        value["deployment_id"] = serde_json::json!(active.deployment_id);
+    }
+    value
 }
 
-fn deployment_status(status: DeploymentStatus) -> &'static str {
-    match status {
-        DeploymentStatus::Pending
-        | DeploymentStatus::Starting
-        | DeploymentStatus::Ready
-        | DeploymentStatus::NetworkReady
-        | DeploymentStatus::Switching => "deploying",
-        DeploymentStatus::Active | DeploymentStatus::Draining | DeploymentStatus::Complete => {
-            "running"
+fn print_application(host: &Host, view: &ApplicationView) {
+    println!("Application: {}", view.application.name);
+    println!("Status:      {}", view.status);
+    if let Some(active) = &view.active {
+        println!("Version:     v{}", active.version);
+    }
+    println!("Provider:    {}", host.provider_id);
+    if let Some(active) = &view.active {
+        print_runtime(active);
+    }
+    if let Some(endpoint) = &view.endpoint {
+        println!("Endpoint:    {endpoint}");
+    }
+    if let Some(deploying) = &view.deploying {
+        println!("Deploying:   v{}", deploying.version);
+    }
+}
+
+fn print_release(host: &Host, view: &ApplicationView, deployment: &ApplicationDeploymentView) {
+    println!("Application: {}", view.application.name);
+    println!("Version:     v{}", deployment.version);
+    if let Some(version) = deployment.rollback_of {
+        println!("Rollback:    to the code of v{version}");
+    }
+    println!("Provider:    {}", host.provider_id);
+    print_runtime(deployment);
+    if let Some(endpoint) = &view.endpoint {
+        println!("Endpoint:    {endpoint}");
+    }
+    println!(
+        "Status:      {}",
+        if deployment.active {
+            view.status.as_str()
+        } else {
+            deployment.state.as_str()
         }
-        DeploymentStatus::Failed | DeploymentStatus::RolledBack => "failed",
+    );
+    if let Some(failure) = &deployment.failure {
+        println!("Failure:     {failure}");
+    }
+}
+
+fn print_runtime(deployment: &ApplicationDeploymentView) {
+    if let Some(runtime) = &deployment.runtime {
+        println!(
+            "Runtime:     {runtime}{}",
+            deployment
+                .runtime_version
+                .as_deref()
+                .map(|version| format!(" {version}"))
+                .unwrap_or_default()
+        );
     }
 }
 
@@ -1034,22 +809,10 @@ fn print_delta(value: &str, offset: &mut usize, stderr: bool) -> compute_core::R
     Ok(())
 }
 
-fn status_label(status: JobStatus) -> &'static str {
-    match status {
-        JobStatus::Created | JobStatus::Accepted | JobStatus::Queued => "created",
-        JobStatus::WaitingForCapacity => "waiting",
-        JobStatus::Reserved | JobStatus::Admitted | JobStatus::Preparing => "deploying",
-        JobStatus::Running => "running",
-        JobStatus::Succeeded => "completed",
-        JobStatus::Cancelled => "stopped",
-        JobStatus::Failed | JobStatus::Rejected | JobStatus::TimedOut => "failed",
-    }
-}
-
 fn format_bytes(bytes: u64) -> String {
-    if bytes % (1024 * 1024 * 1024) == 0 {
+    if bytes.is_multiple_of(1024 * 1024 * 1024) {
         format!("{} GiB", bytes / (1024 * 1024 * 1024))
-    } else if bytes % (1024 * 1024) == 0 {
+    } else if bytes.is_multiple_of(1024 * 1024) {
         format!("{} MiB", bytes / (1024 * 1024))
     } else {
         format!("{bytes} bytes")

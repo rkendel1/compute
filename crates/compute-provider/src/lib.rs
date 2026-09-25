@@ -29,6 +29,9 @@ use tokio::net::{TcpListener, TcpStream};
 
 mod jobs;
 mod runtime;
+pub use runtime::RuntimeCatalog;
+#[doc(hidden)]
+pub mod testing;
 pub use jobs::JobEvent;
 use jobs::JobManager;
 use runtime::RuntimeManager;
@@ -325,6 +328,11 @@ pub struct ProviderCapabilities {
     /// intersect it with theirs; the provider enforces it regardless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<Policy>,
+    /// Whether the provider hosts durable application deployments: a
+    /// Compute daemon that owns revisions, releases, endpoints, and their
+    /// evidence. A provider that only executes workloads does not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub application_deployments: bool,
     pub inventory: RuntimeInventory,
 }
 
@@ -616,6 +624,9 @@ pub trait ComputeProvider: Send + Sync {
 pub struct LocalProvider {
     compute: Compute,
     runtimes: RuntimeManager,
+    /// Whether this node hosts durable application deployments: a Compute
+    /// daemon runs (or is started) here to own them.
+    application_deployments: bool,
     identity: ProviderIdentity,
     policy: ProviderPolicy,
     execution_policy: RwLock<Option<Policy>>,
@@ -632,18 +643,46 @@ impl LocalProvider {
     pub fn new() -> Self {
         Self::with_identity(ProviderIdentity::Local { id: "local".into() })
     }
+    /// A provider with this identity. Its runtime catalog is
+    /// `$COMPUTE_RUNTIME_CATALOG` when set (see [`RuntimeCatalog`]), else the
+    /// embedded one; a catalog that cannot be used makes every managed
+    /// runtime unavailable rather than falling back.
     pub fn with_identity(identity: ProviderIdentity) -> Self {
+        let catalog = RuntimeCatalog::from_environment().unwrap_or_else(|error| {
+            eprintln!("compute: {error}; managed runtimes are unavailable");
+            RuntimeCatalog::empty()
+        });
+        Self::with_identity_and_catalog(identity, catalog)
+    }
+
+    /// Acquire runtimes from `catalog` instead of the environment's.
+    pub fn with_runtime_catalog(self, catalog: RuntimeCatalog) -> Self {
+        let execution_policy = self.execution_policy();
+        Self::with_identity_and_catalog(self.identity.clone(), catalog)
+            .with_policy(self.policy)
+            .with_execution_policy(execution_policy)
+            .with_application_deployments(self.application_deployments)
+    }
+
+    fn with_identity_and_catalog(identity: ProviderIdentity, catalog: RuntimeCatalog) -> Self {
         let provider_key = serde_json::to_string(&identity).expect("provider identity serializes");
-        let runtimes = RuntimeManager::new(&provider_key);
+        let runtimes = RuntimeManager::new(&provider_key, catalog);
         let compute = Compute::with_distribution_root(runtimes.root().to_path_buf());
         Self {
             compute,
             runtimes,
+            application_deployments: false,
             identity,
             policy: ProviderPolicy::default(),
             execution_policy: RwLock::new(None),
             executions_started: AtomicU64::new(0),
         }
+    }
+
+    /// Advertise that this node hosts durable application deployments.
+    pub fn with_application_deployments(mut self, hosted: bool) -> Self {
+        self.application_deployments = hosted;
+        self
     }
 
     pub fn with_policy(mut self, policy: ProviderPolicy) -> Self {
@@ -1223,6 +1262,7 @@ impl ComputeProvider for LocalProvider {
             max_memory_bytes: self.policy.max_memory_bytes,
             resources: provider_resources(&self.policy),
             policy: self.execution_policy(),
+            application_deployments: self.application_deployments,
             inventory,
         })
     }

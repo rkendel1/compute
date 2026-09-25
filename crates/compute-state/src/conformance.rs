@@ -610,6 +610,7 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
                     logical: 8000,
                     host: 20001,
                 }],
+                pool_placement: None,
             }],
             failure: None,
             receipt_ids: vec!["sha256:r".into()],

@@ -25,16 +25,20 @@ These commands generate the canonical `WorkloadSpec` and use the existing
 engine. See [docs/getting-started.md](docs/getting-started.md) for project
 configuration, inputs, outputs, environment, policy, dry runs, and receipts.
 
-Or create a durable application and let Compute resolve its runtime, place it,
-admit it, and expose one lifecycle:
+Or create an application and deploy it. Compute resolves its requirements,
+places it on a provider that can satisfy them and host it (this machine, or
+another node's Compute daemon in your pool), and returns a stable endpoint,
+versions, and receipts:
 
 ```sh
 compute init my-app
-compute run my-app
+compute deploy my-app
 compute status my-app
 compute logs my-app --follow
-compute stop my-app
+compute deploy my-app          # v2, same endpoint
+compute rollback my-app 1      # v3, v1's code
 compute history my-app
+compute stop my-app
 ```
 
 See [docs/applications.md](docs/applications.md) and the

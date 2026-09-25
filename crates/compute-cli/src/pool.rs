@@ -97,16 +97,6 @@ impl PoolLocation {
         })
     }
 
-    pub(crate) fn application_endpoint(&self, id: &str) -> compute_core::Result<Option<String>> {
-        let pool = self.pool()?;
-        let member = pool.member(id).ok_or_else(|| {
-            ComputeError::InvalidWorkload(format!(
-                "provider {id} is not configured in the caller-owned pool"
-            ))
-        })?;
-        Ok(member.config.application_endpoint.clone())
-    }
-
     fn cache(&self) -> compute_core::Result<CapabilityCache> {
         CapabilityCache::load(&self.cache_path()).map_err(placement_error)
     }
@@ -219,7 +209,7 @@ pub enum PoolCommands {
     Submit(Box<PlacementArtifact>),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 pub struct PlacementArtifact {
     #[arg(required_unless_present = "bundle", conflicts_with = "bundle")]
     pub path: Option<PathBuf>,
@@ -905,7 +895,10 @@ fn parse_placement_policy(
     policy: Option<&str>,
     prefer_provider: Option<&str>,
 ) -> compute_core::Result<PlacementPolicy> {
-    if let Some(id) = provider {
+    // `--provider auto` asks placement to choose; `provider:<id>` and a bare
+    // ID name one configured provider.
+    if let Some(value) = provider.filter(|value| *value != "auto") {
+        let id = value.strip_prefix("provider:").unwrap_or(value);
         compute_placement::validate_provider_id(id)
             .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
         return Ok(PlacementPolicy::Provider(id.to_owned()));
@@ -1312,4 +1305,26 @@ fn dispatch_failure(
         error.placement_id,
         error.provider_id.as_deref().unwrap_or("-")
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_accepts_auto_a_prefixed_id_or_a_bare_id() {
+        assert_eq!(
+            parse_placement_policy(Some("auto"), None, None).unwrap(),
+            PlacementPolicy::Auto
+        );
+        assert_eq!(
+            parse_placement_policy(Some("provider:production"), None, None).unwrap(),
+            PlacementPolicy::Provider("production".into())
+        );
+        assert_eq!(
+            parse_placement_policy(Some("linux-worker"), None, None).unwrap(),
+            PlacementPolicy::Provider("linux-worker".into())
+        );
+        assert!(parse_placement_policy(Some("provider:"), None, None).is_err());
+    }
 }

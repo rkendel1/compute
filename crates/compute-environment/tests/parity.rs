@@ -1,6 +1,8 @@
 //! UI/API parity: the UI performs no operation the Compute API does not
 //! expose, and every route in the API's table is really served.
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -118,9 +120,13 @@ async fn every_api_route_is_served() {
     let artifacts = Arc::new(compute_state::StateArtifacts::new(
         compute_state::ControlState::new(store.clone()),
     ));
-    let daemon = Daemon::start(DaemonConfig::new(node.path(), store, artifacts))
-        .await
-        .unwrap();
+    let daemon = Daemon::start({
+        let mut config = DaemonConfig::new(node.path(), store, artifacts);
+        config.provider = std::sync::Arc::new(common::provider());
+        config
+    })
+    .await
+    .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(api::serve(listener, daemon.clone(), None));

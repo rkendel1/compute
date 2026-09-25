@@ -32,8 +32,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), Handler).serve_forever()
 "#;
 
+#[path = "support/runtimes.rs"]
+mod runtimes;
+
 fn compute() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin("compute"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin("compute"));
+    runtimes::with_fixture_runtimes(&mut command);
+    command
 }
 
 fn free_port() -> u16 {

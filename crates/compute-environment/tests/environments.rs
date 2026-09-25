@@ -3,6 +3,8 @@
 //! receipts, restart, and failure — against a real daemon running real
 //! services.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -109,6 +111,7 @@ fn memory_config(dir: &std::path::Path) -> DaemonConfig {
         compute_state::ControlState::new(store.clone()),
     ));
     let mut config = DaemonConfig::new(dir, store, artifacts);
+    config.provider = std::sync::Arc::new(common::provider());
     port_windows(&mut config);
     config
 }
@@ -124,7 +127,7 @@ fn port_windows(config: &mut DaemonConfig) {
 
 async fn harness() -> Harness {
     let state = tempfile::tempdir().unwrap();
-    let provider = Arc::new(LocalProvider::new());
+    let provider = Arc::new(common::provider());
     let mut config = memory_config(state.path());
     config.provider = provider.clone();
     config.restart_delay = Duration::from_millis(100);
@@ -671,10 +674,22 @@ async fn receipts_carry_environment_project_workload_and_execution() {
     let record = &execution.record;
     let receipt_id = record.receipt_id.clone().unwrap();
     // The receipt is evidence: a durable artifact, referenced by ID.
-    let receipt: compute_core::ExecutionReceipt =
-        serde_json::from_value(daemon.receipt(&receipt_id).await.unwrap()).unwrap();
+    let stored = daemon.receipt(&receipt_id).await.unwrap();
+    let receipt: compute_core::ExecutionReceipt = serde_json::from_slice(&stored).unwrap();
     receipt.verify().unwrap();
+    // Served exactly as stored: its canonical encoding verifies offline.
+    assert_eq!(receipt.encoded_bytes().unwrap(), stored);
     let scope = receipt.scope.as_ref().unwrap();
+    // application → deployment → execution, in the receipt itself.
+    assert_eq!(scope.deployment_id, record.deployment_id);
+    assert!(scope.deployment_id.is_some());
+    assert_eq!(
+        receipt
+            .application
+            .as_ref()
+            .map(|application| application.name.as_str()),
+        Some("factory")
+    );
     assert_eq!(scope.environment, "prod");
     assert_eq!(scope.environment_id, view.environment_id);
     assert_eq!(scope.project, "factory");
@@ -721,6 +736,7 @@ async fn desired_state_persists_across_daemon_restarts() {
             state.path().join("artifacts"),
         ));
         let mut config = DaemonConfig::new(state.path().join("node"), store, artifacts);
+        config.provider = std::sync::Arc::new(common::provider());
         config.restart_delay = Duration::from_millis(100);
         config.port_range = windows.port_range;
         config.instance_port_range = windows.instance_port_range;
@@ -767,6 +783,13 @@ async fn environment_placement_participates_in_provider_selection() {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let jobs = tempfile::tempdir().unwrap();
     let mut server = compute_provider::ServerConfig::local(endpoint.clone());
+    server.provider = Arc::new(
+        LocalProvider::with_identity(compute_core::ProviderIdentity::Remote {
+            id: endpoint.clone(),
+            endpoint: endpoint.clone(),
+        })
+        .with_runtime_catalog(common::catalog()),
+    );
     server.job_store = jobs.path().to_path_buf();
     let handle = tokio::spawn(async move {
         let _ = compute_provider::serve_listener(listener, server).await;
@@ -819,7 +842,7 @@ async fn the_api_is_the_only_path_and_it_is_authorized() {
     // A development daemon with a shared token: every request, reads
     // included, must carry it.
     let state = tempfile::tempdir().unwrap();
-    let provider = Arc::new(LocalProvider::new());
+    let provider = Arc::new(common::provider());
     let mut config = memory_config(state.path());
     config.provider = provider.clone();
     config.security.legacy_token = Some("operator".into());

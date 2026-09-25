@@ -23,8 +23,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
 http.server.ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), Handler).serve_forever()
 "#;
 
+#[path = "support/runtimes.rs"]
+mod runtimes;
+
 fn compute_binary() -> PathBuf {
     assert_cmd::cargo::cargo_bin("compute")
+}
+
+fn compute_command() -> Command {
+    let mut command = Command::new(compute_binary());
+    runtimes::with_fixture_runtimes(&mut command);
+    command
 }
 
 fn free_port() -> u16 {
@@ -50,7 +59,7 @@ struct Node {
 
 impl Drop for Node {
     fn drop(&mut self) {
-        let _ = Command::new(compute_binary())
+        let _ = compute_command()
             .args(["stop", "--daemon", &self.endpoint])
             .output();
     }
@@ -58,7 +67,7 @@ impl Drop for Node {
 
 impl Node {
     fn run(&self, args: &[&str]) -> serde_json::Value {
-        let output = Command::new(compute_binary())
+        let output = compute_command()
             .args(args)
             .args(["--daemon", &self.endpoint, "--json"])
             .output()
@@ -73,7 +82,7 @@ impl Node {
     }
 
     fn try_run(&self, args: &[&str]) -> (bool, String) {
-        let output = Command::new(compute_binary())
+        let output = compute_command()
             .args(args)
             .args(["--daemon", &self.endpoint, "--json"])
             .output()
@@ -96,7 +105,7 @@ fn start(root: &Path, window: u16) -> Node {
         state: root.join("node"),
         window,
     };
-    let status = Command::new(compute_binary())
+    let status = compute_command()
         .args([
             "start",
             "--detach",
@@ -205,7 +214,7 @@ fn rebuilt(root: &Path, name: &str) -> PathBuf {
 /// An artifact that answers `version --json` like a compatible Compute,
 /// then misbehaves when started.
 fn impostor(root: &Path, name: &str, start: &str) -> PathBuf {
-    let version = Command::new(compute_binary())
+    let version = compute_command()
         .args(["version", "--json"])
         .output()
         .unwrap()

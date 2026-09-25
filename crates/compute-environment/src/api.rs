@@ -129,6 +129,19 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/events/stream"),
     ("GET", "/providers"),
     ("GET", "/services"),
+    ("GET", "/applications"),
+    ("GET", "/applications/{application}"),
+    ("GET", "/applications/{application}/deployments"),
+    ("POST", "/applications/{application}/deployments"),
+    (
+        "GET",
+        "/applications/{application}/deployments/{deployment}",
+    ),
+    ("POST", "/applications/{application}/rollback"),
+    ("POST", "/applications/{application}/stop"),
+    ("GET", "/applications/{application}/logs"),
+    ("GET", "/compute/capabilities"),
+    ("GET", "/compute/health"),
     ("POST", "/services"),
     ("DELETE", "/services/{service}"),
 ];
@@ -329,6 +342,8 @@ enum Response {
     Json(u16, Value),
     Static(&'static str, &'static str),
     Text(&'static str, String),
+    /// Stored bytes served unchanged, such as a canonical receipt.
+    Bytes(&'static str, Vec<u8>),
     Redirect(&'static str),
     Stream(EventFilter),
 }
@@ -373,6 +388,9 @@ async fn handle(mut stream: Stream, daemon: Arc<Daemon>) -> std::io::Result<()> 
         Ok(Response::Text(content_type, body)) => {
             write_response(&mut stream, 200, content_type, body.as_bytes(), &request_id).await
         }
+        Ok(Response::Bytes(content_type, body)) => {
+            write_response(&mut stream, 200, content_type, &body, &request_id).await
+        }
         Ok(Response::Redirect(location)) => {
             let head = format!(
                 "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -398,6 +416,8 @@ async fn handle(mut stream: Stream, daemon: Arc<Daemon>) -> std::io::Result<()> 
 }
 
 /// Authenticate, authorize, run, and audit one request.
+/// Every daemon call below is boxed: in unoptimized builds a poll function
+/// reserves stack for every inline future, and dispatch has one per route.
 async fn dispatch(
     daemon: &Arc<Daemon>,
     request: Request,
@@ -425,7 +445,7 @@ async fn dispatch(
         ("GET", ["ui", "app.css"]) => {
             return Ok(Response::Static("text/css; charset=utf-8", UI_STYLE));
         }
-        ("GET", ["health"]) => return Ok(Response::Json(200, daemon.health().await)),
+        ("GET", ["health"]) => return Ok(Response::Json(200, Box::pin(daemon.health()).await)),
         _ if daemon.is_stopping() => {
             return Err(EnvironmentError::ControllerUnavailable(
                 "the controller is stopping".into(),
@@ -524,7 +544,7 @@ async fn dispatch(
     // Nothing is changed while durable state is unreachable: a mutation
     // fails before it starts rather than half-applying.
     if mutation && !matches!(segments.as_slice(), ["shutdown"]) {
-        if let Err(error) = daemon.require_state().await {
+        if let Err(error) = Box::pin(daemon.require_state()).await {
             daemon
                 .audit(audit(
                     &principal.operator_id,
@@ -573,7 +593,7 @@ async fn dispatch(
                 Default::default(),
             ),
         };
-        daemon.audit(record).await;
+        Box::pin(daemon.audit(record)).await;
     }
     result
 }
@@ -706,7 +726,7 @@ async fn stream_events(
     stream.write_all(head.as_bytes()).await?;
     let mut last = filter.after.unwrap_or_default();
     if filter.after.is_some()
-        && let Ok(events) = daemon.events(filter.clone()).await
+        && let Ok(events) = Box::pin(daemon.events(filter.clone())).await
     {
         for event in events {
             last = last.max(event.sequence);
@@ -786,47 +806,44 @@ async fn route(
             .unwrap_or(default)
     };
     match (method, segments) {
-        ("GET", ["info"]) => ok(to_value(daemon.info().await)?),
-        ("GET", ["status"]) => ok(to_value(daemon.status().await)?),
+        ("GET", ["info"]) => ok(to_value(Box::pin(daemon.info()).await)?),
+        ("GET", ["status"]) => ok(to_value(Box::pin(daemon.status()).await)?),
 
         // Operators.
         ("GET", ["auth", "whoami"]) => ok(to_value(principal)?),
-        ("GET", ["auth", "credentials"]) => ok(to_value(daemon.credentials().await?)?),
+        ("GET", ["auth", "credentials"]) => ok(to_value(Box::pin(daemon.credentials()).await?)?),
         ("POST", ["auth", "credentials"]) => created(to_value(
-            daemon.create_credential(principal, parse(body)?).await?,
+            Box::pin(daemon.create_credential(principal, parse(body)?)).await?,
         )?),
         ("POST", ["auth", "credentials", id, "revoke"]) => {
-            ok(to_value(daemon.revoke_credential(id).await?)?)
+            ok(to_value(Box::pin(daemon.revoke_credential(id)).await?)?)
         }
         ("POST", ["auth", "credentials", id, "rotate"]) => created(to_value(
-            daemon
-                .rotate_credential(principal, id, parse(body)?)
-                .await?,
+            Box::pin(daemon.rotate_credential(principal, id, parse(body)?)).await?,
         )?),
         // The node's controller.
         ("POST", ["node", "reconcile"]) => {
-            daemon.reconcile().await;
-            ok(to_value(daemon.info().await.reconcile)?)
+            Box::pin(daemon.reconcile()).await;
+            ok(to_value(Box::pin(daemon.info()).await.reconcile)?)
         }
         ("GET", ["node", "upgrade"]) => ok(to_value(daemon.upgrade_record())?),
         ("POST", ["node", "upgrade"]) => {
-            let record = daemon.request_upgrade(principal, parse(body)?).await?;
+            let record = Box::pin(daemon.request_upgrade(principal, parse(body)?)).await?;
             Ok(Response::Json(202, to_value(record)?))
         }
         ("POST", ["node", "rollback"]) => {
             let request: serde_json::Value = parse(body)?;
-            let record = daemon
-                .request_rollback(principal, request["timeout_seconds"].as_u64())
-                .await?;
+            let record =
+                Box::pin(daemon.request_rollback(principal, request["timeout_seconds"].as_u64()))
+                    .await?;
             Ok(Response::Json(202, to_value(record)?))
         }
         ("GET", ["metrics"]) => Ok(Response::Text(
             "text/plain; version=0.0.4",
-            daemon.metrics().await,
+            Box::pin(daemon.metrics()).await,
         )),
         ("GET", ["audit"]) => ok(to_value(
-            daemon
-                .audit_records(query.get("operator").map(String::as_str), limit(100))
+            Box::pin(daemon.audit_records(query.get("operator").map(String::as_str), limit(100)))
                 .await?,
         )?),
         ("POST", ["shutdown"]) => {
@@ -836,9 +853,9 @@ async fn route(
             let keep = request["workloads"].as_str() == Some("keep");
             let daemon = daemon.clone();
             if keep {
-                daemon.detach().await?;
+                Box::pin(daemon.detach()).await?;
             } else {
-                tokio::spawn(async move { daemon.shutdown().await });
+                tokio::spawn(async move { Box::pin(daemon.shutdown()).await });
             }
             ok(
                 serde_json::json!({ "shutdown": true, "workloads": if keep { "kept" } else { "stopped" } }),
@@ -846,37 +863,37 @@ async fn route(
         }
 
         // Environments.
-        ("GET", ["environments"]) => ok(to_value(daemon.environments().await?)?),
-        ("POST", ["environments"]) => {
-            created(to_value(daemon.create_environment(parse(body)?).await?)?)
-        }
+        ("GET", ["environments"]) => ok(to_value(Box::pin(daemon.environments()).await?)?),
+        ("POST", ["environments"]) => created(to_value(
+            Box::pin(daemon.create_environment(parse(body)?)).await?,
+        )?),
         ("GET", ["environments", id]) | ("GET", ["environments", id, "status"]) => {
-            ok(to_value(daemon.environment(id).await?)?)
+            ok(to_value(Box::pin(daemon.environment(id)).await?)?)
         }
         ("DELETE", ["environments", id]) => {
-            daemon.destroy_environment(id).await?;
+            Box::pin(daemon.destroy_environment(id)).await?;
             ok(serde_json::json!({ "destroyed": id }))
         }
         ("POST", ["environments", id, action @ ("start" | "stop" | "restart")]) => {
             let (desired, restart) = lifecycle(action);
             ok(to_value(
-                daemon.set_environment_state(id, desired, restart).await?,
+                Box::pin(daemon.set_environment_state(id, desired, restart)).await?,
             )?)
         }
 
         // Projects in an environment.
         ("GET", ["environments", id, "projects"]) => {
-            ok(to_value(daemon.environment(id).await?.projects)?)
+            ok(to_value(Box::pin(daemon.environment(id)).await?.projects)?)
         }
-        ("POST", ["environments", id, "projects"]) => {
-            created(to_value(daemon.add_project(id, parse(body)?).await?)?)
-        }
+        ("POST", ["environments", id, "projects"]) => created(to_value(
+            Box::pin(daemon.add_project(id, parse(body)?)).await?,
+        )?),
         ("GET", ["environments", id, "projects", project])
         | ("GET", ["environments", id, "projects", project, "status"]) => {
-            ok(to_value(daemon.project(id, project).await?)?)
+            ok(to_value(Box::pin(daemon.project(id, project)).await?)?)
         }
         ("DELETE", ["environments", id, "projects", project]) => {
-            daemon.remove_project(id, project).await?;
+            Box::pin(daemon.remove_project(id, project)).await?;
             ok(serde_json::json!({ "removed": project }))
         }
         (
@@ -891,17 +908,15 @@ async fn route(
         ) => {
             let (desired, restart) = lifecycle(action);
             ok(to_value(
-                daemon
-                    .set_project_state(id, project, desired, restart)
-                    .await?,
+                Box::pin(daemon.set_project_state(id, project, desired, restart)).await?,
             )?)
         }
-        ("GET", ["environments", id, "projects", project, "executions"]) => {
-            ok(to_value(daemon.executions(id, project, limit(50)).await?)?)
-        }
-        ("GET", ["environments", id, "projects", project, "receipts"]) => {
-            ok(to_value(daemon.receipts(id, project, limit(50)).await?)?)
-        }
+        ("GET", ["environments", id, "projects", project, "executions"]) => ok(to_value(
+            Box::pin(daemon.executions(id, project, limit(50))).await?,
+        )?),
+        ("GET", ["environments", id, "projects", project, "receipts"]) => ok(to_value(
+            Box::pin(daemon.receipts(id, project, limit(50))).await?,
+        )?),
 
         // Workloads.
         (
@@ -914,7 +929,9 @@ async fn route(
                 "workloads",
                 workload,
             ],
-        ) => ok(to_value(daemon.workload(id, project, workload).await?)?),
+        ) => ok(to_value(
+            Box::pin(daemon.workload(id, project, workload)).await?,
+        )?),
         (
             "POST",
             [
@@ -929,8 +946,7 @@ async fn route(
         ) => {
             let (desired, restart) = lifecycle(action);
             ok(to_value(
-                daemon
-                    .set_workload_state(id, project, workload, desired, restart)
+                Box::pin(daemon.set_workload_state(id, project, workload, desired, restart))
                     .await?,
             )?)
         }
@@ -945,7 +961,9 @@ async fn route(
                 workload,
                 "run",
             ],
-        ) => ok(to_value(daemon.run_task(id, project, workload).await?)?),
+        ) => ok(to_value(
+            Box::pin(daemon.run_task(id, project, workload)).await?,
+        )?),
         (
             "GET",
             [
@@ -958,21 +976,23 @@ async fn route(
                 "logs",
             ],
         ) => {
-            let (stdout, stderr) = daemon.logs(id, project, workload).await?;
+            let (stdout, stderr) = Box::pin(daemon.logs(id, project, workload)).await?;
             ok(serde_json::json!({ "stdout": stdout, "stderr": stderr }))
         }
 
         // Projects across environments.
-        ("GET", ["projects"]) => ok(to_value(daemon.projects().await?)?),
-        ("GET", ["projects", project]) => ok(to_value(daemon.project_detail(project).await?)?),
-        ("GET", ["projects", project, "status"]) => {
-            ok(to_value(daemon.project_detail(project).await?.summary)?)
+        ("GET", ["projects"]) => ok(to_value(Box::pin(daemon.projects()).await?)?),
+        ("GET", ["projects", project]) => {
+            ok(to_value(Box::pin(daemon.project_detail(project)).await?)?)
         }
+        ("GET", ["projects", project, "status"]) => ok(to_value(
+            Box::pin(daemon.project_detail(project)).await?.summary,
+        )?),
         ("GET", ["projects", project, "revisions"]) => {
-            ok(to_value(daemon.revisions(project).await?)?)
+            ok(to_value(Box::pin(daemon.revisions(project)).await?)?)
         }
         ("POST", ["projects", project, "revisions"]) => created(to_value(
-            daemon.register_revision(project, parse(body)?).await?,
+            Box::pin(daemon.register_revision(project, parse(body)?)).await?,
         )?),
 
         // Deployments.
@@ -985,44 +1005,89 @@ async fn route(
                 )
                 .await?,
         )?),
-        ("POST", ["deployments"]) => created(to_value(daemon.deploy(parse(body)?).await?)?),
+        ("POST", ["deployments"]) => {
+            created(to_value(Box::pin(daemon.deploy(parse(body)?)).await?)?)
+        }
         ("POST", ["deployments", "promote"]) => {
-            created(to_value(daemon.promote(parse(body)?).await?)?)
+            created(to_value(Box::pin(daemon.promote(parse(body)?)).await?)?)
         }
-        ("GET", ["deployments", id]) => ok(to_value(daemon.deployment(id).await?)?),
+        ("GET", ["deployments", id]) => ok(to_value(Box::pin(daemon.deployment(id)).await?)?),
         ("GET", ["deployments", id, "receipt"]) => {
-            ok(daemon.deployment_receipt_document(id).await?)
+            ok(Box::pin(daemon.deployment_receipt_document(id)).await?)
         }
-        ("POST", ["deployments", id, "rollback"]) => ok(to_value(daemon.rollback(id).await?)?),
+        ("POST", ["deployments", id, "rollback"]) => {
+            ok(to_value(Box::pin(daemon.rollback(id)).await?)?)
+        }
 
         // Network.
-        ("GET", ["domains"]) => ok(to_value(daemon.domains().await?)?),
-        ("POST", ["domains"]) => created(to_value(daemon.add_domain(parse(body)?).await?)?),
-        ("GET", ["domains", name]) => ok(to_value(daemon.domain(name).await?)?),
+        ("GET", ["domains"]) => ok(to_value(Box::pin(daemon.domains()).await?)?),
+        ("POST", ["domains"]) => {
+            created(to_value(Box::pin(daemon.add_domain(parse(body)?)).await?)?)
+        }
+        ("GET", ["domains", name]) => ok(to_value(Box::pin(daemon.domain(name)).await?)?),
         ("DELETE", ["domains", name]) => {
-            daemon.remove_domain(name).await?;
+            Box::pin(daemon.remove_domain(name)).await?;
             ok(serde_json::json!({ "removed": name }))
         }
-        ("GET", ["dns"]) => ok(to_value(daemon.dns_status().await?)?),
-        ("POST", ["dns", "reconcile"]) => ok(to_value(daemon.reconcile_dns().await?)?),
-        ("GET", ["certificates"]) => ok(to_value(daemon.certificates().await?)?),
+        ("GET", ["dns"]) => ok(to_value(Box::pin(daemon.dns_status()).await?)?),
+        ("POST", ["dns", "reconcile"]) => ok(to_value(Box::pin(daemon.reconcile_dns()).await?)?),
+        ("GET", ["certificates"]) => ok(to_value(Box::pin(daemon.certificates()).await?)?),
         ("POST", ["certificates", domain, "renew"]) => {
-            ok(to_value(daemon.renew_certificate(domain).await?)?)
+            ok(to_value(Box::pin(daemon.renew_certificate(domain)).await?)?)
         }
-        ("GET", ["network"]) => ok(to_value(daemon.network_status().await)?),
+        ("GET", ["network"]) => ok(to_value(Box::pin(daemon.network_status()).await)?),
 
         // Evidence.
-        ("GET", ["executions", execution]) => ok(to_value(daemon.execution(execution).await?)?),
-        ("GET", ["receipts", receipt]) => ok(daemon.receipt(receipt).await?),
-        ("GET", ["events"]) => ok(to_value(daemon.events(event_filter(query)).await?)?),
+        ("GET", ["executions", execution]) => {
+            ok(to_value(Box::pin(daemon.execution(execution)).await?)?)
+        }
+        ("GET", ["receipts", receipt]) => Ok(Response::Bytes(
+            "application/json",
+            Box::pin(daemon.receipt(receipt)).await?,
+        )),
+        ("GET", ["events"]) => ok(to_value(
+            Box::pin(daemon.events(event_filter(query))).await?,
+        )?),
         ("GET", ["events", "stream"]) => Ok(Response::Stream(event_filter(query))),
 
+        // Applications: the product view over projects in `applications`.
+        ("GET", ["applications"]) => ok(to_value(Box::pin(daemon.applications()).await?)?),
+        ("GET", ["applications", name]) => ok(to_value(Box::pin(daemon.application(name)).await?)?),
+        ("GET", ["applications", name, "deployments"]) => ok(to_value(
+            Box::pin(daemon.application_deployments(name, None)).await?,
+        )?),
+        ("POST", ["applications", name, "deployments"]) => created(to_value(
+            Box::pin(daemon.deploy_application(name, parse(body)?)).await?,
+        )?),
+        ("GET", ["applications", name, "deployments", target]) => ok(to_value(
+            Box::pin(daemon.application_deployment(name, target)).await?,
+        )?),
+        ("POST", ["applications", name, "rollback"]) => created(to_value(
+            Box::pin(daemon.rollback_application(name, parse(body)?)).await?,
+        )?),
+        ("POST", ["applications", name, "stop"]) => {
+            ok(to_value(Box::pin(daemon.stop_application(name)).await?)?)
+        }
+        ("GET", ["applications", name, "logs"]) => {
+            let (stdout, stderr) = Box::pin(daemon.application_logs(name)).await?;
+            ok(serde_json::json!({ "stdout": stdout, "stderr": stderr }))
+        }
+
+        // This node as a provider in a caller's pool (`compute.remote@1`
+        // discovery only: work arrives as application deployments).
+        ("GET", ["compute", "capabilities"]) => {
+            ok(to_value(Box::pin(daemon.provider_capabilities()).await?)?)
+        }
+        ("GET", ["compute", "health"]) => ok(to_value(Box::pin(daemon.provider_health()).await?)?),
+
         // Pool and shared services.
-        ("GET", ["providers"]) => ok(to_value(daemon.providers().await?)?),
-        ("GET", ["services"]) => ok(to_value(daemon.services().await?)?),
-        ("POST", ["services"]) => created(to_value(daemon.register_service(parse(body)?).await?)?),
+        ("GET", ["providers"]) => ok(to_value(Box::pin(daemon.providers()).await?)?),
+        ("GET", ["services"]) => ok(to_value(Box::pin(daemon.services()).await?)?),
+        ("POST", ["services"]) => created(to_value(
+            Box::pin(daemon.register_service(parse(body)?)).await?,
+        )?),
         ("DELETE", ["services", name]) => {
-            daemon.remove_service(name).await?;
+            Box::pin(daemon.remove_service(name)).await?;
             ok(serde_json::json!({ "removed": name }))
         }
         _ => Err(EnvironmentError::NoRoute(format!(

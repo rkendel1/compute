@@ -348,7 +348,7 @@ impl Compute {
             && let Some(required) = &capsule.runtime_version
         {
             let found = runtime.resolved_version.as_deref().unwrap_or("unknown");
-            if found != required {
+            if !compute_core::same_runtime_version(found, required) {
                 return Err(ComputeError::InvalidDependencyCapsule(format!(
                     "dependency capsule requires {}@{required}, resolved {found}",
                     capsule.runtime

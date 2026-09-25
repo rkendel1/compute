@@ -10,6 +10,8 @@
 //! rows scanned, index use), never from latency. `benchmark` measures; set
 //! `COMPUTE_CERTIFICATION_OUT` to a directory to keep its JSON.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -195,6 +197,7 @@ async fn controller(
         state.clone(),
     )));
     let mut daemon_config = DaemonConfig::new(node, state.clone(), artifacts);
+    daemon_config.provider = std::sync::Arc::new(common::provider());
     daemon_config.port_range = (ports, ports + 99);
     daemon_config.instance_port_range = (ports + 20000, ports + 20099);
     // The test drives every cycle.
@@ -1046,6 +1049,7 @@ async fn benchmark() {
                             revision: Some(registered.revision_id),
                             config: Some(BTreeMap::new()),
                             desired_state: Some(DesiredState::Running),
+                            placement: None,
                         })
                         .await
                         .unwrap();
@@ -1227,6 +1231,7 @@ async fn diagnose_a_release() {
             revision: Some(registered.revision_id),
             config: Some(BTreeMap::new()),
             desired_state: Some(DesiredState::Running),
+            placement: None,
         })
         .await
         .unwrap();

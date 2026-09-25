@@ -1,0 +1,28 @@
+name: test
+
+# The whole workspace, including the provider-neutral product acceptance
+# (crates/compute-cli/tests/product.rs): an application is deployed,
+# replaced, rolled back, stopped, and its receipts verified, on ordinary
+# Compute providers on this runner. Managed runtimes in tests come from a
+# host-backed fixture catalog, so no test downloads one.
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Workspace tests
+        run: cargo test --workspace --locked
+      - name: Product acceptance
+        run: cargo test --locked -p compute-cli --test product -- --nocapture

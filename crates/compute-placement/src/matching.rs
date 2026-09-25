@@ -40,6 +40,7 @@ pub enum ReasonCode {
     ArtifactTooLarge,
     OutputExceedsLimit,
     JobsUnsupported,
+    DeploymentUnsupported,
 }
 
 impl ReasonCode {
@@ -72,6 +73,7 @@ impl ReasonCode {
             ArtifactModeUnsupported | ArtifactTooLarge | OutputExceedsLimit | JobsUnsupported => {
                 "artifact"
             }
+            DeploymentUnsupported => "deployment",
         }
     }
 
@@ -259,7 +261,7 @@ pub fn match_provider(
             );
         }
         if let (Some(version), Some(offer)) = (&dependencies.runtime_version, offer)
-            && version != offer.effective_version()
+            && !compute_core::same_runtime_version(version, offer.effective_version())
         {
             reasons.push(
                 ReasonCode::DependencyRuntimeMismatch,
@@ -534,6 +536,18 @@ pub fn match_provider(
             json!("job"),
             json!("synchronous"),
             Some("the provider does not accept durable asynchronous jobs".into()),
+        );
+    }
+    if artifact.submission == SubmissionMode::Deployment && !transport.deployments {
+        reasons.push(
+            ReasonCode::DeploymentUnsupported,
+            json!("deployment"),
+            json!(if transport.jobs {
+                "jobs"
+            } else {
+                "synchronous"
+            }),
+            Some("the provider runs workloads but does not host application deployments".into()),
         );
     }
 

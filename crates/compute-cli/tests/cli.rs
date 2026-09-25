@@ -1067,6 +1067,47 @@ fn direct_paths_and_configuration_fail_closed() {
         .stderr(predicate::str::contains("invalid compute.toml"));
 }
 
+/// `compute` whose managed runtimes come from a host-backed fixture catalog
+/// (`$COMPUTE_RUNTIME_CATALOG`), so no test downloads a runtime. The pinned
+/// Python is prepared once into a runtime store that is also the Compute
+/// distribution the CLI sees (`$COMPUTE_HOME`), so capsules are created,
+/// verified, placed, and executed against the one pinned runtime.
+fn compute_with_fixture_runtimes() -> Command {
+    static FIXTURE: std::sync::OnceLock<(std::path::PathBuf, std::path::PathBuf)> =
+        std::sync::OnceLock::new();
+    let (catalog, store) = FIXTURE.get_or_init(|| {
+        let directory = tempfile::tempdir().unwrap().keep();
+        let catalog = compute_provider::testing::host_fixture_catalog(&directory)
+            .unwrap()
+            .path;
+        let store = directory.join("store");
+        let warm = directory.join("warm");
+        std::fs::create_dir(&warm).unwrap();
+        std::fs::write(warm.join("main.py"), "print('warm')\n").unwrap();
+        Command::cargo_bin("compute")
+            .unwrap()
+            .env("COMPUTE_RUNTIME_CATALOG", &catalog)
+            .env("COMPUTE_RUNTIME_STORE", &store)
+            .args([
+                "run",
+                warm.join("main.py").to_str().unwrap(),
+                "--runtime",
+                "python",
+                "--network",
+                "network",
+            ])
+            .assert()
+            .success();
+        (catalog, store)
+    });
+    let mut command = Command::cargo_bin("compute").unwrap();
+    command
+        .env("COMPUTE_RUNTIME_CATALOG", catalog)
+        .env("COMPUTE_RUNTIME_STORE", store)
+        .env("COMPUTE_HOME", store);
+    command
+}
+
 #[test]
 fn dependency_capsules_are_reproducible_verifiable_and_executable_offline() {
     let temp = tempfile::tempdir().unwrap();
@@ -1082,8 +1123,7 @@ fn dependency_capsules_are_reproducible_verifiable_and_executable_offline() {
     let first = temp.path().join("first.deps");
     let second = temp.path().join("second.deps");
     for output in [&first, &second] {
-        Command::cargo_bin("compute")
-            .unwrap()
+        compute_with_fixture_runtimes()
             .args([
                 "deps",
                 "create",
@@ -1107,8 +1147,7 @@ fn dependency_capsules_are_reproducible_verifiable_and_executable_offline() {
         std::fs::read(&first).unwrap(),
         std::fs::read(&second).unwrap()
     );
-    Command::cargo_bin("compute")
-        .unwrap()
+    compute_with_fixture_runtimes()
         .args(["deps", "verify", first.to_str().unwrap(), "--json"])
         .assert()
         .success()
@@ -1127,8 +1166,7 @@ fn dependency_capsules_are_reproducible_verifiable_and_executable_offline() {
     )
     .unwrap();
     let receipt = temp.path().join("dependency-receipt.json");
-    let output = Command::cargo_bin("compute")
-        .unwrap()
+    let output = compute_with_fixture_runtimes()
         .args([
             "run",
             script.to_str().unwrap(),
@@ -1152,8 +1190,7 @@ fn dependency_capsules_are_reproducible_verifiable_and_executable_offline() {
         result["dependencies"]["capsule_id"],
         result["receipt"]["dependencies"]["capsule_id"]
     );
-    Command::cargo_bin("compute")
-        .unwrap()
+    compute_with_fixture_runtimes()
         .args(["receipt", "verify", receipt.to_str().unwrap(), "--json"])
         .assert()
         .success()
@@ -1163,8 +1200,7 @@ fn dependency_capsules_are_reproducible_verifiable_and_executable_offline() {
         "[run]\nruntime = \"python\"\nentrypoint = \"main.py\"\n[network]\nmode = \"network\"\n[dependencies]\ncapsule = \"first.deps\"\n",
     )
     .unwrap();
-    Command::cargo_bin("compute")
-        .unwrap()
+    compute_with_fixture_runtimes()
         .args(["run", script.to_str().unwrap(), "--json"])
         .assert()
         .success()
@@ -1192,8 +1228,7 @@ fn dependency_capsules_are_reproducible_verifiable_and_executable_offline() {
             "dependencies": { "capsule": capsule_id }
         }),
     );
-    Command::cargo_bin("compute")
-        .unwrap()
+    compute_with_fixture_runtimes()
         .env("COMPUTE_DEPENDENCY_CACHE", &cache)
         .args(["run", "--workload", workload.to_str().unwrap(), "--json"])
         .assert()
@@ -1203,8 +1238,7 @@ fn dependency_capsules_are_reproducible_verifiable_and_executable_offline() {
     let bundle_a = temp.path().join("a.compute");
     let bundle_b = temp.path().join("b.compute");
     for bundle in [&bundle_a, &bundle_b] {
-        Command::cargo_bin("compute")
-            .unwrap()
+        compute_with_fixture_runtimes()
             .args([
                 "bundle",
                 "create",
@@ -1221,8 +1255,7 @@ fn dependency_capsules_are_reproducible_verifiable_and_executable_offline() {
         std::fs::read(&bundle_a).unwrap(),
         std::fs::read(&bundle_b).unwrap()
     );
-    Command::cargo_bin("compute")
-        .unwrap()
+    compute_with_fixture_runtimes()
         .args([
             "run",
             "--bundle",
@@ -1243,8 +1276,7 @@ fn capsule_binding_tampering_and_host_dependency_leakage_fail_closed() {
     std::fs::create_dir(&dependencies).unwrap();
     std::fs::write(dependencies.join("payload.txt"), "payload").unwrap();
     let capsule = temp.path().join("python.deps");
-    Command::cargo_bin("compute")
-        .unwrap()
+    compute_with_fixture_runtimes()
         .args([
             "deps",
             "create",
@@ -1263,8 +1295,7 @@ fn capsule_binding_tampering_and_host_dependency_leakage_fail_closed() {
     tampered[index] ^= 1;
     let tampered_path = temp.path().join("tampered.deps");
     std::fs::write(&tampered_path, tampered).unwrap();
-    Command::cargo_bin("compute")
-        .unwrap()
+    compute_with_fixture_runtimes()
         .args(["deps", "verify", tampered_path.to_str().unwrap()])
         .assert()
         .failure();
@@ -1275,8 +1306,7 @@ fn capsule_binding_tampering_and_host_dependency_leakage_fail_closed() {
         "linux-x86_64"
     };
     let platform_capsule = temp.path().join("wrong-platform.deps");
-    Command::cargo_bin("compute")
-        .unwrap()
+    compute_with_fixture_runtimes()
         .args([
             "deps",
             "create",
@@ -1291,8 +1321,7 @@ fn capsule_binding_tampering_and_host_dependency_leakage_fail_closed() {
         ])
         .assert()
         .success();
-    Command::cargo_bin("compute")
-        .unwrap()
+    compute_with_fixture_runtimes()
         .args(["deps", "verify", platform_capsule.to_str().unwrap()])
         .assert()
         .failure()
@@ -1301,8 +1330,7 @@ fn capsule_binding_tampering_and_host_dependency_leakage_fail_closed() {
         ));
 
     let node_capsule = temp.path().join("node.deps");
-    Command::cargo_bin("compute")
-        .unwrap()
+    compute_with_fixture_runtimes()
         .args([
             "deps",
             "create",
@@ -1321,8 +1349,7 @@ fn capsule_binding_tampering_and_host_dependency_leakage_fail_closed() {
     std::fs::write(host.join("host_only.py"), "VALUE = 'leaked'\n").unwrap();
     let script = temp.path().join("main.py");
     std::fs::write(&script, "import host_only\nprint(host_only.VALUE)\n").unwrap();
-    Command::cargo_bin("compute")
-        .unwrap()
+    compute_with_fixture_runtimes()
         .args([
             "run",
             script.to_str().unwrap(),
@@ -1335,8 +1362,7 @@ fn capsule_binding_tampering_and_host_dependency_leakage_fail_closed() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("does not match workload runtime"));
-    Command::cargo_bin("compute")
-        .unwrap()
+    compute_with_fixture_runtimes()
         .env("PYTHONPATH", &host)
         .args([
             "run",
@@ -1589,8 +1615,7 @@ open(os.path.join(os.environ["COMPUTE_OUTPUT_DIR"], "result.bin"), "wb").write(v
     let first = temp.path().join("first.compute");
     let second = temp.path().join("second.compute");
     let create = |output: &std::path::Path| {
-        Command::cargo_bin("compute")
-            .unwrap()
+        compute_with_fixture_runtimes()
             .args([
                 "bundle",
                 "create",
@@ -1612,8 +1637,7 @@ open(os.path.join(os.environ["COMPUTE_OUTPUT_DIR"], "result.bin"), "wb").write(v
     );
     let identity: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
 
-    let verify = Command::cargo_bin("compute")
-        .unwrap()
+    let verify = compute_with_fixture_runtimes()
         .args(["bundle", "verify", first.to_str().unwrap(), "--json"])
         .output()
         .unwrap();
@@ -1623,8 +1647,7 @@ open(os.path.join(os.environ["COMPUTE_OUTPUT_DIR"], "result.bin"), "wb").write(v
     assert_eq!(verified["bundle_id"], identity["bundle_id"]);
     assert_eq!(verified["workload_id"], identity["workload_id"]);
 
-    let inspect = Command::cargo_bin("compute")
-        .unwrap()
+    let inspect = compute_with_fixture_runtimes()
         .args(["bundle", "inspect", first.to_str().unwrap(), "--json"])
         .output()
         .unwrap();
@@ -1635,8 +1658,7 @@ open(os.path.join(os.environ["COMPUTE_OUTPUT_DIR"], "result.bin"), "wb").write(v
 
     std::fs::remove_file(temp.path().join("main.py")).unwrap();
     std::fs::remove_file(temp.path().join("payload.bin")).unwrap();
-    let dry_run = Command::cargo_bin("compute")
-        .unwrap()
+    let dry_run = compute_with_fixture_runtimes()
         .args([
             "run",
             "--bundle",
@@ -1651,8 +1673,7 @@ open(os.path.join(os.environ["COMPUTE_OUTPUT_DIR"], "result.bin"), "wb").write(v
     assert_eq!(plan["bundle_verification"]["valid"], true);
     assert_eq!(plan["plan"]["workload_id"], identity["workload_id"]);
 
-    let run = Command::cargo_bin("compute")
-        .unwrap()
+    let run = compute_with_fixture_runtimes()
         .args(["run", "--bundle", first.to_str().unwrap(), "--json"])
         .output()
         .unwrap();
@@ -1673,8 +1694,7 @@ open(os.path.join(os.environ["COMPUTE_OUTPUT_DIR"], "result.bin"), "wb").write(v
         .unwrap();
     tampered[offset] = 1;
     std::fs::write(&second, tampered).unwrap();
-    let invalid = Command::cargo_bin("compute")
-        .unwrap()
+    let invalid = compute_with_fixture_runtimes()
         .args(["bundle", "verify", second.to_str().unwrap(), "--json"])
         .output()
         .unwrap();

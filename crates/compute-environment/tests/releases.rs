@@ -6,6 +6,8 @@
 //! one, every request is answered, and each answer comes from exactly one
 //! revision.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -122,6 +124,7 @@ fn config(node: &std::path::Path, store: Arc<dyn compute_state::StateStore>) -> 
         compute_state::ControlState::new(store.clone()),
     ));
     let mut config = DaemonConfig::new(node, store, artifacts);
+    config.provider = std::sync::Arc::new(common::provider());
     config.restart_delay = Duration::from_millis(100);
     config.reconcile_interval = Duration::from_millis(200);
     config.switch_timeout = Duration::from_secs(2);
@@ -258,6 +261,7 @@ async fn release(daemon: &Arc<Daemon>, label: &str, web: WorkloadDefinition) -> 
                 "s3cr3t-token-value".to_string(),
             )])),
             desired_state: None,
+            placement: None,
         })
         .await
         .unwrap()

@@ -4,6 +4,8 @@
 //! The critical assertion: Compute's memory can disappear. The desired
 //! state cannot.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,6 +123,7 @@ impl StateStore for Partitionable {
 fn config(node: &std::path::Path, store: Arc<dyn StateStore>) -> DaemonConfig {
     let artifacts = Arc::new(StateArtifacts::new(ControlState::new(store.clone())));
     let mut config = DaemonConfig::new(node, store, artifacts);
+    config.provider = std::sync::Arc::new(common::provider());
     config.restart_delay = Duration::from_millis(100);
     config.reconcile_interval = Duration::from_millis(200);
     port_windows(&mut config);
@@ -177,6 +180,7 @@ async fn deploy(
             revision: Some(label.into()),
             config: Some(BTreeMap::from([("REVISION".into(), label.into())])),
             desired_state: None,
+            placement: None,
         })
         .await
         .unwrap()

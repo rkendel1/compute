@@ -51,6 +51,7 @@ async fn controlled_services_log_live_cancel_and_bind_scope() {
         workload_id: "wl_test".into(),
         workload: "api".into(),
         workload_kind: "service".into(),
+        deployment_id: None,
     });
     let admission = provider.admit(request.clone()).await.unwrap();
     assert!(admission.decision.admitted);
