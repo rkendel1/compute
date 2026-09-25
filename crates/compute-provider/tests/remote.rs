@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compute_core::{
-    IsolationRequirement, NetworkPolicy, ResourceLimits, ResourceVector, RuntimeKind,
-    WORKLOAD_SPEC_VERSION, WorkloadBundle, WorkloadOutput, WorkloadSpec,
+    ApplicationIdentity, IsolationRequirement, NetworkPolicy, ResourceLimits, ResourceVector,
+    RuntimeKind, WORKLOAD_SPEC_VERSION, WorkloadBundle, WorkloadOutput, WorkloadSpec,
 };
 use compute_provider::{
     ComputeProvider, LocalProvider, ProviderAuthorizer, ProviderError, ProviderErrorKind,
@@ -408,7 +408,7 @@ async fn durable_jobs_are_idempotent_owned_verifiable_and_restart_safe() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queued_jobs_cancel_truthfully_and_terminal_jobs_expire() {
     let (_root, bytes) = fixture_with_script(
-        b"sleep 0.25; printf 'provider-ok'; printf 'artifact-ok' > \"$COMPUTE_OUTPUT_DIR/result.txt\"",
+        b"printf 'application-started\\n'; sleep 1; printf 'provider-ok'; printf 'artifact-ok' > \"$COMPUTE_OUTPUT_DIR/result.txt\"",
     );
     let store = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -416,15 +416,15 @@ async fn queued_jobs_cancel_truthfully_and_terminal_jobs_expire() {
     let mut config = ServerConfig::local(endpoint.clone());
     config.job_store = store.path().to_path_buf();
     config.max_concurrent_jobs = 1;
-    config.job_retention = Duration::from_millis(150);
+    config.job_retention = Duration::from_secs(1);
     let server = tokio::spawn(async move {
         let _ = compute_provider::serve_listener(listener, config).await;
     });
     let client = RemoteProvider::new(endpoint.clone()).with_bearer_token("queue-owner");
-    let first = client
-        .submit(ProviderRequest::bundle(bytes.clone()), None)
-        .await
-        .unwrap();
+    let application = ApplicationIdentity::new("cancel-demo", Some(3000)).unwrap();
+    let mut first_request = ProviderRequest::bundle(bytes.clone());
+    first_request.execution.application = Some(application.clone());
+    let first = client.submit(first_request, None).await.unwrap();
     loop {
         if client.job_status(&first.job_id.0).await.unwrap().status
             == compute_core::JobStatus::Running
@@ -433,14 +433,44 @@ async fn queued_jobs_cancel_truthfully_and_terminal_jobs_expire() {
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    let live_logs = loop {
+        let logs = client.job_logs(&first.job_id.0).await.unwrap();
+        if logs.stdout.contains("application-started") {
+            break logs;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert!(!live_logs.complete);
     let running_cancel = client.cancel_job(&first.job_id.0).await.unwrap();
     assert_eq!(running_cancel.status, compute_core::JobStatus::Running);
     assert!(running_cancel.cancellation.requested);
-    assert!(!running_cancel.cancellation.effective);
+    assert!(running_cancel.cancellation.effective);
     assert_eq!(
         running_cancel.cancellation.phase.as_deref(),
-        Some("execution_not_interruptible")
+        Some("execution_interrupt_requested")
     );
+    let first_terminal = wait_for_terminal(&client, &first.job_id.0).await;
+    assert_eq!(first_terminal.status, compute_core::JobStatus::Cancelled);
+    assert_eq!(first_terminal.application.as_ref(), Some(&application));
+    let final_logs = client.job_logs(&first.job_id.0).await.unwrap();
+    assert!(final_logs.complete);
+    assert!(final_logs.stdout.contains("application-started"));
+    let receipt = client.job_receipt(&first.job_id.0).await.unwrap().receipt;
+    assert_eq!(receipt.application.as_ref(), Some(&application));
+    receipt.verify().unwrap();
+
+    let blocker = client
+        .submit(ProviderRequest::bundle(bytes.clone()), None)
+        .await
+        .unwrap();
+    loop {
+        if client.job_status(&blocker.job_id.0).await.unwrap().status
+            == compute_core::JobStatus::Running
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     let second = client
         .submit(ProviderRequest::bundle(bytes), None)
         .await
@@ -473,15 +503,19 @@ async fn queued_jobs_cancel_truthfully_and_terminal_jobs_expire() {
             .map(|reservation| reservation.state),
         Some(compute_core::ReservationState::Released)
     );
-
-    loop {
-        let status = client.job_status(&first.job_id.0).await.unwrap();
-        if status.status.is_terminal() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    tokio::time::sleep(Duration::from_millis(175)).await;
+    client.cancel_job(&blocker.job_id.0).await.unwrap();
+    let blocker = wait_for_terminal(&client, &blocker.job_id.0).await;
+    assert_eq!(blocker.status, compute_core::JobStatus::Cancelled);
+    assert_eq!(
+        client
+            .capacity_snapshot()
+            .await
+            .unwrap()
+            .reserved
+            .concurrency,
+        0
+    );
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
     let expired = client.job_status(&first.job_id.0).await.unwrap_err();
     assert_eq!(expired.kind, ProviderErrorKind::JobExpired);
     let foreign = RemoteProvider::new(endpoint).with_bearer_token("foreign-owner");
@@ -661,6 +695,106 @@ async fn permanently_oversized_jobs_reject_without_waiting_or_executing() {
             .reserved
             .cpu_millis,
         0
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scheduler_is_oldest_fitting_without_head_of_line_blocking() {
+    fn with_cpu(script: &[u8], cpu: u32) -> Vec<u8> {
+        let (_root, bytes) = fixture_with_script(script);
+        let mut bundle = WorkloadBundle::from_bytes(&bytes).unwrap();
+        bundle.workload.resources.cpu_count = Some(cpu);
+        bundle.to_bytes().unwrap()
+    }
+
+    let store = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let policy = ProviderPolicy {
+        resource_capacity: Some(ResourceVector {
+            cpu_count: 2,
+            memory_bytes: 4 * 1024 * 1024,
+            disk_bytes: 4 * 1024 * 1024,
+        }),
+        ..ProviderPolicy::default()
+    };
+    let mut config = ServerConfig::local_with_policy(endpoint.clone(), policy);
+    config.job_store = store.path().to_path_buf();
+    config.max_concurrent_jobs = 2;
+    let server = tokio::spawn(async move {
+        let _ = compute_provider::serve_listener(listener, config).await;
+    });
+    let client = RemoteProvider::new(endpoint);
+
+    let first = client
+        .submit(
+            ProviderRequest::bundle(with_cpu(
+                b"sleep 0.35; printf first; printf artifact > \"$COMPUTE_OUTPUT_DIR/result.txt\"",
+                1,
+            )),
+            None,
+        )
+        .await
+        .unwrap();
+    loop {
+        if client.job_status(&first.job_id.0).await.unwrap().status
+            == compute_core::JobStatus::Running
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // The older job needs both CPUs and cannot fit beside `first`.
+    let older_large = client
+        .submit(
+            ProviderRequest::bundle(with_cpu(
+                b"sleep 0.05; printf large; printf artifact > \"$COMPUTE_OUTPUT_DIR/result.txt\"",
+                2,
+            )),
+            None,
+        )
+        .await
+        .unwrap();
+    let younger_small = client
+        .submit(
+            ProviderRequest::bundle(with_cpu(
+                b"sleep 0.05; printf small; printf artifact > \"$COMPUTE_OUTPUT_DIR/result.txt\"",
+                1,
+            )),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let small = wait_for_terminal(&client, &younger_small.job_id.0).await;
+    assert_eq!(small.status, compute_core::JobStatus::Succeeded);
+    let large_while_first_runs = client.job_status(&older_large.job_id.0).await.unwrap();
+    assert_eq!(
+        large_while_first_runs.status,
+        compute_core::JobStatus::WaitingForCapacity
+    );
+    assert!(
+        large_while_first_runs
+            .capacity_wait
+            .as_ref()
+            .is_some_and(|wait| {
+                wait.reasons
+                    .iter()
+                    .any(|reason| reason == "insufficient_cpu")
+            })
+    );
+
+    assert_eq!(
+        wait_for_terminal(&client, &first.job_id.0).await.status,
+        compute_core::JobStatus::Succeeded
+    );
+    assert_eq!(
+        wait_for_terminal(&client, &older_large.job_id.0)
+            .await
+            .status,
+        compute_core::JobStatus::Succeeded
     );
     server.abort();
 }

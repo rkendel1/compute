@@ -153,20 +153,28 @@ pub struct StartCommand {
 
 #[derive(Args, Debug)]
 pub struct StopCommand {
+    /// Stop one Compute application. Without this argument, stop the daemon.
+    pub application: Option<PathBuf>,
     /// Stop only the controller: services and their endpoints keep running
     /// on the supervisor, and the next controller reattaches to them.
     #[arg(long)]
     pub keep_workloads: bool,
     #[command(flatten)]
     pub daemon: DaemonLocation,
+    #[command(flatten)]
+    pub pool: crate::pool::PoolLocation,
     #[arg(long)]
     pub json: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct DaemonCommand {
+    /// Show one Compute application. Without this argument, show the daemon.
+    pub application: Option<PathBuf>,
     #[command(flatten)]
     pub daemon: DaemonLocation,
+    #[command(flatten)]
+    pub pool: crate::pool::PoolLocation,
     #[arg(long)]
     pub json: bool,
 }
@@ -1679,7 +1687,7 @@ fn print_execution(view: &ExecutionView, json: bool) {
 pub struct DeployCommand {
     pub project: String,
     /// The environment to release to.
-    #[arg(long, required_unless_present = "from")]
+    #[arg(long)]
     pub environment: Option<String>,
     /// Release the exact revision current in this environment (promotion).
     #[arg(long, requires = "to", conflicts_with_all = ["environment", "source", "revision"])]
@@ -1703,6 +1711,8 @@ pub struct DeployCommand {
     pub wait: bool,
     #[command(flatten)]
     pub daemon: DaemonLocation,
+    #[command(flatten)]
+    pub pool: crate::pool::PoolLocation,
     #[arg(long)]
     pub json: bool,
 }

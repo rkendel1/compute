@@ -1,0 +1,20 @@
+[application]
+name = "compute-demo"
+port = 3000
+
+[runtime]
+name = "node"
+version = ">=24"
+
+[run]
+entrypoint = "server.js"
+
+[resources]
+cpu = 1
+memory = "512MiB"
+
+[network]
+mode = "network"
+
+[placement]
+policy = "auto"

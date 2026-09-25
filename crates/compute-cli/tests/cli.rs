@@ -10,6 +10,59 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+#[test]
+fn init_creates_runnable_node_and_python_applications() {
+    let temporary = tempfile::tempdir().unwrap();
+    for (runtime, entrypoint) in [("node", "server.js"), ("python", "main.py")] {
+        let path = temporary.path().join(format!("{runtime}-app"));
+        let output = Command::cargo_bin("compute")
+            .unwrap()
+            .args([
+                "init",
+                path.to_str().unwrap(),
+                "--runtime",
+                runtime,
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["application"]["name"], format!("{runtime}-app"));
+        assert_eq!(result["application"]["port"], 3000);
+        assert!(
+            result["application"]["id"]
+                .as_str()
+                .is_some_and(|identity| identity.starts_with("sha256:"))
+        );
+        assert!(path.join(entrypoint).is_file());
+        let manifest = std::fs::read_to_string(path.join("compute.toml")).unwrap();
+        assert!(manifest.contains("[application]"));
+        assert!(manifest.contains(&format!("name = \"{runtime}\"")));
+        assert!(manifest.contains("policy = \"auto\""));
+    }
+}
+
+#[test]
+fn init_refuses_to_overwrite_an_existing_application_directory() {
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::write(temporary.path().join("keep.txt"), "owned by user").unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["init", temporary.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("directory is not empty"));
+    assert_eq!(
+        std::fs::read_to_string(temporary.path().join("keep.txt")).unwrap(),
+        "owned by user"
+    );
+}
+
 fn fixture_distribution_lock(
     artifact: &[u8],
     platform: &str,
@@ -263,10 +316,13 @@ fn run_provider_auto_and_explicit_use_canonical_placement() {
     )
     .unwrap();
 
-    for provider in ["auto", "provider:local"] {
+    for (flag, value, mode) in [
+        ("--policy", "auto", "pool"),
+        ("--provider", "local", "explicit"),
+    ] {
         let output = Command::cargo_bin("compute")
             .unwrap()
-            .args(["run", wasm.to_str().unwrap(), "--provider", provider])
+            .args(["run", wasm.to_str().unwrap(), flag, value])
             .arg("--pool-config")
             .arg(&pool)
             .arg("--json")
@@ -280,12 +336,17 @@ fn run_provider_auto_and_explicit_use_canonical_placement() {
         let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result["status"], "completed");
         assert_eq!(result["placement"]["selected"]["provider_id"], "local");
+        assert_eq!(result["placement"]["selection_mode"], mode);
         assert_eq!(
-            result["placement"]["selection_mode"],
-            if provider == "auto" {
-                "pool"
+            result["placement"]["providers"][0]["candidate"]["selected"],
+            true
+        );
+        assert_eq!(
+            result["receipt"]["placement"]["policy"]["mode"],
+            if flag == "--policy" {
+                "auto"
             } else {
-                "explicit"
+                "provider"
             }
         );
         assert_eq!(
@@ -314,6 +375,53 @@ fn run_provider_auto_and_explicit_use_canonical_placement() {
     let placement: serde_json::Value = serde_json::from_slice(&placement.stdout).unwrap();
     assert_eq!(placement["outcome"], "placed");
     assert_eq!(placement["selected"]["provider_id"], "local");
+}
+
+#[test]
+fn compute_toml_placement_defaults_are_overridden_by_cli_policy() {
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temporary.path().join("main.wasm"),
+        wat::parse_str(r#"(module (func (export "_start")))"#).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        temporary.path().join("compute.toml"),
+        "[runtime]\nname = \"wasm\"\n[run]\nentrypoint = \"main.wasm\"\n[placement]\npolicy = \"local\"\n",
+    )
+    .unwrap();
+    let pool = temporary.path().join("compute-pool.toml");
+    std::fs::write(&pool, "[pool]\n[providers.local]\nkind = \"local\"\n").unwrap();
+
+    let inspect = |extra: &[&str]| {
+        let mut command = Command::cargo_bin("compute").unwrap();
+        command
+            .current_dir(temporary.path())
+            .args(["placement", ".", "--json", "--pool-config"])
+            .arg(&pool)
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let configured = inspect(&[]);
+    assert!(
+        configured.status.success(),
+        "{}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+    let configured: serde_json::Value = serde_json::from_slice(&configured.stdout).unwrap();
+    assert_eq!(configured["placement_policy"]["mode"], "prefer_local");
+
+    let overridden = inspect(&["--policy", "auto"]);
+    assert!(overridden.status.success());
+    let overridden: serde_json::Value = serde_json::from_slice(&overridden.stdout).unwrap();
+    assert_eq!(overridden["placement_policy"]["mode"], "auto");
+
+    let preferred = inspect(&["--prefer-provider", "local"]);
+    assert!(preferred.status.success());
+    let preferred: serde_json::Value = serde_json::from_slice(&preferred.stdout).unwrap();
+    assert_eq!(preferred["placement_policy"]["mode"], "prefer_provider");
+    assert_eq!(preferred["placement_policy"]["provider"], "local");
 }
 
 #[test]

@@ -44,11 +44,12 @@ the following:
 If no provider satisfies the contract, the result is `placement_failed`, and
 nothing executes.
 
-Use `compute run APP --provider auto` to select by compatibility and the
-pool's deterministic priority ordering. `--provider local` and
-`--provider remote` filter only the eligible set; `--provider provider:ID`
-requires one configured provider and never falls back. Legacy bare IDs remain
-accepted. The established
+Use `compute run APP` or `compute run APP --policy auto` for automatic
+placement. `--policy local` prefers an eligible local provider.
+`--prefer-provider ID` expresses affinity but falls back when that provider
+is ineligible or temporarily lacks capacity. `--provider ID` is strict: the
+named provider must run the workload or explain why it cannot, with no
+fallback. The established
 read-only forms are `compute placement APP` (an alias for
 `compute placement inspect APP`) and `compute placement explain APP`.
 
@@ -146,20 +147,23 @@ There is no host dependency fallback.
 
 ## Selection
 
-Eligibility and selection are separate phases. `local`, `remote`, and
-`provider:ID` never alter capability matching or make an ineligible provider
-eligible.
+Eligibility, capacity, and preference are separate phases. A preference never
+alters capability matching or makes an ineligible provider eligible.
 
 1. Only providers that are **compatible** and **admitted by policy** are
    candidates. Admission is evaluated per provider, independently of
    capability, under the caller's policy intersected with the provider's
    advertised policy; see [admission.md](admission.md).
-2. Candidates are ordered by `priority` (descending), then provider ID
-   (ascending).
-3. The first candidate is selected.
+2. Capacity-available candidates precede temporarily unavailable candidates.
+3. `auto` orders by runtime readiness, locality, configured priority, then
+   provider ID. `local` moves locality ahead of runtime readiness. Provider
+   affinity is considered after capacity and before readiness/locality.
+4. Every candidate records its rank and factual ordering reasons such as
+   `sufficient_capacity`, `runtime_ready`, `local`, and `preferred_provider`.
+5. The first candidate is selected.
 
-Selection never uses randomness, response time, latency, hidden heuristics,
-or health scoring. Health affects selection only when the pool explicitly
+Selection never uses opaque scores, randomness, response time, latency, or
+health scoring. Health affects selection only when the pool explicitly
 sets `require_healthy`. The same pool configuration, capabilities, policy,
 and requirements always produce the same selection.
 
@@ -181,7 +185,7 @@ incompatible), and `excluded_providers` (compatibility not established).
 ## Explicit provider
 
 ```sh
-compute pool run --provider provider:production ./script.py
+compute run ./script.py --provider production
 ```
 
 Only the named provider is evaluated. If it is compatible, the workload runs
@@ -245,7 +249,19 @@ Both commands run these steps:
 There is no second execution engine. The selected provider binds the
 placement into the receipt it seals. Compute then verifies that the receipt
 names the selected provider, the placement, and the required distribution,
-dependency, runtime, and isolation.
+dependency, runtime, and isolation. Durable jobs and receipts also preserve
+the placement policy, ordered candidates, selection reasons, and selected
+provider.
+
+Workload defaults may be declared without creating a policy language:
+
+```toml
+[placement]
+policy = "auto" # or "local"
+prefer_provider = "remote-dev"
+```
+
+CLI placement flags override these defaults.
 
 `pool submit` requires a job-capable provider. The local provider has no
 durable jobs, so it is `incompatible` with `jobs_unsupported`. The output

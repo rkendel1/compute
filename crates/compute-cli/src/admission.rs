@@ -19,7 +19,7 @@ pub const LOCAL_CONFIG: &str = "compute.toml";
 pub struct PolicyLocation {
     /// Execution policy (compute.policy@1 JSON) that also applies to this
     /// invocation. It can only restrict.
-    #[arg(long = "policy", global = true)]
+    #[arg(long = "execution-policy", global = true)]
     pub policy: Option<PathBuf>,
     /// Local configuration file. Defaults to $COMPUTE_CONFIG, then
     /// ./compute.toml when present.

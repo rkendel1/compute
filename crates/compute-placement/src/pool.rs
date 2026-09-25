@@ -54,6 +54,11 @@ pub struct ProviderConfig {
     pub kind: ProviderKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    /// Public URL where applications published by this provider are reached.
+    /// This is explicit because it cannot be inferred safely through proxies,
+    /// NAT, or container port mappings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_endpoint: Option<String>,
     #[serde(default)]
     pub priority: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,6 +114,7 @@ impl PoolConfig {
                 ProviderConfig {
                     kind: ProviderKind::Local,
                     endpoint: None,
+                    application_endpoint: None,
                     priority: 0,
                     token_env: None,
                 },
@@ -172,13 +178,21 @@ impl ProviderConfig {
         {
             return invalid("token_env must name an environment variable");
         }
+        if let Some(endpoint) = &self.application_endpoint
+            && (!(endpoint.starts_with("http://") || endpoint.starts_with("https://"))
+                || endpoint
+                    .chars()
+                    .any(|character| character.is_control() || character.is_whitespace()))
+        {
+            return invalid("application_endpoint must be an http:// or https:// URL");
+        }
         Ok(())
     }
 
     /// Configuration fields that identify where the provider is. Used to
     /// invalidate cached capabilities when configuration changes.
     pub fn fingerprint(&self) -> String {
-        crate::canonical_identity(&(self.kind, &self.endpoint))
+        crate::canonical_identity(&(self.kind, &self.endpoint, &self.application_endpoint))
     }
 }
 
@@ -211,6 +225,8 @@ pub struct PoolMemberInspection {
     pub kind: ProviderKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_endpoint: Option<String>,
     pub priority: i64,
     pub authenticated: bool,
 }
@@ -343,6 +359,7 @@ impl ProviderPool {
                 provider_id: member.id.clone(),
                 kind: member.config.kind,
                 endpoint: member.config.endpoint.clone(),
+                application_endpoint: member.config.application_endpoint.clone(),
                 priority: member.config.priority,
                 authenticated: member.config.token_env.is_some(),
             })

@@ -37,16 +37,26 @@ pub struct ResolvedDirect {
     pub config: Option<PathBuf>,
     pub workload: WorkloadSpec,
     pub dependency_capsule: Option<DependencyCapsule>,
+    pub placement: DirectPlacement,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DirectPlacement {
+    pub policy: Option<String>,
+    pub prefer_provider: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ProjectConfig {
+    /// Product-level metadata consumed by application lifecycle commands.
+    application: Option<toml::Value>,
     runtime: RuntimeConfig,
     run: RunConfig,
     resources: ResourceConfig,
     network: NetworkConfig,
     dependencies: DependenciesConfig,
+    placement: PlacementConfig,
     /// Local execution policy reference; read by the policy loader.
     policy: Option<toml::Value>,
     /// Server configuration; read by `compute serve`.
@@ -91,6 +101,13 @@ struct NetworkConfig {
 #[serde(default, deny_unknown_fields)]
 struct DependenciesConfig {
     capsule: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PlacementConfig {
+    policy: Option<String>,
+    prefer_provider: Option<String>,
 }
 
 pub fn resolve(options: DirectOptions) -> compute_core::Result<ResolvedDirect> {
@@ -319,6 +336,10 @@ pub fn resolve(options: DirectOptions) -> compute_core::Result<ResolvedDirect> {
         config: config_source,
         workload,
         dependency_capsule,
+        placement: DirectPlacement {
+            policy: config.placement.policy,
+            prefer_provider: config.placement.prefer_provider,
+        },
     })
 }
 

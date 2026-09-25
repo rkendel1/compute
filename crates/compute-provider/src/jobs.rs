@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -56,6 +57,7 @@ pub struct JobManager {
     provider: Arc<dyn ComputeProvider>,
     capacity: ProviderCapacity,
     mutation: Mutex<()>,
+    active: Mutex<BTreeMap<JobId, compute_core::ExecutionControl>>,
     wake: Notify,
 }
 
@@ -73,6 +75,7 @@ impl JobManager {
             provider,
             capacity,
             mutation: Mutex::new(()),
+            active: Mutex::new(BTreeMap::new()),
             wake: Notify::new(),
         });
         manager.recover()?;
@@ -296,15 +299,18 @@ impl JobManager {
                 bundle_id: verification.bundle_id,
                 dependency_id,
                 runtime: bundle.workload.runtime,
+                application: request.execution.application.clone(),
                 requested_execution,
             },
             status: JobStatus::Queued,
             provider: self.provider.identity(),
+            application: request.execution.application.clone(),
             placement_id: request
                 .execution
                 .placement
                 .as_ref()
                 .map(|placement| placement.placement_id.clone()),
+            placement: request.execution.placement.clone(),
             provider_id: Some(provider_id),
             admission: None,
             reservation: Some(reservation),
@@ -463,6 +469,22 @@ impl JobManager {
                 }
             },
         };
+        let log_directory = self.directory(&job_id).join("logs");
+        if fs::create_dir_all(&log_directory).is_err() {
+            let _ = self
+                .transition(
+                    &job_id,
+                    JobStatus::Failed,
+                    Some("could not create job log directory".into()),
+                )
+                .await;
+            return;
+        }
+        let control = compute_core::ExecutionControl::new().with_log_directory(log_directory);
+        self.active
+            .lock()
+            .await
+            .insert(job_id.clone(), control.clone());
         if self
             .transition(&job_id, JobStatus::Preparing, None)
             .await
@@ -472,6 +494,7 @@ impl JobManager {
                 .await
                 .is_err()
         {
+            self.active.lock().await.remove(&job_id);
             let _ = self.release(&job_id).await;
             return;
         }
@@ -486,6 +509,7 @@ impl JobManager {
             })
         });
         let Some(reservation_evidence) = reservation_evidence else {
+            self.active.lock().await.remove(&job_id);
             let _ = self
                 .transition(
                     &job_id,
@@ -497,8 +521,9 @@ impl JobManager {
         };
         let response = self
             .provider
-            .execute_admitted(execution_request, admission)
+            .execute_admitted_controlled(execution_request, admission, &control)
             .await;
+        self.active.lock().await.remove(&job_id);
         match response {
             Ok(mut response) => {
                 if let Some(receipt) = response.result.receipt.as_mut() {
@@ -593,7 +618,12 @@ impl JobManager {
             self.wake.notify_waiters();
             return Ok(false);
         }
-        let reasons = insufficient_reasons(&required, &before.available);
+        let mut reasons = insufficient_reasons(&required, &before.available);
+        if reasons.is_empty()
+            && self.next_fitting_job_locked(&before.available)?.as_ref() != Some(job_id)
+        {
+            reasons.push("queue_predecessor".into());
+        }
         if !reasons.is_empty() {
             let changed = job.status != JobStatus::WaitingForCapacity
                 || job.capacity_wait.as_ref().is_none_or(|waiting| {
@@ -716,6 +746,42 @@ impl JobManager {
             }
         }
         Ok(capacity_snapshot(&self.capacity, reserved))
+    }
+
+    /// Oldest fitting job wins. An older job that cannot use the current
+    /// capacity does not head-of-line block smaller compatible work, but it
+    /// becomes the winner as soon as enough capacity is available.
+    fn next_fitting_job_locked(
+        &self,
+        available: &ResourceRequirements,
+    ) -> Result<Option<JobId>, ProviderError> {
+        let mut fitting = Vec::new();
+        for entry in fs::read_dir(&self.root).map_err(transport_error)? {
+            let entry = entry.map_err(transport_error)?;
+            if !entry.file_type().map_err(transport_error)?.is_dir() {
+                continue;
+            }
+            let Ok(job_id) = JobId::parse(entry.file_name().to_string_lossy().into_owned()) else {
+                continue;
+            };
+            let Ok(job) = self.read_job(&job_id) else {
+                continue;
+            };
+            if job.status.is_terminal() {
+                continue;
+            }
+            let Some(reservation) = job.reservation.as_ref() else {
+                continue;
+            };
+            if reservation.state != ReservationState::Pending
+                || !insufficient_reasons(&reservation.resources, available).is_empty()
+            {
+                continue;
+            }
+            fitting.push((job.created_at, job.job_id));
+        }
+        fitting.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        Ok(fitting.into_iter().next().map(|(_, job_id)| job_id))
     }
 
     async fn persist_result(
@@ -893,6 +959,7 @@ impl JobManager {
     pub async fn cancel(&self, job_id: &JobId, owner: &str) -> Result<ExecutionJob, ProviderError> {
         self.authorize_owner(job_id, owner)?;
         self.require_not_expired(job_id)?;
+        let control = self.active.lock().await.get(job_id).cloned();
         let _guard = self.mutation.lock().await;
         let mut job = self.read_job(job_id)?;
         job.cancellation.requested = true;
@@ -908,8 +975,12 @@ impl JobManager {
                 job.cancellation.phase = Some("before_execution".into());
             }
             JobStatus::Preparing | JobStatus::Running => {
-                job.cancellation.effective = false;
-                job.cancellation.phase = Some("execution_not_interruptible".into());
+                job.cancellation.effective = control.is_some();
+                job.cancellation.phase = Some(if control.is_some() {
+                    "execution_interrupt_requested".into()
+                } else {
+                    "execution_control_unavailable".into()
+                });
             }
             _ => {
                 job.cancellation.effective = false;
@@ -923,6 +994,10 @@ impl JobManager {
             false
         };
         self.write_job(&job)?;
+        if let Some(control) = control {
+            control.cancel();
+            self.append_event(job_id, "cancellation_requested")?;
+        }
         if job.status == JobStatus::Cancelled {
             self.append_event(job_id, "terminal")?;
         }
@@ -931,6 +1006,23 @@ impl JobManager {
             self.wake.notify_waiters();
         }
         Ok(job)
+    }
+
+    pub async fn logs(
+        &self,
+        job_id: &JobId,
+        owner: &str,
+    ) -> Result<compute_core::JobLogs, ProviderError> {
+        self.authorize_owner(job_id, owner)?;
+        self.require_not_expired(job_id)?;
+        let job = self.read_job(job_id)?;
+        let directory = self.directory(job_id).join("logs");
+        Ok(compute_core::JobLogs {
+            job_id: job_id.clone(),
+            stdout: read_optional_log(&directory.join("stdout.log"))?,
+            stderr: read_optional_log(&directory.join("stderr.log"))?,
+            complete: job.status.is_terminal(),
+        })
     }
 
     pub async fn events(
@@ -1166,6 +1258,14 @@ fn terminal_status(result: &compute_core::ExecutionResult) -> JobStatus {
         ExecutionStatus::Completed | ExecutionStatus::Failed => JobStatus::Failed,
         ExecutionStatus::Cancelled | ExecutionStatus::Killed => JobStatus::Cancelled,
         _ => JobStatus::Failed,
+    }
+}
+
+fn read_optional_log(path: &Path) -> Result<String, ProviderError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(transport_error(error)),
     }
 }
 

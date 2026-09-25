@@ -2268,6 +2268,7 @@ fn build_pool(config: &DaemonConfig) -> Result<ProviderPool, EnvironmentError> {
             ProviderConfig {
                 kind: ProviderKind::Local,
                 endpoint: None,
+                application_endpoint: None,
                 priority: 0,
                 token_env: None,
             },

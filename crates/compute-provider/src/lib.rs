@@ -196,6 +196,10 @@ pub struct ExecutionOptions {
     /// receipt. Metadata: excluded from the request hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<compute_core::ReceiptScope>,
+    /// Product-level application identity. Metadata: excluded from the
+    /// portable request hash and sealed into jobs and receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application: Option<compute_core::ApplicationIdentity>,
     /// Caller execution policy, intersected with the provider's own. It can
     /// only restrict; it is part of the request hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -253,6 +257,11 @@ impl ProviderRequest {
         }
         if let Some(policy) = &self.execution.policy {
             policy.validate().map_err(|error| {
+                ProviderError::new(ProviderErrorKind::PolicyRejected, error.to_string())
+            })?;
+        }
+        if let Some(application) = &self.execution.application {
+            application.verify().map_err(|error| {
                 ProviderError::new(ProviderErrorKind::PolicyRejected, error.to_string())
             })?;
         }
@@ -590,6 +599,17 @@ pub trait ComputeProvider: Send + Sync {
     ) -> Result<ExecuteResponse, ProviderError> {
         let _ = admission;
         self.execute(request).await
+    }
+
+    /// Execute an admitted durable job with cancellation and live logs.
+    async fn execute_admitted_controlled(
+        &self,
+        request: ProviderRequest,
+        admission: Admission,
+        control: &compute_core::ExecutionControl,
+    ) -> Result<ExecuteResponse, ProviderError> {
+        let _ = control;
+        self.execute_admitted(request, admission).await
     }
 }
 
@@ -1017,6 +1037,7 @@ impl LocalProvider {
             });
             receipt.placement = request.execution.placement.clone();
             receipt.scope = request.execution.scope.clone();
+            receipt.application = request.execution.application.clone();
             receipt.bind_admission(&summary);
             receipt.seal().map_err(classify_compute_error)?;
         }
@@ -1089,6 +1110,15 @@ impl ComputeProvider for LocalProvider {
         admission: Admission,
     ) -> Result<ExecuteResponse, ProviderError> {
         self.run_admitted(request, admission, None).await
+    }
+
+    async fn execute_admitted_controlled(
+        &self,
+        request: ProviderRequest,
+        admission: Admission,
+        control: &compute_core::ExecutionControl,
+    ) -> Result<ExecuteResponse, ProviderError> {
+        self.run_admitted(request, admission, Some(control)).await
     }
 
     async fn capabilities(&self) -> Result<ProviderCapabilities, ProviderError> {
@@ -1465,6 +1495,11 @@ impl RemoteProvider {
         let job_id = checked_job_id(job_id)?;
         self.get(&format!("/compute/jobs/{job_id}/events")).await
     }
+
+    pub async fn job_logs(&self, job_id: &str) -> Result<compute_core::JobLogs, ProviderError> {
+        let job_id = checked_job_id(job_id)?;
+        self.get(&format!("/compute/jobs/{job_id}/logs")).await
+    }
 }
 
 fn checked_job_id(value: &str) -> Result<compute_core::JobId, ProviderError> {
@@ -1592,6 +1627,7 @@ pub enum ProviderOperation {
     Artifacts,
     Cancel,
     Events,
+    Logs,
 }
 
 #[async_trait]
@@ -1865,6 +1901,12 @@ async fn handle_connection(
                 .events(job_id.as_ref().expect("job route"), &owner)
                 .await,
         ),
+        ProviderOperation::Logs => encode_result(
+            state
+                .jobs
+                .logs(job_id.as_ref().expect("job route"), &owner)
+                .await,
+        ),
     };
     match result {
         Ok(body) => write_response(&mut stream, 200, &body).await,
@@ -1916,6 +1958,7 @@ fn parse_route(
         ("GET", Some("receipt")) => ProviderOperation::Receipt,
         ("GET", Some("artifacts")) => ProviderOperation::Artifacts,
         ("GET", Some("events")) => ProviderOperation::Events,
+        ("GET", Some("logs")) => ProviderOperation::Logs,
         ("POST", Some("cancel")) => ProviderOperation::Cancel,
         _ => return Ok(None),
     };

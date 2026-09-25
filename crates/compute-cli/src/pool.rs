@@ -97,6 +97,16 @@ impl PoolLocation {
         })
     }
 
+    pub(crate) fn application_endpoint(&self, id: &str) -> compute_core::Result<Option<String>> {
+        let pool = self.pool()?;
+        let member = pool.member(id).ok_or_else(|| {
+            ComputeError::InvalidWorkload(format!(
+                "provider {id} is not configured in the caller-owned pool"
+            ))
+        })?;
+        Ok(member.config.application_endpoint.clone())
+    }
+
     fn cache(&self) -> compute_core::Result<CapabilityCache> {
         CapabilityCache::load(&self.cache_path()).map_err(placement_error)
     }
@@ -215,9 +225,15 @@ pub struct PlacementArtifact {
     pub path: Option<PathBuf>,
     #[arg(long)]
     pub bundle: Option<PathBuf>,
-    /// Placement policy: auto, local, remote, provider:<id>, or a legacy bare ID.
+    /// Strict provider selection. The provider must be eligible; no fallback.
     #[arg(long)]
     pub provider: Option<String>,
+    /// Placement preference policy: auto or local.
+    #[arg(long = "policy", conflicts_with_all = ["provider", "prefer_provider"])]
+    pub placement_policy: Option<String>,
+    /// Prefer this eligible provider, but fall back when it is unavailable.
+    #[arg(long, conflicts_with = "provider")]
+    pub prefer_provider: Option<String>,
     /// Discover capabilities now instead of using cached descriptors.
     #[arg(long)]
     pub refresh: bool,
@@ -754,8 +770,8 @@ pub(crate) fn enum_label(value: &impl serde::Serialize) -> String {
 pub(crate) fn prepare(
     artifact: &PlacementArtifact,
     policy: &crate::admission::PolicyLocation,
-) -> compute_core::Result<(WorkloadBundle, ProviderRequest)> {
-    let bundle = if let Some(path) = &artifact.bundle {
+) -> compute_core::Result<(WorkloadBundle, ProviderRequest, direct::DirectPlacement)> {
+    let (bundle, placement) = if let Some(path) = &artifact.bundle {
         if artifact.runtime.is_some()
             || !artifact.env.is_empty()
             || artifact.env_file.is_some()
@@ -773,7 +789,10 @@ pub(crate) fn prepare(
                 "--bundle cannot be combined with direct execution overrides".into(),
             ));
         }
-        WorkloadBundle::read(path)?
+        (
+            WorkloadBundle::read(path)?,
+            direct::DirectPlacement::default(),
+        )
     } else {
         let resolved = direct::resolve(direct::DirectOptions {
             path: artifact.path.clone().expect("required by clap"),
@@ -792,11 +811,15 @@ pub(crate) fn prepare(
             timeout: artifact.timeout,
             defaults: policy.defaults()?,
         })?;
-        WorkloadBundle::create_from_with_capsule(
-            resolved.workload,
-            &resolved.root,
-            resolved.dependency_capsule,
-        )?
+        let placement = resolved.placement.clone();
+        (
+            WorkloadBundle::create_from_with_capsule(
+                resolved.workload,
+                &resolved.root,
+                resolved.dependency_capsule,
+            )?,
+            placement,
+        )
     };
     let mut request = ProviderRequest::bundle(bundle.to_bytes()?);
     request.expected.workload_id = Some(bundle.workload_id()?);
@@ -806,7 +829,7 @@ pub(crate) fn prepare(
         .as_ref()
         .map(DependencyCapsule::capsule_id)
         .transpose()?;
-    Ok((bundle, request))
+    Ok((bundle, request, placement))
 }
 
 pub(crate) async fn evaluate(
@@ -815,7 +838,7 @@ pub(crate) async fn evaluate(
     artifact: &PlacementArtifact,
     submission: SubmissionMode,
 ) -> compute_core::Result<(ProviderPool, PlacementReport, ProviderRequest)> {
-    let (bundle, mut request) = prepare(artifact, policy)?;
+    let (bundle, mut request, configured_placement) = prepare(artifact, policy)?;
     // Placement pins these identities, so they are part of the request whose
     // exact size the requirements record.
     request.expected.distribution_id = artifact.distribution.clone();
@@ -842,7 +865,17 @@ pub(crate) async fn evaluate(
             .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
     let admission = compute_placement::AdmissionContext::new(&policy.sources()?, contract);
     let pool = location.pool()?;
-    let placement_policy = parse_placement_policy(artifact.provider.as_deref())?;
+    let placement_policy = parse_placement_policy(
+        artifact.provider.as_deref(),
+        artifact
+            .placement_policy
+            .as_deref()
+            .or(configured_placement.policy.as_deref()),
+        artifact
+            .prefer_provider
+            .as_deref()
+            .or(configured_placement.prefer_provider.as_deref()),
+    )?;
     let explicit = match &placement_policy {
         PlacementPolicy::Provider(id) => Some(id.as_str()),
         _ => None,
@@ -867,23 +900,29 @@ pub(crate) async fn evaluate(
     Ok((pool, report, request))
 }
 
-fn parse_placement_policy(value: Option<&str>) -> compute_core::Result<PlacementPolicy> {
-    Ok(match value.unwrap_or("auto") {
-        "auto" => PlacementPolicy::Auto,
-        "local" => PlacementPolicy::Local,
-        "remote" => PlacementPolicy::Remote,
-        value if value.starts_with("provider:") => {
-            let id = value.trim_start_matches("provider:");
-            compute_placement::validate_provider_id(id)
-                .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
-            PlacementPolicy::Provider(id.to_owned())
-        }
-        id => {
-            compute_placement::validate_provider_id(id)
-                .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
-            PlacementPolicy::Provider(id.to_owned())
-        }
-    })
+fn parse_placement_policy(
+    provider: Option<&str>,
+    policy: Option<&str>,
+    prefer_provider: Option<&str>,
+) -> compute_core::Result<PlacementPolicy> {
+    if let Some(id) = provider {
+        compute_placement::validate_provider_id(id)
+            .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
+        return Ok(PlacementPolicy::Provider(id.to_owned()));
+    }
+    if let Some(id) = prefer_provider {
+        compute_placement::validate_provider_id(id)
+            .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
+        return Ok(PlacementPolicy::PreferProvider(id.to_owned()));
+    }
+    match policy.unwrap_or("auto") {
+        "auto" => Ok(PlacementPolicy::Auto),
+        "local" => Ok(PlacementPolicy::PreferLocal),
+        "remote" => Ok(PlacementPolicy::PreferRemote),
+        value => Err(ComputeError::InvalidWorkload(format!(
+            "unknown placement policy {value:?}; expected auto or local"
+        ))),
+    }
 }
 
 pub async fn placement(command: PlacementCommand) -> compute_core::Result<()> {
@@ -913,6 +952,7 @@ pub async fn placement(command: PlacementCommand) -> compute_core::Result<()> {
                 "provider_id": provider.provider_id,
                 "status": provider.status,
                 "capacity_status": provider.capacity_status,
+                "candidate": provider.candidate,
                 "reasons": provider.reasons,
                 "capacity_reasons": provider.capacity_reasons,
                 "error": provider.error,
@@ -952,12 +992,25 @@ fn print_summary(report: &PlacementReport) {
             .map(enum_label)
             .unwrap_or_else(|| "-".into());
         println!(
-            "  {}\t{}\tpriority {}\truntime {}",
+            "  {}\t{}\tpriority {}\truntime {}\trank {}{}",
             provider.provider_id,
             provider.status.as_str(),
             provider.priority,
-            runtime
+            runtime,
+            provider
+                .candidate
+                .rank
+                .map(|rank| rank.to_string())
+                .unwrap_or_else(|| "-".into()),
+            if provider.candidate.selected {
+                "\tselected"
+            } else {
+                ""
+            }
         );
+        if !provider.candidate.reasons.is_empty() {
+            println!("    policy: {}", provider.candidate.reasons.join(", "));
+        }
         if provider.reasons.is_empty()
             && provider.status == compute_placement::EvaluationStatus::Compatible
         {

@@ -87,6 +87,7 @@ fn remote_config(endpoint: &str, priority: i64) -> ProviderConfig {
     ProviderConfig {
         kind: ProviderKind::Remote,
         endpoint: Some(endpoint.into()),
+        application_endpoint: None,
         priority,
         token_env: None,
     }
@@ -126,6 +127,7 @@ impl PlacementHarness {
             ProviderConfig {
                 kind: ProviderKind::Local,
                 endpoint: None,
+                application_endpoint: None,
                 priority: 10,
                 token_env: None,
             },

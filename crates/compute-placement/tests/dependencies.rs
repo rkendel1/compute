@@ -147,6 +147,7 @@ async fn dependency_capsule_matrix() {
         ProviderConfig {
             kind: ProviderKind::Local,
             endpoint: None,
+            application_endpoint: None,
             priority: 0,
             token_env: None,
         },
@@ -158,6 +159,7 @@ async fn dependency_capsule_matrix() {
         ProviderConfig {
             kind: ProviderKind::Remote,
             endpoint: Some(endpoint.clone()),
+            application_endpoint: None,
             priority: 10,
             token_env: None,
         },
@@ -271,7 +273,7 @@ async fn dependency_capsule_matrix() {
             &admission,
             None,
         );
-        assert_eq!(report.selected.as_ref().unwrap().provider_id, "remote");
+        assert_eq!(report.selected.as_ref().unwrap().provider_id, "local");
         let response = dispatch::execute(&pool, &report, request).await.unwrap();
         assert_eq!(response.result.stdout.text, "packaged");
         report

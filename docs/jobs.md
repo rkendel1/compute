@@ -42,9 +42,10 @@ key, every submission may create another job. Compute never silently retries
 workloads and does not promise exactly-once execution. This matters for
 workloads with external side effects.
 
-Cancellation before execution is effective. During execution, v1 records the
-request but reports it as ineffective because the provider cannot guarantee
-runtime termination. A client disconnect or wait timeout never cancels work.
+Cancellation before execution is effective. During execution the provider
+signals the controlled runtime, persists the cancelled result and final
+receipt, and releases the reservation. A client disconnect or wait timeout
+never cancels work.
 
 Every job operation is authorized independently and bound to the submitting
 owner. Artifact paths are never accepted from clients: retrieval maps the job

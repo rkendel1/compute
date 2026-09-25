@@ -74,6 +74,188 @@ fn sized_provider(kind: ProviderKind, cpu: u64, memory_gib: u64) -> Synthetic {
 }
 
 #[test]
+fn placement_policy_acceptance_matrix_is_deterministic_and_explainable() {
+    let config = config(&[
+        ("provider-a", ProviderKind::Local, 10),
+        ("provider-b", ProviderKind::Remote, 100),
+        ("provider-c", ProviderKind::Remote, 50),
+    ]);
+    let mut a = sized_provider(ProviderKind::Local, 2, 4);
+    a.runtimes = vec![RuntimeKind::Node];
+    let mut b = sized_provider(ProviderKind::Remote, 8, 16);
+    b.runtimes = vec![RuntimeKind::Node];
+    let mut c = sized_provider(ProviderKind::Remote, 8, 16);
+    c.runtimes = vec![RuntimeKind::Python];
+    let records = vec![
+        a.record("provider-a"),
+        b.record("provider-b"),
+        c.record("provider-c"),
+    ];
+
+    let mut small_node = requirements(RuntimeKind::Node);
+    small_node.resources.cpu_count = Some(1);
+    let auto = place_with_policy(
+        &config.providers,
+        &config.pool,
+        &records,
+        &small_node,
+        &baseline(&small_node),
+        PlacementPolicy::Auto,
+    );
+    assert_eq!(auto.selected.as_ref().unwrap().provider_id, "provider-a");
+    assert!(
+        auto.providers
+            .iter()
+            .find(|p| p.provider_id == "provider-a")
+            .unwrap()
+            .candidate
+            .selected
+    );
+
+    let mut large_node = small_node.clone();
+    large_node.resources.cpu_count = Some(6);
+    let large = place_with_policy(
+        &config.providers,
+        &config.pool,
+        &records,
+        &large_node,
+        &baseline(&large_node),
+        PlacementPolicy::Auto,
+    );
+    assert_eq!(large.selected.as_ref().unwrap().provider_id, "provider-b");
+
+    let python = requirements(RuntimeKind::Python);
+    let python_report = place_with_policy(
+        &config.providers,
+        &config.pool,
+        &records,
+        &python,
+        &baseline(&python),
+        PlacementPolicy::Auto,
+    );
+    assert_eq!(
+        python_report.selected.as_ref().unwrap().provider_id,
+        "provider-c"
+    );
+
+    let preferred = place_with_policy(
+        &config.providers,
+        &config.pool,
+        &records,
+        &small_node,
+        &baseline(&small_node),
+        PlacementPolicy::PreferProvider("provider-b".into()),
+    );
+    assert_eq!(
+        preferred.selected.as_ref().unwrap().provider_id,
+        "provider-b"
+    );
+    let receipt = preferred.receipt_binding().unwrap();
+    assert_eq!(receipt.policy.mode, "prefer_provider");
+    assert_eq!(receipt.policy.provider.as_deref(), Some("provider-b"));
+    assert_eq!(
+        receipt
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.selected)
+            .count(),
+        1
+    );
+
+    let mut busy_b = b.clone_for_test();
+    busy_b.resources.available.cpu_count = 0;
+    let busy_records = vec![
+        a.record("provider-a"),
+        busy_b.record("provider-b"),
+        c.record("provider-c"),
+    ];
+    let fallback = place_with_policy(
+        &config.providers,
+        &config.pool,
+        &busy_records,
+        &small_node,
+        &baseline(&small_node),
+        PlacementPolicy::PreferProvider("provider-b".into()),
+    );
+    assert_eq!(
+        fallback.selected.as_ref().unwrap().provider_id,
+        "provider-a"
+    );
+
+    let strict = place_with_policy(
+        &config.providers,
+        &config.pool,
+        &records,
+        &small_node,
+        &baseline(&small_node),
+        PlacementPolicy::Provider("provider-c".into()),
+    );
+    assert_eq!(strict.outcome, PlacementOutcome::PlacementFailed);
+    assert_eq!(
+        strict.failure.as_ref().unwrap().code,
+        "explicit_provider_incompatible"
+    );
+}
+
+#[test]
+fn auto_prefers_runtime_ready_before_locality_and_local_policy_reverses_that_order() {
+    let config = config(&[
+        ("local", ProviderKind::Local, 100),
+        ("remote", ProviderKind::Remote, 10),
+    ]);
+    let mut local = Synthetic::new(ProviderKind::Local, &[RuntimeKind::Wasm]).record("local");
+    let runtime = local
+        .descriptor
+        .as_mut()
+        .unwrap()
+        .runtimes
+        .iter_mut()
+        .find(|runtime| runtime.kind == RuntimeKind::Wasm)
+        .unwrap();
+    runtime.lifecycle = compute_core::RuntimeLifecycleStatus::Available;
+    let mut distribution = compute_core::RuntimeDistribution {
+        id: String::new(),
+        runtime: RuntimeKind::Wasm,
+        version: "wasi".into(),
+        platform: compute_core::PlatformIdentity {
+            os: "linux".into(),
+            architecture: "x86_64".into(),
+            runtime_abi: None,
+        },
+        artifact: "https://example.invalid/wasm.tar".into(),
+        digest: compute_core::sha256_identity(b"runtime-artifact"),
+        source: "https://example.invalid/wasm".into(),
+        executable: "runtimes/wasm/bin/wasm".into(),
+        capabilities: compute_core::RuntimeCapabilities::wasm(),
+    };
+    distribution.id = distribution.canonical_id().unwrap();
+    runtime.distribution = Some(distribution);
+    let records = vec![
+        local,
+        Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Wasm]).record("remote"),
+    ];
+    let required = wasm_strict();
+    let auto = place_with_policy(
+        &config.providers,
+        &config.pool,
+        &records,
+        &required,
+        &baseline(&required),
+        PlacementPolicy::Auto,
+    );
+    assert_eq!(auto.selected.as_ref().unwrap().provider_id, "remote");
+    let local_policy = place_with_policy(
+        &config.providers,
+        &config.pool,
+        &records,
+        &required,
+        &baseline(&required),
+        PlacementPolicy::PreferLocal,
+    );
+    assert_eq!(local_policy.selected.as_ref().unwrap().provider_id, "local");
+}
+
+#[test]
 fn resource_eligibility_precedes_selection_policy_and_binds_receipt_evidence() {
     let config = config(&[
         ("local-small", ProviderKind::Local, 100),
@@ -95,7 +277,7 @@ fn resource_eligibility_precedes_selection_policy_and_binds_receipt_evidence() {
         &records,
         &small,
         &baseline(&small),
-        PlacementPolicy::Remote,
+        PlacementPolicy::PreferRemote,
     );
     assert_eq!(
         small_report.compatible_providers,
@@ -579,9 +761,12 @@ fn explanation_answers_the_four_questions() {
         "a (remote, priority 100, health healthy): incompatible (policy would admit): runtime_unsupported"
     ));
     assert!(
-        explanation.considered.iter().any(
-            |line| line.starts_with("b ") && line.ends_with(": compatible; capacity available")
-        )
+        explanation
+            .considered
+            .iter()
+            .any(|line| line.starts_with("b ")
+                && line.contains(": compatible; capacity available; candidate: rank")
+                && line.contains("runtime_ready"))
     );
     assert!(explanation.selection.starts_with(
         "selected provider b: compatible and admitted by policy, with selection priority 50"
@@ -779,6 +964,7 @@ priority = 100
 [providers.dev]
 kind = "remote"
 endpoint = "http://compute-dev:8080"
+application_endpoint = "https://dev-app.example"
 priority = 50
 
 [providers.production]
@@ -791,12 +977,17 @@ token_env = "COMPUTE_PRODUCTION_TOKEN"
     assert!(config.pool.require_healthy);
     assert_eq!(config.providers.len(), 3);
     assert_eq!(config.providers["production"].priority, 0);
+    assert_eq!(
+        config.providers["dev"].application_endpoint.as_deref(),
+        Some("https://dev-app.example")
+    );
     for invalid in [
         "[providers.x]\nkind = \"remote\"\n",
         "[providers.x]\nkind = \"local\"\nendpoint = \"http://a\"\n",
         "[providers.x]\nkind = \"remote\"\nendpoint = \"http://user:pw@a\"\n",
         "[providers.\"bad id\"]\nkind = \"local\"\n",
         "[providers.x]\nkind = \"local\"\nweight = 3\n",
+        "[providers.x]\nkind = \"local\"\napplication_endpoint = \"not-a-url\"\n",
         "[pool]\ncapability_ttl_seconds = 0\n",
     ] {
         assert!(

@@ -20,7 +20,6 @@ use crate::pool::{DiscoveryError, DiscoveryRecord, DiscoveryStatus, PoolPolicy, 
 use crate::requirements::PlacementRequirements;
 
 pub const PLACEMENT_VERSION: &str = "compute.placement@1";
-const POOL_ORDERING: &str = "priority_descending,provider_id_ascending";
 const EXPLICIT_ORDERING: &str = "explicit_provider";
 
 /// Caller intent applied only after capability eligibility is known.
@@ -29,18 +28,34 @@ const EXPLICIT_ORDERING: &str = "explicit_provider";
 pub enum PlacementPolicy {
     #[default]
     Auto,
-    Local,
-    Remote,
+    PreferLocal,
+    PreferRemote,
+    PreferProvider(String),
     Provider(String),
 }
 
 impl PlacementPolicy {
     fn accepts(&self, provider: &ProviderEvaluation) -> bool {
         match self {
-            Self::Auto => true,
-            Self::Local => provider.provider_kind == ProviderKind::Local,
-            Self::Remote => provider.provider_kind == ProviderKind::Remote,
+            Self::Auto | Self::PreferLocal | Self::PreferRemote | Self::PreferProvider(_) => true,
             Self::Provider(id) => provider.provider_id == *id,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::PreferLocal => "local",
+            Self::PreferRemote => "remote",
+            Self::PreferProvider(_) => "prefer_provider",
+            Self::Provider(_) => "provider",
+        }
+    }
+
+    fn policy_provider(&self) -> Option<&str> {
+        match self {
+            Self::Provider(id) | Self::PreferProvider(id) => Some(id),
+            _ => None,
         }
     }
 
@@ -143,6 +158,7 @@ pub struct ProviderEvaluation {
     /// statically incompatible and may cause a durable job to wait.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capacity_reasons: Vec<IncompatibilityReason>,
+    pub candidate: CandidateDecision,
     /// Capability incompatibilities.
     pub reasons: Vec<IncompatibilityReason>,
     /// Admission under this provider's effective policy, evaluated
@@ -151,6 +167,16 @@ pub struct ProviderEvaluation {
     pub admission: Option<AdmissionDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<DiscoveryError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateDecision {
+    pub eligible: bool,
+    pub selected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<u64>,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,6 +303,22 @@ impl PlacementReport {
             provider_protocol: selected.provider_protocol.clone(),
             selection_mode: self.selection_mode,
             selection_reason: selected.selection_reason.clone(),
+            policy: compute_core::ReceiptPlacementPolicy {
+                mode: self.placement_policy.label().into(),
+                provider: self.placement_policy.policy_provider().map(str::to_owned),
+            },
+            candidates: self
+                .providers
+                .iter()
+                .map(|provider| compute_core::ReceiptPlacementCandidate {
+                    provider_id: provider.provider_id.clone(),
+                    eligible: provider.candidate.eligible,
+                    capacity_available: provider.capacity_status == CapacityStatus::Available,
+                    selected: provider.candidate.selected,
+                    rank: provider.candidate.rank,
+                    reasons: provider.candidate.reasons.clone(),
+                })
+                .collect(),
             requested_resources: ResourceVector {
                 cpu_count: self
                     .requirements
@@ -395,7 +437,11 @@ pub fn place_with_policy(
     } else {
         SelectionMode::Pool
     };
-    let selection_policy = SelectionPolicy::from_pool(policy);
+    let mut selection_policy = SelectionPolicy::from_pool(policy);
+    selection_policy.ordering = policy_ordering(&placement_policy)
+        .split(',')
+        .map(str::to_owned)
+        .collect();
     let mut providers = vec![];
     for record in records {
         if explicit.is_some_and(|id| id != record.provider_id) {
@@ -434,14 +480,37 @@ pub fn place_with_policy(
         )
     });
 
-    let candidates = || {
-        providers.iter().filter(|provider| {
+    let mut candidate_ids = providers
+        .iter()
+        .filter(|provider| {
             provider.status == EvaluationStatus::Compatible && placement_policy.accepts(provider)
         })
-    };
-    let chosen = candidates()
-        .find(|provider| provider.capacity_status == CapacityStatus::Available)
-        .or_else(|| candidates().next());
+        .map(|provider| provider.provider_id.clone())
+        .collect::<Vec<_>>();
+    candidate_ids.sort_by(|left, right| {
+        let left = providers
+            .iter()
+            .find(|provider| provider.provider_id == *left)
+            .expect("candidate exists");
+        let right = providers
+            .iter()
+            .find(|provider| provider.provider_id == *right)
+            .expect("candidate exists");
+        compare_candidates(left, right, &placement_policy)
+    });
+    let chosen_id = candidate_ids.first().cloned();
+    for provider in &mut providers {
+        provider.candidate.eligible = provider.status == EvaluationStatus::Compatible;
+        provider.candidate.rank = candidate_ids
+            .iter()
+            .position(|id| id == &provider.provider_id)
+            .map(|index| index as u64 + 1);
+        provider.candidate.selected = chosen_id.as_deref() == Some(&provider.provider_id);
+        provider.candidate.reasons = candidate_reasons(provider, &placement_policy);
+    }
+    let chosen = chosen_id
+        .as_deref()
+        .and_then(|id| providers.iter().find(|provider| provider.provider_id == id));
     let capacity_available_providers = compatible_providers
         .iter()
         .filter(|id| {
@@ -487,7 +556,7 @@ pub fn place_with_policy(
                     ordering: if explicit.is_some() {
                         EXPLICIT_ORDERING
                     } else {
-                        POOL_ORDERING
+                        policy_ordering(&placement_policy)
                     }
                     .into(),
                     compatible_candidates: providers
@@ -682,9 +751,104 @@ fn evaluate(
         status,
         capacity_status,
         capacity_reasons,
+        candidate: CandidateDecision::default(),
         reasons,
         admission,
         error,
+    }
+}
+
+fn runtime_ready(provider: &ProviderEvaluation) -> bool {
+    matches!(
+        provider.runtime_lifecycle,
+        Some(
+            compute_core::RuntimeLifecycleStatus::Ready
+                | compute_core::RuntimeLifecycleStatus::Installed
+        )
+    )
+}
+
+fn compare_candidates(
+    left: &ProviderEvaluation,
+    right: &ProviderEvaluation,
+    policy: &PlacementPolicy,
+) -> std::cmp::Ordering {
+    let capacity = |provider: &ProviderEvaluation| match provider.capacity_status {
+        CapacityStatus::Available => 0,
+        CapacityStatus::Unknown => 1,
+        CapacityStatus::Unavailable => 2,
+    };
+    let affinity = |provider: &ProviderEvaluation| match policy {
+        PlacementPolicy::PreferProvider(id) => u8::from(provider.provider_id != *id),
+        _ => 0,
+    };
+    let locality = |provider: &ProviderEvaluation| match policy {
+        PlacementPolicy::PreferRemote => u8::from(provider.provider_kind != ProviderKind::Remote),
+        _ => u8::from(provider.provider_kind != ProviderKind::Local),
+    };
+    let ready = |provider: &ProviderEvaluation| u8::from(!runtime_ready(provider));
+    let common = capacity(left)
+        .cmp(&capacity(right))
+        .then_with(|| affinity(left).cmp(&affinity(right)));
+    let preferred = match policy {
+        PlacementPolicy::PreferLocal | PlacementPolicy::PreferRemote => common
+            .then_with(|| locality(left).cmp(&locality(right)))
+            .then_with(|| ready(left).cmp(&ready(right))),
+        _ => common
+            .then_with(|| ready(left).cmp(&ready(right)))
+            .then_with(|| locality(left).cmp(&locality(right))),
+    };
+    preferred
+        .then_with(|| right.priority.cmp(&left.priority))
+        .then_with(|| left.provider_id.cmp(&right.provider_id))
+}
+
+fn candidate_reasons(provider: &ProviderEvaluation, policy: &PlacementPolicy) -> Vec<String> {
+    if provider.status != EvaluationStatus::Compatible {
+        return provider
+            .reasons
+            .iter()
+            .map(|reason| reason.code.as_str())
+            .chain(std::iter::once(provider.status.as_str().into()))
+            .collect();
+    }
+    let mut reasons = vec![match provider.capacity_status {
+        CapacityStatus::Available => "sufficient_capacity".into(),
+        CapacityStatus::Unavailable => "capacity_unavailable".into(),
+        CapacityStatus::Unknown => "capacity_unknown".into(),
+    }];
+    if let PlacementPolicy::PreferProvider(id) = policy {
+        reasons.push(if provider.provider_id == *id {
+            "preferred_provider".into()
+        } else {
+            "provider_affinity_not_matched".into()
+        });
+    }
+    reasons.push(if runtime_ready(provider) {
+        "runtime_ready".into()
+    } else {
+        "runtime_requires_preparation".into()
+    });
+    reasons.push(match provider.provider_kind {
+        ProviderKind::Local => "local".into(),
+        ProviderKind::Remote => "remote".into(),
+    });
+    reasons.push(format!("pool_priority:{}", provider.priority));
+    reasons
+}
+
+fn policy_ordering(policy: &PlacementPolicy) -> &'static str {
+    match policy {
+        PlacementPolicy::Auto => {
+            "capacity,runtime_readiness,locality,priority_descending,provider_id_ascending"
+        }
+        PlacementPolicy::PreferLocal | PlacementPolicy::PreferRemote => {
+            "capacity,locality,runtime_readiness,priority_descending,provider_id_ascending"
+        }
+        PlacementPolicy::PreferProvider(_) => {
+            "capacity,provider_affinity,runtime_readiness,locality,priority_descending,provider_id_ascending"
+        }
+        PlacementPolicy::Provider(_) => EXPLICIT_ORDERING,
     }
 }
 
@@ -980,7 +1144,7 @@ fn explain(
                     head.push_str(&format!(", distribution {}", distribution.id));
                 }
             }
-            match provider.status {
+            let evaluation = match provider.status {
                 EvaluationStatus::Compatible => match provider.capacity_status {
                     CapacityStatus::Available => {
                         format!("{head}: compatible; capacity available")
@@ -1039,7 +1203,21 @@ fn explain(
                         .map(|error| format!(": {}", error.message))
                         .unwrap_or_default()
                 ),
-            }
+            };
+            format!(
+                "{evaluation}; candidate: {}{}; reasons: {}",
+                provider
+                    .candidate
+                    .rank
+                    .map(|rank| format!("rank {rank}"))
+                    .unwrap_or_else(|| "not ranked".into()),
+                if provider.candidate.selected {
+                    ", selected"
+                } else {
+                    ", not selected"
+                },
+                provider.candidate.reasons.join(", ")
+            )
         })
         .collect();
 
@@ -1049,10 +1227,11 @@ fn explain(
             selected.provider_id
         ),
         (Some(selected), _) => format!(
-            "selected provider {}: compatible and admitted by policy, with selection priority {}, first among {} candidate(s) ordered by priority (descending) then provider ID (ascending)",
+            "selected provider {}: compatible and admitted by policy, with selection priority {}, first among {} candidate(s) ordered by {}",
             selected.provider_id,
             selected.selection_reason.selection_priority,
-            selected.selection_reason.compatible_candidates
+            selected.selection_reason.compatible_candidates,
+            selected.selection_reason.ordering
         ),
         (None, Some(failure)) => format!("placement_failed: {}: {}", failure.code, failure.message),
         (None, None) => "placement_failed".into(),

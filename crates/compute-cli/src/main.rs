@@ -13,6 +13,7 @@ use compute_provider::{
 use compute_runtime::Compute;
 
 mod admission;
+mod application;
 mod certification;
 mod control_state;
 mod direct;
@@ -39,6 +40,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Create the smallest useful Compute application.
+    Init(application::InitCommand),
     Run(Box<RunCommand>),
     Bundle(BundleCommand),
     /// Create and verify portable dependency capsules.
@@ -81,6 +84,10 @@ enum Commands {
     Stop(environment_cmd::StopCommand),
     /// Show the Compute daemon's status.
     Status(environment_cmd::DaemonCommand),
+    /// Read an application's live stdout and stderr.
+    Logs(application::LogsCommand),
+    /// List an application's durable execution history.
+    History(application::HistoryCommand),
     /// Create, inspect, and operate environments.
     Environment(environment_cmd::EnvironmentCommand),
     /// Add, remove, inspect, and operate projects within an environment.
@@ -501,11 +508,17 @@ struct RunCommand {
     /// Placement policy: auto, local, remote, or provider:<id>.
     #[arg(long)]
     provider: Option<String>,
+    /// Placement preference policy: auto or local.
+    #[arg(long = "policy", conflicts_with_all = ["provider", "prefer_provider"])]
+    placement_policy: Option<String>,
+    /// Prefer this provider when eligible and currently available.
+    #[arg(long, conflicts_with = "provider")]
+    prefer_provider: Option<String>,
     /// Discover provider capabilities now instead of using a fresh cache.
-    #[arg(long, requires = "provider")]
+    #[arg(long)]
     refresh: bool,
     /// Write the complete structured placement decision to this file.
-    #[arg(long, requires = "provider")]
+    #[arg(long)]
     placement_output: Option<PathBuf>,
     #[command(flatten)]
     location: pool::PoolLocation,
@@ -605,6 +618,19 @@ async fn main() {
 
 fn parse_cli() -> Cli {
     let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    // `--policy FILE` was the execution-policy spelling before placement
+    // policy became first-class. Preserve it when the value is not a known
+    // placement policy; the unambiguous spelling is now --execution-policy.
+    for index in 0..arguments.len().saturating_sub(1) {
+        if arguments[index] == "--policy"
+            && !matches!(
+                arguments[index + 1].to_str(),
+                Some("auto" | "local" | "remote")
+            )
+        {
+            arguments[index] = "--execution-policy".into();
+        }
+    }
     if arguments.get(1).and_then(|value| value.to_str()) == Some("placement")
         && !matches!(
             arguments.get(2).and_then(|value| value.to_str()),
@@ -618,9 +644,20 @@ fn parse_cli() -> Cli {
 
 async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
     match cli.command {
+        Commands::Init(command) => application::init(command)?,
         Commands::Run(command) => {
             let command = *command;
-            if command.provider.is_some() {
+            let explicit_placement = command.provider.is_some()
+                || command.placement_policy.is_some()
+                || command.prefer_provider.is_some();
+            let portable_auto = command.workload.is_none()
+                && command.mounts.is_empty()
+                && command.stdin.is_none()
+                && command.expected_workload_id.is_none()
+                && command.expected_bundle_id.is_none()
+                && !command.dry_run
+                && !command.explain;
+            if explicit_placement || portable_auto {
                 return run_with_provider(command).await;
             }
             let dependency_capsule = command
@@ -1392,13 +1429,34 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Policy(command) => policy_cmd::policy(command).await?,
         Commands::Explain(command) => policy_cmd::explain(command).await?,
         Commands::Start(command) => environment_cmd::start(command).await?,
-        Commands::Stop(command) => environment_cmd::stop(command).await?,
-        Commands::Status(command) => environment_cmd::status(command).await?,
+        Commands::Stop(command) => {
+            if let Some(path) = command.application.clone() {
+                application::stop(path, command.pool, command.json).await?;
+            } else {
+                environment_cmd::stop(command).await?;
+            }
+        }
+        Commands::Status(command) => {
+            if let Some(path) = command.application.clone() {
+                application::status(path, command.pool, command.json).await?;
+            } else {
+                environment_cmd::status(command).await?;
+            }
+        }
+        Commands::Logs(command) => application::logs(command).await?,
+        Commands::History(command) => application::history(command).await?,
         Commands::Environment(command) => environment_cmd::environment(command).await?,
         Commands::Project(command) => environment_cmd::project(command).await?,
         Commands::Workload(command) => environment_cmd::workload(command).await?,
         Commands::Execution(command) => environment_cmd::execution(command).await?,
-        Commands::Deploy(command) => environment_cmd::deploy(command).await?,
+        Commands::Deploy(command) => {
+            let path = PathBuf::from(&command.project);
+            if application::is_application(&path) {
+                application::deploy(path, command.pool, command.json).await?;
+            } else {
+                environment_cmd::deploy(command).await?;
+            }
+        }
         Commands::Promote(command) => environment_cmd::promote(command).await?,
         Commands::Deployment(command) => environment_cmd::deployment(command).await?,
         Commands::Domain(command) => network_cmd::domain(command).await?,
@@ -1688,6 +1746,8 @@ async fn run_with_provider(command: RunCommand) -> compute_core::Result<()> {
         path: command.path,
         bundle: command.bundle,
         provider,
+        placement_policy: command.placement_policy,
+        prefer_provider: command.prefer_provider,
         refresh: command.refresh,
         submit: false,
         distribution: None,
@@ -1722,6 +1782,12 @@ async fn run_with_provider(command: RunCommand) -> compute_core::Result<()> {
             policy: command.policy,
         })
         .await
+    } else if artifact
+        .path
+        .as_deref()
+        .is_some_and(application::is_application)
+    {
+        application::run(artifact, command.location, command.policy).await
     } else {
         pool::pool(pool::PoolCommand {
             command: pool::PoolCommands::Run(Box::new(artifact)),

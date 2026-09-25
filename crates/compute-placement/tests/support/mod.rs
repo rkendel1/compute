@@ -279,6 +279,7 @@ pub fn config(entries: &[(&str, ProviderKind, i64)]) -> PoolConfig {
                         kind: *kind,
                         endpoint: (*kind == ProviderKind::Remote)
                             .then(|| format!("https://{id}.example")),
+                        application_endpoint: None,
                         priority: *priority,
                         token_env: None,
                     },

@@ -190,6 +190,9 @@ pub struct ExecutionReceipt {
     pub provider: Option<crate::ProviderIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_protocol: Option<String>,
+    /// Product-level application this execution belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application: Option<crate::ApplicationIdentity>,
     /// Placement decision that routed this execution to its provider. Absent
     /// for executions that were not placed through a provider pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -312,6 +315,12 @@ pub struct ReceiptPlacement {
     pub provider_protocol: String,
     pub selection_mode: SelectionMode,
     pub selection_reason: SelectionReason,
+    /// Placement/scheduling policy applied after eligibility was known.
+    #[serde(default)]
+    pub policy: ReceiptPlacementPolicy,
+    /// Deterministic candidate order, including rejected providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<ReceiptPlacementCandidate>,
     /// Resources requested by the workload when placement ran.
     #[serde(default)]
     pub requested_resources: ResourceVector,
@@ -327,6 +336,26 @@ pub struct ReceiptPlacement {
     /// Durable capacity grant established before provider admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reservation: Option<ReceiptReservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptPlacementPolicy {
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptPlacementCandidate {
+    pub provider_id: String,
+    pub eligible: bool,
+    pub capacity_available: bool,
+    pub selected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<u64>,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,6 +384,8 @@ struct ReceiptBody<'a> {
     provider: &'a Option<crate::ProviderIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_protocol: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    application: &'a Option<crate::ApplicationIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     placement: &'a Option<ReceiptPlacement>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -464,6 +495,21 @@ impl ExecutionReceipt {
             {
                 return Err(invalid("placement selected an incompatible provider"));
             }
+            let selected = placement
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.selected)
+                .collect::<Vec<_>>();
+            if !placement.candidates.is_empty()
+                && (selected.len() != 1
+                    || selected[0].provider_id != placement.provider_id
+                    || !selected[0].eligible)
+            {
+                return Err(invalid("placement candidate selection is inconsistent"));
+            }
+        }
+        if let Some(application) = &self.application {
+            application.verify()?;
         }
         if let Some(reservation) = &self.reservation {
             crate::ReservationId::parse(reservation.reservation_id.0.clone())?;
@@ -603,6 +649,7 @@ impl ExecutionReceipt {
             bundle: &self.bundle,
             provider: &self.provider,
             provider_protocol: &self.provider_protocol,
+            application: &self.application,
             placement: &self.placement,
             reservation: &self.reservation,
             scope: &self.scope,
@@ -728,6 +775,7 @@ pub fn create_execution_receipt(
         bundle,
         provider: None,
         provider_protocol: None,
+        application: None,
         placement: None,
         reservation: None,
         scope: None,

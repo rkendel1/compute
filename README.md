@@ -25,6 +25,21 @@ These commands generate the canonical `WorkloadSpec` and use the existing
 engine. See [docs/getting-started.md](docs/getting-started.md) for project
 configuration, inputs, outputs, environment, policy, dry runs, and receipts.
 
+Or create a durable application and let Compute resolve its runtime, place it,
+admit it, and expose one lifecycle:
+
+```sh
+compute init my-app
+compute run my-app
+compute status my-app
+compute logs my-app --follow
+compute stop my-app
+compute history my-app
+```
+
+See [docs/applications.md](docs/applications.md) and the
+[HTTP demo](examples/compute-demo/).
+
 Resolved dependencies can be packaged separately as deterministic,
 content-addressed `compute.deps@1` capsules and embedded in the same `.compute`
 bundle. See [docs/dependencies.md](docs/dependencies.md).

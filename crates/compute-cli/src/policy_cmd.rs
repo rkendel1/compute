@@ -160,7 +160,7 @@ async fn admit(
             "admission checks never execute; --receipt and --idempotency-key are not valid".into(),
         ));
     }
-    let (_, mut request) = crate::pool::prepare(artifact, policy)?;
+    let (_, mut request, _) = crate::pool::prepare(artifact, policy)?;
     request.execution.isolation = artifact.isolation;
     request.expected.distribution_id = artifact.distribution.clone();
     request.execution.policy = request_policy(&policy.sources()?);

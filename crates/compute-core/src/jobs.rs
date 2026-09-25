@@ -6,12 +6,59 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ExecutionReceipt, ExecutionResult, IsolationProfile, NetworkPolicy, ProviderIdentity,
-    ResourceLimits, Result, RuntimeKind,
+    ResourceLimits, Result, RuntimeKind, sha256_identity,
 };
 
 pub const EXECUTION_JOB_VERSION: &str = "compute.job@1";
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_RESERVATION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Stable product-level identity. Jobs are individual executions of this
+/// application and may change as its workload evolves.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationIdentity {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
+impl ApplicationIdentity {
+    pub fn new(name: impl Into<String>, port: Option<u16>) -> Result<Self> {
+        let name = name.into();
+        if name.is_empty()
+            || name.len() > 64
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(crate::ComputeError::InvalidWorkload(
+                "application name must be 1-64 letters, digits, '.', '-', or '_'".into(),
+            ));
+        }
+        if port == Some(0) {
+            return Err(crate::ComputeError::InvalidWorkload(
+                "application port must be greater than zero".into(),
+            ));
+        }
+        let id = sha256_identity(
+            &serde_json::to_vec(&("compute.application@1", &name))
+                .map_err(crate::ComputeError::Json)?,
+        );
+        Ok(Self { id, name, port })
+    }
+
+    pub fn verify(&self) -> Result<()> {
+        let expected = Self::new(self.name.clone(), self.port)?;
+        if self.id != expected.id {
+            return Err(crate::ComputeError::InvalidWorkload(
+                "application identity does not match its name".into(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -194,6 +241,8 @@ pub struct JobRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_id: Option<String>,
     pub runtime: RuntimeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application: Option<ApplicationIdentity>,
     pub requested_execution: JobRequestedPolicy,
 }
 
@@ -205,9 +254,15 @@ pub struct ExecutionJob {
     pub request: JobRequest,
     pub status: JobStatus,
     pub provider: ProviderIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application: Option<ApplicationIdentity>,
     /// Pool placement that routed the job here, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_id: Option<String>,
+    /// Complete durable placement decision supplied by the caller-owned
+    /// pool, including policy and ordered candidates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<crate::ReceiptPlacement>,
     /// Pool identifier of this provider in that placement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
@@ -274,4 +329,13 @@ pub struct JobArtifacts {
 pub struct JobReceipt {
     pub job_id: JobId,
     pub receipt: ExecutionReceipt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobLogs {
+    pub job_id: JobId,
+    pub stdout: String,
+    pub stderr: String,
+    pub complete: bool,
 }

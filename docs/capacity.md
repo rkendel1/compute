@@ -26,3 +26,9 @@ compatibility separately from temporary capacity availability.
 Successful durable-job receipts bind the reservation ID, requested and
 reserved resources, and the capacity snapshot recorded by the atomic reserve
 operation. This is historical execution evidence, not mutable live capacity.
+
+Queued work uses an oldest-fitting rule. Among jobs that fit the current
+availability, the oldest durable job reserves first. An older job that cannot
+fit the current partial capacity does not head-of-line block compatible work;
+it becomes first as soon as sufficient capacity is released. Cancellation and
+restart preserve the same durable ordering inputs.

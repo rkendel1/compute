@@ -98,6 +98,7 @@ fn remote(endpoint: &str, priority: i64) -> ProviderConfig {
     ProviderConfig {
         kind: ProviderKind::Remote,
         endpoint: Some(endpoint.into()),
+        application_endpoint: None,
         priority,
         token_env: None,
     }
@@ -107,6 +108,7 @@ fn local(priority: i64) -> ProviderConfig {
     ProviderConfig {
         kind: ProviderKind::Local,
         endpoint: None,
+        application_endpoint: None,
         priority,
         token_env: None,
     }
@@ -284,7 +286,8 @@ async fn placement_selects_only_providers_that_satisfy_each_workload() {
     );
 
     // Strict WASM: the priority-100 process provider cannot satisfy strict
-    // isolation and must never win. `strict` (50) beats `local` (10).
+    // isolation and must never win. Auto prefers the eligible local provider
+    // over the higher-priority remote provider.
     let mut bundle = wasm_bundle(IsolationProfile::Strict);
     bundle.workload.resources.cpu_count = Some(1);
     bundle.workload.resources.memory_required_bytes = Some(64 * 1024 * 1024);
@@ -325,7 +328,7 @@ async fn placement_selects_only_providers_that_satisfy_each_workload() {
         .unwrap();
     assert_eq!(node.status, EvaluationStatus::Incompatible);
     let selected = report.selected.clone().unwrap();
-    assert_eq!(selected.provider_id, "strict");
+    assert_eq!(selected.provider_id, "local");
 
     let response = dispatch::execute(&matrix.pool, &report, request)
         .await
@@ -336,9 +339,9 @@ async fn placement_selects_only_providers_that_satisfy_each_workload() {
     report.verify_receipt(&receipt).unwrap();
     let placement = receipt.placement.unwrap();
     assert_eq!(placement.placement_id, report.placement_id);
-    assert_eq!(placement.provider_id, "strict");
+    assert_eq!(placement.provider_id, "local");
     assert_eq!(placement.selection_mode, SelectionMode::Pool);
-    assert_eq!(placement.provider_protocol, "compute.remote@1");
+    assert_eq!(placement.provider_protocol, "compute.local@1");
     assert_eq!(placement.requested_resources.cpu_count, 1);
     assert_eq!(placement.requested_resources.memory_bytes, 64 * 1024 * 1024);
     assert_eq!(placement.allocated_resources.disk_bytes, 1024 * 1024);
@@ -346,15 +349,12 @@ async fn placement_selects_only_providers_that_satisfy_each_workload() {
     assert!(placement.execution_platform.is_some());
     assert_eq!(
         receipt.provider,
-        Some(ProviderIdentity::Remote {
-            id: matrix.servers[1].endpoint.clone(),
-            endpoint: matrix.servers[1].endpoint.clone(),
-        })
+        Some(ProviderIdentity::Local { id: "local".into() })
     );
     assert_eq!(receipt.isolation.effective, IsolationProfile::Strict);
-    assert_eq!(matrix.local_executions.load(Ordering::SeqCst), 0);
+    assert_eq!(matrix.local_executions.load(Ordering::SeqCst), 1);
 
-    // Process-isolated shell: the priority-100 process provider wins.
+    // Process-isolated shell: auto still prefers the eligible local provider.
     let bundle = shell_bundle();
     let (request, requirements, admission) = prepare(&bundle, SubmissionMode::Synchronous);
     let report = place(
@@ -371,7 +371,7 @@ async fn placement_selects_only_providers_that_satisfy_each_workload() {
         .unwrap();
     assert_eq!(response.result.stdout.text, "shell-placed");
     let receipt = response.result.receipt.unwrap();
-    assert_eq!(receipt.placement.as_ref().unwrap().provider_id, "process");
+    assert_eq!(receipt.placement.as_ref().unwrap().provider_id, "local");
     report.verify_receipt(&receipt).unwrap();
 }
 
@@ -473,18 +473,26 @@ async fn pool_submission_places_jobs_on_job_capable_providers() {
     assert_eq!(submitted.provider_id, "strict");
     let client = RemoteProvider::new(submitted.endpoint.clone().unwrap());
     let job_id = submitted.job.job_id.0.clone();
-    loop {
-        if client
-            .job_status(&job_id)
-            .await
-            .unwrap()
-            .status
-            .is_terminal()
-        {
-            break;
+    let job = loop {
+        let job = client.job_status(&job_id).await.unwrap();
+        if job.status.is_terminal() {
+            break job;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    };
+    let durable_placement = job
+        .placement
+        .as_ref()
+        .expect("job preserves placement policy");
+    assert_eq!(durable_placement.policy.mode, "auto");
+    assert_eq!(
+        durable_placement
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.selected)
+            .count(),
+        1
+    );
     let result = client.job_result(&job_id).await.unwrap();
     assert_eq!(result.result.stdout.text, "placed\n");
     let receipt = client.job_receipt(&job_id).await.unwrap().receipt;
