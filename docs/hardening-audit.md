@@ -122,6 +122,12 @@ Evidence: `availability.rs` (3 tests), `recovery.rs::managed_feltdb_is_the_durab
 
 ## 6. FeltDB access
 
+> **Superseded for FeltDB consumption** by the FeltDB 0.11.8 consumer
+> certification ([feltdb-0.11.8-consumer-certification.md](feltdb-0.11.8-consumer-certification.md)),
+> summarized in [section 14](#14-feltdb-0118-consumption). The numbers below
+> are this audit's, at `f68ce7f`, on a smaller dataset; they are kept as
+> the historical baseline.
+
 Evidence: `feltdb-latency.json`, with the baselines. Release build, 40 samples per operation, local `feltdb-server`.
 
 | Operation | Before p50 / p95 (ms) | Now p50 / p95 (ms) | FeltDB requests per call | Target | Status |
@@ -281,3 +287,29 @@ The 15 invariants and their regression tests are in [architecture.md](architectu
 7. **The supervisor cannot be upgraded** without restarting workloads.
 8. **Not measured:** Managed FeltDB over a network, and half-open network partitions.
 9. **Isolation coverage.** Host isolation was exercised on cgroup v1 as root only.
+
+## 14. FeltDB 0.11.8 consumption
+
+A follow-up change moved Compute onto `@feltdb/core` 0.11.8 and removed the
+access patterns this audit's section 6 measured around. The full report,
+with every status and number, is
+[feltdb-0.11.8-consumer-certification.md](feltdb-0.11.8-consumer-certification.md)
+(machine-readable: [`.json`](feltdb-0.11.8-consumer-certification.json));
+the contract is [feltdb.md](feltdb.md). In short:
+
+| Area | This audit | Now |
+| --- | --- | --- |
+| FeltDB version | 0.11.7, manifest only | 0.11.8, verified as resolved in CI; the tests' server is built from the resolved package |
+| Identity lookups | `_id` filters: FeltDB scanned the collection | Indexed `record_id`: one row examined |
+| Views (executions, receipts, revisions, deployments, audit) | Scope loaded, sorted, truncated in Compute; receipts had no index | Ordered and limited by FeltDB, within an index |
+| Desired-state load | Ten independent whole-collection reads plus per-record scans, every cycle; not coherent | A coherent, bounded snapshot; a cycle with no other writer reads one revision |
+| After a mutation | The next read reloaded all desired state | The write is read back by identity; the controller's own commits carry its working copy forward |
+| Recovery | Refresh, then record | Ordered: rebuild from FeltDB, continue the sequence, reload credentials, flush held evidence and audit, record, reconcile — before a mutation is accepted |
+| Model changes | `upgrade` replaced the model | `compute control-plane upgrade`: inspect, refuse a downgrade, verified FeltDB backup, apply, verify, backfill, smoke test; controllers refuse an older model |
+| Diagnosis | Mode and error | `compute doctor`: versions, model generation, authority state, last durable read and mutation, last recovery, cache, pending work, snapshots, query plans |
+
+Two FeltDB 0.11.8 findings bound what Compute alone can improve: FeltDB's
+cost per request grows linearly with its committed state (measured from
+`/v1/state/version` and an index probe, while `/health` stays flat), and
+`backup verify` rejects FeltDB's own online backups of application state.
+Both are in the certification's remaining gaps.

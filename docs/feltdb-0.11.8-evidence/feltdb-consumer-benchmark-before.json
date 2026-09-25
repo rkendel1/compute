@@ -1,0 +1,110 @@
+{
+  "compute": "eac2be8 (before this change)",
+  "controller": {
+    "startup_empty_ms": 130.187364,
+    "startup_with_state_ms": 14316.357114
+  },
+  "dataset": {
+    "executions": 4000,
+    "projects": 40
+  },
+  "feltdb": {
+    "server": "built from @feltdb/core 0.11.8",
+    "transport": "feltdb-server on this host, HTTP over loopback"
+  },
+  "format": "compute.feltdb-consumer-benchmark@1",
+  "measured_at": "2026-09-25T18:18:51.354270897Z",
+  "results": [
+    {
+      "max_ms": 11420.71,
+      "n": 10,
+      "operation": "add project/service",
+      "p50_ms": 9717.59,
+      "p95_ms": 11420.71,
+      "pattern": "before (Compute eac2be8)",
+      "scope": "end-to-end"
+    },
+    {
+      "max_ms": 123.07,
+      "n": 30,
+      "operation": "execution lookup",
+      "p50_ms": 101.95,
+      "p95_ms": 116.3,
+      "pattern": "before (Compute eac2be8)",
+      "scope": "end-to-end"
+    },
+    {
+      "max_ms": 4182.69,
+      "n": 30,
+      "operation": "executions view (project, 20)",
+      "p50_ms": 3997.09,
+      "p95_ms": 4113.22,
+      "pattern": "before (Compute eac2be8)",
+      "scope": "end-to-end"
+    },
+    {
+      "max_ms": 0.62,
+      "n": 30,
+      "operation": "environment view",
+      "p50_ms": 0.32,
+      "p95_ms": 0.4,
+      "pattern": "before (Compute eac2be8)",
+      "scope": "end-to-end"
+    },
+    {
+      "max_ms": 0.02,
+      "n": 30,
+      "operation": "project view",
+      "p50_ms": 0.01,
+      "p95_ms": 0.01,
+      "pattern": "before (Compute eac2be8)",
+      "scope": "end-to-end"
+    },
+    {
+      "max_ms": 220.61,
+      "n": 30,
+      "operation": "release lookup",
+      "p50_ms": 194.6,
+      "p95_ms": 206.03,
+      "pattern": "before (Compute eac2be8)",
+      "scope": "end-to-end"
+    },
+    {
+      "max_ms": 4351.45,
+      "n": 30,
+      "operation": "mutation + event (environment create)",
+      "p50_ms": 4181.61,
+      "p95_ms": 4327.8,
+      "pattern": "before (Compute eac2be8)",
+      "scope": "end-to-end"
+    },
+    {
+      "max_ms": 4330.17,
+      "n": 30,
+      "operation": "project update (stop/start)",
+      "p50_ms": 4121.12,
+      "p95_ms": 4323.73,
+      "pattern": "before (Compute eac2be8)",
+      "scope": "end-to-end"
+    },
+    {
+      "max_ms": 6390.96,
+      "n": 10,
+      "operation": "release update (register, deploy, complete)",
+      "p50_ms": 5910.96,
+      "p95_ms": 6390.96,
+      "pattern": "before (Compute eac2be8)",
+      "scope": "end-to-end"
+    },
+    {
+      "max_ms": 4439.99,
+      "n": 30,
+      "operation": "reconciliation (full cycle, nothing changed)",
+      "p50_ms": 4090.5,
+      "p95_ms": 4396.86,
+      "pattern": "before (Compute eac2be8)",
+      "scope": "end-to-end"
+    }
+  ],
+  "samples": 30
+}

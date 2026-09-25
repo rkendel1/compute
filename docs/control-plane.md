@@ -37,18 +37,27 @@ It covers:
 - total replace
 - merge update
 - version fencing that refuses stale writes
-- ordered and ranged queries
+- ordered and ranged queries, `In` filters, and limits
+- identity reads (`get_many`) of exactly the named records
+- a revision that moves on every committed write and on nothing else
+- snapshots: bounded to their sources, coherent under concurrent writers
+  (never half a transaction), reused while current, stale after any write,
+  with deterministic identity
 - chunked artifacts
 - durability
 
 `compute-state-feltdb` speaks FeltDB's wire protocol directly, using
 `reqwest` over rustls. It has no dependency on `@feltdb/core` or on the
-embedded FeltDB crate.
+embedded FeltDB crate. How it reads, what it may cache, and how it
+recovers are in [docs/feltdb.md](feltdb.md): FeltDB is the durable
+authority, and the controller's memory never is.
 
 ## The model: `compute.flow`
 
 `crates/compute-state-feltdb/model/compute.flow` is the schema authority,
-`compute.state@1`:
+`compute.state@1`, at model generation 2 (`compute_state::MODEL_GENERATION`).
+Every collection also carries `record_id`, its identity as an indexed
+field, because FeltDB indexes declared fields and not `_id`:
 
 | Collection | Holds |
 | --- | --- |
@@ -133,9 +142,16 @@ It prints the `[state]` configuration to use.
 
 Both commands are idempotent. Running them again reuses the tenant and the
 application, and when the model is already current it changes nothing.
-`upgrade` installs a newer model on the existing application and bumps
-FeltDB's `state_schema_version`, as FeltDB requires. Existing data stays in
-place.
+
+`upgrade` is the explicit prerequisite for a controller whose model is
+newer than the one in FeltDB. It inspects the active model, refuses a
+downgrade, secures and verifies a FeltDB backup, installs the model
+(bumping FeltDB's `state_schema_version`, as FeltDB requires), verifies it,
+gives older records their indexed identity, smoke-tests it, and reports
+every step. `compute control-plane inspect` compares the models without
+changing anything. See [docs/feltdb.md](feltdb.md#the-model-and-upgrades).
+Existing data stays in place. Neither command ever replaces a model that
+declares something this build does not.
 
 The key needs these FeltDB scopes:
 
@@ -144,6 +160,10 @@ The key needs these FeltDB scopes:
 - `application:revision:read`, `application:revision:create`,
   `application:revision:promote`
 - `application:environment:read`, `application:environment:write`
+
+An online backup during `upgrade --backup` needs a separate key with
+`cluster:write`, in `COMPUTE_FELTDB_BACKUP_TOKEN`; Compute's own key never
+needs it.
 
 ## Desired and actual state
 

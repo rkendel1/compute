@@ -148,7 +148,7 @@ pub struct SecurityView {
     pub active_credentials: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlPlaneView {
     pub state: BackendInfo,
     /// `normal`, or `degraded_control_plane` while durable control state is
@@ -159,6 +159,90 @@ pub struct ControlPlaneView {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reconciled_at: Option<DateTime<Utc>>,
+    /// The durable-state boundary: absent from controllers older than it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<AuthorityView>,
+}
+
+/// The boundary between Compute and its durable authority (FeltDB), for
+/// diagnosis. Counters and timestamps only: never credentials, tokens, or
+/// record contents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuthorityView {
+    /// `healthy`, `degraded_control_plane` (unreachable; reads served from
+    /// the last snapshot, marked stale), `state_unavailable` (unreachable
+    /// with nothing read yet: reads and changes fail), or `recovered`
+    /// (answering again; the recovery sequence has not finished).
+    pub state: String,
+    /// The `@feltdb/core` release this build is certified against, when
+    /// the backend is FeltDB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certified_feltdb: Option<String>,
+    /// The Compute control model: its format and generation.
+    pub model: String,
+    pub model_generation: u32,
+    /// What the backend reports at its boundary (FeltDB: server version,
+    /// connection, query plans, transactions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<compute_state::AccessReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_durable_read: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_durable_mutation: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_since: Option<DateTime<Utc>>,
+    /// The last outage that ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_recovery: Option<RecoveryView>,
+    pub cache: CacheView,
+    /// Controller writes not yet read back, evidence and audit waiting for
+    /// durable state.
+    pub pending: PendingView,
+    pub snapshots: Vec<compute_state::SnapshotReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecoveryView {
+    pub began: DateTime<Utc>,
+    pub ended: DateTime<Utc>,
+    pub outage_seconds: f64,
+}
+
+/// The controller's working copy of desired state. Never authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CacheView {
+    /// Writes this controller has committed; a read cached before the
+    /// latest is not served.
+    pub generation: u64,
+    /// The durable state the working copy was read at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_ms: Option<u64>,
+    /// How old a read may be served from it.
+    pub max_age_ms: u64,
+    /// `current` (read at the latest generation within `max_age_ms`),
+    /// `expired`, `stale` (durable state unreachable), or `empty`.
+    pub freshness: String,
+    /// The snapshot it was derived from, when derived whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    /// The durable revision it provably represents, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    /// Refreshes answered by that revision alone (nothing else read).
+    #[serde(default)]
+    pub reused: u64,
+    /// This controller's own commits carried onto it without a re-read.
+    #[serde(default)]
+    pub rolled_forward: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingView {
+    pub targeted_refresh: usize,
+    pub evidence: usize,
+    pub audit: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -257,20 +257,19 @@ impl Daemon {
         operator: Option<&str>,
         limit: usize,
     ) -> Result<Vec<AuditRecord>, EnvironmentError> {
+        // Ordered and limited by FeltDB; one operator's records through its
+        // index.
         let mut query = Query::all(compute_state::Collection::Audit);
         if let Some(operator) = operator {
             query = query.eq("operator_id", operator.to_string());
         }
-        let mut records = self
+        Ok(self
             .control()
-            .query::<AuditRecord>(query)
+            .query::<AuditRecord>(query.descending("at").limit(limit))
             .await?
             .into_iter()
             .map(|stored| stored.value)
-            .collect::<Vec<_>>();
-        records.sort_by(|left, right| right.at.cmp(&left.at));
-        records.truncate(limit);
-        Ok(records)
+            .collect())
     }
 
     fn append_audit_log(&self, record: &AuditRecord) {

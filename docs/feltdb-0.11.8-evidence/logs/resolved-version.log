@@ -1,0 +1,9 @@
+{
+  "certified": "0.11.8",
+  "resolved": {
+    "packages/compute-state-model/package-lock.json:node_modules/@feltdb/core": "0.11.8",
+    "packages/compute-state-model/node_modules/@feltdb/core": "0.11.8"
+  },
+  "status": "PASS",
+  "failures": []
+}

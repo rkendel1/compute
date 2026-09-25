@@ -483,13 +483,14 @@ impl Daemon {
 
     /// Newest first.
     pub async fn revisions(&self, project: &str) -> Result<Vec<RevisionView>, EnvironmentError> {
-        let mut revisions = self
+        let revisions = self
             .control()
             .query::<ProjectRevisionRecord>(
-                Query::all(Collection::ProjectRevision).eq("project_id", ids::project(project)),
+                Query::all(Collection::ProjectRevision)
+                    .eq("project_id", ids::project(project))
+                    .descending("created_at"),
             )
             .await?;
-        revisions.sort_by(|left, right| right.value.created_at.cmp(&left.value.created_at));
         Ok(revisions
             .into_iter()
             .map(|revision| revision_view(revision.id, revision.value))
@@ -518,11 +519,13 @@ impl Daemon {
         if let Some(project) = project {
             query = query.eq("project_id", ids::project(&project));
         }
-        let mut deployments = self.control().query::<DeploymentRecord>(query).await?;
-        deployments.sort_by(|left, right| right.value.created_at.cmp(&left.value.created_at));
+        // Ordered and limited by FeltDB, within the environment's or the
+        // project's index when one is named.
+        query = query.descending("created_at");
         if let Some(limit) = limit {
-            deployments.truncate(limit);
+            query = query.limit(limit);
         }
+        let deployments = self.control().query::<DeploymentRecord>(query).await?;
         Ok(deployments
             .into_iter()
             .map(|deployment| DeploymentView {
@@ -585,6 +588,11 @@ impl Daemon {
             Ok(record) => record.value,
             Err(failure) => {
                 let inner = self.inner.lock().await;
+                // This controller's own evidence, not confirmed by durable
+                // state: the response says so.
+                if let Some(loaded) = inner.loaded {
+                    crate::auth::set_freshness("stale", loaded.as_of);
+                }
                 inner
                     .terminal
                     .get(execution_id)
@@ -623,16 +631,16 @@ impl Daemon {
         limit: usize,
     ) -> Result<Vec<ExecutionRecord>, EnvironmentError> {
         let (membership, _) = self.membership(environment, project).await?;
-        let mut executions = self
+        let executions = self
             .control()
             .query::<ExecutionRecord>(
                 Query::all(Collection::Execution)
+                    .eq("project_id", membership.value.project_id.clone())
                     .eq("environment_id", membership.value.environment_id.clone())
-                    .eq("project_id", membership.value.project_id.clone()),
+                    .descending("started_at")
+                    .limit(limit),
             )
             .await?;
-        executions.sort_by(|left, right| right.value.started_at.cmp(&left.value.started_at));
-        executions.truncate(limit);
         Ok(executions.into_iter().map(|record| record.value).collect())
     }
 
@@ -644,16 +652,16 @@ impl Daemon {
         limit: usize,
     ) -> Result<Vec<ReceiptRecord>, EnvironmentError> {
         let (membership, _) = self.membership(environment, project).await?;
-        let mut receipts = self
+        let receipts = self
             .control()
             .query::<ReceiptRecord>(
                 Query::all(Collection::Receipt)
+                    .eq("project_id", membership.value.project_id.clone())
                     .eq("environment_id", membership.value.environment_id.clone())
-                    .eq("project_id", membership.value.project_id.clone()),
+                    .descending("created_at")
+                    .limit(limit),
             )
             .await?;
-        receipts.sort_by(|left, right| right.value.created_at.cmp(&left.value.created_at));
-        receipts.truncate(limit);
         Ok(receipts.into_iter().map(|record| record.value).collect())
     }
 

@@ -26,6 +26,18 @@ use crate::store::Collection;
 
 pub const STATE_VERSION: &str = "compute.state@1";
 
+/// The generation of the control model within `compute.state@1`. Each
+/// generation only adds (collections, optional fields, indexes), so a
+/// controller of an earlier generation keeps working on a later model.
+///
+/// - 1: the hardening model (optional `OperatorCredential`, `Audit`,
+///   `Execution.failure`).
+/// - 2: FeltDB 0.11.8 consumption: an indexed `record_id` identity on
+///   every collection, and indexes for the filters Compute's views use
+///   (`Execution.project_id`, `Receipt.project_id`, `Event.environment`,
+///   `Event.project`, `Event.deployment_id`).
+pub const MODEL_GENERATION: u32 = 2;
+
 /// A typed document of one collection.
 pub trait Document: Serialize + DeserializeOwned + Clone + Send + Sync {
     const COLLECTION: Collection;
@@ -212,6 +224,7 @@ pub struct ProjectRevisionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     pub workloads: Vec<RevisionWorkload>,
+    #[serde(with = "crate::time")]
     pub created_at: DateTime<Utc>,
 }
 document!(ProjectRevisionRecord, ProjectRevision);
@@ -409,6 +422,7 @@ pub struct DeploymentRecord {
     pub status_since: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
+    #[serde(with = "crate::time")]
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -451,6 +465,7 @@ pub struct ExecutionRecord {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    #[serde(with = "crate::time")]
     pub started_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
@@ -492,6 +507,7 @@ pub struct ReceiptRecord {
     /// The artifact holding the encoded receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_digest: Option<String>,
+    #[serde(with = "crate::time")]
     pub created_at: DateTime<Utc>,
 }
 document!(ReceiptRecord, Receipt);
@@ -841,6 +857,7 @@ pub struct AuditRecord {
     /// execution, credential.
     #[serde(default)]
     pub detail: serde_json::Map<String, serde_json::Value>,
+    #[serde(with = "crate::time")]
     pub at: DateTime<Utc>,
 }
 document!(AuditRecord, Audit);
@@ -917,6 +934,7 @@ pub mod events {
     pub const ENDPOINT_UNAVAILABLE: &str = "endpoint.unavailable";
     pub const FELTDB_UNAVAILABLE: &str = "feltdb.unavailable";
     pub const FELTDB_RECOVERED: &str = "feltdb.recovered";
+    pub const CONTROL_MODEL_UPGRADED: &str = "control_model.upgraded";
     // Operators.
     pub const AUTHENTICATION_FAILED: &str = "auth.authentication_failed";
     pub const AUTHORIZATION_DENIED: &str = "auth.authorization_denied";
@@ -1020,5 +1038,50 @@ pub mod ids {
 
     pub fn artifact_chunk(digest: &str, index: u64) -> String {
         format!("{}_{index:06}", artifact(digest))
+    }
+}
+
+/// Decode a stored document as its collection's typed record: whether
+/// this build can read it. Used to prove existing state readable after a
+/// model change.
+pub fn decode_document(
+    collection: crate::Collection,
+    value: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), crate::StateError> {
+    fn decode<T: Document>(
+        value: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), crate::StateError> {
+        serde_json::from_value::<T>(serde_json::Value::Object(value.clone()))
+            .map(|_| ())
+            .map_err(|error| {
+                crate::StateError::Invalid(format!(
+                    "a {} record does not decode: {error}",
+                    T::COLLECTION.name()
+                ))
+            })
+    }
+    use crate::Collection as C;
+    match collection {
+        C::Project => decode::<ProjectRecord>(value),
+        C::ProjectRevision => decode::<ProjectRevisionRecord>(value),
+        C::Environment => decode::<EnvironmentRecord>(value),
+        C::EnvironmentProject => decode::<EnvironmentProjectRecord>(value),
+        C::Deployment => decode::<DeploymentRecord>(value),
+        C::Workload => decode::<WorkloadRecord>(value),
+        C::Execution => decode::<ExecutionRecord>(value),
+        C::Service => decode::<ServiceRecord>(value),
+        C::Provider => decode::<ProviderRecord>(value),
+        C::Receipt => decode::<ReceiptRecord>(value),
+        C::Event => decode::<EventRecord>(value),
+        C::WorkloadStatus => decode::<WorkloadStatusRecord>(value),
+        C::Artifact => decode::<ArtifactRecord>(value),
+        C::ArtifactChunk => decode::<ArtifactChunkRecord>(value),
+        C::WorkloadInstance => decode::<WorkloadInstanceRecord>(value),
+        C::TrafficAssignment => decode::<TrafficAssignmentRecord>(value),
+        C::Domain => decode::<DomainRecord>(value),
+        C::DnsRecord => decode::<DnsRecordRecord>(value),
+        C::Certificate => decode::<CertificateRecord>(value),
+        C::OperatorCredential => decode::<OperatorCredentialRecord>(value),
+        C::Audit => decode::<AuditRecord>(value),
     }
 }

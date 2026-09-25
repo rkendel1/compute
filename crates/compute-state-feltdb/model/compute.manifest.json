@@ -24,6 +24,11 @@
           "name": "created_at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -64,6 +69,11 @@
           "name": "created_at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -103,6 +113,11 @@
           "name": "created_at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -162,6 +177,11 @@
           "name": "updated_at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -310,6 +330,11 @@
           "name": "updated_at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -392,6 +417,11 @@
           "name": "deployment_id",
           "type": "text",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -501,6 +531,11 @@
           "name": "failure",
           "type": "text",
           "required": false
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -556,6 +591,11 @@
           "name": "created_at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -611,6 +651,11 @@
           "name": "updated_at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -646,6 +691,11 @@
           "name": "observed_at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -700,6 +750,11 @@
         {
           "name": "data",
           "type": "json",
+          "required": false
+        },
+        {
+          "name": "record_id",
+          "type": "text",
           "required": false
         }
       ]
@@ -766,6 +821,11 @@
           "name": "observed_at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -796,6 +856,11 @@
           "name": "created_at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -816,6 +881,11 @@
           "name": "data",
           "type": "text",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -909,6 +979,11 @@
           "name": "updated_at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -989,6 +1064,11 @@
           "name": "switched_at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -1064,6 +1144,11 @@
           "name": "created_at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -1114,6 +1199,11 @@
           "name": "state",
           "type": "json",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -1174,6 +1264,11 @@
           "name": "last_reconciled_at",
           "type": "datetime",
           "required": false
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     },
@@ -1227,6 +1322,11 @@
         },
         {
           "name": "created_by",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "record_id",
           "type": "text",
           "required": false
         }
@@ -1289,6 +1389,11 @@
           "name": "at",
           "type": "datetime",
           "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
         }
       ]
     }
@@ -1299,6 +1404,14 @@
       "collection": "Project",
       "fields": [
         "name"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Project.record_id",
+      "collection": "Project",
+      "fields": [
+        "record_id"
       ],
       "unique": false
     },
@@ -1319,10 +1432,26 @@
       "unique": false
     },
     {
+      "name": "ProjectRevision.record_id",
+      "collection": "ProjectRevision",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
       "name": "Environment.name",
       "collection": "Environment",
       "fields": [
         "name"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Environment.record_id",
+      "collection": "Environment",
+      "fields": [
+        "record_id"
       ],
       "unique": false
     },
@@ -1339,6 +1468,14 @@
       "collection": "EnvironmentProject",
       "fields": [
         "project_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "EnvironmentProject.record_id",
+      "collection": "EnvironmentProject",
+      "fields": [
+        "record_id"
       ],
       "unique": false
     },
@@ -1367,6 +1504,14 @@
       "unique": false
     },
     {
+      "name": "Deployment.record_id",
+      "collection": "Deployment",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
       "name": "Workload.environment_id",
       "collection": "Workload",
       "fields": [
@@ -1377,6 +1522,22 @@
     {
       "name": "Workload.project_id",
       "collection": "Workload",
+      "fields": [
+        "project_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Workload.record_id",
+      "collection": "Workload",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Execution.project_id",
+      "collection": "Execution",
       "fields": [
         "project_id"
       ],
@@ -1407,6 +1568,14 @@
       "unique": false
     },
     {
+      "name": "Execution.record_id",
+      "collection": "Execution",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
       "name": "Receipt.execution_id",
       "collection": "Receipt",
       "fields": [
@@ -1423,10 +1592,42 @@
       "unique": false
     },
     {
+      "name": "Receipt.project_id",
+      "collection": "Receipt",
+      "fields": [
+        "project_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Receipt.record_id",
+      "collection": "Receipt",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
       "name": "Service.name",
       "collection": "Service",
       "fields": [
         "name"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Service.record_id",
+      "collection": "Service",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Provider.record_id",
+      "collection": "Provider",
+      "fields": [
+        "record_id"
       ],
       "unique": false
     },
@@ -1447,6 +1648,38 @@
       "unique": false
     },
     {
+      "name": "Event.environment",
+      "collection": "Event",
+      "fields": [
+        "environment"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Event.project",
+      "collection": "Event",
+      "fields": [
+        "project"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Event.deployment_id",
+      "collection": "Event",
+      "fields": [
+        "deployment_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Event.record_id",
+      "collection": "Event",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
       "name": "WorkloadStatus.workload_id",
       "collection": "WorkloadStatus",
       "fields": [
@@ -1463,6 +1696,14 @@
       "unique": false
     },
     {
+      "name": "WorkloadStatus.record_id",
+      "collection": "WorkloadStatus",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
       "name": "Artifact.digest",
       "collection": "Artifact",
       "fields": [
@@ -1471,10 +1712,26 @@
       "unique": false
     },
     {
+      "name": "Artifact.record_id",
+      "collection": "Artifact",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
       "name": "ArtifactChunk.digest",
       "collection": "ArtifactChunk",
       "fields": [
         "digest"
+      ],
+      "unique": false
+    },
+    {
+      "name": "ArtifactChunk.record_id",
+      "collection": "ArtifactChunk",
+      "fields": [
+        "record_id"
       ],
       "unique": false
     },
@@ -1495,10 +1752,26 @@
       "unique": false
     },
     {
+      "name": "WorkloadInstance.record_id",
+      "collection": "WorkloadInstance",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
       "name": "TrafficAssignment.endpoint",
       "collection": "TrafficAssignment",
       "fields": [
         "endpoint"
+      ],
+      "unique": false
+    },
+    {
+      "name": "TrafficAssignment.record_id",
+      "collection": "TrafficAssignment",
+      "fields": [
+        "record_id"
       ],
       "unique": false
     },
@@ -1519,10 +1792,26 @@
       "unique": false
     },
     {
+      "name": "Domain.record_id",
+      "collection": "Domain",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
       "name": "DnsRecord.domain",
       "collection": "DnsRecord",
       "fields": [
         "domain"
+      ],
+      "unique": false
+    },
+    {
+      "name": "DnsRecord.record_id",
+      "collection": "DnsRecord",
+      "fields": [
+        "record_id"
       ],
       "unique": false
     },
@@ -1535,6 +1824,14 @@
       "unique": false
     },
     {
+      "name": "Certificate.record_id",
+      "collection": "Certificate",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
       "name": "OperatorCredential.operator_id",
       "collection": "OperatorCredential",
       "fields": [
@@ -1543,10 +1840,26 @@
       "unique": false
     },
     {
+      "name": "OperatorCredential.record_id",
+      "collection": "OperatorCredential",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
       "name": "Audit.operator_id",
       "collection": "Audit",
       "fields": [
         "operator_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Audit.record_id",
+      "collection": "Audit",
+      "fields": [
+        "record_id"
       ],
       "unique": false
     }

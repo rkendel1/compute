@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use compute_state::{
-    BackendInfo, Collection, Query, Record, STATE_VERSION, StateError, StateStore, Tables, Write,
-    apply_in_memory,
+    BackendInfo, Collection, Query, Record, Revision, STATE_VERSION, StateError, StateStore,
+    Tables, Transitions, Write, apply_in_memory,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -37,6 +37,7 @@ struct StoredDocument {
 pub struct FileState {
     path: PathBuf,
     inner: Mutex<(Tables, u64)>,
+    transitions: Transitions,
 }
 
 fn io(path: &Path, error: std::io::Error) -> StateError {
@@ -84,6 +85,7 @@ impl FileState {
         Ok(Self {
             path,
             inner: Mutex::new((tables, next_version)),
+            transitions: Transitions::default(),
         })
     }
 
@@ -179,14 +181,35 @@ impl StateStore for FileState {
     }
 
     async fn commit(&self, writes: Vec<Write>) -> Result<(), StateError> {
+        self.commit_tracked(writes).await.map(|_| ())
+    }
+
+    async fn commit_tracked(&self, writes: Vec<Write>) -> Result<Option<(u64, u64)>, StateError> {
         let mut inner = self.inner.lock().await;
         let mut tables = inner.0.clone();
-        let mut next_version = inner.1;
+        let before = inner.1;
+        let mut next_version = before;
+        let written = writes.clone();
         apply_in_memory(&mut tables, writes, &mut next_version)?;
         // Durable first: memory changes only once the file does.
         self.write(&tables, next_version)?;
         *inner = (tables, next_version);
-        Ok(())
+        self.transitions
+            .record(Some((before, next_version)), &written);
+        Ok(Some((before, next_version)))
+    }
+
+    fn take_transitions(&self) -> Option<Vec<compute_state::Transition>> {
+        Some(self.transitions.take())
+    }
+
+    /// Every committed write advances the version counter, which the file
+    /// keeps across restarts.
+    async fn revision(&self) -> Result<Option<Revision>, StateError> {
+        Ok(Some(Revision {
+            value: self.inner.lock().await.1,
+            scope: format!("file:{}", self.path.display()),
+        }))
     }
 }
 

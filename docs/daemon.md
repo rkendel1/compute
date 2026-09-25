@@ -71,7 +71,7 @@ The API fails closed. How it is secured depends on how it is started:
 | Artifacts: workload bundles and receipt documents, by digest | The control state's artifact store (a directory for file state; chunks in FeltDB) | Yes |
 | Operator credentials (SHA-256 verifiers, never the secrets) and the audit trail | Control state, with a 0600 snapshot of verifiers in `<state-dir>/credentials.json` and the audit trail mirrored to `<state-dir>/audit.log` | Yes |
 | Running processes, endpoint listeners and their open connections, and the outcomes of units that ended | The supervisor, with its unit manifest in `<state-dir>/supervisor/` (no secrets) | Node-local, outlives the controller |
-| Live health and output, restart backoff, the read cache | Controller memory | No |
+| Live health and output, restart backoff, snapshots of desired and observed state, the read cache | Controller memory: derived from control state, labelled with their freshness, never an authority ([docs/feltdb.md](feltdb.md#controller-working-state)) | No |
 | Artifact cache, service logs, the node lock, binaries kept for rollback, the last upgrade record | `--state-dir` | Node-local |
 
 The daemon's memory can disappear, and so can its node. The desired state
@@ -80,7 +80,9 @@ restores every environment, bundles included.
 
 ## Reconciliation
 
-Each cycle, the reconciler reads desired state from control state, advances
+Each cycle, the reconciler refreshes its snapshot of desired state (one
+revision read when nothing changed; a coherent, bounded read of desired
+state when something did — see [docs/feltdb.md](feltdb.md#snapshots)), advances
 every release in flight ([docs/releases.md](releases.md)), and then acts on
 it:
 
@@ -98,8 +100,10 @@ Endpoints are pointed at the instances their traffic assignments name.
 Ingress routes, DNS records, and certificates are reconciled
 ([docs/networking.md](networking.md)). Then the reconciler writes what it
 observed back to control state: workload status and events. Cycles run every `--reconcile-interval-ms`
-and after every change made through the API. A change made directly in
-Managed FeltDB, for example by another tool, takes effect within one cycle.
+and after every change made through the API. A change made through the API
+is read back by identity (targeted refresh); a change made directly in
+Managed FeltDB, for example by another tool, moves the revision and takes
+effect within one cycle (periodic reconciliation).
 
 A cycle that can't read control state changes nothing. See
 [Failing closed](control-plane.md#failing-closed).
@@ -141,12 +145,29 @@ last knew:
   from the short read cache say `cached`;
 - every change returns `503 state_unavailable`; nothing is written
   locally instead;
-- `/info` reports `control_plane.mode: degraded_control_plane`, and
+- `/info` reports `control_plane.mode: degraded_control_plane` and
+  `control_plane.authority.state` (`degraded_control_plane`, or
+  `state_unavailable` when this controller never read durable state);
   `feltdb.unavailable` is recorded once it is back, followed by
   `feltdb.recovered` and a full reconciliation.
 
+When it answers again, recovery runs before any change is accepted:
+the snapshots are rebuilt from FeltDB (nothing derived before the outage is
+reused), the event sequence continues from durable state, credentials
+reload, evidence and audit held during the outage are written, and
+`feltdb.recovered` is recorded ([docs/feltdb.md](feltdb.md#availability)).
+
 A controller that starts while control state is unreachable starts in this
-mode (unless `--require-state-at-start`), and converges when it returns.
+mode (unless `--require-state-at-start`), and converges when it returns. A
+controller refuses to start on a Compute model older than its own: run
+`compute control-plane upgrade` first.
+
+`compute doctor` shows the boundary: the certified FeltDB version and the
+server's, the model generation, the authority state, the last durable read
+and mutation, the last recovery, the cache generation and freshness,
+pending work, snapshot builds and reuse, and how FeltDB executed Compute's
+queries (indexed, scanned, rows). It shows no credentials or record
+contents.
 
 ## The Compute API (`compute.api@1`)
 

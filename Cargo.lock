@@ -501,6 +501,7 @@ dependencies = [
  "compute-provider",
  "compute-runtime",
  "compute-state",
+ "compute-state-feltdb",
  "compute-state-file",
  "compute-state-memory",
  "libc",

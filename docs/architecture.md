@@ -1,5 +1,16 @@
 # Compute architecture
 
+> **Compute does not implement a second durable-state system. FeltDB is the
+> authoritative durable-state substrate. Compute may keep bounded, ephemeral
+> working state and caches, but they are never authority.**
+>
+> **Compute reads targeted state through bounded, indexed FeltDB queries and
+> coherent multi-record views through FeltDB snapshots. Whole-collection
+> reads filtered in Compute are prohibited on production controller paths.**
+>
+> The contract, and the working state the controller may keep, is
+> [docs/feltdb.md](feltdb.md).
+
 Compute runs applications on a node. It has three parts, and each can fail
 without taking the others down with it:
 
@@ -9,8 +20,10 @@ operators, CLI, UI, AppPort
         ▼
 controller  (`compute start`)
   ├── Compute API, reconciliation, releases, ingress (:80/:443)
-  ├── read cache over control state (an optimization, never an authority)
+  ├── working state: snapshots of control state and a read cache
+  │   (derived, labelled with their freshness, never an authority)
   └── talks to ─┬─▶ control state: FeltDB (or a file) ─ durable desired state + evidence
+                │     bounded indexed queries, coherent snapshots, fenced transactions
                 └─▶ data plane: the supervisor (`compute supervisor`)
                         ├── workload processes (process groups, host isolation)
                         ├── endpoint listeners (host port ─▶ instance)
@@ -52,6 +65,9 @@ that breaks one fails them.
 | 13 | Compute remains runtime-neutral. | The runtime conformance suite (`compute-runtime-conformance`) runs the same contract against every runtime. |
 | 14 | Compute does not require AuthBoundry to execute an application. | Every test above runs Compute alone; operator credentials are Compute's own. |
 | 15 | Compute does not become an application-specific product framework. | Review: nothing in Compute names an application. |
+| 16 | Controller paths read FeltDB through bounded, indexed queries and snapshots; nothing scans a collection to find a few records. | `feltdb_consumer.rs`: `the_controller_keeps_authority_in_feltdb_through_an_outage` (a quiet cycle runs no queries; scans are limited to the listed shapes); `consumer.rs`: `targeted_reads_are_indexed_and_bounded` |
+| 17 | A snapshot is coherent: it never observes part of a transaction, and it is reused only while the revision it represents is current. | `compute_state::conformance` (memory, file, and a real FeltDB): concurrent paired writes, reuse, staleness, identity |
+| 18 | A controller never runs on a model it would misuse, and the model is never downgraded. | `consumer.rs`: `the_upgrade_backs_up_migrates_and_verifies`, `a_newer_model_is_never_downgraded` |
 
 ## Failure kinds
 
@@ -85,6 +101,7 @@ execution they are about. They never carry secrets.
 | `reconcile.started`, `reconcile.finished` | Full reconciliation cycles that changed something, with duration, resources examined, changed, and errors |
 | `upgrade.started`, `upgrade.ready`, `upgrade.completed`, `upgrade.failed`, `upgrade.rolled_back` | Controller upgrades |
 | `feltdb.unavailable`, `feltdb.recovered` | Control-state outages |
+| `control_model.upgraded` | A controller gave records an older controller wrote their indexed identity |
 | `auth.authentication_failed`, `auth.authorization_denied` | Refused requests (at most 60 a minute are recorded) |
 | `credential.created`, `credential.revoked`, `credential.rotated`, `credential.bootstrapped` | Operator credentials |
 | `endpoint.unavailable` | An endpoint could not listen |

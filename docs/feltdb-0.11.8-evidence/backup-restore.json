@@ -1,0 +1,80 @@
+{
+  "audit": 1,
+  "backup": {
+    "backup_id": "ccdb3ae206dc0053a29828c03c0973b801bb61380cf7ba0d862c954a48ec916e",
+    "bytes_written": 184098,
+    "created_ms": 1790363223166,
+    "duration_ms": 0,
+    "files": 6,
+    "format": 1,
+    "operation": "verify",
+    "path": "/tmp/compute-state-feltdb-21784-1790363222896622677/backup",
+    "source": {
+      "data": "/tmp/compute-state-feltdb-21784-1790363222896622677/state.log",
+      "durable_format": 2,
+      "server_version": "0.2.0",
+      "state_sha256": "70b1b1e4733de310888862b3aa592dd842675fef1b03dd68287e5d03ac4d28a4"
+    },
+    "status": "ok",
+    "verification": "verified"
+  },
+  "events": 20,
+  "executions": 30,
+  "offline_backup": {
+    "backup_id": "ccdb3ae206dc0053a29828c03c0973b801bb61380cf7ba0d862c954a48ec916e",
+    "bytes_written": 184098,
+    "created_ms": 1790363223166,
+    "duration_ms": 6,
+    "files": 6,
+    "format": 1,
+    "operation": "create",
+    "path": "/tmp/compute-state-feltdb-21784-1790363222896622677/backup",
+    "source": {
+      "data": "/tmp/compute-state-feltdb-21784-1790363222896622677/state.log",
+      "durable_format": 2,
+      "server_version": "0.2.0",
+      "state_sha256": "70b1b1e4733de310888862b3aa592dd842675fef1b03dd68287e5d03ac4d28a4"
+    },
+    "status": "ok",
+    "verification": "verified"
+  },
+  "online_backup": {
+    "created": true,
+    "verification": {
+      "backup_id": "b0b8f3ece266e926087704ebe4e0302a103f5c3fcccf0f198c259740f08ce8e1",
+      "bytes_written": 157909,
+      "created_ms": 1790363223146,
+      "duration_ms": 0,
+      "error": "capability error: snapshot contains an invalid state row",
+      "files": 6,
+      "format": 1,
+      "operation": "verify",
+      "path": "/tmp/compute-state-feltdb-21784-1790363222896622677/online-backup",
+      "source": {
+        "data": "/tmp/compute-state-feltdb-21784-1790363222896622677/state.log",
+        "durable_format": 2,
+        "server_version": "0.2.0",
+        "state_sha256": "d3a7f91f16b463920c71c0cf71de23f0c69d89ce299ba0a38e832dbb68fafcdd"
+      },
+      "status": "failed",
+      "verification": "failed"
+    }
+  },
+  "records_compared": 51,
+  "renamed_for_serving": [
+    "applications.json -> state.applications.json",
+    "platform.json -> state.platform.json"
+  ],
+  "restored_files": [
+    "state.log",
+    "api-keys.json",
+    "state.content",
+    "keys.json",
+    "state.platform.json",
+    "state.log.lock",
+    "state.cluster.json",
+    "state.applications.json",
+    "audit.log"
+  ],
+  "revision_before_backup": 51
+}

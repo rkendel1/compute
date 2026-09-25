@@ -1,0 +1,227 @@
+{
+  "result": "upgraded",
+  "before": {
+    "application_id": "app_J1mE7cXTN9DYKumsJy",
+    "environment": "production",
+    "active_revision": "apprev://tenant_9tVjgG5QBij2b5tT2k/app_J1mE7cXTN9DYKumsJy/sha256:ae9d1e16e3090ca679bf96fdd636fd4e65f6929e21bbb2c7099ab7d8b4f13300",
+    "active_schema_version": 1,
+    "required": "compute.state@1",
+    "required_generation": 2,
+    "comparison": {
+      "relation": "older",
+      "additions": [
+        "field Artifact.record_id:text?",
+        "field ArtifactChunk.record_id:text?",
+        "field Audit.record_id:text?",
+        "field Certificate.record_id:text?",
+        "field Deployment.record_id:text?",
+        "field DnsRecord.record_id:text?",
+        "field Domain.record_id:text?",
+        "field Environment.record_id:text?",
+        "field EnvironmentProject.record_id:text?",
+        "field Event.record_id:text?",
+        "field Execution.record_id:text?",
+        "field OperatorCredential.record_id:text?",
+        "field Project.record_id:text?",
+        "field ProjectRevision.record_id:text?",
+        "field Provider.record_id:text?",
+        "field Receipt.record_id:text?",
+        "field Service.record_id:text?",
+        "field TrafficAssignment.record_id:text?",
+        "field Workload.record_id:text?",
+        "field WorkloadInstance.record_id:text?",
+        "field WorkloadStatus.record_id:text?",
+        "index Artifact.record_id",
+        "index ArtifactChunk.record_id",
+        "index Audit.record_id",
+        "index Certificate.record_id",
+        "index Deployment.record_id",
+        "index DnsRecord.record_id",
+        "index Domain.record_id",
+        "index Environment.record_id",
+        "index EnvironmentProject.record_id",
+        "index Event.deployment_id",
+        "index Event.environment",
+        "index Event.project",
+        "index Event.record_id",
+        "index Execution.project_id",
+        "index Execution.record_id",
+        "index OperatorCredential.record_id",
+        "index Project.record_id",
+        "index ProjectRevision.record_id",
+        "index Provider.record_id",
+        "index Receipt.project_id",
+        "index Receipt.record_id",
+        "index Service.record_id",
+        "index TrafficAssignment.record_id",
+        "index Workload.record_id",
+        "index WorkloadInstance.record_id",
+        "index WorkloadStatus.record_id"
+      ],
+      "unknown": []
+    }
+  },
+  "after": {
+    "application_id": "app_J1mE7cXTN9DYKumsJy",
+    "environment": "production",
+    "active_revision": "apprev://tenant_9tVjgG5QBij2b5tT2k/app_J1mE7cXTN9DYKumsJy/sha256:a47fc0e528d4354d2bc66a679b525a80c954d96c93d9d883c0a51ac606ecf1a5",
+    "active_schema_version": 2,
+    "required": "compute.state@1",
+    "required_generation": 2,
+    "comparison": {
+      "relation": "current",
+      "additions": [],
+      "unknown": []
+    }
+  },
+  "steps": [
+    {
+      "name": "inspect_current_model",
+      "status": "PASS",
+      "detail": {
+        "active_revision": "apprev://tenant_9tVjgG5QBij2b5tT2k/app_J1mE7cXTN9DYKumsJy/sha256:ae9d1e16e3090ca679bf96fdd636fd4e65f6929e21bbb2c7099ab7d8b4f13300",
+        "active_schema_version": 1,
+        "relation": "older"
+      }
+    },
+    {
+      "name": "inspect_required_model",
+      "status": "PASS",
+      "detail": {
+        "additions": [
+          "field Artifact.record_id:text?",
+          "field ArtifactChunk.record_id:text?",
+          "field Audit.record_id:text?",
+          "field Certificate.record_id:text?",
+          "field Deployment.record_id:text?",
+          "field DnsRecord.record_id:text?",
+          "field Domain.record_id:text?",
+          "field Environment.record_id:text?",
+          "field EnvironmentProject.record_id:text?",
+          "field Event.record_id:text?",
+          "field Execution.record_id:text?",
+          "field OperatorCredential.record_id:text?",
+          "field Project.record_id:text?",
+          "field ProjectRevision.record_id:text?",
+          "field Provider.record_id:text?",
+          "field Receipt.record_id:text?",
+          "field Service.record_id:text?",
+          "field TrafficAssignment.record_id:text?",
+          "field Workload.record_id:text?",
+          "field WorkloadInstance.record_id:text?",
+          "field WorkloadStatus.record_id:text?",
+          "index Artifact.record_id",
+          "index ArtifactChunk.record_id",
+          "index Audit.record_id",
+          "index Certificate.record_id",
+          "index Deployment.record_id",
+          "index DnsRecord.record_id",
+          "index Domain.record_id",
+          "index Environment.record_id",
+          "index EnvironmentProject.record_id",
+          "index Event.deployment_id",
+          "index Event.environment",
+          "index Event.project",
+          "index Event.record_id",
+          "index Execution.project_id",
+          "index Execution.record_id",
+          "index OperatorCredential.record_id",
+          "index Project.record_id",
+          "index ProjectRevision.record_id",
+          "index Provider.record_id",
+          "index Receipt.project_id",
+          "index Receipt.record_id",
+          "index Service.record_id",
+          "index TrafficAssignment.record_id",
+          "index Workload.record_id",
+          "index WorkloadInstance.record_id",
+          "index WorkloadStatus.record_id"
+        ],
+        "generation": 2,
+        "model": "compute.state@1"
+      }
+    },
+    {
+      "name": "refuse_unsafe_downgrade",
+      "status": "PASS",
+      "detail": {
+        "relation": "older"
+      }
+    },
+    {
+      "name": "backup_create",
+      "status": "PASS",
+      "detail": {
+        "age_seconds": 0,
+        "archive": "/tmp/compute-state-feltdb-21784-1790363224878335021/backup",
+        "taken_by": "operator"
+      }
+    },
+    {
+      "name": "backup_verify",
+      "status": "PASS",
+      "detail": {
+        "backup_id": "ea16919c09ce6ac0736830baf5d0844303ecf69c2b84b5f7f6329878917583e0",
+        "bytes": 103716,
+        "files": 6,
+        "format": 1,
+        "verifier": "/tmp/claude-0/-home-user-compute/03ddab09-52ca-58e2-9ccc-e840df3e214e/scratchpad/bin/feltdb-server-0.11.8"
+      }
+    },
+    {
+      "name": "apply_model",
+      "status": "PASS",
+      "detail": {
+        "changed": true,
+        "revision_id": "apprev://tenant_9tVjgG5QBij2b5tT2k/app_J1mE7cXTN9DYKumsJy/sha256:a47fc0e528d4354d2bc66a679b525a80c954d96c93d9d883c0a51ac606ecf1a5"
+      }
+    },
+    {
+      "name": "verify_model",
+      "status": "PASS",
+      "detail": {
+        "active_revision": "apprev://tenant_9tVjgG5QBij2b5tT2k/app_J1mE7cXTN9DYKumsJy/sha256:a47fc0e528d4354d2bc66a679b525a80c954d96c93d9d883c0a51ac606ecf1a5",
+        "records_given_identity": {
+          "Deployment": 1,
+          "Environment": 1
+        }
+      }
+    },
+    {
+      "name": "smoke_test",
+      "status": "PASS",
+      "detail": {
+        "collections_decoded": {
+          "Artifact": 0,
+          "ArtifactChunk": 0,
+          "Audit": 0,
+          "Certificate": 0,
+          "Deployment": 1,
+          "DnsRecord": 0,
+          "Domain": 0,
+          "Environment": 1,
+          "EnvironmentProject": 0,
+          "Event": 0,
+          "Execution": 0,
+          "OperatorCredential": 0,
+          "Project": 0,
+          "ProjectRevision": 0,
+          "Provider": 0,
+          "Receipt": 0,
+          "Service": 0,
+          "TrafficAssignment": 0,
+          "Workload": 0,
+          "WorkloadInstance": 0,
+          "WorkloadStatus": 0
+        },
+        "revision": 4,
+        "transaction": "committed and undone"
+      }
+    },
+    {
+      "name": "report",
+      "status": "PASS",
+      "detail": null
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+   Compiling compute-state v0.1.0 (/home/user/compute/crates/compute-state)
+   Compiling compute-state-memory v0.1.0 (/home/user/compute/crates/compute-state-memory)
+   Compiling compute-state-feltdb v0.1.0 (/home/user/compute/crates/compute-state-feltdb)
+    Finished `release` profile [optimized] target(s) in 20.12s
+     Running tests/consumer.rs (target/release/deps/consumer-0afe2b31356ff5e5)
+
+running 1 test
+{"executions":0,"health_p50_ms":0.45,"indexed_lookup_p50_ms":1.42,"indexed_lookup_server_reported_p50_ms":0.06,"revision":0,"state_version_p50_ms":1.09}
+{"executions":500,"health_p50_ms":0.5,"indexed_lookup_p50_ms":10.36,"indexed_lookup_server_reported_p50_ms":3.63,"revision":500,"state_version_p50_ms":5.51}
+{"executions":1000,"health_p50_ms":0.57,"indexed_lookup_p50_ms":19.86,"indexed_lookup_server_reported_p50_ms":7.41,"revision":1000,"state_version_p50_ms":10.14}
+{"executions":2000,"health_p50_ms":0.59,"indexed_lookup_p50_ms":41.55,"indexed_lookup_server_reported_p50_ms":16.54,"revision":2000,"state_version_p50_ms":21.02}
+{"executions":4000,"health_p50_ms":0.71,"indexed_lookup_p50_ms":94.73,"indexed_lookup_server_reported_p50_ms":38.54,"revision":4000,"state_version_p50_ms":47.47}
+test feltdb_request_cost_by_state_size ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 38.74s
+

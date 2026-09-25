@@ -1,0 +1,1116 @@
+{
+  "format": "compute.feltdb-consumer-certification@1",
+  "compute_commit": "99afae5",
+  "feltdb": {
+    "certified": "@feltdb/core 0.11.8",
+    "resolved": {
+      "certified": "0.11.8",
+      "resolved": {
+        "packages/compute-state-model/package-lock.json:node_modules/@feltdb/core": "0.11.8",
+        "packages/compute-state-model/node_modules/@feltdb/core": "0.11.8"
+      },
+      "status": "PASS",
+      "failures": []
+    },
+    "server": "feltdb-server built from the source shipped in @feltdb/core 0.11.8 (reports version 0.2.0)",
+    "previous_server": "feltdb-server built from @feltdb/core 0.11.7 (also reports 0.2.0)"
+  },
+  "model": {
+    "format": "compute.state@1",
+    "generation": 2
+  },
+  "environment": {
+    "os": "linux 6.18.44-fc-v37",
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "cpus": 4,
+    "memory": "16481980 kB",
+    "feltdb_transport": "feltdb-server on the same host, HTTP over loopback",
+    "benchmark_build": "release",
+    "test_build": "debug (CARGO_INCREMENTAL=0, CARGO_PROFILE_DEV_DEBUG=0)"
+  },
+  "statuses": [
+    "PASS",
+    "MEASURED",
+    "SUPPORTED",
+    "NOT_RUN",
+    "UNKNOWN",
+    "FAIL"
+  ],
+  "checks": [
+    {
+      "check": "resolved-version",
+      "status": "PASS",
+      "command": "node scripts/feltdb/verify-version.mjs --json",
+      "log": "logs/resolved-version.log"
+    },
+    {
+      "check": "model-compiles",
+      "status": "PASS",
+      "command": "bash -c cd packages/compute-state-model && npm run check && npm test",
+      "log": "logs/model-compiles.log"
+    },
+    {
+      "check": "workspace-tests",
+      "status": "PASS",
+      "command": "cargo test --workspace --no-fail-fast",
+      "log": "logs/workspace-tests.log"
+    },
+    {
+      "check": "adapter-real-server",
+      "status": "PASS",
+      "command": "cargo test -p compute-state-feltdb -- --include-ignored --test-threads 1 --skip state_written_by_the_previous_server --skip feltdb_request_cost",
+      "log": "logs/adapter-real-server.log"
+    },
+    {
+      "check": "previous-server-compatibility",
+      "status": "PASS",
+      "command": "cargo test -p compute-state-feltdb --test consumer state_written_by_the_previous_server -- --ignored",
+      "log": "logs/previous-server-compatibility.log"
+    },
+    {
+      "check": "controller-real-server",
+      "status": "PASS",
+      "command": "cargo test -p compute-environment --test feltdb_consumer -- --ignored --test-threads 1 --skip benchmark",
+      "log": "logs/controller-real-server.log"
+    },
+    {
+      "check": "end-to-end-real-server",
+      "status": "PASS",
+      "command": "cargo test -p compute-cli --test recovery managed_feltdb -- --ignored",
+      "log": "logs/end-to-end-real-server.log"
+    },
+    {
+      "check": "feltdb-request-cost",
+      "status": "PASS",
+      "command": "env COMPUTE_CERTIFICATION_OUT=/home/user/compute/docs/feltdb-0.11.8-evidence cargo test --release -p compute-state-feltdb --test consumer feltdb_request_cost -- --ignored --nocapture",
+      "log": "logs/feltdb-request-cost.log"
+    },
+    {
+      "check": "benchmark",
+      "status": "PASS",
+      "command": "env COMPUTE_CERTIFICATION_OUT=/home/user/compute/docs/feltdb-0.11.8-evidence cargo test --release -p compute-environment --test feltdb_consumer benchmark -- --ignored --nocapture",
+      "log": "logs/benchmark.log"
+    }
+  ],
+  "commands": {
+    "certification": "FELTDB_SERVER_BIN=\u2026 FELTDB_PREVIOUS_SERVER_BIN=\u2026 scripts/feltdb/certify.sh",
+    "tests": [
+      "node scripts/feltdb/verify-version.mjs --json",
+      "bash -c cd packages/compute-state-model && npm run check && npm test",
+      "cargo test --workspace --no-fail-fast",
+      "cargo test -p compute-state-feltdb -- --include-ignored --test-threads 1 --skip state_written_by_the_previous_server --skip feltdb_request_cost",
+      "cargo test -p compute-state-feltdb --test consumer state_written_by_the_previous_server -- --ignored",
+      "cargo test -p compute-environment --test feltdb_consumer -- --ignored --test-threads 1 --skip benchmark",
+      "cargo test -p compute-cli --test recovery managed_feltdb -- --ignored",
+      "env COMPUTE_CERTIFICATION_OUT=/home/user/compute/docs/feltdb-0.11.8-evidence cargo test --release -p compute-state-feltdb --test consumer feltdb_request_cost -- --ignored --nocapture"
+    ],
+    "benchmark": "env COMPUTE_CERTIFICATION_OUT=/home/user/compute/docs/feltdb-0.11.8-evidence cargo test --release -p compute-environment --test feltdb_consumer benchmark -- --ignored --nocapture",
+    "benchmark_before": "the same benchmark on Compute eac2be8 (docs/feltdb-0.11.8-evidence/before_bench.rs.txt), cargo test --release -p compute-environment --test before_bench -- --ignored"
+  },
+  "results": {
+    "version": [
+      {
+        "item": "Compute resolves exactly @feltdb/core 0.11.8 (lockfile and node_modules)",
+        "status": "PASS",
+        "evidence": "logs/resolved-version.log",
+        "check": "resolved-version"
+      },
+      {
+        "item": "compute.flow compiles with 0.11.8 to the checked-in manifest",
+        "status": "PASS",
+        "evidence": "logs/model-compiles.log",
+        "check": "model-compiles"
+      }
+    ],
+    "bounded_query": [
+      {
+        "item": "An identity lookup is one index probe (1 row examined); a project's newest executions examine only that project's rows; get_many never scans",
+        "status": "PASS",
+        "evidence": "consumer.rs::targeted_reads_are_indexed_and_bounded",
+        "check": "adapter-real-server"
+      },
+      {
+        "item": "A quiet reconcile cycle runs no queries (two revision reads); controller paths scan only the documented shapes",
+        "status": "PASS",
+        "evidence": "feltdb_consumer.rs::the_controller_keeps_authority_in_feltdb_through_an_outage",
+        "check": "controller-real-server"
+      }
+    ],
+    "snapshot": [
+      {
+        "item": "Snapshots are coherent under concurrent writers (never half a transaction), bounded, reused while current, stale after any write, deterministic in identity; on memory, file, and a real FeltDB",
+        "status": "PASS",
+        "evidence": "compute_state::conformance via feltdb_is_a_conforming_durable_authority",
+        "check": "adapter-real-server"
+      },
+      {
+        "item": "A key without state:read cannot build a snapshot",
+        "status": "PASS",
+        "evidence": "consumer.rs::snapshots_are_authorized_by_the_authority",
+        "check": "adapter-real-server"
+      }
+    ],
+    "authority_and_recovery": [
+      {
+        "item": "healthy \u2192 outage \u2192 read (stale, labelled) \u2192 mutation (state_unavailable) \u2192 recovery (snapshots rebuilt, feltdb.recovered) \u2192 mutation, in process on a real feltdb-server",
+        "status": "PASS",
+        "evidence": "feltdb_consumer.rs::the_controller_keeps_authority_in_feltdb_through_an_outage",
+        "check": "controller-real-server"
+      },
+      {
+        "item": "The CLI controller on a real feltdb-server: degraded start, refused changes, recovery, restore on a fresh node",
+        "status": "PASS",
+        "evidence": "recovery.rs::managed_feltdb_is_the_durable_authority",
+        "check": "end-to-end-real-server"
+      },
+      {
+        "item": "An outage is unavailability for reads and writes; a failed build keeps the published snapshot; recovery is automatic",
+        "status": "PASS",
+        "evidence": "consumer.rs::an_outage_is_unavailability_and_recovery_is_automatic",
+        "check": "adapter-real-server"
+      }
+    ],
+    "concurrency": [
+      {
+        "item": "40 concurrent executions keep every record, receipt, and event; event sequences are unique",
+        "status": "PASS",
+        "evidence": "feltdb_consumer.rs::concurrent_operations_keep_every_record_and_event",
+        "check": "controller-real-server"
+      },
+      {
+        "item": "1,000 concurrent executions lose no evidence (memory backend)",
+        "status": "PASS",
+        "evidence": "executions.rs",
+        "check": "workspace-tests"
+      }
+    ],
+    "upgrade": [
+      {
+        "item": "compute control-plane upgrade: dry run; refuses an unverifiable backup before changing anything; with a verified FeltDB archive: applies, verifies, backfills identities, smoke-tests; old records readable through the index; idempotent",
+        "status": "PASS",
+        "evidence": "consumer.rs::the_upgrade_backs_up_migrates_and_verifies",
+        "check": "adapter-real-server"
+      },
+      {
+        "item": "A newer model is never downgraded (upgrade and provision both refuse)",
+        "status": "PASS",
+        "evidence": "consumer.rs::a_newer_model_is_never_downgraded",
+        "check": "adapter-real-server"
+      },
+      {
+        "item": "A controller refuses to start on an older model",
+        "status": "PASS",
+        "evidence": "consumer.rs::the_upgrade_backs_up_migrates_and_verifies",
+        "check": "adapter-real-server"
+      },
+      {
+        "item": "State written by the 0.11.7 server opens unchanged on 0.11.8 and passes conformance; the 0.11.7 server opens what 0.11.8 wrote",
+        "status": "PASS",
+        "evidence": "consumer.rs::state_written_by_the_previous_server_opens_on_this_one",
+        "check": "previous-server-compatibility"
+      }
+    ],
+    "backup_restore": [
+      {
+        "item": "FeltDB offline backup create \u2192 verify \u2192 restore \u2192 serve: record-by-record equivalence (executions, events, audit), indexes answer",
+        "status": "PASS",
+        "evidence": "consumer.rs::a_feltdb_backup_restores_compute_state_exactly",
+        "check": "adapter-real-server"
+      },
+      {
+        "item": "FeltDB online backup of application state verifies",
+        "status": "FAIL",
+        "evidence": "backup-restore.json (online_backup.verification): 'snapshot contains an invalid state row'",
+        "attribution": "FeltDB 0.11.8"
+      }
+    ],
+    "workspace": [
+      {
+        "item": "Full Compute workspace tests",
+        "status": "PASS",
+        "evidence": "logs/workspace-tests.log",
+        "check": "workspace-tests"
+      }
+    ]
+  },
+  "remaining_gaps": [
+    {
+      "gap": "FeltDB 0.11.8's cost per request grows linearly with committed state: at 4,000 committed operations /v1/state/version takes ~42 ms and an index probe returning nothing ~81 ms (FeltDB reports ~32 ms of execution), while /health stays ~0.6 ms",
+      "status": "MEASURED",
+      "attribution": "FeltDB (inside its request handling; the exact cause is not isolated)",
+      "evidence": "feltdb-request-cost.json"
+    },
+    {
+      "gap": "Controller start with state is slower: 22.6 s vs 14.3 s before, at this dataset",
+      "status": "MEASURED",
+      "attribution": "Partly attributed: the start now runs the identity-backfill probe (21 FeltDB requests, each scanning its collection for records without record_id) and builds the desired snapshot by identity probes (~68 FeltDB requests), each paying FeltDB's per-request cost; the split between them was not measured",
+      "evidence": "feltdb-consumer-benchmark.json, feltdb-consumer-benchmark-before.json"
+    },
+    {
+      "gap": "Execution lookup (135 vs 102 ms) and release lookup (270 vs 195 ms) are slower, with the same number of FeltDB requests as before",
+      "status": "UNKNOWN",
+      "attribution": "Not isolated. Both are FeltDB-request bound; the state size at the moment of measurement and the model's added indexes differ between the runs"
+    },
+    {
+      "gap": "FeltDB 0.11.8 backup verify rejects an online backup of application state ('snapshot contains an invalid state row'); compute control-plane upgrade therefore stops before changing anything when given --backup, and --backup-archive (an offline FeltDB backup) is the working path",
+      "status": "FAIL",
+      "attribution": "FeltDB 0.11.8 (export_snapshot / install_snapshot)"
+    },
+    {
+      "gap": "A restored FeltDB archive names its sidecars applications.json and platform.json; a server on files/state.log reads state.applications.json and state.platform.json, so they must be renamed before serving",
+      "status": "MEASURED",
+      "attribution": "FeltDB 0.11.8"
+    },
+    {
+      "gap": "The 0.11.7 and 0.11.8 servers report the same version (0.2.0) and capability fingerprint; the server release cannot be verified from the wire",
+      "status": "UNKNOWN",
+      "attribution": "FeltDB"
+    },
+    {
+      "gap": "FeltDB 0.11.8's planner uses no ordered index: the newest event (start, recovery) and unscoped operator listings scan server-side",
+      "status": "SUPPORTED",
+      "attribution": "FeltDB planner; bounded by what FeltDB returns (limit), not by what it examines"
+    },
+    {
+      "gap": "Placement never re-discovers a provider's capabilities after their cache entry expires, so a long-running controller eventually cannot place new workloads (reproduced on Compute eac2be8 too)",
+      "status": "FAIL",
+      "attribution": "Compute placement (pre-existing; out of this change's scope, reported)"
+    },
+    {
+      "gap": "Managed FeltDB over a network; half-open partitions; more than one controller per control plane",
+      "status": "NOT_RUN"
+    },
+    {
+      "gap": "Rollback of a Compute model upgrade: FeltDB revisions are immutable and the previous revision can be promoted again, but Compute has no command for it and it was not exercised",
+      "status": "NOT_RUN"
+    }
+  ],
+  "upgrade_report": {
+    "result": "upgraded",
+    "before": {
+      "application_id": "app_J1mE7cXTN9DYKumsJy",
+      "environment": "production",
+      "active_revision": "apprev://tenant_9tVjgG5QBij2b5tT2k/app_J1mE7cXTN9DYKumsJy/sha256:ae9d1e16e3090ca679bf96fdd636fd4e65f6929e21bbb2c7099ab7d8b4f13300",
+      "active_schema_version": 1,
+      "required": "compute.state@1",
+      "required_generation": 2,
+      "comparison": {
+        "relation": "older",
+        "additions": [
+          "field Artifact.record_id:text?",
+          "field ArtifactChunk.record_id:text?",
+          "field Audit.record_id:text?",
+          "field Certificate.record_id:text?",
+          "field Deployment.record_id:text?",
+          "field DnsRecord.record_id:text?",
+          "field Domain.record_id:text?",
+          "field Environment.record_id:text?",
+          "field EnvironmentProject.record_id:text?",
+          "field Event.record_id:text?",
+          "field Execution.record_id:text?",
+          "field OperatorCredential.record_id:text?",
+          "field Project.record_id:text?",
+          "field ProjectRevision.record_id:text?",
+          "field Provider.record_id:text?",
+          "field Receipt.record_id:text?",
+          "field Service.record_id:text?",
+          "field TrafficAssignment.record_id:text?",
+          "field Workload.record_id:text?",
+          "field WorkloadInstance.record_id:text?",
+          "field WorkloadStatus.record_id:text?",
+          "index Artifact.record_id",
+          "index ArtifactChunk.record_id",
+          "index Audit.record_id",
+          "index Certificate.record_id",
+          "index Deployment.record_id",
+          "index DnsRecord.record_id",
+          "index Domain.record_id",
+          "index Environment.record_id",
+          "index EnvironmentProject.record_id",
+          "index Event.deployment_id",
+          "index Event.environment",
+          "index Event.project",
+          "index Event.record_id",
+          "index Execution.project_id",
+          "index Execution.record_id",
+          "index OperatorCredential.record_id",
+          "index Project.record_id",
+          "index ProjectRevision.record_id",
+          "index Provider.record_id",
+          "index Receipt.project_id",
+          "index Receipt.record_id",
+          "index Service.record_id",
+          "index TrafficAssignment.record_id",
+          "index Workload.record_id",
+          "index WorkloadInstance.record_id",
+          "index WorkloadStatus.record_id"
+        ],
+        "unknown": []
+      }
+    },
+    "after": {
+      "application_id": "app_J1mE7cXTN9DYKumsJy",
+      "environment": "production",
+      "active_revision": "apprev://tenant_9tVjgG5QBij2b5tT2k/app_J1mE7cXTN9DYKumsJy/sha256:a47fc0e528d4354d2bc66a679b525a80c954d96c93d9d883c0a51ac606ecf1a5",
+      "active_schema_version": 2,
+      "required": "compute.state@1",
+      "required_generation": 2,
+      "comparison": {
+        "relation": "current",
+        "additions": [],
+        "unknown": []
+      }
+    },
+    "steps": [
+      {
+        "name": "inspect_current_model",
+        "status": "PASS",
+        "detail": {
+          "active_revision": "apprev://tenant_9tVjgG5QBij2b5tT2k/app_J1mE7cXTN9DYKumsJy/sha256:ae9d1e16e3090ca679bf96fdd636fd4e65f6929e21bbb2c7099ab7d8b4f13300",
+          "active_schema_version": 1,
+          "relation": "older"
+        }
+      },
+      {
+        "name": "inspect_required_model",
+        "status": "PASS",
+        "detail": {
+          "additions": [
+            "field Artifact.record_id:text?",
+            "field ArtifactChunk.record_id:text?",
+            "field Audit.record_id:text?",
+            "field Certificate.record_id:text?",
+            "field Deployment.record_id:text?",
+            "field DnsRecord.record_id:text?",
+            "field Domain.record_id:text?",
+            "field Environment.record_id:text?",
+            "field EnvironmentProject.record_id:text?",
+            "field Event.record_id:text?",
+            "field Execution.record_id:text?",
+            "field OperatorCredential.record_id:text?",
+            "field Project.record_id:text?",
+            "field ProjectRevision.record_id:text?",
+            "field Provider.record_id:text?",
+            "field Receipt.record_id:text?",
+            "field Service.record_id:text?",
+            "field TrafficAssignment.record_id:text?",
+            "field Workload.record_id:text?",
+            "field WorkloadInstance.record_id:text?",
+            "field WorkloadStatus.record_id:text?",
+            "index Artifact.record_id",
+            "index ArtifactChunk.record_id",
+            "index Audit.record_id",
+            "index Certificate.record_id",
+            "index Deployment.record_id",
+            "index DnsRecord.record_id",
+            "index Domain.record_id",
+            "index Environment.record_id",
+            "index EnvironmentProject.record_id",
+            "index Event.deployment_id",
+            "index Event.environment",
+            "index Event.project",
+            "index Event.record_id",
+            "index Execution.project_id",
+            "index Execution.record_id",
+            "index OperatorCredential.record_id",
+            "index Project.record_id",
+            "index ProjectRevision.record_id",
+            "index Provider.record_id",
+            "index Receipt.project_id",
+            "index Receipt.record_id",
+            "index Service.record_id",
+            "index TrafficAssignment.record_id",
+            "index Workload.record_id",
+            "index WorkloadInstance.record_id",
+            "index WorkloadStatus.record_id"
+          ],
+          "generation": 2,
+          "model": "compute.state@1"
+        }
+      },
+      {
+        "name": "refuse_unsafe_downgrade",
+        "status": "PASS",
+        "detail": {
+          "relation": "older"
+        }
+      },
+      {
+        "name": "backup_create",
+        "status": "PASS",
+        "detail": {
+          "age_seconds": 0,
+          "archive": "/tmp/compute-state-feltdb-21784-1790363224878335021/backup",
+          "taken_by": "operator"
+        }
+      },
+      {
+        "name": "backup_verify",
+        "status": "PASS",
+        "detail": {
+          "backup_id": "ea16919c09ce6ac0736830baf5d0844303ecf69c2b84b5f7f6329878917583e0",
+          "bytes": 103716,
+          "files": 6,
+          "format": 1,
+          "verifier": "/tmp/claude-0/-home-user-compute/03ddab09-52ca-58e2-9ccc-e840df3e214e/scratchpad/bin/feltdb-server-0.11.8"
+        }
+      },
+      {
+        "name": "apply_model",
+        "status": "PASS",
+        "detail": {
+          "changed": true,
+          "revision_id": "apprev://tenant_9tVjgG5QBij2b5tT2k/app_J1mE7cXTN9DYKumsJy/sha256:a47fc0e528d4354d2bc66a679b525a80c954d96c93d9d883c0a51ac606ecf1a5"
+        }
+      },
+      {
+        "name": "verify_model",
+        "status": "PASS",
+        "detail": {
+          "active_revision": "apprev://tenant_9tVjgG5QBij2b5tT2k/app_J1mE7cXTN9DYKumsJy/sha256:a47fc0e528d4354d2bc66a679b525a80c954d96c93d9d883c0a51ac606ecf1a5",
+          "records_given_identity": {
+            "Deployment": 1,
+            "Environment": 1
+          }
+        }
+      },
+      {
+        "name": "smoke_test",
+        "status": "PASS",
+        "detail": {
+          "collections_decoded": {
+            "Artifact": 0,
+            "ArtifactChunk": 0,
+            "Audit": 0,
+            "Certificate": 0,
+            "Deployment": 1,
+            "DnsRecord": 0,
+            "Domain": 0,
+            "Environment": 1,
+            "EnvironmentProject": 0,
+            "Event": 0,
+            "Execution": 0,
+            "OperatorCredential": 0,
+            "Project": 0,
+            "ProjectRevision": 0,
+            "Provider": 0,
+            "Receipt": 0,
+            "Service": 0,
+            "TrafficAssignment": 0,
+            "Workload": 0,
+            "WorkloadInstance": 0,
+            "WorkloadStatus": 0
+          },
+          "revision": 4,
+          "transaction": "committed and undone"
+        }
+      },
+      {
+        "name": "report",
+        "status": "PASS",
+        "detail": null
+      }
+    ]
+  },
+  "backup_restore_evidence": {
+    "audit": 1,
+    "backup": {
+      "backup_id": "ccdb3ae206dc0053a29828c03c0973b801bb61380cf7ba0d862c954a48ec916e",
+      "bytes_written": 184098,
+      "created_ms": 1790363223166,
+      "duration_ms": 0,
+      "files": 6,
+      "format": 1,
+      "operation": "verify",
+      "path": "/tmp/compute-state-feltdb-21784-1790363222896622677/backup",
+      "source": {
+        "data": "/tmp/compute-state-feltdb-21784-1790363222896622677/state.log",
+        "durable_format": 2,
+        "server_version": "0.2.0",
+        "state_sha256": "70b1b1e4733de310888862b3aa592dd842675fef1b03dd68287e5d03ac4d28a4"
+      },
+      "status": "ok",
+      "verification": "verified"
+    },
+    "events": 20,
+    "executions": 30,
+    "offline_backup": {
+      "backup_id": "ccdb3ae206dc0053a29828c03c0973b801bb61380cf7ba0d862c954a48ec916e",
+      "bytes_written": 184098,
+      "created_ms": 1790363223166,
+      "duration_ms": 6,
+      "files": 6,
+      "format": 1,
+      "operation": "create",
+      "path": "/tmp/compute-state-feltdb-21784-1790363222896622677/backup",
+      "source": {
+        "data": "/tmp/compute-state-feltdb-21784-1790363222896622677/state.log",
+        "durable_format": 2,
+        "server_version": "0.2.0",
+        "state_sha256": "70b1b1e4733de310888862b3aa592dd842675fef1b03dd68287e5d03ac4d28a4"
+      },
+      "status": "ok",
+      "verification": "verified"
+    },
+    "online_backup": {
+      "created": true,
+      "verification": {
+        "backup_id": "b0b8f3ece266e926087704ebe4e0302a103f5c3fcccf0f198c259740f08ce8e1",
+        "bytes_written": 157909,
+        "created_ms": 1790363223146,
+        "duration_ms": 0,
+        "error": "capability error: snapshot contains an invalid state row",
+        "files": 6,
+        "format": 1,
+        "operation": "verify",
+        "path": "/tmp/compute-state-feltdb-21784-1790363222896622677/online-backup",
+        "source": {
+          "data": "/tmp/compute-state-feltdb-21784-1790363222896622677/state.log",
+          "durable_format": 2,
+          "server_version": "0.2.0",
+          "state_sha256": "d3a7f91f16b463920c71c0cf71de23f0c69d89ce299ba0a38e832dbb68fafcdd"
+        },
+        "status": "failed",
+        "verification": "failed"
+      }
+    },
+    "records_compared": 51,
+    "renamed_for_serving": [
+      "applications.json -> state.applications.json",
+      "platform.json -> state.platform.json"
+    ],
+    "restored_files": [
+      "state.log",
+      "api-keys.json",
+      "state.content",
+      "keys.json",
+      "state.platform.json",
+      "state.log.lock",
+      "state.cluster.json",
+      "state.applications.json",
+      "audit.log"
+    ],
+    "revision_before_backup": 51
+  },
+  "feltdb_request_cost": [
+    {
+      "executions": 0,
+      "health_p50_ms": 0.45,
+      "indexed_lookup_p50_ms": 1.42,
+      "indexed_lookup_server_reported_p50_ms": 0.06,
+      "revision": 0,
+      "state_version_p50_ms": 1.09
+    },
+    {
+      "executions": 500,
+      "health_p50_ms": 0.5,
+      "indexed_lookup_p50_ms": 10.36,
+      "indexed_lookup_server_reported_p50_ms": 3.63,
+      "revision": 500,
+      "state_version_p50_ms": 5.51
+    },
+    {
+      "executions": 1000,
+      "health_p50_ms": 0.57,
+      "indexed_lookup_p50_ms": 19.86,
+      "indexed_lookup_server_reported_p50_ms": 7.41,
+      "revision": 1000,
+      "state_version_p50_ms": 10.14
+    },
+    {
+      "executions": 2000,
+      "health_p50_ms": 0.59,
+      "indexed_lookup_p50_ms": 41.55,
+      "indexed_lookup_server_reported_p50_ms": 16.54,
+      "revision": 2000,
+      "state_version_p50_ms": 21.02
+    },
+    {
+      "executions": 4000,
+      "health_p50_ms": 0.71,
+      "indexed_lookup_p50_ms": 94.73,
+      "indexed_lookup_server_reported_p50_ms": 38.54,
+      "revision": 4000,
+      "state_version_p50_ms": 47.47
+    }
+  ],
+  "benchmark": {
+    "dataset": {
+      "executions": 4000,
+      "projects": 40
+    },
+    "samples": 30,
+    "scopes": {
+      "compute-only": "not measured separately: end-to-end minus FeltDB is not isolated here",
+      "end-to-end": "a controller operation: Compute work plus its FeltDB requests; the requests per call are listed",
+      "feltdb-only": "the adapter's request(s) to FeltDB and back; Compute does no work but encode and decode"
+    },
+    "controller_after": {
+      "last_reconcile": {
+        "duration_ms": 3187.8057599999997,
+        "errors": 0,
+        "phases_ms": {
+          "converge": 0.055505,
+          "data_plane": 0.0010479999999999999,
+          "endpoints": 0.000221,
+          "network": 0.003066,
+          "observe": 3088.914596,
+          "pending": 0.006707,
+          "refresh": 98.779408,
+          "releases": 0.024927
+        },
+        "resources_changed": 50,
+        "resources_examined": 50,
+        "started_at": "2026-09-25T19:09:46.292644884Z"
+      },
+      "startup_empty_ms": 270.459858,
+      "startup_with_state_ms": 22599.076297
+    },
+    "controller_before": {
+      "startup_empty_ms": 130.187364,
+      "startup_with_state_ms": 14316.357114
+    },
+    "operations": [
+      {
+        "operation": "add project/service",
+        "scope": "end-to-end",
+        "pattern": "after",
+        "after": {
+          "n": 10,
+          "p50_ms": 5496.58,
+          "p95_ms": 6057.41,
+          "max_ms": 6057.41
+        },
+        "feltdb_per_call": {
+          "queries": 25.2,
+          "revision_reads": 4.0,
+          "rows_returned": 69.5,
+          "rows_scanned": 69.5,
+          "transactions": 12.0
+        },
+        "status": "MEASURED",
+        "before_compute_eac2be8": {
+          "n": 10,
+          "p50_ms": 9717.59,
+          "p95_ms": 11420.71,
+          "max_ms": 11420.71
+        }
+      },
+      {
+        "operation": "single indexed lookup",
+        "scope": "feltdb-only",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 134.7,
+          "p95_ms": 167.88,
+          "max_ms": 185.22
+        },
+        "feltdb_per_call": {
+          "queries": 1.0,
+          "revision_reads": 0.0,
+          "rows_returned": 1.0,
+          "rows_scanned": 1.0,
+          "transactions": 0.0
+        },
+        "status": "MEASURED"
+      },
+      {
+        "operation": "single indexed lookup",
+        "scope": "feltdb-only",
+        "pattern": "before (_id scan)",
+        "after": {
+          "n": 30,
+          "p50_ms": 153.05,
+          "p95_ms": 181.63,
+          "max_ms": 193.61
+        },
+        "feltdb_per_call": {
+          "queries": 0.0,
+          "revision_reads": 0.0,
+          "rows_returned": 0.0,
+          "rows_scanned": 0.0,
+          "transactions": 0.0
+        },
+        "status": "MEASURED"
+      },
+      {
+        "operation": "bounded list (a project's 20 newest executions)",
+        "scope": "feltdb-only",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 137.27,
+          "p95_ms": 151.25,
+          "max_ms": 152.06
+        },
+        "feltdb_per_call": {
+          "queries": 1.0,
+          "revision_reads": 0.0,
+          "rows_returned": 20.0,
+          "rows_scanned": 100.0,
+          "transactions": 0.0
+        },
+        "status": "MEASURED"
+      },
+      {
+        "operation": "bounded list (a project's 20 newest executions)",
+        "scope": "feltdb-only",
+        "pattern": "before (whole collection, filtered in Compute)",
+        "after": {
+          "n": 10,
+          "p50_ms": 842.29,
+          "p95_ms": 868.13,
+          "max_ms": 868.13
+        },
+        "feltdb_per_call": {
+          "queries": 4.0,
+          "revision_reads": 0.0,
+          "rows_returned": 4000.0,
+          "rows_scanned": 16000.0,
+          "transactions": 0.0
+        },
+        "status": "MEASURED"
+      },
+      {
+        "operation": "execution lookup",
+        "scope": "end-to-end",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 135.1,
+          "p95_ms": 157.74,
+          "max_ms": 160.04
+        },
+        "feltdb_per_call": {
+          "queries": 1.0,
+          "revision_reads": 0.0,
+          "rows_returned": 1.0,
+          "rows_scanned": 1.0,
+          "transactions": 0.0
+        },
+        "status": "MEASURED",
+        "before_compute_eac2be8": {
+          "n": 30,
+          "p50_ms": 101.95,
+          "p95_ms": 116.3,
+          "max_ms": 123.07
+        }
+      },
+      {
+        "operation": "executions view (project, 20)",
+        "scope": "end-to-end",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 201.01,
+          "p95_ms": 222.06,
+          "max_ms": 224.84
+        },
+        "feltdb_per_call": {
+          "queries": 1.0,
+          "revision_reads": 1.0,
+          "rows_returned": 20.0,
+          "rows_scanned": 100.0,
+          "transactions": 0.0
+        },
+        "status": "MEASURED",
+        "before_compute_eac2be8": {
+          "n": 30,
+          "p50_ms": 3997.09,
+          "p95_ms": 4113.22,
+          "max_ms": 4182.69
+        }
+      },
+      {
+        "operation": "environment view",
+        "scope": "end-to-end",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 0.31,
+          "p95_ms": 0.36,
+          "max_ms": 0.53
+        },
+        "feltdb_per_call": {
+          "queries": 0.0,
+          "revision_reads": 0.0,
+          "rows_returned": 0.0,
+          "rows_scanned": 0.0,
+          "transactions": 0.0
+        },
+        "status": "MEASURED",
+        "before_compute_eac2be8": {
+          "n": 30,
+          "p50_ms": 0.32,
+          "p95_ms": 0.4,
+          "max_ms": 0.62
+        }
+      },
+      {
+        "operation": "project view",
+        "scope": "end-to-end",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 0.01,
+          "p95_ms": 0.01,
+          "max_ms": 0.02
+        },
+        "feltdb_per_call": {
+          "queries": 0.0,
+          "revision_reads": 0.0,
+          "rows_returned": 0.0,
+          "rows_scanned": 0.0,
+          "transactions": 0.0
+        },
+        "status": "MEASURED",
+        "before_compute_eac2be8": {
+          "n": 30,
+          "p50_ms": 0.01,
+          "p95_ms": 0.01,
+          "max_ms": 0.02
+        }
+      },
+      {
+        "operation": "release lookup",
+        "scope": "end-to-end",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 269.65,
+          "p95_ms": 295.43,
+          "max_ms": 336.74
+        },
+        "feltdb_per_call": {
+          "queries": 2.0,
+          "revision_reads": 0.0,
+          "rows_returned": 1.0,
+          "rows_scanned": 1.0,
+          "transactions": 0.0
+        },
+        "status": "MEASURED",
+        "before_compute_eac2be8": {
+          "n": 30,
+          "p50_ms": 194.6,
+          "p95_ms": 206.03,
+          "max_ms": 220.61
+        }
+      },
+      {
+        "operation": "small bounded snapshot (2 records, build)",
+        "scope": "feltdb-only",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 329.22,
+          "p95_ms": 353.79,
+          "max_ms": 358.79
+        },
+        "feltdb_per_call": {
+          "queries": 2.0,
+          "revision_reads": 2.0,
+          "rows_returned": 2.0,
+          "rows_scanned": 2.0,
+          "transactions": 0.0
+        },
+        "status": "MEASURED"
+      },
+      {
+        "operation": "large bounded snapshot (every execution, build)",
+        "scope": "feltdb-only",
+        "pattern": "after",
+        "after": {
+          "n": 10,
+          "p50_ms": 998.6,
+          "p95_ms": 1050.14,
+          "max_ms": 1050.14
+        },
+        "feltdb_per_call": {
+          "queries": 4.0,
+          "revision_reads": 2.0,
+          "rows_returned": 4000.0,
+          "rows_scanned": 16000.0,
+          "transactions": 0.0
+        },
+        "status": "MEASURED"
+      },
+      {
+        "operation": "multi-source coherent snapshot (desired state, build)",
+        "scope": "feltdb-only",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 5523.5,
+          "p95_ms": 5855.14,
+          "max_ms": 9095.25
+        },
+        "feltdb_per_call": {
+          "queries": 67.7,
+          "revision_reads": 2.0,
+          "rows_returned": 202.7,
+          "rows_scanned": 202.7,
+          "transactions": 0.0
+        },
+        "status": "MEASURED"
+      },
+      {
+        "operation": "multi-source coherent snapshot (desired state, unchanged: reuse)",
+        "scope": "feltdb-only",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 72.13,
+          "p95_ms": 100.54,
+          "max_ms": 101.06
+        },
+        "feltdb_per_call": {
+          "queries": 0.0,
+          "revision_reads": 1.0,
+          "rows_returned": 0.0,
+          "rows_scanned": 0.0,
+          "transactions": 0.0
+        },
+        "status": "MEASURED"
+      },
+      {
+        "operation": "desired-state load",
+        "scope": "feltdb-only",
+        "pattern": "before (independent whole reads, _id gets)",
+        "after": {
+          "n": 30,
+          "p50_ms": 9220.74,
+          "p95_ms": 9933.34,
+          "max_ms": 10359.21
+        },
+        "feltdb_per_call": {
+          "queries": 16.0,
+          "revision_reads": 0.0,
+          "rows_returned": 151.0,
+          "rows_scanned": 166.1,
+          "transactions": 0.0
+        },
+        "status": "MEASURED"
+      },
+      {
+        "operation": "single durable mutation",
+        "scope": "feltdb-only",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 157.26,
+          "p95_ms": 202.42,
+          "max_ms": 205.59
+        },
+        "feltdb_per_call": {
+          "queries": 0.0,
+          "revision_reads": 0.0,
+          "rows_returned": 0.0,
+          "rows_scanned": 0.0,
+          "transactions": 1.0
+        },
+        "status": "MEASURED"
+      },
+      {
+        "operation": "mutation + event (environment create)",
+        "scope": "end-to-end",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 685.5,
+          "p95_ms": 802.93,
+          "max_ms": 810.62
+        },
+        "feltdb_per_call": {
+          "queries": 2.0,
+          "revision_reads": 3.0,
+          "rows_returned": 51.0,
+          "rows_scanned": 51.0,
+          "transactions": 1.0
+        },
+        "status": "MEASURED",
+        "before_compute_eac2be8": {
+          "n": 30,
+          "p50_ms": 4181.61,
+          "p95_ms": 4327.8,
+          "max_ms": 4351.45
+        }
+      },
+      {
+        "operation": "project update (stop/start)",
+        "scope": "end-to-end",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 696.52,
+          "p95_ms": 787.33,
+          "max_ms": 846.22
+        },
+        "feltdb_per_call": {
+          "queries": 2.0,
+          "revision_reads": 3.0,
+          "rows_returned": 51.0,
+          "rows_scanned": 51.0,
+          "transactions": 1.0
+        },
+        "status": "MEASURED",
+        "before_compute_eac2be8": {
+          "n": 30,
+          "p50_ms": 4121.12,
+          "p95_ms": 4323.73,
+          "max_ms": 4330.17
+        }
+      },
+      {
+        "operation": "release update (register, deploy, complete)",
+        "scope": "end-to-end",
+        "pattern": "after",
+        "after": {
+          "n": 10,
+          "p50_ms": 3289.34,
+          "p95_ms": 3623.95,
+          "max_ms": 3623.95
+        },
+        "feltdb_per_call": {
+          "queries": 15.1,
+          "revision_reads": 3.0,
+          "rows_returned": 59.0,
+          "rows_scanned": 59.0,
+          "transactions": 5.0
+        },
+        "status": "MEASURED",
+        "before_compute_eac2be8": {
+          "n": 10,
+          "p50_ms": 5910.96,
+          "p95_ms": 6390.96,
+          "max_ms": 6390.96
+        }
+      },
+      {
+        "operation": "reconciliation (full cycle, nothing changed)",
+        "scope": "end-to-end",
+        "pattern": "after",
+        "after": {
+          "n": 30,
+          "p50_ms": 168.48,
+          "p95_ms": 217.89,
+          "max_ms": 223.88
+        },
+        "feltdb_per_call": {
+          "queries": 0.0,
+          "revision_reads": 2.0,
+          "rows_returned": 0.0,
+          "rows_scanned": 0.0,
+          "transactions": 0.0
+        },
+        "status": "MEASURED",
+        "before_compute_eac2be8": {
+          "n": 30,
+          "p50_ms": 4090.5,
+          "p95_ms": 4396.86,
+          "max_ms": 4439.99
+        }
+      }
+    ]
+  }
+}

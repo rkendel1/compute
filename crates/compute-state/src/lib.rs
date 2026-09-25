@@ -16,12 +16,18 @@ pub mod artifacts;
 pub mod conformance;
 pub mod control;
 pub mod model;
+pub mod snapshot;
 pub mod store;
+pub mod time;
 
 pub use artifacts::{ArtifactStore, StateArtifacts};
 pub use control::{Batch, ControlState, Stored};
 pub use model::*;
+pub use snapshot::{
+    Coherence, Incoherent, Refreshed, Snapshot, SnapshotDefinition, SnapshotHandle, SnapshotReport,
+    SnapshotSource, Validation,
+};
 pub use store::{
-    BackendInfo, Collection, Comparison, Filter, Query, Record, StateError, StateStore, Tables,
-    Write, apply_in_memory,
+    AccessReport, BackendInfo, Collection, Comparison, Filter, ID_FIELD, Query, Record, Revision,
+    StateError, StateStore, Tables, Transition, Transitions, UNCHAINED, Write, apply_in_memory,
 };

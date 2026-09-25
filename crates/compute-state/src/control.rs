@@ -5,6 +5,7 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 
 use crate::model::Document;
+use crate::snapshot::{SnapshotDefinition, SnapshotHandle, SnapshotRegistry};
 use crate::store::{BackendInfo, Query, Record, StateError, StateStore, Write};
 
 /// A typed document with its identity and version.
@@ -15,7 +16,7 @@ pub struct Stored<T> {
     pub value: T,
 }
 
-fn decode<T: Document>(record: Record) -> Result<Stored<T>, StateError> {
+pub(crate) fn decode<T: Document>(record: Record) -> Result<Stored<T>, StateError> {
     let value = serde_json::from_value(Value::Object(record.value)).map_err(|error| {
         StateError::Invalid(format!(
             "{} {} does not match compute.state@1: {error}",
@@ -138,11 +139,42 @@ impl Batch {
 #[derive(Clone)]
 pub struct ControlState {
     store: Arc<dyn StateStore>,
+    snapshots: Arc<SnapshotRegistry>,
 }
 
 impl ControlState {
     pub fn new(store: Arc<dyn StateStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            snapshots: Arc::new(SnapshotRegistry::default()),
+        }
+    }
+
+    /// Resolve a snapshot handle: the same name and definition always
+    /// resolve the same handle.
+    pub fn snapshot(
+        &self,
+        definition: SnapshotDefinition,
+    ) -> Result<Arc<SnapshotHandle>, StateError> {
+        self.snapshots.resolve(definition, &self.store)
+    }
+
+    pub fn snapshots(&self) -> &SnapshotRegistry {
+        &self.snapshots
+    }
+
+    /// Documents of `T` by identity, in bounded requests.
+    pub async fn get_many<T: Document>(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<Stored<T>>, StateError> {
+        let mut stored = vec![];
+        for chunk in ids.chunks(200) {
+            for record in self.store.get_many(T::COLLECTION, chunk).await? {
+                stored.push(decode(record)?);
+            }
+        }
+        Ok(stored)
     }
 
     pub fn backend(&self) -> BackendInfo {
@@ -173,17 +205,28 @@ impl ControlState {
             .collect()
     }
 
-    /// Every document of `T`'s collection.
+    /// Every document of `T`'s collection. Unbounded: for collections the
+    /// caller genuinely needs whole and that are bounded by construction
+    /// (providers, services, credentials), never to find a few records.
     pub async fn list<T: Document>(&self) -> Result<Vec<Stored<T>>, StateError> {
         self.query(Query::all(T::COLLECTION)).await
     }
 
     /// Apply a batch atomically.
     pub async fn transaction(&self, batch: Batch) -> Result<(), StateError> {
+        self.transaction_tracked(batch).await.map(|_| ())
+    }
+
+    /// Apply a batch atomically, returning the revisions immediately before
+    /// and after it when the backend states them.
+    pub async fn transaction_tracked(
+        &self,
+        batch: Batch,
+    ) -> Result<Option<(u64, u64)>, StateError> {
         let writes = batch.into_writes()?;
         if writes.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
-        self.store.commit(writes).await
+        self.store.commit_tracked(writes).await
     }
 }

@@ -190,6 +190,18 @@ pub async fn provision_manifest(
             .map(|revision| (revision_id.to_string(), revision)),
         None => None,
     };
+    // Never replace a model this build does not fully know: that would
+    // drop collections, fields, or indexes a newer Compute relies on.
+    if let Some((revision_id, revision)) = &active {
+        let comparison = compare_models(&revision["manifest"], &manifest);
+        if !comparison.unknown.is_empty() {
+            return Err(StateError::Invalid(format!(
+                "refusing to downgrade the Compute model: the active revision {revision_id} declares {} that this build does not ({}); upgrade Compute instead",
+                comparison.unknown.len(),
+                comparison.unknown.join(", ")
+            )));
+        }
+    }
     if let Some((revision_id, revision)) = &active
         && same_model(&revision["manifest"], &manifest)
     {
@@ -297,6 +309,152 @@ pub async fn provision_manifest(
         environment: request.environment,
         revision_id,
         changed: true,
+    })
+}
+
+/// How the active model relates to this build's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRelation {
+    /// No Compute model is active.
+    Absent,
+    /// The active model is this build's.
+    Current,
+    /// This build only adds to the active model: upgrade.
+    Older,
+    /// The active model declares what this build does not: a newer Compute
+    /// installed it. Refused: a downgrade would discard it.
+    Newer,
+    /// Each declares something the other does not. Refused.
+    Divergent,
+}
+
+/// The difference between the active model and this build's, element by
+/// element (`Collection`, `Collection.field:type:required`, index and
+/// policy names).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelComparison {
+    pub relation: ModelRelation,
+    /// What this build adds to the active model.
+    pub additions: Vec<String>,
+    /// What the active model declares that this build does not.
+    pub unknown: Vec<String>,
+}
+
+fn model_elements(manifest: &Value) -> std::collections::BTreeSet<String> {
+    let mut elements = std::collections::BTreeSet::new();
+    for collection in manifest["collections"].as_array().into_iter().flatten() {
+        let name = collection["name"].as_str().unwrap_or_default();
+        elements.insert(format!("collection {name}"));
+        for field in collection["fields"].as_array().into_iter().flatten() {
+            elements.insert(format!(
+                "field {name}.{}:{}{}",
+                field["name"].as_str().unwrap_or_default(),
+                field["type"].as_str().unwrap_or_default(),
+                if field["required"].as_bool().unwrap_or_default() {
+                    ""
+                } else {
+                    "?"
+                }
+            ));
+        }
+    }
+    for (key, kind) in [("indexes", "index"), ("policies", "policy")] {
+        for item in manifest[key].as_array().into_iter().flatten() {
+            elements.insert(format!(
+                "{kind} {}",
+                item["name"].as_str().unwrap_or_default()
+            ));
+        }
+    }
+    elements
+}
+
+/// Compare the active model (`stored`, or `Value::Null` when none) with
+/// this build's.
+pub fn compare_models(stored: &Value, ours: &Value) -> ModelComparison {
+    if stored.is_null() || stored["collections"].is_null() {
+        return ModelComparison {
+            relation: ModelRelation::Absent,
+            additions: vec![],
+            unknown: vec![],
+        };
+    }
+    let active = model_elements(stored);
+    let wanted = model_elements(ours);
+    let additions = wanted.difference(&active).cloned().collect::<Vec<_>>();
+    let unknown = active.difference(&wanted).cloned().collect::<Vec<_>>();
+    let relation = match (additions.is_empty(), unknown.is_empty()) {
+        (true, true) => ModelRelation::Current,
+        (false, true) => ModelRelation::Older,
+        (true, false) => ModelRelation::Newer,
+        (false, false) => ModelRelation::Divergent,
+    };
+    ModelComparison {
+        relation,
+        additions,
+        unknown,
+    }
+}
+
+/// The Compute model active in a FeltDB environment, compared with this
+/// build's. Read-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInspection {
+    pub application_id: String,
+    pub environment: String,
+    pub active_revision: Option<String>,
+    pub active_schema_version: Option<u64>,
+    /// This build's model.
+    pub required: String,
+    pub required_generation: u32,
+    pub comparison: ModelComparison,
+}
+
+/// Inspect the active Compute model without changing anything.
+pub async fn inspect_model(config: &FeltDbConfig) -> Result<ModelInspection, StateError> {
+    let client = FeltDbState::new(config.clone())?;
+    let ours: Value = serde_json::from_str(COMPUTE_MANIFEST)
+        .map_err(|error| StateError::Invalid(format!("embedded manifest: {error}")))?;
+    let current = client
+        .send(
+            reqwest::Method::GET,
+            &format!(
+                "/v1/application?application_id={}&environment={}",
+                encode(&config.application_id),
+                encode(&config.environment)
+            ),
+            None,
+        )
+        .await
+        .ok();
+    let active_revision = current
+        .as_ref()
+        .and_then(|current| current["revision_id"].as_str())
+        .map(str::to_owned);
+    let stored = match &active_revision {
+        Some(revision_id) => client
+            .send(
+                reqwest::Method::GET,
+                &format!(
+                    "/api/applications/{}/revisions/{}",
+                    encode(&config.application_id),
+                    encode(revision_id)
+                ),
+                None,
+            )
+            .await
+            .map_err(|refusal| failure("read the active Compute model", refusal))?,
+        None => Value::Null,
+    };
+    Ok(ModelInspection {
+        application_id: config.application_id.clone(),
+        environment: config.environment.clone(),
+        active_schema_version: stored["manifest"]["state_schema_version"].as_u64(),
+        active_revision,
+        required: compute_state::STATE_VERSION.into(),
+        required_generation: compute_state::MODEL_GENERATION,
+        comparison: compare_models(&stored["manifest"], &ours),
     })
 }
 
