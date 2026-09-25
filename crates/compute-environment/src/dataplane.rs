@@ -702,7 +702,30 @@ pub(crate) fn boot_id() -> Option<String> {
         .map(|id| id.trim().to_string())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub(crate) fn boot_id() -> Option<String> {
+    let mut boot = std::mem::MaybeUninit::<libc::timeval>::uninit();
+    let mut size = std::mem::size_of::<libc::timeval>();
+    // SAFETY: `boot` is sized for the `kern.boottime` timeval result and
+    // sysctlbyname initializes it on success.
+    if unsafe {
+        libc::sysctlbyname(
+            c"kern.boottime".as_ptr(),
+            boot.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || size != std::mem::size_of::<libc::timeval>()
+    {
+        return None;
+    }
+    let boot = unsafe { boot.assume_init() };
+    Some(format!("{}:{}", boot.tv_sec, boot.tv_usec))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn boot_id() -> Option<String> {
     None
 }
@@ -715,7 +738,34 @@ pub(crate) fn start_time(pid: u32) -> Option<u64> {
     rest.split_whitespace().nth(19)?.parse().ok()
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub(crate) fn start_time(pid: u32) -> Option<u64> {
+    let pid = i32::try_from(pid).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: proc_pidinfo writes at most `size` bytes to a correctly sized
+    // proc_bsdinfo buffer.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    Some(
+        info.pbi_start_tvsec
+            .saturating_mul(1_000_000)
+            .saturating_add(info.pbi_start_tvusec),
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn start_time(_pid: u32) -> Option<u64> {
     None
 }

@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use compute_core::{
-    ExecutionReceipt, ProviderIdentity, ReceiptPlacement, SelectionMode, SelectionReason,
+    ExecutionReceipt, PlatformIdentity, ProviderIdentity, ProviderResourceInventory,
+    ReceiptPlacement, ResourceVector, SelectionMode, SelectionReason,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +22,35 @@ use crate::requirements::PlacementRequirements;
 pub const PLACEMENT_VERSION: &str = "compute.placement@1";
 const POOL_ORDERING: &str = "priority_descending,provider_id_ascending";
 const EXPLICIT_ORDERING: &str = "explicit_provider";
+
+/// Caller intent applied only after capability eligibility is known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "mode", content = "provider", rename_all = "snake_case")]
+pub enum PlacementPolicy {
+    #[default]
+    Auto,
+    Local,
+    Remote,
+    Provider(String),
+}
+
+impl PlacementPolicy {
+    fn accepts(&self, provider: &ProviderEvaluation) -> bool {
+        match self {
+            Self::Auto => true,
+            Self::Local => provider.provider_kind == ProviderKind::Local,
+            Self::Remote => provider.provider_kind == ProviderKind::Remote,
+            Self::Provider(id) => provider.provider_id == *id,
+        }
+    }
+
+    fn explicit(&self) -> Option<&str> {
+        match self {
+            Self::Provider(id) => Some(id),
+            _ => None,
+        }
+    }
+}
 
 /// The documented, complete selection policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +124,10 @@ pub struct ProviderEvaluation {
     pub runtime_lifecycle: Option<compute_core::RuntimeLifecycleStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_distribution: Option<compute_core::RuntimeDistribution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<PlatformIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ProviderResourceInventory>,
     pub status: EvaluationStatus,
     /// Capability incompatibilities.
     pub reasons: Vec<IncompatibilityReason>,
@@ -118,6 +152,8 @@ pub struct SelectedProvider {
     pub runtime_lifecycle: compute_core::RuntimeLifecycleStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_distribution: Option<compute_core::RuntimeDistribution>,
+    pub platform: PlatformIdentity,
+    pub resources: ProviderResourceInventory,
 }
 
 /// What admission evaluates during placement: the caller's effective policy
@@ -190,6 +226,7 @@ pub struct PlacementReport {
     pub placement_id: String,
     pub outcome: PlacementOutcome,
     pub selection_mode: SelectionMode,
+    pub placement_policy: PlacementPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_provider: Option<String>,
     pub requirements: PlacementRequirements,
@@ -222,6 +259,28 @@ impl PlacementReport {
             provider_protocol: selected.provider_protocol.clone(),
             selection_mode: self.selection_mode,
             selection_reason: selected.selection_reason.clone(),
+            requested_resources: ResourceVector {
+                cpu_count: self
+                    .requirements
+                    .resources
+                    .cpu_count
+                    .map(u64::from)
+                    .unwrap_or(0),
+                memory_bytes: self.requirements.resources.memory_bytes.unwrap_or(0),
+                disk_bytes: self.requirements.resources.disk_bytes.unwrap_or(0),
+            },
+            provider_resources: selected.resources.clone(),
+            allocated_resources: ResourceVector {
+                cpu_count: self
+                    .requirements
+                    .resources
+                    .cpu_count
+                    .map(u64::from)
+                    .unwrap_or(0),
+                memory_bytes: self.requirements.resources.memory_bytes.unwrap_or(0),
+                disk_bytes: self.requirements.resources.disk_bytes.unwrap_or(0),
+            },
+            execution_platform: Some(selected.platform.clone()),
         })
     }
 
@@ -286,6 +345,28 @@ pub fn place(
     admission: &AdmissionContext,
     explicit: Option<&str>,
 ) -> PlacementReport {
+    let placement_policy = explicit
+        .map(|id| PlacementPolicy::Provider(id.to_owned()))
+        .unwrap_or_default();
+    place_with_policy(
+        configs,
+        policy,
+        records,
+        requirements,
+        admission,
+        placement_policy,
+    )
+}
+
+pub fn place_with_policy(
+    configs: &BTreeMap<String, ProviderConfig>,
+    policy: &PoolPolicy,
+    records: &[DiscoveryRecord],
+    requirements: &PlacementRequirements,
+    admission: &AdmissionContext,
+    placement_policy: PlacementPolicy,
+) -> PlacementReport {
+    let explicit = placement_policy.explicit();
     let selection_mode = if explicit.is_some() {
         SelectionMode::Explicit
     } else {
@@ -330,9 +411,9 @@ pub fn place(
         )
     });
 
-    let chosen = providers
-        .iter()
-        .find(|provider| provider.status == EvaluationStatus::Compatible);
+    let chosen = providers.iter().find(|provider| {
+        provider.status == EvaluationStatus::Compatible && placement_policy.accepts(provider)
+    });
     let (selected, failure) = match (chosen, explicit) {
         (Some(provider), _) => (
             Some(SelectedProvider {
@@ -366,12 +447,26 @@ pub fn place(
                         POOL_ORDERING
                     }
                     .into(),
-                    compatible_candidates: compatible_providers.len() as u64,
+                    compatible_candidates: providers
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.status == EvaluationStatus::Compatible
+                                && placement_policy.accepts(candidate)
+                        })
+                        .count() as u64,
                 },
                 runtime_lifecycle: provider
                     .runtime_lifecycle
                     .expect("compatible providers offer the required runtime"),
                 runtime_distribution: provider.runtime_distribution.clone(),
+                platform: provider
+                    .platform
+                    .clone()
+                    .expect("compatible providers have a platform"),
+                resources: provider
+                    .resources
+                    .clone()
+                    .expect("compatible providers have resource inventory"),
             }),
             None,
         ),
@@ -406,13 +501,21 @@ pub fn place(
             None,
             Some(PlacementFailure {
                 code: "no_compatible_provider".into(),
-                message: format!(
-                    "no provider proved it satisfies this workload contract and is admitted by policy ({} evaluated: {} incompatible, {} policy-denied, {} excluded)",
-                    providers.len(),
-                    incompatible_providers.len(),
-                    policy_denied_providers.len(),
-                    excluded_providers.len() - policy_denied_providers.len()
-                ),
+                message: if compatible_providers.is_empty() {
+                    format!(
+                        "no provider proved it satisfies this workload contract and is admitted by policy ({} evaluated: {} incompatible, {} policy-denied, {} excluded)",
+                        providers.len(),
+                        incompatible_providers.len(),
+                        policy_denied_providers.len(),
+                        excluded_providers.len() - policy_denied_providers.len()
+                    )
+                } else {
+                    format!(
+                        "{} provider(s) are eligible, but none matches placement policy {:?}",
+                        compatible_providers.len(),
+                        placement_policy
+                    )
+                },
             }),
         ),
     };
@@ -422,6 +525,7 @@ pub fn place(
         admission,
         &selection_policy,
         selection_mode,
+        &placement_policy,
         explicit,
         &providers,
     );
@@ -440,6 +544,7 @@ pub fn place(
             PlacementOutcome::PlacementFailed
         },
         selection_mode,
+        placement_policy: placement_policy.clone(),
         requested_provider: explicit.map(str::to_owned),
         requirements: requirements.clone(),
         selection_policy,
@@ -517,6 +622,8 @@ fn evaluate(
         runtime_distribution: descriptor
             .and_then(|descriptor| descriptor.runtime(requirements.runtime.kind))
             .and_then(|runtime| runtime.distribution.clone()),
+        platform: descriptor.map(|descriptor| descriptor.distribution.platform.clone()),
+        resources: descriptor.map(|descriptor| descriptor.resources.clone()),
         status,
         reasons,
         admission,
@@ -569,6 +676,7 @@ fn placement_identity(
     admission: &AdmissionContext,
     policy: &SelectionPolicy,
     mode: SelectionMode,
+    placement_policy: &PlacementPolicy,
     explicit: Option<&str>,
     providers: &[ProviderEvaluation],
 ) -> String {
@@ -584,6 +692,12 @@ fn placement_identity(
         admission_id: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         health: Option<Health>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cpu_available: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        memory_available: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disk_available: Option<u64>,
     }
     #[derive(Serialize)]
     struct Material<'a> {
@@ -593,6 +707,7 @@ fn placement_identity(
         contract: &'a ExecutionContract,
         selection_policy: &'a SelectionPolicy,
         selection_mode: SelectionMode,
+        placement_policy: &'a PlacementPolicy,
         requested_provider: Option<&'a str>,
         providers: Vec<Member<'a>>,
     }
@@ -603,6 +718,7 @@ fn placement_identity(
         contract: &admission.contract,
         selection_policy: policy,
         selection_mode: mode,
+        placement_policy,
         requested_provider: explicit,
         providers: providers
             .iter()
@@ -618,6 +734,24 @@ fn placement_identity(
                     .as_ref()
                     .map(|decision| decision.admission_id.as_str()),
                 health: policy.require_healthy.then_some(provider.health),
+                cpu_available: requirements.resources.cpu_count.and_then(|_| {
+                    provider
+                        .resources
+                        .as_ref()
+                        .map(|resources| resources.available.cpu_count)
+                }),
+                memory_available: requirements.resources.memory_bytes.and_then(|_| {
+                    provider
+                        .resources
+                        .as_ref()
+                        .map(|resources| resources.available.memory_bytes)
+                }),
+                disk_available: requirements.resources.disk_bytes.and_then(|_| {
+                    provider
+                        .resources
+                        .as_ref()
+                        .map(|resources| resources.available.disk_bytes)
+                }),
             })
             .collect(),
     })
@@ -670,11 +804,17 @@ fn explain(
     requires.push(format!("network {}", requirements.network));
     let resources = &requirements.resources;
     let mut limits = vec![];
+    if let Some(value) = resources.cpu_count {
+        limits.push(format!("cpu count {value}"));
+    }
     if let Some(value) = resources.timeout_ms {
         limits.push(format!("timeout {value}ms"));
     }
     if let Some(value) = resources.memory_bytes {
         limits.push(format!("memory {value} bytes"));
+    }
+    if let Some(value) = resources.disk_bytes {
+        limits.push(format!("disk {value} bytes"));
     }
     if let Some(value) = resources.cpu_time_ms {
         limits.push(format!("cpu time {value}ms"));
@@ -697,6 +837,9 @@ fn explain(
         Some(platform) => format!("platform {}", platform.label()),
         None => "platform: any".into(),
     });
+    if let Some(architecture) = &requirements.architecture {
+        requires.push(format!("architecture {architecture}"));
+    }
     requires.push(format!(
         "artifact {} transport of {} bytes, {} submission",
         requirements.artifact.mode,

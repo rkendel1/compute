@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use compute_core::{
-    IsolationProfile, NetworkPolicy, PlatformIdentity, ProviderIdentity, ResourceLimits,
-    RuntimeCapabilities, RuntimeKind,
+    IsolationProfile, NetworkPolicy, PlatformIdentity, ProviderIdentity, ProviderResourceInventory,
+    ResourceLimits, RuntimeCapabilities, RuntimeKind,
 };
 use compute_provider::{ProviderCapabilities, REMOTE_PROTOCOL};
 use serde::{Deserialize, Serialize};
@@ -162,7 +162,8 @@ pub struct ProviderDescriptor {
     /// Identity the provider reports and binds into receipts.
     pub provider_identity: ProviderIdentity,
     pub protocol_version: String,
-    /// Digest of every capability field (everything except availability).
+    /// Digest of stable capability fields. Health, observation timestamps,
+    /// and currently available resources are excluded.
     pub capability_version: String,
     pub runtimes: Vec<RuntimeOffer>,
     /// Runtimes the provider knows but cannot execute right now.
@@ -171,6 +172,7 @@ pub struct ProviderDescriptor {
     pub isolation_profiles: Vec<IsolationProfile>,
     pub network_capabilities: Vec<NetworkPolicy>,
     pub resource_capabilities: ResourceCapabilities,
+    pub resources: ProviderResourceInventory,
     pub dependency_capsules: DependencyCapsuleSupport,
     pub artifact_limits: ArtifactLimits,
     /// The provider's advertised execution policy, validated.
@@ -283,6 +285,30 @@ impl ProviderDescriptor {
                 "resource_capabilities",
                 "resource limits must be positive when present",
             ));
+        }
+        for (name, available, capacity) in [
+            (
+                "cpu_count",
+                capabilities.resources.available.cpu_count,
+                capabilities.resources.capacity.cpu_count,
+            ),
+            (
+                "memory_bytes",
+                capabilities.resources.available.memory_bytes,
+                capabilities.resources.capacity.memory_bytes,
+            ),
+            (
+                "disk_bytes",
+                capabilities.resources.available.disk_bytes,
+                capabilities.resources.capacity.disk_bytes,
+            ),
+        ] {
+            if available > capacity {
+                return Err(invalid(
+                    format!("resources.available.{name}"),
+                    format!("available {available} exceeds capacity {capacity}"),
+                ));
+            }
         }
         if capabilities.max_concurrent_jobs == Some(0) {
             return Err(invalid(
@@ -444,6 +470,7 @@ impl ProviderDescriptor {
                 max_timeout_ms: capabilities.max_timeout_ms,
                 max_memory_bytes: capabilities.max_memory_bytes,
             },
+            resources: capabilities.resources.clone(),
             dependency_capsules: DependencyCapsuleSupport {
                 transfer: formats
                     .iter()
@@ -487,6 +514,7 @@ impl ProviderDescriptor {
             isolation_profiles: &'a [IsolationProfile],
             network_capabilities: &'a [NetworkPolicy],
             resource_capabilities: &'a ResourceCapabilities,
+            resource_capacity: &'a compute_core::ResourceVector,
             dependency_capsules: &'a DependencyCapsuleSupport,
             artifact_limits: &'a ArtifactLimits,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -504,6 +532,7 @@ impl ProviderDescriptor {
             isolation_profiles: &self.isolation_profiles,
             network_capabilities: &self.network_capabilities,
             resource_capabilities: &self.resource_capabilities,
+            resource_capacity: &self.resources.capacity,
             dependency_capsules: &self.dependency_capsules,
             artifact_limits: &self.artifact_limits,
             policy: &self.policy,

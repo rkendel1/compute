@@ -263,7 +263,7 @@ fn run_provider_auto_and_explicit_use_canonical_placement() {
     )
     .unwrap();
 
-    for provider in ["auto", "local"] {
+    for provider in ["auto", "provider:local"] {
         let output = Command::cargo_bin("compute")
             .unwrap()
             .args(["run", wasm.to_str().unwrap(), "--provider", provider])
@@ -791,7 +791,7 @@ fn direct_javascript_is_ambiguous_and_compute_toml_resolves_it() {
 
     std::fs::write(
         temp.path().join("compute.toml"),
-        "[run]\nruntime = \"node\"\nversion = \">=24,<25\"\nentrypoint = \"app.js\"\n[network]\nmode = \"disabled\"\n",
+        "[runtime]\nname = \"node\"\nversion = \">=24,<25\"\narchitecture = \"arm64\"\n[run]\nentrypoint = \"app.js\"\n[resources]\ncpu = 2\nmemory = \"2GiB\"\ndisk = \"5GiB\"\n[network]\nmode = \"disabled\"\n",
     )
     .unwrap();
     Command::cargo_bin("compute")
@@ -803,6 +803,12 @@ fn direct_javascript_is_ambiguous_and_compute_toml_resolves_it() {
         .stdout(predicate::str::contains(
             "\"runtime_version\": \">=24,<25\"",
         ))
+        .stdout(predicate::str::contains("\"architecture\": \"arm64\""))
+        .stdout(predicate::str::contains("\"cpu_count\": 2"))
+        .stdout(predicate::str::contains(
+            "\"memory_required_bytes\": 2147483648",
+        ))
+        .stdout(predicate::str::contains("\"disk_bytes\": 5368709120"))
         .stdout(predicate::str::contains(
             "\"configuration\": \"compute.toml\"",
         ));

@@ -48,7 +48,15 @@ pub struct DependencyRequirement {
 #[serde(deny_unknown_fields)]
 pub struct ResourceRequirement {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bytes: Option<u64>,
+    /// Memory that must be enforced as a limit, if requested separately from
+    /// environment capacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_limit_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,7 +72,10 @@ pub struct ResourceRequirement {
 impl ResourceRequirement {
     pub fn to_limits(&self) -> compute_core::ResourceLimits {
         compute_core::ResourceLimits {
-            memory_bytes: self.memory_bytes,
+            cpu_count: self.cpu_count,
+            memory_required_bytes: None,
+            memory_bytes: self.memory_limit_bytes,
+            disk_bytes: self.disk_bytes,
             cpu_time: self.cpu_time_ms.map(std::time::Duration::from_millis),
             wall_time: self.timeout_ms.map(std::time::Duration::from_millis),
             process_count: self.process_count,
@@ -116,6 +127,9 @@ pub struct PlacementRequirements {
     pub resources: ResourceRequirement,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<PlatformIdentity>,
+    /// Architecture-only constraint from a portable workload declaration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
     pub artifact: ArtifactRequirement,
 }
 
@@ -249,7 +263,10 @@ impl PlacementRequirements {
             host: workload.isolation.host,
             network: workload.network.clone(),
             resources: ResourceRequirement {
-                memory_bytes: resources.memory_bytes,
+                cpu_count: resources.cpu_count,
+                memory_bytes: resources.memory_required_bytes.or(resources.memory_bytes),
+                memory_limit_bytes: resources.memory_bytes,
+                disk_bytes: resources.disk_bytes,
                 timeout_ms: resources.wall_time.map(duration_ms),
                 cpu_time_ms: resources.cpu_time.map(duration_ms),
                 process_count: resources.process_count,
@@ -257,6 +274,7 @@ impl PlacementRequirements {
                 stderr_bytes: resources.stderr_bytes,
             },
             platform,
+            architecture: workload.architecture.clone(),
             artifact: ArtifactRequirement {
                 mode: "bundle".into(),
                 request_bytes,

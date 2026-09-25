@@ -15,9 +15,9 @@ use compute_core::{
     PlatformIdentity, WorkloadBundle,
 };
 use compute_placement::{
-    CapabilityCache, DiscoveryMode, DiscoveryRecord, PlacementOutcome, PlacementReport,
-    PlacementRequirements, PoolConfig, ProviderPool, RequirementOptions, SubmissionMode, dispatch,
-    place,
+    CapabilityCache, DiscoveryMode, DiscoveryRecord, PlacementOutcome, PlacementPolicy,
+    PlacementReport, PlacementRequirements, PoolConfig, ProviderPool, RequirementOptions,
+    SubmissionMode, dispatch, place_with_policy,
 };
 use compute_provider::{ComputeProvider, LocalProvider, ProviderRequest, RemoteProvider};
 
@@ -193,7 +193,7 @@ pub struct PlacementArtifact {
     pub path: Option<PathBuf>,
     #[arg(long)]
     pub bundle: Option<PathBuf>,
-    /// Require this configured provider; it is validated, never substituted.
+    /// Placement policy: auto, local, remote, provider:<id>, or a legacy bare ID.
     #[arg(long)]
     pub provider: Option<String>,
     /// Discover capabilities now instead of using cached descriptors.
@@ -663,25 +663,48 @@ pub(crate) async fn evaluate(
             .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
     let admission = compute_placement::AdmissionContext::new(&policy.sources()?, contract);
     let pool = location.pool()?;
-    let explicit = artifact.provider.as_deref();
+    let placement_policy = parse_placement_policy(artifact.provider.as_deref())?;
+    let explicit = match &placement_policy {
+        PlacementPolicy::Provider(id) => Some(id.as_str()),
+        _ => None,
+    };
     let only = explicit.filter(|id| pool.member(id).is_some());
     let records = if explicit.is_some() && only.is_none() {
         vec![]
     } else {
         discover(location, &pool, artifact.refresh, only).await?
     };
-    let report = place(
+    let report = place_with_policy(
         &pool.configs(),
         pool.policy(),
         &records,
         &requirements,
         &admission,
-        explicit,
+        placement_policy,
     );
     if let Some(path) = &artifact.placement_output {
         std::fs::write(path, serde_json::to_vec_pretty(&report)?)?;
     }
     Ok((pool, report, request))
+}
+
+fn parse_placement_policy(value: Option<&str>) -> compute_core::Result<PlacementPolicy> {
+    Ok(match value.unwrap_or("auto") {
+        "auto" => PlacementPolicy::Auto,
+        "local" => PlacementPolicy::Local,
+        "remote" => PlacementPolicy::Remote,
+        value if value.starts_with("provider:") => {
+            let id = value.trim_start_matches("provider:");
+            compute_placement::validate_provider_id(id)
+                .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
+            PlacementPolicy::Provider(id.to_owned())
+        }
+        id => {
+            compute_placement::validate_provider_id(id)
+                .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
+            PlacementPolicy::Provider(id.to_owned())
+        }
+    })
 }
 
 pub async fn placement(command: PlacementCommand) -> compute_core::Result<()> {
@@ -748,18 +771,27 @@ fn print_summary(report: &PlacementReport) {
             .map(enum_label)
             .unwrap_or_else(|| "-".into());
         println!(
-            "  {}\t{}\tpriority {}\truntime {}\t{}",
+            "  {}\t{}\tpriority {}\truntime {}",
             provider.provider_id,
             provider.status.as_str(),
             provider.priority,
-            runtime,
-            provider
-                .reasons
-                .iter()
-                .map(|reason| reason.code.as_str())
-                .collect::<Vec<_>>()
-                .join(",")
+            runtime
         );
+        if provider.reasons.is_empty()
+            && provider.status == compute_placement::EvaluationStatus::Compatible
+        {
+            println!("    ✓ entire workload contract");
+        }
+        for reason in &provider.reasons {
+            println!(
+                "    ✗ {}: {}",
+                reason.code.as_str(),
+                reason.detail.clone().unwrap_or_else(|| format!(
+                    "requires {}, available {}",
+                    reason.required, reason.available
+                ))
+            );
+        }
     }
     println!(
         "Compatible: {}",

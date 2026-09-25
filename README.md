@@ -56,7 +56,7 @@ and [docs/placement.md](docs/placement.md).
 compute provider list
 compute placement explain ./script.py
 compute run ./script.py --provider auto
-compute run ./script.py --provider production
+compute run ./script.py --provider provider:production
 compute runtimes --provider production
 compute pool submit --bundle script.compute --json
 ```
@@ -248,6 +248,21 @@ Environment inheritance remains disabled.
   },
   "network": "network"
 }
+```
+
+Directory workloads may declare the portable runtime and placement resources
+in `compute.toml`:
+
+```toml
+[runtime]
+name = "node"
+version = ">=24"
+architecture = "arm64"
+
+[resources]
+cpu = 2
+memory = "2GiB"
+disk = "5GiB"
 ```
 
 Execute, inspect, or plan the same specification without creating another

@@ -6,7 +6,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ComputeError, ExecutionErrorKind, ExecutionInputSource, ExecutionRequest, ExecutionResult,
-    ExecutionStatus, IsolationEvidence, NetworkPolicy, ResolvedRuntime, Result, RuntimeKind,
+    ExecutionStatus, IsolationEvidence, NetworkPolicy, PlatformIdentity, ProviderResourceInventory,
+    ResolvedRuntime, ResourceVector, Result, RuntimeKind,
 };
 
 pub const RECEIPT_VERSION: &str = "compute.receipt@1";
@@ -306,6 +307,18 @@ pub struct ReceiptPlacement {
     pub provider_protocol: String,
     pub selection_mode: SelectionMode,
     pub selection_reason: SelectionReason,
+    /// Resources requested by the workload when placement ran.
+    #[serde(default)]
+    pub requested_resources: ResourceVector,
+    /// Capacity and availability observed on the selected provider.
+    #[serde(default)]
+    pub provider_resources: ProviderResourceInventory,
+    /// Allocation admitted for this execution. Usage is reported separately.
+    #[serde(default)]
+    pub allocated_resources: ResourceVector,
+    /// Platform the selected provider advertised and executed on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_platform: Option<PlatformIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

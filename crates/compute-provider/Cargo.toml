@@ -11,6 +11,7 @@ chrono.workspace = true
 compute-core = { path = "../compute-core" }
 compute-policy = { path = "../compute-policy" }
 compute-runtime = { path = "../compute-runtime" }
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

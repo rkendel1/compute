@@ -381,8 +381,19 @@ pub struct IsolationPlan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResourceLimits {
+    /// Logical CPUs required for placement. This is an allocation request,
+    /// not a CPU-time enforcement limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_count: Option<u32>,
+    /// Memory required from an execution environment for placement. Unlike
+    /// `memory_bytes`, this does not request runtime limit enforcement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_required_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_bytes: Option<u64>,
+    /// Scratch disk bytes required in the execution environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
     #[serde(
         rename = "cpu_time_ms",
         alias = "cpu_time",
@@ -403,6 +414,24 @@ pub struct ResourceLimits {
     pub stdout_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr_bytes: Option<u64>,
+}
+
+/// A resource vector used for provider inventory and receipt evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResourceVector {
+    pub cpu_count: u64,
+    pub memory_bytes: u64,
+    pub disk_bytes: u64,
+}
+
+/// Capacity is the configured ceiling; available is the allocatable snapshot
+/// observed for a placement decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProviderResourceInventory {
+    pub capacity: ResourceVector,
+    pub available: ResourceVector,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -476,6 +505,9 @@ pub struct WorkloadSpec {
     pub runtime: RuntimeKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_version: Option<String>,
+    /// Required execution architecture, independent of the caller's host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
     pub entrypoint: PathBuf,
     #[serde(default)]
     pub args: Vec<String>,
@@ -571,6 +603,22 @@ impl WorkloadSpec {
         }
 
         validate_resource_value(self.resources.memory_bytes, "memory_bytes")?;
+        validate_resource_value(
+            self.resources.memory_required_bytes,
+            "memory_required_bytes",
+        )?;
+        validate_resource_value(self.resources.cpu_count.map(u64::from), "cpu_count")?;
+        validate_resource_value(self.resources.disk_bytes, "disk_bytes")?;
+        if self.architecture.as_deref().is_some_and(|value| {
+            value.is_empty()
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        }) {
+            return Err(ComputeError::InvalidWorkload(
+                "architecture must be a non-empty token".into(),
+            ));
+        }
         validate_resource_value(
             self.resources
                 .cpu_time
@@ -2941,6 +2989,7 @@ mod tests {
             version: WORKLOAD_SPEC_VERSION.into(),
             runtime: RuntimeKind::Python,
             runtime_version: None,
+            architecture: None,
             entrypoint: "main.py".into(),
             args: vec!["hello world".into()],
             env: [("MODE".into(), "test".into())].into_iter().collect(),

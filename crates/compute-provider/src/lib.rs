@@ -16,9 +16,9 @@ pub use compute_policy::{
 
 use compute_core::{
     BundleInput, BundleWorkloadPlan, DependencyCapsule, ExecutionResult, IsolationProfile,
-    NetworkPolicy, ProviderIdentity, ProviderRuntimeRequirement, ReceiptPlacement,
-    RuntimeDistribution, RuntimeInventory, RuntimeKind, RuntimeLifecycleStatus, RuntimePreparation,
-    RuntimeResolution, WorkloadBundle, WorkloadSpec,
+    NetworkPolicy, ProviderIdentity, ProviderResourceInventory, ProviderRuntimeRequirement,
+    ReceiptPlacement, ResourceVector, RuntimeDistribution, RuntimeInventory, RuntimeKind,
+    RuntimeLifecycleStatus, RuntimePreparation, RuntimeResolution, WorkloadBundle, WorkloadSpec,
 };
 use compute_runtime::Compute;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -305,6 +305,9 @@ pub struct ProviderCapabilities {
     /// Largest memory limit this provider accepts, when bounded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_memory_bytes: Option<u64>,
+    /// Physical/configured capacity and currently allocatable resources.
+    #[serde(default)]
+    pub resources: ProviderResourceInventory,
     /// The provider's own execution policy, when one is configured. Callers
     /// intersect it with theirs; the provider enforces it regardless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -328,6 +331,10 @@ pub struct ProviderPolicy {
     pub max_timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_memory_bytes: Option<u64>,
+    /// Optional operator-defined provider capacity. When absent, Compute
+    /// detects resources from the execution host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_capacity: Option<ResourceVector>,
 }
 
 impl ProviderPolicy {
@@ -390,8 +397,119 @@ impl ProviderPolicy {
                 "memory {requested} bytes exceeds this provider's limit of {limit} bytes"
             ));
         }
+        if let Some(capacity) = &self.resource_capacity {
+            let requested = &workload.resources;
+            if requested
+                .cpu_count
+                .is_some_and(|value| u64::from(value) > capacity.cpu_count)
+            {
+                return reject(format!(
+                    "cpu requires {}, available {}",
+                    requested.cpu_count.unwrap_or_default(),
+                    capacity.cpu_count
+                ));
+            }
+            let memory_required = requested.memory_required_bytes.or(requested.memory_bytes);
+            if memory_required.is_some_and(|value| value > capacity.memory_bytes) {
+                return reject(format!(
+                    "memory requires {} bytes, available {} bytes",
+                    memory_required.unwrap_or_default(),
+                    capacity.memory_bytes
+                ));
+            }
+            if requested
+                .disk_bytes
+                .is_some_and(|value| value > capacity.disk_bytes)
+            {
+                return reject(format!(
+                    "disk requires {} bytes, available {} bytes",
+                    requested.disk_bytes.unwrap_or_default(),
+                    capacity.disk_bytes
+                ));
+            }
+        }
         Ok(())
     }
+}
+
+fn provider_resources(policy: &ProviderPolicy) -> ProviderResourceInventory {
+    if let Some(capacity) = &policy.resource_capacity {
+        return ProviderResourceInventory {
+            capacity: capacity.clone(),
+            available: capacity.clone(),
+        };
+    }
+
+    let cpu_count = std::thread::available_parallelism()
+        .map(|value| value.get() as u64)
+        .unwrap_or(1);
+    let (memory_bytes, memory_available) = detected_memory();
+    let (disk_bytes, disk_available) = detected_disk();
+    ProviderResourceInventory {
+        capacity: ResourceVector {
+            cpu_count,
+            memory_bytes,
+            disk_bytes,
+        },
+        available: ResourceVector {
+            cpu_count,
+            memory_bytes: memory_available,
+            disk_bytes: disk_available,
+        },
+    }
+}
+
+#[cfg(unix)]
+fn detected_memory() -> (u64, u64) {
+    // sysconf is portable across the macOS development host and Linux
+    // providers. Saturating arithmetic keeps malformed host values inert.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+    #[cfg(not(target_os = "macos"))]
+    let available = unsafe { libc::sysconf(libc::_SC_AVPHYS_PAGES) };
+    #[cfg(target_os = "macos")]
+    let available = pages;
+    if page_size <= 0 || pages <= 0 {
+        return (0, 0);
+    }
+    let page_size = page_size as u64;
+    let capacity = (pages as u64).saturating_mul(page_size);
+    let available = if available > 0 {
+        (available as u64).saturating_mul(page_size).min(capacity)
+    } else {
+        capacity
+    };
+    (capacity, available)
+}
+
+#[cfg(not(unix))]
+fn detected_memory() -> (u64, u64) {
+    (0, 0)
+}
+
+#[cfg(unix)]
+fn detected_disk() -> (u64, u64) {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return (0, 0);
+    };
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return (0, 0);
+    }
+    let stats = unsafe { stats.assume_init() };
+    let block_size = stats.f_frsize as u64;
+    (
+        (stats.f_blocks as u64).saturating_mul(block_size),
+        (stats.f_bavail as u64).saturating_mul(block_size),
+    )
+}
+
+#[cfg(not(unix))]
+fn detected_disk() -> (u64, u64) {
+    (0, 0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -537,6 +655,33 @@ impl LocalProvider {
         self.executions_started.load(Ordering::SeqCst)
     }
 
+    fn check_available_resources(&self, bundle: &WorkloadBundle) -> Result<(), ProviderError> {
+        let available = provider_resources(&self.policy).available;
+        let requested = &bundle.workload.resources;
+        let reject = |name: &str, required: u64, found: u64| {
+            ProviderError::new(
+                ProviderErrorKind::CapabilityMismatch,
+                format!("{name} requires {required}, available {found}"),
+            )
+        };
+        if let Some(cpu) = requested.cpu_count
+            && u64::from(cpu) > available.cpu_count
+        {
+            return Err(reject("cpu", u64::from(cpu), available.cpu_count));
+        }
+        if let Some(memory) = requested.memory_required_bytes.or(requested.memory_bytes)
+            && memory > available.memory_bytes
+        {
+            return Err(reject("memory bytes", memory, available.memory_bytes));
+        }
+        if let Some(disk) = requested.disk_bytes
+            && disk > available.disk_bytes
+        {
+            return Err(reject("disk bytes", disk, available.disk_bytes));
+        }
+        Ok(())
+    }
+
     fn effective_policy(&self, request: &ProviderRequest) -> EffectivePolicy {
         let mut sources = vec![];
         if let Some(policy) = self.execution_policy() {
@@ -559,6 +704,9 @@ impl LocalProvider {
         let mut codes = vec![];
         if let Err(error) = self.policy.check(bundle, isolation) {
             codes.push(format!("provider_restricted: {}", error.message));
+        }
+        if let Err(error) = self.check_available_resources(bundle) {
+            codes.push(format!("resource_unavailable: {}", error.message));
         }
         match self.inspect(request.clone()).await {
             Ok(response) => {
@@ -706,6 +854,7 @@ impl LocalProvider {
                 .unwrap_or(bundle.workload.isolation.profile)
                 .max(bundle.workload.isolation.profile),
         )?;
+        self.check_available_resources(&bundle)?;
         if let Some(placement) = &request.execution.placement {
             compute_core::validate_sha256_identity(&placement.placement_id).map_err(|error| {
                 ProviderError::new(ProviderErrorKind::PolicyRejected, error.to_string())
@@ -718,6 +867,29 @@ impl LocalProvider {
                         placement.provider_protocol,
                         identity_protocol(&self.identity)
                     ),
+                ));
+            }
+            let requested = ResourceVector {
+                cpu_count: bundle
+                    .workload
+                    .resources
+                    .cpu_count
+                    .map(u64::from)
+                    .unwrap_or(0),
+                memory_bytes: bundle
+                    .workload
+                    .resources
+                    .memory_required_bytes
+                    .or(bundle.workload.resources.memory_bytes)
+                    .unwrap_or(0),
+                disk_bytes: bundle.workload.resources.disk_bytes.unwrap_or(0),
+            };
+            if placement.requested_resources != requested
+                || placement.allocated_resources != requested
+            {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::PolicyRejected,
+                    "placement resource evidence differs from the workload contract",
                 ));
             }
         }
@@ -1013,6 +1185,7 @@ impl ComputeProvider for LocalProvider {
             runtime_artifacts,
             max_timeout_ms: self.policy.max_timeout_ms,
             max_memory_bytes: self.policy.max_memory_bytes,
+            resources: provider_resources(&self.policy),
             policy: self.execution_policy(),
             inventory,
         })

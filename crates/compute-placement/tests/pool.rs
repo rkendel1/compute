@@ -130,6 +130,7 @@ fn wasm_bundle(isolation: IsolationProfile) -> WorkloadBundle {
         version: WORKLOAD_SPEC_VERSION.into(),
         runtime: RuntimeKind::Wasm,
         runtime_version: None,
+        architecture: None,
         entrypoint: "main.wasm".into(),
         args: vec![],
         env: BTreeMap::new(),
@@ -160,6 +161,7 @@ fn shell_bundle() -> WorkloadBundle {
         version: WORKLOAD_SPEC_VERSION.into(),
         runtime: RuntimeKind::Shell,
         runtime_version: None,
+        architecture: None,
         entrypoint: "main.sh".into(),
         args: vec![],
         env: BTreeMap::new(),
@@ -283,7 +285,10 @@ async fn placement_selects_only_providers_that_satisfy_each_workload() {
 
     // Strict WASM: the priority-100 process provider cannot satisfy strict
     // isolation and must never win. `strict` (50) beats `local` (10).
-    let bundle = wasm_bundle(IsolationProfile::Strict);
+    let mut bundle = wasm_bundle(IsolationProfile::Strict);
+    bundle.workload.resources.cpu_count = Some(1);
+    bundle.workload.resources.memory_required_bytes = Some(64 * 1024 * 1024);
+    bundle.workload.resources.disk_bytes = Some(1024 * 1024);
     let (request, requirements, admission) = prepare(&bundle, SubmissionMode::Synchronous);
     let report = place(
         &matrix.pool.configs(),
@@ -334,6 +339,11 @@ async fn placement_selects_only_providers_that_satisfy_each_workload() {
     assert_eq!(placement.provider_id, "strict");
     assert_eq!(placement.selection_mode, SelectionMode::Pool);
     assert_eq!(placement.provider_protocol, "compute.remote@1");
+    assert_eq!(placement.requested_resources.cpu_count, 1);
+    assert_eq!(placement.requested_resources.memory_bytes, 64 * 1024 * 1024);
+    assert_eq!(placement.allocated_resources.disk_bytes, 1024 * 1024);
+    assert!(placement.provider_resources.available.cpu_count >= 1);
+    assert!(placement.execution_platform.is_some());
     assert_eq!(
         receipt.provider,
         Some(ProviderIdentity::Remote {
@@ -704,7 +714,16 @@ async fn repeated_discovery_and_placement_is_deterministic() {
             None,
         );
         assert_eq!(again.placement_id, first.placement_id);
-        assert_eq!(again.selected, first.selected);
+        assert_eq!(
+            again
+                .selected
+                .as_ref()
+                .map(|selected| &selected.provider_id),
+            first
+                .selected
+                .as_ref()
+                .map(|selected| &selected.provider_id)
+        );
         assert_eq!(again.explanation, first.explanation);
     }
 }

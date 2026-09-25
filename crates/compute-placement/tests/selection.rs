@@ -4,7 +4,7 @@ use chrono::Duration;
 use compute_core::{IsolationProfile, RuntimeKind, SelectionMode};
 use compute_placement::{
     Availability, DiscoveryRecord, DiscoveryStatus, EvaluationStatus, Health, PlacementOutcome,
-    PoolPolicy, ProviderDescriptor, ProviderKind, place,
+    PlacementPolicy, PoolPolicy, ProviderDescriptor, ProviderKind, place, place_with_policy,
 };
 use support::*;
 
@@ -12,6 +12,83 @@ fn wasm_strict() -> compute_placement::PlacementRequirements {
     let mut requirements = requirements(RuntimeKind::Wasm);
     requirements.isolation = IsolationProfile::Strict;
     requirements
+}
+
+fn sized_provider(kind: ProviderKind, cpu: u64, memory_gib: u64) -> Synthetic {
+    let mut provider = Synthetic::new(kind, &[RuntimeKind::Wasm]);
+    let resources = compute_core::ResourceVector {
+        cpu_count: cpu,
+        memory_bytes: memory_gib * 1024 * 1024 * 1024,
+        disk_bytes: 20 * 1024 * 1024 * 1024,
+    };
+    provider.resources = compute_core::ProviderResourceInventory {
+        capacity: resources.clone(),
+        available: resources,
+    };
+    provider
+}
+
+#[test]
+fn resource_eligibility_precedes_selection_policy_and_binds_receipt_evidence() {
+    let config = config(&[
+        ("local-small", ProviderKind::Local, 100),
+        ("local-large", ProviderKind::Local, 50),
+        ("remote", ProviderKind::Remote, 75),
+    ]);
+    let records = vec![
+        sized_provider(ProviderKind::Local, 2, 2).record("local-small"),
+        sized_provider(ProviderKind::Local, 8, 16).record("local-large"),
+        sized_provider(ProviderKind::Remote, 4, 8).record("remote"),
+    ];
+
+    let mut small = wasm_strict();
+    small.resources.cpu_count = Some(1);
+    small.resources.memory_bytes = Some(512 * 1024 * 1024);
+    let small_report = place_with_policy(
+        &config.providers,
+        &config.pool,
+        &records,
+        &small,
+        &baseline(&small),
+        PlacementPolicy::Remote,
+    );
+    assert_eq!(
+        small_report.compatible_providers,
+        ["local-small", "remote", "local-large"]
+    );
+    assert_eq!(
+        small_report.selected.as_ref().unwrap().provider_id,
+        "remote"
+    );
+
+    let mut large = wasm_strict();
+    large.resources.cpu_count = Some(6);
+    large.resources.memory_bytes = Some(8 * 1024 * 1024 * 1024);
+    let large_report = place_with_policy(
+        &config.providers,
+        &config.pool,
+        &records,
+        &large,
+        &baseline(&large),
+        PlacementPolicy::Auto,
+    );
+    assert_eq!(large_report.compatible_providers, ["local-large"]);
+    assert_eq!(
+        large_report.incompatible_providers,
+        ["local-small", "remote"]
+    );
+    assert_eq!(
+        large_report.selected.as_ref().unwrap().provider_id,
+        "local-large"
+    );
+    let receipt = large_report.receipt_binding().unwrap();
+    assert_eq!(receipt.requested_resources.cpu_count, 6);
+    assert_eq!(
+        receipt.allocated_resources.memory_bytes,
+        8 * 1024 * 1024 * 1024
+    );
+    assert_eq!(receipt.provider_resources.capacity.cpu_count, 8);
+    assert_eq!(receipt.execution_platform.unwrap().label(), "linux-x86_64");
 }
 
 /// A: python/process only (priority 100), B: wasm strict (priority 50),

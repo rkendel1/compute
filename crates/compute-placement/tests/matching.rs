@@ -33,6 +33,64 @@ fn exact_runtime_match_is_compatible() {
 }
 
 #[test]
+fn resource_availability_is_distinct_from_capacity_and_explained() {
+    let mut provider = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Wasm]);
+    provider.resources = compute_core::ProviderResourceInventory {
+        capacity: compute_core::ResourceVector {
+            cpu_count: 8,
+            memory_bytes: 16 * 1024 * 1024 * 1024,
+            disk_bytes: 20 * 1024 * 1024 * 1024,
+        },
+        available: compute_core::ResourceVector {
+            cpu_count: 2,
+            memory_bytes: 2 * 1024 * 1024 * 1024,
+            disk_bytes: 3 * 1024 * 1024 * 1024,
+        },
+    };
+    let mut required = wasm_requirements();
+    required.resources.cpu_count = Some(4);
+    required.resources.memory_bytes = Some(4 * 1024 * 1024 * 1024);
+    required.resources.disk_bytes = Some(5 * 1024 * 1024 * 1024);
+
+    let matched = match_provider(&required, &provider.descriptor("busy"));
+    assert_eq!(
+        matched.codes(),
+        [
+            ReasonCode::CpuUnavailable,
+            ReasonCode::MemoryUnavailable,
+            ReasonCode::DiskUnavailable,
+        ]
+    );
+    assert!(matched.reasons.iter().all(|reason| {
+        reason.available.get("capacity").is_some()
+            && reason.available.get("available").is_some()
+            && reason.detail.is_some()
+    }));
+}
+
+fn wasm_requirements() -> compute_placement::PlacementRequirements {
+    let mut required = requirements(RuntimeKind::Wasm);
+    required.isolation = IsolationProfile::Strict;
+    required
+}
+
+#[test]
+fn portable_architecture_aliases_match_and_mismatches_are_structured() {
+    let mut provider = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Wasm]);
+    provider.platform = "linux-aarch64".into();
+    let descriptor = provider.descriptor("arm");
+    let mut required = wasm_requirements();
+    required.architecture = Some("arm64".into());
+    assert!(match_provider(&required, &descriptor).compatible);
+
+    required.architecture = Some("x86_64".into());
+    assert_eq!(
+        codes(&required, &descriptor),
+        [ReasonCode::ArchitectureMismatch]
+    );
+}
+
+#[test]
 fn wrong_runtime_is_structured() {
     let matched = match_provider(&requirements(RuntimeKind::Node), &python());
     assert!(!matched.compatible);
@@ -302,15 +360,18 @@ fn insufficient_memory() {
     let descriptor = provider.descriptor("p");
     let mut requirements = requirements(RuntimeKind::Wasm);
     requirements.resources.memory_bytes = Some(512 * 1024 * 1024);
+    requirements.resources.memory_limit_bytes = Some(512 * 1024 * 1024);
     assert_eq!(
         codes(&requirements, &descriptor),
         [ReasonCode::MemoryExceedsLimit]
     );
     requirements.resources.memory_bytes = Some(1024);
+    requirements.resources.memory_limit_bytes = Some(1024);
     assert!(match_provider(&requirements, &descriptor).compatible);
 
     let mut python_requirements = crate::requirements(RuntimeKind::Python);
     python_requirements.resources.memory_bytes = Some(1024);
+    python_requirements.resources.memory_limit_bytes = Some(1024);
     assert_eq!(
         codes(&python_requirements, &descriptor),
         [ReasonCode::MemoryUnenforceable]

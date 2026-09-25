@@ -32,8 +32,8 @@ pub use matching::{
 };
 pub use placement::{
     AdmissionContext, EvaluationStatus, PLACEMENT_VERSION, PlacementExplanation, PlacementFailure,
-    PlacementOutcome, PlacementReport, ProviderEvaluation, SelectedProvider, SelectionPolicy,
-    place,
+    PlacementOutcome, PlacementPolicy, PlacementReport, ProviderEvaluation, SelectedProvider,
+    SelectionPolicy, place, place_with_policy,
 };
 pub use pool::{
     CAPABILITY_CACHE_VERSION, CacheEntry, CapabilityCache, DEFAULT_CAPABILITY_TTL_SECONDS,

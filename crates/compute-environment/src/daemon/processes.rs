@@ -13,6 +13,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::Unit;
+use crate::dataplane::{boot_id, start_time};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ProcessRecord {
@@ -36,31 +37,6 @@ fn path(state_dir: &Path, unit: &Unit) -> PathBuf {
         "{}.json",
         compute_state::short_digest(&[&key.0, &key.1, &key.2, &unit.deployment_id])
     ))
-}
-
-#[cfg(target_os = "linux")]
-fn boot_id() -> Option<String> {
-    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .ok()
-        .map(|id| id.trim().to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn boot_id() -> Option<String> {
-    None
-}
-
-/// Field 22 of `/proc/<pid>/stat`: the start time in clock ticks.
-#[cfg(target_os = "linux")]
-fn start_time(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = &stat[stat.rfind(')')? + 2..];
-    rest.split_whitespace().nth(19)?.parse().ok()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn start_time(_pid: u32) -> Option<u64> {
-    None
 }
 
 /// Record a running service's process group.

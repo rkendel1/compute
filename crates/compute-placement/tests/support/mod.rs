@@ -63,6 +63,7 @@ pub struct Synthetic {
     pub artifacts: BTreeMap<RuntimeKind, String>,
     pub unavailable: Vec<RuntimeKind>,
     pub policy: Option<compute_policy::Policy>,
+    pub resources: compute_core::ProviderResourceInventory,
 }
 
 impl Synthetic {
@@ -87,6 +88,18 @@ impl Synthetic {
             artifacts: BTreeMap::new(),
             unavailable: vec![],
             policy: None,
+            resources: compute_core::ProviderResourceInventory {
+                capacity: compute_core::ResourceVector {
+                    cpu_count: 8,
+                    memory_bytes: 16 * 1024 * 1024 * 1024,
+                    disk_bytes: 100 * 1024 * 1024 * 1024,
+                },
+                available: compute_core::ResourceVector {
+                    cpu_count: 8,
+                    memory_bytes: 16 * 1024 * 1024 * 1024,
+                    disk_bytes: 100 * 1024 * 1024 * 1024,
+                },
+            },
         }
     }
 
@@ -107,6 +120,7 @@ impl Synthetic {
             artifacts: self.artifacts.clone(),
             unavailable: self.unavailable.clone(),
             policy: self.policy.clone(),
+            resources: self.resources.clone(),
         }
     }
 
@@ -189,6 +203,7 @@ impl Synthetic {
             runtime_artifacts: self.artifacts.clone(),
             max_timeout_ms: self.max_timeout_ms,
             max_memory_bytes: self.max_memory_bytes,
+            resources: self.resources.clone(),
             policy: self.policy.clone(),
             inventory: RuntimeInventory {
                 compute_version: "0.1.0".into(),
@@ -240,6 +255,7 @@ pub fn requirements(kind: RuntimeKind) -> PlacementRequirements {
         },
         resources: ResourceRequirement::default(),
         platform: None,
+        architecture: None,
         artifact: ArtifactRequirement {
             mode: "bundle".into(),
             request_bytes: 4096,

@@ -45,8 +45,10 @@ If no provider satisfies the contract, the result is `placement_failed`, and
 nothing executes.
 
 Use `compute run APP --provider auto` to select by compatibility and the
-pool's deterministic priority ordering. Use `--provider ID` to require one
-configured provider; explicit selection never falls back. The established
+pool's deterministic priority ordering. `--provider local` and
+`--provider remote` filter only the eligible set; `--provider provider:ID`
+requires one configured provider and never falls back. Legacy bare IDs remain
+accepted. The established
 read-only forms are `compute placement APP` (an alias for
 `compute placement inspect APP`) and `compute placement explain APP`.
 
@@ -67,7 +69,13 @@ contain only what affects execution compatibility:
   },
   "isolation": "strict",
   "network": "none",
-  "resources": { "memory_bytes": 536870912, "timeout_ms": 30000 },
+  "resources": {
+    "cpu_count": 2,
+    "memory_bytes": 2147483648,
+    "disk_bytes": 5368709120,
+    "timeout_ms": 30000
+  },
+  "architecture": "arm64",
   "platform": { "os": "linux", "architecture": "x86_64" },
   "artifact": { "mode": "bundle", "request_bytes": 9486, "submission": "synchronous" }
 }
@@ -78,6 +86,7 @@ Where each requirement comes from:
 | Requirement | Source |
 | --- | --- |
 | Runtime kind and version | The workload |
+| CPU, memory, disk, architecture | The workload (`compute.toml` or portable workload specification) |
 | Runtime artifact identity | `--runtime-artifact` |
 | Distribution | `--distribution` |
 | Isolation | The workload's profile. `--isolation` may strengthen it, never weaken it |
@@ -112,7 +121,7 @@ value, and the available value:
 | dependencies | `dependency_format_unsupported`, `dependency_capsule_missing`, `dependency_capsule_mismatch`, `dependency_runtime_mismatch`, `dependency_platform_mismatch` |
 | isolation | `isolation_unsupported` (with the failing boundary, such as `filesystem_isolation_unavailable`) |
 | network | `network_unsupported` |
-| resources | `timeout_unenforceable`, `timeout_exceeds_limit`, `memory_unenforceable`, `memory_exceeds_limit`, `cpu_limit_unenforceable`, `process_limit_unenforceable`, `output_limit_unenforceable` |
+| resources | `cpu_unavailable`, `memory_unavailable`, `disk_unavailable`, `timeout_unenforceable`, `timeout_exceeds_limit`, `memory_unenforceable`, `memory_exceeds_limit`, `cpu_limit_unenforceable`, `process_limit_unenforceable`, `output_limit_unenforceable` |
 | artifact | `artifact_mode_unsupported`, `artifact_too_large`, `output_exceeds_limit`, `jobs_unsupported` |
 
 Runtime isolation is resolved by the same function execution uses, so
@@ -136,6 +145,10 @@ transferred and verified at execution), or when the provider already holds
 There is no host dependency fallback.
 
 ## Selection
+
+Eligibility and selection are separate phases. `local`, `remote`, and
+`provider:ID` never alter capability matching or make an ineligible provider
+eligible.
 
 1. Only providers that are **compatible** and **admitted by policy** are
    candidates. Admission is evaluated per provider, independently of
@@ -168,7 +181,7 @@ incompatible), and `excluded_providers` (compatibility not established).
 ## Explicit provider
 
 ```sh
-compute pool run --provider production ./script.py
+compute pool run --provider provider:production ./script.py
 ```
 
 Only the named provider is evaluated. If it is compatible, the workload runs

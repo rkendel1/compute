@@ -145,6 +145,15 @@ struct ServeCommand {
     /// Largest memory limit a workload may request.
     #[arg(long, value_parser = parse_memory)]
     max_memory: Option<u64>,
+    /// Override advertised CPU capacity (fixture/fleet allocation budget).
+    #[arg(long, requires_all = ["resource_memory", "resource_disk"])]
+    resource_cpu: Option<u64>,
+    /// Override advertised memory capacity.
+    #[arg(long, value_parser = parse_memory, requires_all = ["resource_cpu", "resource_disk"])]
+    resource_memory: Option<u64>,
+    /// Override advertised scratch disk capacity.
+    #[arg(long, value_parser = parse_memory, requires_all = ["resource_cpu", "resource_memory"])]
+    resource_disk: Option<u64>,
     /// Execution policy this server enforces: `--policy FILE`, or
     /// `[server.policy] path` in `--config`/compute.toml.
     #[command(flatten)]
@@ -485,8 +494,7 @@ struct RunCommand {
     bundle: Option<PathBuf>,
     #[arg(long)]
     runtime: Option<String>,
-    /// Execute through the caller-owned provider pool. `auto` selects the
-    /// highest-priority compatible provider; an ID requires that provider.
+    /// Placement policy: auto, local, remote, or provider:<id>.
     #[arg(long)]
     provider: Option<String>,
     /// Discover provider capabilities now instead of using a fresh cache.
@@ -1348,6 +1356,13 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     .max_timeout
                     .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX)),
                 max_memory_bytes: command.max_memory,
+                resource_capacity: command.resource_cpu.map(|cpu_count| {
+                    compute_core::ResourceVector {
+                        cpu_count,
+                        memory_bytes: command.resource_memory.expect("clap requires memory"),
+                        disk_bytes: command.resource_disk.expect("clap requires disk"),
+                    }
+                }),
             };
             let execution_policy = command.execution_policy.server_policy()?;
             if let Some(policy) = &execution_policy {
@@ -1580,7 +1595,10 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
             mounts,
             network,
             ResourceLimits {
+                cpu_count: None,
+                memory_required_bytes: None,
                 memory_bytes: memory,
+                disk_bytes: None,
                 wall_time: timeout,
                 cpu_time: None,
                 process_count: None,
@@ -1659,11 +1677,7 @@ async fn run_with_provider(command: RunCommand) -> compute_core::Result<()> {
             "expected identity flags are not yet supported with provider placement".into(),
         ));
     }
-    let provider = command
-        .provider
-        .as_deref()
-        .filter(|provider| *provider != "auto")
-        .map(str::to_owned);
+    let provider = command.provider.clone();
     let artifact = pool::PlacementArtifact {
         path: command.path,
         bundle: command.bundle,
@@ -2345,6 +2359,24 @@ fn parse_isolation(value: &str) -> Result<IsolationProfile, String> {
 
 fn parse_memory(value: &str) -> Result<u64, String> {
     let normalized = value.trim().to_ascii_lowercase();
+    if let Some(raw) = normalized.strip_suffix("kib") {
+        let kib = raw.parse::<u64>().map_err(|error| error.to_string())?;
+        return kib
+            .checked_mul(1024)
+            .ok_or_else(|| "resource size overflows u64".into());
+    }
+    if let Some(raw) = normalized.strip_suffix("mib") {
+        let mib = raw.parse::<u64>().map_err(|error| error.to_string())?;
+        return mib
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| "resource size overflows u64".into());
+    }
+    if let Some(raw) = normalized.strip_suffix("gib") {
+        let gib = raw.parse::<u64>().map_err(|error| error.to_string())?;
+        return gib
+            .checked_mul(1024 * 1024 * 1024)
+            .ok_or_else(|| "resource size overflows u64".into());
+    }
     if let Some(raw) = normalized.strip_suffix("mb") {
         let mib = raw.parse::<u64>().map_err(|error| error.to_string())?;
         return Ok(mib * 1024 * 1024);

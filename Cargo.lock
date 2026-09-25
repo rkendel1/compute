@@ -581,6 +581,7 @@ dependencies = [
  "compute-core",
  "compute-policy",
  "compute-runtime",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

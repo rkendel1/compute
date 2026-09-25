@@ -42,6 +42,7 @@ pub struct ResolvedDirect {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ProjectConfig {
+    runtime: RuntimeConfig,
     run: RunConfig,
     resources: ResourceConfig,
     network: NetworkConfig,
@@ -50,6 +51,14 @@ struct ProjectConfig {
     policy: Option<toml::Value>,
     /// Server configuration; read by `compute serve`.
     server: Option<toml::Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RuntimeConfig {
+    name: Option<String>,
+    version: Option<String>,
+    architecture: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -66,8 +75,10 @@ struct RunConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ResourceConfig {
+    cpu: Option<u32>,
     timeout: Option<String>,
     memory: Option<String>,
+    disk: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -145,7 +156,11 @@ pub fn resolve(options: DirectOptions) -> compute_core::Result<ResolvedDirect> {
     };
     let entrypoint_host = root.join(&entrypoint);
 
-    let runtime_name = options.runtime.as_deref().or(config.run.runtime.as_deref());
+    let runtime_name = options
+        .runtime
+        .as_deref()
+        .or(config.runtime.name.as_deref())
+        .or(config.run.runtime.as_deref());
     let runtime = match runtime_name {
         Some(value) => value.parse::<RuntimeKind>()?,
         None => detect_runtime(&root, &entrypoint_host)?
@@ -196,6 +211,13 @@ pub fn resolve(options: DirectOptions) -> compute_core::Result<ResolvedDirect> {
             .transpose()
             .map_err(ComputeError::InvalidWorkload)?,
     };
+    let disk = config
+        .resources
+        .disk
+        .as_deref()
+        .map(super::parse_memory)
+        .transpose()
+        .map_err(ComputeError::InvalidWorkload)?;
 
     let mut environment = BTreeMap::new();
     if let Some(path) = options.env_file.as_deref() {
@@ -263,14 +285,23 @@ pub fn resolve(options: DirectOptions) -> compute_core::Result<ResolvedDirect> {
     let workload = WorkloadSpec {
         version: WORKLOAD_SPEC_VERSION.into(),
         runtime,
-        runtime_version: config.run.version,
+        runtime_version: config.runtime.version.or(config.run.version),
+        architecture: config.runtime.architecture,
         entrypoint,
         args: options.args,
         env: environment,
         inputs,
         outputs,
         resources: ResourceLimits {
-            memory_bytes: memory,
+            cpu_count: config.resources.cpu,
+            memory_required_bytes: config
+                .resources
+                .memory
+                .is_some()
+                .then_some(memory)
+                .flatten(),
+            memory_bytes: options.memory,
+            disk_bytes: disk,
             wall_time: timeout,
             ..ResourceLimits::default()
         },

@@ -34,6 +34,7 @@ remotely, `LocalProvider::capabilities` locally). The response describes:
 | `distribution_id`, `inventory.platform` | Exact distribution and `<os>-<architecture>` |
 | `isolation_profiles`, `network_policies` | Offered isolation and network policies |
 | `max_timeout_ms`, `max_memory_bytes` | Upper bounds on requested limits, when bounded |
+| `resources.capacity`, `resources.available` | Configured/detected CPU, memory, and disk ceiling, and the allocatable snapshot used by placement |
 | `dependency_capsule_formats`, `dependency_capsules` | Accepted capsule formats and capsules already resident |
 | `artifact_modes`, `max_request_bytes`, `max_output_bytes` | Artifact transport limits |
 | `max_concurrent_jobs`, `job_retention_seconds` | Present when durable jobs are accepted |
@@ -81,6 +82,13 @@ compute serve --listen 0.0.0.0:8080 \
   --max-timeout 60s --max-memory 1g
 ```
 
+For a provider with an operator-defined allocation budget (including test
+fleets), advertise all three resource dimensions explicitly:
+
+```sh
+compute serve --resource-cpu 8 --resource-memory 16GiB --resource-disk 100GiB
+```
+
 A request that exceeds the restriction fails with `capability_mismatch` and
 never runs.
 
@@ -103,7 +111,9 @@ runtime selection wherever its requirement can be evaluated.
 Provider identity is included in every execution result and sealed into its
 `compute.receipt@1` receipt. Remote receipts also bind `compute.remote@1`.
 Placed executions also bind their placement: placement ID, pool provider ID,
-protocol, selection mode (`explicit` or `pool`), and selection reason.
+protocol, selection mode (`explicit` or `pool`), selection reason, requested
+and allocated resources, the provider capacity/availability snapshot, and the
+execution platform.
 Receipt verification is local and never contacts the provider.
 Prepared-runtime receipts additionally bind the selected distribution,
 verified artifact digest, prepared payload identity, and actual executable.

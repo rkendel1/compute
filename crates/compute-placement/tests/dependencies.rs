@@ -71,6 +71,7 @@ fn bundle(fixture: &Fixture, capsule: &DependencyCapsule, embed: bool) -> Worklo
         version: WORKLOAD_SPEC_VERSION.into(),
         runtime: fixture.kind,
         runtime_version: None,
+        architecture: None,
         entrypoint: fixture.entrypoint.into(),
         args: vec![],
         env: BTreeMap::new(),

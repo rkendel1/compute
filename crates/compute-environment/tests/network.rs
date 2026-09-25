@@ -22,6 +22,7 @@ fn bundle(source: &str) -> Vec<u8> {
         version: WORKLOAD_SPEC_VERSION.into(),
         runtime: RuntimeKind::Python,
         runtime_version: None,
+        architecture: None,
         entrypoint: "main.py".into(),
         args: vec![],
         env: BTreeMap::new(),

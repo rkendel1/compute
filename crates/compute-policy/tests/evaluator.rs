@@ -16,6 +16,7 @@ fn spec(runtime: RuntimeKind, entrypoint: &str) -> WorkloadSpec {
         version: WORKLOAD_SPEC_VERSION.into(),
         runtime,
         runtime_version: None,
+        architecture: None,
         entrypoint: entrypoint.into(),
         args: vec![],
         env: BTreeMap::new(),

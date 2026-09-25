@@ -30,6 +30,9 @@ pub enum ReasonCode {
     TimeoutExceedsLimit,
     MemoryUnenforceable,
     MemoryExceedsLimit,
+    CpuUnavailable,
+    MemoryUnavailable,
+    DiskUnavailable,
     CpuLimitUnenforceable,
     ProcessLimitUnenforceable,
     OutputLimitUnenforceable,
@@ -60,6 +63,9 @@ impl ReasonCode {
             | TimeoutExceedsLimit
             | MemoryUnenforceable
             | MemoryExceedsLimit
+            | CpuUnavailable
+            | MemoryUnavailable
+            | DiskUnavailable
             | CpuLimitUnenforceable
             | ProcessLimitUnenforceable
             | OutputLimitUnenforceable => "resources",
@@ -203,6 +209,16 @@ pub fn match_provider(
             );
         }
     }
+    if let Some(architecture) = &requirements.architecture
+        && !architecture_matches(architecture, &provider_platform.architecture)
+    {
+        reasons.push(
+            ReasonCode::ArchitectureMismatch,
+            json!(architecture),
+            json!(provider_platform.architecture),
+            None,
+        );
+    }
 
     // Dependencies: capsule identity is authoritative.
     if let Some(dependencies) = &requirements.dependencies {
@@ -313,6 +329,46 @@ pub fn match_provider(
     // Resources.
     let resources = &requirements.resources;
     let limits = &descriptor.resource_capabilities;
+    let inventory = &descriptor.resources;
+    if let Some(cpu) = resources.cpu_count
+        && u64::from(cpu) > inventory.available.cpu_count
+    {
+        reasons.push(
+            ReasonCode::CpuUnavailable,
+            json!(cpu),
+            json!({"available": inventory.available.cpu_count, "capacity": inventory.capacity.cpu_count}),
+            Some(format!(
+                "cpu requires {cpu}, available {} (capacity {})",
+                inventory.available.cpu_count, inventory.capacity.cpu_count
+            )),
+        );
+    }
+    if let Some(memory) = resources.memory_bytes
+        && memory > inventory.available.memory_bytes
+    {
+        reasons.push(
+            ReasonCode::MemoryUnavailable,
+            json!(memory),
+            json!({"available": inventory.available.memory_bytes, "capacity": inventory.capacity.memory_bytes}),
+            Some(format!(
+                "memory requires {memory} bytes, available {} bytes (capacity {} bytes)",
+                inventory.available.memory_bytes, inventory.capacity.memory_bytes
+            )),
+        );
+    }
+    if let Some(disk) = resources.disk_bytes
+        && disk > inventory.available.disk_bytes
+    {
+        reasons.push(
+            ReasonCode::DiskUnavailable,
+            json!(disk),
+            json!({"available": inventory.available.disk_bytes, "capacity": inventory.capacity.disk_bytes}),
+            Some(format!(
+                "disk requires {disk} bytes, available {} bytes (capacity {} bytes)",
+                inventory.available.disk_bytes, inventory.capacity.disk_bytes
+            )),
+        );
+    }
     if let Some(timeout) = resources.timeout_ms {
         if let Some(maximum) = limits.max_timeout_ms
             && timeout > maximum
@@ -333,7 +389,7 @@ pub fn match_provider(
             );
         }
     }
-    if let Some(memory) = resources.memory_bytes {
+    if let Some(memory) = resources.memory_limit_bytes {
         if let Some(maximum) = limits.max_memory_bytes
             && memory > maximum
         {
@@ -515,4 +571,15 @@ fn offered_runtimes(descriptor: &ProviderDescriptor) -> Vec<RuntimeKind> {
         .iter()
         .map(|runtime| runtime.kind)
         .collect()
+}
+
+fn architecture_matches(required: &str, available: &str) -> bool {
+    fn canonical(value: &str) -> String {
+        match value.to_ascii_lowercase().as_str() {
+            "arm64" | "aarch64" => "arm64".into(),
+            "x86_64" | "amd64" => "x86_64".into(),
+            other => other.into(),
+        }
+    }
+    canonical(required) == canonical(available)
 }
