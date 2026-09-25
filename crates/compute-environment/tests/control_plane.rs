@@ -181,6 +181,7 @@ async fn deploy(
             config: Some(BTreeMap::from([("REVISION".into(), label.into())])),
             desired_state: None,
             placement: None,
+            ..DeployRequest::default()
         })
         .await
         .unwrap()

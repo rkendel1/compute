@@ -162,6 +162,7 @@ impl Daemon {
                         .or_else(|| workload.runtime_version.clone())
                 }),
                 placement: workload.and_then(|workload| workload.pool_placement.clone()),
+                artifact: workload.and_then(|workload| workload.application_artifact.clone()),
                 failure: record.failure.clone().or(record.rollback_reason.clone()),
                 receipt: record.receipt.clone(),
                 execution_receipts: record.receipt_ids.clone(),
@@ -197,13 +198,8 @@ impl Daemon {
                 "this node does not host application deployments".into(),
             ));
         }
-        ApplicationIdentity::new(name, Some(request.port))?;
-        if request.port == 0 {
-            return Err(EnvironmentError::Invalid(
-                "an application needs the port it listens on".into(),
-            ));
-        }
-        let bundle = WorkloadBundle::from_bytes(&request.bundle)?;
+        let resolved = resolve_application(name, &request).await?;
+        let bundle = WorkloadBundle::from_bytes(&resolved.bundle)?;
         let bundle_id = bundle.bundle_id()?;
         self.ensure_applications_environment().await?;
         let definition = RevisionDefinition {
@@ -212,10 +208,10 @@ impl Daemon {
             workloads: vec![WorkloadDefinition {
                 name: APPLICATION_WORKLOAD.into(),
                 kind: WorkloadKind::Service,
-                bundle: request.bundle,
+                bundle: resolved.bundle,
                 ports: vec![PortSpec {
                     name: "http".into(),
-                    port: request.port,
+                    port: resolved.port,
                 }],
                 restart: RestartPolicy::OnFailure,
                 desired_state: DesiredState::Running,
@@ -238,9 +234,11 @@ impl Daemon {
             project: name.into(),
             environment: APPLICATIONS_ENVIRONMENT.into(),
             revision: Some(revision.revision_id),
-            config: None,
+            config: request.env,
             desired_state: Some(DesiredState::Running),
             placement: request.placement,
+            artifact: resolved.evidence,
+            required_config: resolved.required_env,
         })
         .await
     }
@@ -297,6 +295,14 @@ impl Daemon {
             config: Some(target.record.config.clone()),
             desired_state: Some(DesiredState::Running),
             placement: request.placement,
+            // The same artifact as the version rolled back to.
+            artifact: target
+                .record
+                .workloads
+                .iter()
+                .find(|workload| workload.name == APPLICATION_WORKLOAD)
+                .and_then(|workload| workload.application_artifact.clone()),
+            required_config: Default::default(),
         })
         .await
     }
@@ -446,4 +452,83 @@ mod tests {
             Some("node.example")
         );
     }
+}
+
+/// What a deploy request releases: the bundle, its port, and, from an
+/// artifact, the artifact's evidence and environment contract.
+struct ResolvedApplication {
+    bundle: Vec<u8>,
+    port: u16,
+    evidence: Option<compute_state::ApplicationArtifactEvidence>,
+    required_env: std::collections::BTreeSet<String>,
+}
+
+/// Resolve a deploy request to the application it releases. An artifact
+/// by reference is fetched here, on the provider, and must have the digest
+/// the caller pinned; a manifest must name the application being deployed.
+async fn resolve_application(
+    name: &str,
+    request: &ApplicationDeployRequest,
+) -> Result<ResolvedApplication, EnvironmentError> {
+    let Some(source) = &request.artifact else {
+        let port = request.port.filter(|port| *port > 0).ok_or_else(|| {
+            EnvironmentError::Invalid("an application needs the port it listens on".into())
+        })?;
+        if request.bundle.is_empty() {
+            return Err(EnvironmentError::Invalid(
+                "a deployment needs an application artifact or a bundle".into(),
+            ));
+        }
+        ApplicationIdentity::new(name, Some(port))?;
+        return Ok(ResolvedApplication {
+            bundle: request.bundle.clone(),
+            port,
+            evidence: None,
+            required_env: Default::default(),
+        });
+    };
+    if !request.bundle.is_empty() || request.port.is_some() {
+        return Err(EnvironmentError::Invalid(
+            "an application artifact carries its bundle and port; send one or the other".into(),
+        ));
+    }
+    let (bytes, url) = match source {
+        ApplicationArtifactSource::Inline { data } => (data.clone(), None),
+        ApplicationArtifactSource::Reference(reference) => {
+            let fetching = reference.clone();
+            let bytes = tokio::task::spawn_blocking(move || fetching.fetch())
+                .await
+                .map_err(|error| EnvironmentError::Invalid(error.to_string()))??;
+            (bytes, Some(reference.url.clone()))
+        }
+    };
+    let artifact = compute_core::ApplicationArtifact::from_bytes(&bytes)?;
+    let manifest = &artifact.manifest;
+    if manifest.application.name != name {
+        return Err(EnvironmentError::Invalid(format!(
+            "the artifact is application {}, not {name}",
+            manifest.application.name
+        )));
+    }
+    Ok(ResolvedApplication {
+        bundle: artifact.bundle_bytes().to_vec(),
+        port: manifest
+            .application
+            .port
+            .expect("a verified artifact has a port"),
+        evidence: Some(compute_state::ApplicationArtifactEvidence {
+            artifact_id: artifact.artifact_id()?,
+            url,
+            version: manifest.version.clone(),
+            capabilities: manifest.capabilities.iter().cloned().collect(),
+        }),
+        // Defaults built into the artifact satisfy a requirement too.
+        required_env: manifest
+            .env
+            .required
+            .iter()
+            .filter(|name| !manifest.env.defaults.contains_key(*name))
+            .cloned()
+            .collect(),
+    })
 }

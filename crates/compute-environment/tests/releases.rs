@@ -262,6 +262,7 @@ async fn release(daemon: &Arc<Daemon>, label: &str, web: WorkloadDefinition) -> 
             )])),
             desired_state: None,
             placement: None,
+            ..DeployRequest::default()
         })
         .await
         .unwrap()

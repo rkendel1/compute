@@ -21,6 +21,11 @@ pub use host::{HostEnforcement, HostProfile};
 mod dependencies;
 pub use dependencies::*;
 mod jobs;
+
+pub mod application_artifact;
+pub use application_artifact::{
+    ApplicationArtifact, ApplicationDescription, ApplicationManifest, ArtifactReference,
+};
 pub use jobs::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

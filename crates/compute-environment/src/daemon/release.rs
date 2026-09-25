@@ -291,6 +291,12 @@ impl Daemon {
                     .iter()
                     .find(|recorded| recorded.name == workload.name)
                     .and_then(|recorded| recorded.pool_placement.clone()),
+                application_artifact: release
+                    .value
+                    .workloads
+                    .iter()
+                    .find(|recorded| recorded.name == workload.name)
+                    .and_then(|recorded| recorded.application_artifact.clone()),
             };
             if let Some(distribution) = report
                 .selected

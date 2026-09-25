@@ -56,111 +56,187 @@ fn free_window(width: u16) -> u16 {
     panic!("no free port window");
 }
 
+/// A Compute daemon this test started: enough to stop and start it again
+/// as the same node.
+struct Node {
+    name: String,
+    url: String,
+    token: String,
+    /// The environment variable the pool reads its token from.
+    token_env: String,
+    listen: u16,
+    endpoints: u16,
+    instances: u16,
+    offer: Option<String>,
+}
+
 struct Pool {
     root: tempfile::TempDir,
     catalog: PathBuf,
-    daemons: Vec<(String, String)>,
-    serve: Option<Child>,
+    daemons: Vec<Node>,
+    servers: Vec<Child>,
+    /// The daemon the `local` pool member uses, when there is one.
+    local: Option<usize>,
 }
 
 impl Pool {
-    fn start() -> Self {
+    fn empty() -> Self {
         let root = tempfile::tempdir().unwrap();
         let catalog = compute_provider::testing::host_fixture_catalog(&root.path().join("catalog"))
             .expect("fixture runtime catalog")
             .path;
-        let mut pool = Self {
+        Self {
             root,
             catalog,
             daemons: vec![],
-            serve: None,
-        };
-        let a = pool.start_daemon("a", TOKEN_A);
-        let b = pool.start_daemon("b", TOKEN_B);
-        let serve_port = free_window(1);
-        let serve = Command::new(BIN)
-            .args([
-                "serve",
-                "--listen",
-                &format!("127.0.0.1:{serve_port}"),
-                "--job-store",
-            ])
-            .arg(pool.root.path().join("jobs"))
-            .env("COMPUTE_RUNTIME_CATALOG", &pool.catalog)
-            .env(
-                "COMPUTE_RUNTIME_STORE",
-                pool.root.path().join("store-serve"),
-            )
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        pool.serve = Some(serve);
-        wait_until("compute serve answers", || {
-            TcpStream::connect(("127.0.0.1", serve_port)).is_ok()
-        });
-        // Placement prefers higher priority: the jobs-only server first.
-        std::fs::write(
-            pool.config(),
-            format!(
-                r#"[providers.jobs-only]
-kind = "remote"
-endpoint = "http://127.0.0.1:{serve_port}"
-priority = 100
+            servers: vec![],
+            local: None,
+        }
+    }
 
-[providers.provider-a]
-kind = "remote"
-endpoint = "{a}"
-token_env = "PROVIDER_A_TOKEN"
-priority = 50
-
-[providers.provider-b]
-kind = "remote"
-endpoint = "{b}"
-token_env = "PROVIDER_B_TOKEN"
-priority = 10
-"#
-            ),
-        )
-        .unwrap();
+    /// Two provider daemons and a jobs-only `compute serve`, which placement
+    /// prefers (higher priority) whenever it qualifies.
+    fn start() -> Self {
+        let mut pool = Self::empty();
+        let a = pool.start_daemon("a", TOKEN_A, None);
+        let b = pool.start_daemon("b", TOKEN_B, None);
+        let serve = pool.start_serve("jobs-only", None);
+        pool.daemons[a].token_env = "PROVIDER_A_TOKEN".into();
+        pool.daemons[b].token_env = "PROVIDER_B_TOKEN".into();
+        pool.configure(&[
+            ("jobs-only", Member::Remote(serve), 100),
+            ("provider-a", Member::Daemon(a), 50),
+            ("provider-b", Member::Daemon(b), 10),
+        ]);
         pool
     }
 
-    fn start_daemon(&mut self, name: &str, token: &str) -> String {
+    /// Start a daemon that requires `token`, offering `offer` (all modes
+    /// when `None`). Its index in `daemons`.
+    fn start_daemon(&mut self, name: &str, token: &str, offer: Option<&str>) -> usize {
         let listen = free_window(1);
-        let endpoints = free_window(4);
-        let instances = free_window(12);
-        let url = format!("http://127.0.0.1:{listen}");
-        let output = Command::new(BIN)
+        let node = Node {
+            name: name.into(),
+            url: format!("http://127.0.0.1:{listen}"),
+            token: token.into(),
+            token_env: format!("NODE_{}_TOKEN", name.to_ascii_uppercase().replace('-', "_")),
+            listen,
+            endpoints: free_window(4),
+            instances: free_window(12),
+            offer: offer.map(str::to_owned),
+        };
+        self.launch(&node);
+        self.daemons.push(node);
+        self.daemons.len() - 1
+    }
+
+    fn launch(&self, node: &Node) {
+        let mut command = Command::new(BIN);
+        command
             .args([
                 "start",
                 "--detach",
                 "--listen",
-                &format!("127.0.0.1:{listen}"),
+                &format!("127.0.0.1:{}", node.listen),
             ])
             .arg("--state-dir")
-            .arg(self.root.path().join(format!("node-{name}")))
+            .arg(self.root.path().join(format!("node-{}", node.name)))
             .args([
                 "--port-range",
-                &format!("{endpoints}-{}", endpoints + 3),
+                &format!("{}-{}", node.endpoints, node.endpoints + 3),
                 "--instance-port-range",
-                &format!("{instances}-{}", instances + 11),
+                &format!("{}-{}", node.instances, node.instances + 11),
                 "--reconcile-interval-ms",
                 "500",
                 "--require-token-env",
                 "NODE_TOKEN",
-            ])
-            .env("NODE_TOKEN", token)
+            ]);
+        if let Some(offer) = &node.offer {
+            command.args(["--offer", offer]);
+        }
+        let output = command
+            .env("NODE_TOKEN", &node.token)
+            .env("COMPUTE_RUNTIME_CATALOG", &self.catalog)
+            .env(
+                "COMPUTE_RUNTIME_STORE",
+                self.root.path().join(format!("store-{}", node.name)),
+            )
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", text(&output));
+    }
+
+    /// Stop a daemon and start it again as the same node: the same state,
+    /// address, and ports.
+    fn restart_daemon(&self, index: usize) {
+        let node = &self.daemons[index];
+        let stopped = Command::new(BIN)
+            .args(["stop", "--daemon", &node.url])
+            .env("COMPUTE_DAEMON_TOKEN", &node.token)
+            .output()
+            .unwrap();
+        assert!(stopped.status.success(), "{}", text(&stopped));
+        wait_until("the daemon stops listening", || {
+            TcpStream::connect(("127.0.0.1", node.listen)).is_err()
+        });
+        self.launch(node);
+    }
+
+    /// Start `compute serve` offering `offer` (its default when `None`).
+    fn start_serve(&mut self, name: &str, offer: Option<&str>) -> String {
+        let port = free_window(1);
+        let mut command = Command::new(BIN);
+        command
+            .args(["serve", "--listen", &format!("127.0.0.1:{port}")])
+            .arg("--job-store")
+            .arg(self.root.path().join(format!("jobs-{name}")));
+        if let Some(offer) = offer {
+            command.args(["--offer", offer]);
+        }
+        let child = command
             .env("COMPUTE_RUNTIME_CATALOG", &self.catalog)
             .env(
                 "COMPUTE_RUNTIME_STORE",
                 self.root.path().join(format!("store-{name}")),
             )
-            .output()
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
             .unwrap();
-        assert!(output.status.success(), "{}", text(&output));
-        self.daemons.push((url.clone(), token.to_owned()));
-        url
+        self.servers.push(child);
+        wait_until("compute serve answers", || {
+            TcpStream::connect(("127.0.0.1", port)).is_ok()
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// Write the pool: each member's ID, what it is, and its priority.
+    fn configure(&mut self, members: &[(&str, Member, u32)]) {
+        let mut config = String::new();
+        self.local = None;
+        for (id, member, priority) in members {
+            match member {
+                Member::Local(daemon) => {
+                    self.local = Some(*daemon);
+                    config.push_str(&format!(
+                        "[providers.{id}]\nkind = \"local\"\npriority = {priority}\n\n"
+                    ));
+                }
+                Member::Daemon(daemon) => {
+                    let node = &self.daemons[*daemon];
+                    config.push_str(&format!(
+                        "[providers.{id}]\nkind = \"remote\"\nendpoint = \"{}\"\ntoken_env = \"{}\"\npriority = {priority}\n\n",
+                        node.url, node.token_env
+                    ));
+                }
+                Member::Remote(endpoint) => config.push_str(&format!(
+                    "[providers.{id}]\nkind = \"remote\"\nendpoint = \"{endpoint}\"\npriority = {priority}\n\n"
+                )),
+            }
+        }
+        std::fs::write(self.config(), config).unwrap();
     }
 
     fn config(&self) -> PathBuf {
@@ -170,7 +246,8 @@ priority = 10
     /// `compute …` as a developer runs it: the pool is configured, and
     /// its credentials are in the environment.
     fn compute(&self, arguments: &[&str]) -> Output {
-        Command::new(BIN)
+        let mut command = Command::new(BIN);
+        command
             .args(arguments)
             .current_dir(self.root.path())
             .env("COMPUTE_POOL_CONFIG", self.config())
@@ -178,11 +255,20 @@ priority = 10
                 "COMPUTE_CAPABILITY_CACHE",
                 self.root.path().join("cache.json"),
             )
-            .env("PROVIDER_A_TOKEN", TOKEN_A)
-            .env("PROVIDER_B_TOKEN", TOKEN_B)
             .env("COMPUTE_RUNTIME_CATALOG", &self.catalog)
-            .output()
-            .unwrap()
+            .env("COMPUTE_RUNTIME_STORE", self.root.path().join("store-cli"))
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost");
+        for node in &self.daemons {
+            command.env(&node.token_env, &node.token);
+        }
+        if let Some(local) = self.local {
+            let node = &self.daemons[local];
+            command
+                .env("COMPUTE_DAEMON", &node.url)
+                .env("COMPUTE_DAEMON_TOKEN", &node.token);
+        }
+        command.output().unwrap()
     }
 
     fn json(&self, arguments: &[&str]) -> Value {
@@ -192,26 +278,42 @@ priority = 10
             .unwrap_or_else(|error| panic!("{arguments:?}: {error}: {}", text(&output)))
     }
 
+    /// `compute …` that must fail: its stderr.
+    fn refused(&self, arguments: &[&str]) -> String {
+        let output = self.compute(arguments);
+        assert!(!output.status.success(), "{arguments:?}: {}", text(&output));
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    }
+
     /// The provider daemon's API, as an agent reads it.
     fn api(&self, daemon: usize, path: &str) -> Vec<u8> {
-        let (url, token) = &self.daemons[daemon];
-        let (status, body) = http_get(url, path, Some(token)).unwrap();
+        let node = &self.daemons[daemon];
+        let (status, body) = http_get(&node.url, path, Some(&node.token)).unwrap();
         assert_eq!(status, 200, "{path}: {}", String::from_utf8_lossy(&body));
         body
     }
 }
 
+enum Member {
+    /// The `local` member, backed by this daemon.
+    Local(usize),
+    /// A daemon, with its credential.
+    Daemon(usize),
+    /// A `compute serve` endpoint.
+    Remote(String),
+}
+
 impl Drop for Pool {
     fn drop(&mut self) {
-        for (url, token) in &self.daemons {
+        for node in &self.daemons {
             let _ = Command::new(BIN)
-                .args(["stop", "--daemon", url])
-                .env("COMPUTE_DAEMON_TOKEN", token)
+                .args(["stop", "--daemon", &node.url])
+                .env("COMPUTE_DAEMON_TOKEN", &node.token)
                 .output();
         }
-        if let Some(mut serve) = self.serve.take() {
-            let _ = serve.kill();
-            let _ = serve.wait();
+        for server in &mut self.servers {
+            let _ = server.kill();
+            let _ = server.wait();
         }
     }
 }
@@ -517,10 +619,175 @@ fn an_application_moves_from_source_to_a_placed_versioned_verifiable_deployment(
         "provider-a"
     );
     // The application is not on provider-b.
-    let (status, _) =
-        http_get(&pool.daemons[1].0, "/applications/hello-api", Some(TOKEN_B)).unwrap();
+    let (status, _) = http_get(
+        &pool.daemons[1].url,
+        "/applications/hello-api",
+        Some(TOKEN_B),
+    )
+    .unwrap();
     assert_eq!(status, 404);
     // Remote deployment needs the provider's credential.
-    let (status, _) = http_get(&pool.daemons[0].0, "/applications", None).unwrap();
+    let (status, _) = http_get(&pool.daemons[0].url, "/applications", None).unwrap();
     assert_eq!(status, 401);
+}
+
+/// Every provider type crossed with every submission mode. A provider
+/// accepts exactly the execution modes it offers; any other combination is
+/// rejected by placement, before anything executes.
+///
+/// ```text
+///                     run   job   deployment
+/// local               yes   no    yes   (this machine: in process, and its daemon)
+/// daemon              yes   yes   yes   (compute start)
+/// deployment-only     no    no    yes   (compute start --offer deployments)
+/// jobs-only           no    yes   no    (compute serve --offer jobs)
+/// ```
+#[test]
+fn every_provider_accepts_exactly_the_execution_modes_it_offers() {
+    let mut pool = Pool::empty();
+    let local = pool.start_daemon("local-node", "local-operator", None);
+    let daemon = pool.start_daemon("daemon", "daemon-operator", None);
+    let deployment_only = pool.start_daemon(
+        "deployment-only",
+        "deployment-operator",
+        Some("deployments"),
+    );
+    let jobs_only = pool.start_serve("jobs-only", Some("jobs"));
+    // Priorities rank the providers that do not offer a mode first, so a
+    // provider that cannot take a submission is never chosen by accident.
+    pool.configure(&[
+        ("local", Member::Local(local), 1),
+        ("daemon", Member::Daemon(daemon), 10),
+        ("deployment-only", Member::Daemon(deployment_only), 100),
+        ("jobs-only", Member::Remote(jobs_only), 50),
+    ]);
+    let job = pool.root.path().join("job.py");
+    std::fs::write(&job, "print('ran on a provider')\n").unwrap();
+    let job = job.to_str().unwrap();
+
+    let nothing_ran = |provider: &str, code: &str, refusal: &str| {
+        assert!(
+            refusal.contains(&format!("provider {provider}: incompatible"))
+                && refusal.contains(code)
+                && refusal.contains("nothing was executed"),
+            "{provider}: {refusal}"
+        );
+    };
+    for (provider, run, jobs, deploys) in [
+        ("local", true, false, true),
+        ("daemon", true, true, true),
+        ("deployment-only", false, false, true),
+        ("jobs-only", false, true, false),
+    ] {
+        let receipt = pool.root.path().join(format!("run-{provider}.json"));
+        let run_arguments = [
+            "pool",
+            "run",
+            job,
+            "--network",
+            "network",
+            "--provider",
+            provider,
+            "--receipt",
+            receipt.to_str().unwrap(),
+            "--json",
+        ];
+        if run {
+            let ran = pool.json(&run_arguments);
+            assert_eq!(ran["status"], "completed", "{provider}: {ran:#}");
+            assert_eq!(ran["stdout"]["text"], "ran on a provider\n");
+            assert_eq!(ran["placement"]["selected"]["provider_id"], provider);
+            // The run's receipt verifies offline.
+            let verified = pool.compute(&["receipt", "verify", receipt.to_str().unwrap()]);
+            assert!(verified.status.success(), "{}", text(&verified));
+        } else {
+            nothing_ran(provider, "run_unsupported", &pool.refused(&run_arguments));
+        }
+        let submit_arguments = [
+            "pool",
+            "submit",
+            job,
+            "--network",
+            "network",
+            "--provider",
+            provider,
+            "--json",
+        ];
+        if jobs {
+            let submitted = pool.json(&submit_arguments);
+            assert_eq!(submitted["provider_id"], provider, "{submitted:#}");
+            assert!(submitted["job_id"].as_str().unwrap().starts_with("job_"));
+        } else {
+            nothing_ran(
+                provider,
+                "jobs_unsupported",
+                &pool.refused(&submit_arguments),
+            );
+        }
+        let application = pool.root.path().join(format!("app-{provider}"));
+        let app = application.to_str().unwrap();
+        pool.json(&["init", app, "--runtime", "python", "--json"]);
+        let deploy_arguments = ["deploy", app, "--provider", provider, "--json"];
+        if deploys {
+            let deployed = pool.json(&deploy_arguments);
+            assert_eq!(deployed["provider"], provider, "{deployed:#}");
+            assert_eq!(deployed["status"], "running");
+            assert_eq!(deployed["version"], 1);
+            for field in ["application_id", "deployment_id", "runtime", "receipt"] {
+                assert!(deployed[field].is_string(), "{field}: {deployed:#}");
+            }
+            assert!(deployed["artifact"]["artifact_id"].is_string());
+            let endpoint = deployed["endpoint"].as_str().unwrap().to_owned();
+            wait_until("the deployment answers", || {
+                fetch(&endpoint).as_deref() == Some("Hello from Compute")
+            });
+        } else {
+            let refusal = pool.refused(&deploy_arguments);
+            assert!(
+                refusal.contains("No compatible provider found")
+                    && refusal.contains("does not host application deployments"),
+                "{provider}: {refusal}"
+            );
+        }
+    }
+    // Nothing was deployed where deployment was refused.
+    let (status, _) = http_get(
+        &pool.daemons[deployment_only].url,
+        "/applications/app-jobs-only",
+        Some("deployment-operator"),
+    )
+    .unwrap();
+    assert_eq!(status, 404);
+
+    // With no provider named, placement sends each submission to the
+    // highest-priority provider that offers its mode. A daemon in a run
+    // pool runs workloads; it no longer fails them at dispatch. (`auto`
+    // prefers this machine, so the pool here is the remote providers.)
+    let jobs_only = pool.start_serve("jobs-only-2", Some("jobs"));
+    pool.configure(&[
+        ("daemon", Member::Daemon(daemon), 10),
+        ("deployment-only", Member::Daemon(deployment_only), 100),
+        ("jobs-only", Member::Remote(jobs_only), 50),
+    ]);
+    let ran = pool.json(&["pool", "run", job, "--network", "network", "--json"]);
+    assert_eq!(ran["placement"]["selected"]["provider_id"], "daemon");
+    assert_eq!(ran["status"], "completed");
+    let incompatible = ran["placement"]["incompatible_providers"].to_string();
+    assert!(
+        incompatible.contains("deployment-only") && incompatible.contains("jobs-only"),
+        "{incompatible}"
+    );
+    let submitted = pool.json(&["pool", "submit", job, "--network", "network", "--json"]);
+    assert!(
+        ["daemon", "jobs-only"].contains(&submitted["provider_id"].as_str().unwrap()),
+        "{submitted:#}"
+    );
+    let application = pool.root.path().join("placed");
+    let app = application.to_str().unwrap();
+    pool.json(&["init", app, "--runtime", "python", "--json"]);
+    let deployed = pool.json(&["deploy", app, "--json"]);
+    assert!(
+        ["daemon", "deployment-only"].contains(&deployed["provider"].as_str().unwrap()),
+        "{deployed:#}"
+    );
 }

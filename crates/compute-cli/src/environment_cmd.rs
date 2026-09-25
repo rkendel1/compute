@@ -64,7 +64,7 @@ fn label(value: &impl serde::Serialize) -> String {
     crate::pool::enum_label(value)
 }
 
-fn parse_pair(value: &str) -> Result<(String, String), String> {
+pub(crate) fn parse_pair(value: &str) -> Result<(String, String), String> {
     value
         .split_once('=')
         .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -1846,6 +1846,7 @@ pub async fn deploy(command: DeployCommand) -> compute_core::Result<()> {
         config,
         desired_state: None,
         placement: None,
+        ..DeployRequest::default()
     };
     let deployment: DeploymentView = client
         .post("/deployments", Some(&request))

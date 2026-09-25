@@ -1,12 +1,20 @@
 //! The application lifecycle: `compute init`, `deploy`, `status`, `logs`,
-//! `history`, `rollback`, and `stop` for a directory with an
-//! `[application]` in its `compute.toml`.
+//! `history`, `rollback`, and `stop`, and the same operations under
+//! `compute application` (with `info` and `pack`).
+//!
+//! An application is a directory with an `[application]` in its
+//! `compute.toml`, or a portable application artifact
+//! (`compute.application-artifact@1`) as a file or a `file://` or
+//! `http(s)://` URL. Operations on a deployed application also take its
+//! name.
 //!
 //! ```text
 //! compute deploy APP
-//!   → requirements (compute.toml)
+//!   → the artifact (a directory is packed into one)
+//!   → requirements (its bundle)
 //!   → provider discovery and placement (the caller-owned pool)
 //!   → the selected provider's Compute daemon: /applications/{name}
+//!     (a URL is fetched and verified there, by the provider)
 //!   → revision, release, stable endpoint, versions, evidence
 //! ```
 //!
@@ -15,16 +23,20 @@
 //! application database here: the application's home is found by asking
 //! the pool's providers.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clap::Args;
-use compute_core::{ApplicationIdentity, ComputeError};
+use clap::{Args, Subcommand};
+use compute_core::{
+    ApplicationArtifact, ApplicationDescription, ApplicationIdentity, ArtifactReference,
+    ComputeError,
+};
 use compute_environment::client::DaemonClient;
 use compute_environment::{
-    ApplicationDeployRequest, ApplicationDeploymentState, ApplicationDeploymentView,
-    ApplicationRollbackRequest, ApplicationView, EnvironmentError,
+    ApplicationArtifactSource, ApplicationDeployRequest, ApplicationDeploymentState,
+    ApplicationDeploymentView, ApplicationRollbackRequest, ApplicationView, EnvironmentError,
 };
 use compute_placement::{
     EvaluationStatus, PlacementOutcome, PlacementReport, ProviderKind, SubmissionMode,
@@ -46,7 +58,8 @@ pub struct InitCommand {
 
 #[derive(Args, Debug)]
 pub struct LogsCommand {
-    pub application: PathBuf,
+    /// The application: its directory, artifact, or name.
+    pub application: String,
     #[arg(long)]
     pub follow: bool,
     /// Read one version's output. Only the active version's instance keeps
@@ -63,7 +76,8 @@ pub struct LogsCommand {
 
 #[derive(Args, Debug)]
 pub struct HistoryCommand {
-    pub application: PathBuf,
+    /// The application: its directory, artifact, or name.
+    pub application: String,
     #[command(flatten)]
     pub daemon: DaemonLocation,
     #[command(flatten)]
@@ -74,7 +88,8 @@ pub struct HistoryCommand {
 
 #[derive(Args, Debug)]
 pub struct RollbackCommand {
-    pub application: PathBuf,
+    /// The application: its directory, artifact, or name.
+    pub application: String,
     /// Deployment ID or application-scoped version.
     pub deployment: String,
     #[command(flatten)]
@@ -85,10 +100,133 @@ pub struct RollbackCommand {
     pub json: bool,
 }
 
+/// `compute application …`: the application lifecycle as one resource, for
+/// people and agents.
+#[derive(Args, Debug)]
+pub struct ApplicationCommand {
+    #[command(subcommand)]
+    pub command: ApplicationCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ApplicationCommands {
+    /// Describe an application directory or artifact: identity, runtime,
+    /// requirements, environment contract. Contacts no provider.
+    Info(InfoCommand),
+    /// Package an application directory as a portable artifact.
+    Pack(PackCommand),
+    /// Place the application on a provider that can host it and release a
+    /// new version there.
+    Deploy(DeployCommand),
+    /// The application's state on the provider that hosts it.
+    Status(TargetCommand),
+    /// The active version's output.
+    Logs(LogsCommand),
+    /// Every version, newest first.
+    History(HistoryCommand),
+    /// Deploy an earlier version again, as the next version.
+    Rollback(RollbackCommand),
+    /// Stop serving. Versions and evidence remain.
+    Stop(TargetCommand),
+}
+
+#[derive(Args, Debug)]
+pub struct InfoCommand {
+    /// An application directory, artifact file, or `file://`/`http(s)://`
+    /// artifact URL.
+    pub application: String,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct PackCommand {
+    /// The application directory.
+    pub path: PathBuf,
+    /// Where to write the artifact. Defaults to `NAME.capp` here.
+    #[arg(long, short)]
+    pub output: Option<PathBuf>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct DeployCommand {
+    /// An application directory, artifact file, or `file://`/`http(s)://`
+    /// artifact URL. A URL is fetched by the provider.
+    pub application: String,
+    /// The provider to deploy to (`auto`, `provider:<id>`, or a pool
+    /// provider ID). Placement chooses by default.
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// The application's configuration (`NAME=VALUE`, repeatable),
+    /// replacing the current one. Omitted, the current one is kept.
+    #[arg(long = "set", value_parser = crate::environment_cmd::parse_pair)]
+    pub env: Vec<(String, String)>,
+    #[command(flatten)]
+    pub daemon: DaemonLocation,
+    #[command(flatten)]
+    pub location: pool::PoolLocation,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct TargetCommand {
+    /// The application: its directory, artifact, or name.
+    pub application: String,
+    #[command(flatten)]
+    pub daemon: DaemonLocation,
+    #[command(flatten)]
+    pub location: pool::PoolLocation,
+    #[arg(long)]
+    pub json: bool,
+}
+
+pub async fn command(command: ApplicationCommand) -> compute_core::Result<()> {
+    match command.command {
+        ApplicationCommands::Info(command) => info(command).await,
+        ApplicationCommands::Pack(command) => pack_command(command),
+        ApplicationCommands::Deploy(command) => {
+            deploy(
+                command.application,
+                command.provider,
+                command.env,
+                command.daemon,
+                command.location,
+                command.json,
+            )
+            .await
+        }
+        ApplicationCommands::Status(command) => {
+            status(
+                command.application,
+                command.daemon,
+                command.location,
+                command.json,
+            )
+            .await
+        }
+        ApplicationCommands::Logs(command) => logs(command).await,
+        ApplicationCommands::History(command) => history(command).await,
+        ApplicationCommands::Rollback(command) => rollback(command).await,
+        ApplicationCommands::Stop(command) => {
+            stop(
+                command.application,
+                command.daemon,
+                command.location,
+                command.json,
+            )
+            .await
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Definition {
     pub root: PathBuf,
     pub identity: ApplicationIdentity,
+    pub description: ApplicationDescription,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +240,17 @@ struct ApplicationSection {
     name: String,
     #[serde(default)]
     port: Option<u16>,
+    /// The developer's label for this build.
+    #[serde(default)]
+    version: Option<String>,
+    /// Environment names the deployment's configuration must supply.
+    #[serde(default)]
+    required_env: BTreeSet<String>,
+    /// Capability names the application offers.
+    #[serde(default)]
+    capabilities: BTreeSet<String>,
+    #[serde(default)]
+    metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -146,10 +295,230 @@ pub fn definition(path: &Path) -> compute_core::Result<Definition> {
             config.display()
         ))
     })?;
+    let application = file.application;
     Ok(Definition {
         root,
-        identity: ApplicationIdentity::new(file.application.name, file.application.port)?,
+        identity: ApplicationIdentity::new(application.name, application.port)?,
+        description: ApplicationDescription {
+            version: application.version,
+            required_env: application.required_env,
+            capabilities: application.capabilities,
+            metadata: application.metadata,
+        },
     })
+}
+
+/// What a command was given: an application directory, an artifact (a
+/// file, or a URL the provider will fetch), or a deployed application's
+/// name.
+enum Target {
+    Directory(Definition),
+    Artifact {
+        artifact: Box<ApplicationArtifact>,
+        bytes: Vec<u8>,
+        /// Set for a URL: the provider fetches this, pinned to the digest
+        /// of the bytes placed here.
+        reference: Option<ArtifactReference>,
+        source: String,
+    },
+    Name(String),
+}
+
+impl Target {
+    fn name(&self) -> &str {
+        match self {
+            Self::Directory(definition) => &definition.identity.name,
+            Self::Artifact { artifact, .. } => &artifact.manifest.application.name,
+            Self::Name(name) => name,
+        }
+    }
+}
+
+fn is_url(value: &str) -> bool {
+    ["file://", "http://", "https://"]
+        .iter()
+        .any(|scheme| value.starts_with(scheme))
+}
+
+/// Whether `value` names something `compute deploy` deploys as an
+/// application: a directory with `[application]`, an artifact file, or an
+/// artifact URL.
+pub fn is_deployable(value: &str) -> bool {
+    let path = Path::new(value);
+    is_url(value)
+        || is_application(path)
+        || (path.is_file()
+            && std::fs::read(path).is_ok_and(|bytes| ApplicationArtifact::sniff(&bytes)))
+}
+
+async fn target(value: &str) -> compute_core::Result<Target> {
+    if is_url(value) {
+        let url = value.to_owned();
+        let bytes =
+            tokio::task::spawn_blocking(move || compute_core::application_artifact::fetch(&url))
+                .await
+                .map_err(|error| ComputeError::Runtime(error.to_string()))??;
+        let artifact = ApplicationArtifact::from_bytes(&bytes)?;
+        let reference = ArtifactReference {
+            url: value.to_owned(),
+            digest: compute_core::sha256_identity(&bytes),
+        };
+        return Ok(Target::Artifact {
+            artifact: Box::new(artifact),
+            bytes,
+            reference: Some(reference),
+            source: value.to_owned(),
+        });
+    }
+    let path = Path::new(value);
+    if path.is_dir() || path.file_name().is_some_and(|name| name == "compute.toml") {
+        return Ok(Target::Directory(definition(path)?));
+    }
+    if path.is_file() {
+        let bytes = std::fs::read(path)?;
+        if !ApplicationArtifact::sniff(&bytes) {
+            return Err(ComputeError::InvalidWorkload(format!(
+                "{value} is not an application artifact (compute.application-artifact@1)"
+            )));
+        }
+        let artifact = ApplicationArtifact::from_bytes(&bytes)?;
+        return Ok(Target::Artifact {
+            artifact: Box::new(artifact),
+            bytes,
+            reference: None,
+            source: std::fs::canonicalize(path)?.display().to_string(),
+        });
+    }
+    ApplicationIdentity::new(value, None).map_err(|_| {
+        ComputeError::InvalidWorkload(format!(
+            "{value} is not an application directory, artifact, URL, or name"
+        ))
+    })?;
+    Ok(Target::Name(value.to_owned()))
+}
+
+/// The name of the application `value` refers to.
+async fn target_name(value: &str) -> compute_core::Result<String> {
+    Ok(target(value).await?.name().to_owned())
+}
+
+/// Package an application directory as a portable artifact: its canonical
+/// bundle, built exactly as `compute run` and `compute deploy` build it,
+/// and its manifest.
+pub fn pack(definition: &Definition) -> compute_core::Result<ApplicationArtifact> {
+    if definition.identity.port.is_none() {
+        return Err(ComputeError::InvalidWorkload(
+            "deployable applications must declare application.port".into(),
+        ));
+    }
+    let (bundle, _, _) = pool::prepare(
+        &pool::PlacementArtifact {
+            path: Some(definition.root.clone()),
+            ..pool::PlacementArtifact::default()
+        },
+        &admission::PolicyLocation::default(),
+    )?;
+    ApplicationArtifact::new(
+        definition.identity.clone(),
+        definition.description.clone(),
+        &bundle,
+    )
+}
+
+fn pack_command(command: PackCommand) -> compute_core::Result<()> {
+    let definition = definition(&command.path)?;
+    let artifact = pack(&definition)?;
+    let bytes = artifact.to_bytes()?;
+    let output = command
+        .output
+        .unwrap_or_else(|| PathBuf::from(format!("{}.capp", definition.identity.name)));
+    std::fs::write(&output, &bytes)?;
+    let artifact_id = artifact.artifact_id()?;
+    if command.json {
+        print_json(&serde_json::json!({
+            "artifact_id": artifact_id,
+            "path": output,
+            "size": bytes.len(),
+            "manifest": artifact.manifest,
+        }));
+    } else {
+        println!("Packed {}", artifact.manifest.application.name);
+        println!("Artifact:    {artifact_id}");
+        println!("Path:        {}", output.display());
+    }
+    Ok(())
+}
+
+async fn info(command: InfoCommand) -> compute_core::Result<()> {
+    let (artifact, source) = match target(&command.application).await? {
+        Target::Directory(definition) => {
+            let source = definition.root.display().to_string();
+            (pack(&definition)?, source)
+        }
+        Target::Artifact {
+            artifact, source, ..
+        } => (*artifact, source),
+        Target::Name(name) => {
+            return Err(ComputeError::InvalidWorkload(format!(
+                "{name}: give an application directory or artifact; `compute application status {name}` describes a deployed application"
+            )));
+        }
+    };
+    let artifact_id = artifact.artifact_id()?;
+    let manifest = &artifact.manifest;
+    if command.json {
+        print_json(&serde_json::json!({
+            "artifact_id": artifact_id,
+            "source": source,
+            "manifest": manifest,
+        }));
+        return Ok(());
+    }
+    println!("Application: {}", manifest.application.name);
+    println!("ID:          {}", manifest.application.id);
+    if let Some(version) = &manifest.version {
+        println!("Version:     {version}");
+    }
+    println!(
+        "Runtime:     {}{}",
+        manifest.runtime.name,
+        manifest
+            .runtime
+            .version
+            .as_deref()
+            .map(|version| format!(" {version}"))
+            .unwrap_or_default()
+    );
+    println!("Entrypoint:  {}", manifest.entrypoint.display());
+    if let Some(port) = manifest.application.port {
+        println!("Port:        {port}");
+    }
+    if !manifest.env.required.is_empty() {
+        println!(
+            "Requires:    {}",
+            manifest
+                .env
+                .required
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if !manifest.capabilities.is_empty() {
+        println!(
+            "Offers:      {}",
+            manifest
+                .capabilities
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    println!("Artifact:    {artifact_id}");
+    println!("Source:      {source}");
+    Ok(())
 }
 
 pub fn is_application(path: &Path) -> bool {
@@ -222,19 +591,36 @@ pub fn init(command: InitCommand) -> compute_core::Result<()> {
 /// Deploy a new version: place the application on a provider that can
 /// satisfy its requirements and host it, then release it there.
 pub async fn deploy(
-    path: PathBuf,
+    application: String,
     provider: Option<String>,
+    env: Vec<(String, String)>,
     daemon: DaemonLocation,
     location: pool::PoolLocation,
     json: bool,
 ) -> compute_core::Result<()> {
-    let definition = definition(&path)?;
-    let name = definition.identity.name.clone();
-    let port = definition.identity.port.ok_or_else(|| {
-        ComputeError::InvalidWorkload(
-            "deployable applications must declare application.port".into(),
-        )
-    })?;
+    let target = target(&application).await?;
+    // A directory is packed into the artifact it deploys, so every
+    // deployment is of an artifact, with its identity as evidence.
+    let (artifact, bytes, reference, source, directory) = match target {
+        Target::Directory(definition) => {
+            let artifact = pack(&definition)?;
+            let bytes = artifact.to_bytes()?;
+            let source = definition.root.display().to_string();
+            (artifact, bytes, None, source, Some(definition.root))
+        }
+        Target::Artifact {
+            artifact,
+            bytes,
+            reference,
+            source,
+        } => (*artifact, bytes, reference, source, None),
+        Target::Name(name) => {
+            return Err(ComputeError::InvalidWorkload(format!(
+                "{name}: deploy an application directory, artifact, or artifact URL"
+            )));
+        }
+    };
+    let name = artifact.manifest.application.name.clone();
     // An application lives on one provider. A new version goes where the
     // application already is: moving it is not something deploy does
     // silently.
@@ -252,17 +638,31 @@ pub async fn deploy(
         (Some(home), _) => Some(home.provider_id.clone()),
         (None, requested) => requested.clone(),
     };
-    let artifact = pool::PlacementArtifact {
-        path: Some(definition.root.clone()),
-        provider: pinned,
-        // Deployment capability is live state: discover it now.
-        refresh: true,
-        ..pool::PlacementArtifact::default()
+    // Placement evaluates the bundle the provider will run. A directory
+    // keeps its compute.toml placement preferences.
+    let staged = tempfile::NamedTempFile::new()?;
+    let placement_artifact = match directory {
+        Some(root) => pool::PlacementArtifact {
+            path: Some(root),
+            provider: pinned,
+            // Deployment capability is live state: discover it now.
+            refresh: true,
+            ..pool::PlacementArtifact::default()
+        },
+        None => {
+            std::fs::write(staged.path(), artifact.bundle_bytes())?;
+            pool::PlacementArtifact {
+                bundle: Some(staged.path().to_path_buf()),
+                provider: pinned,
+                refresh: true,
+                ..pool::PlacementArtifact::default()
+            }
+        }
     };
-    let (_, report, request) = pool::evaluate(
+    let (_, report, _) = pool::evaluate(
         &location,
         &admission::PolicyLocation::default(),
-        &artifact,
+        &placement_artifact,
         SubmissionMode::Deployment,
     )
     .await?;
@@ -275,14 +675,6 @@ pub async fn deploy(
             print_json(&report);
         }
         return Err(ComputeError::Runtime(explain_no_provider(&name, &report)));
-    };
-    let bundle = match &request.artifact {
-        compute_provider::ArtifactTransport::Bundle { data } => data.clone(),
-        _ => {
-            return Err(ComputeError::Runtime(
-                "placement did not produce a portable bundle".into(),
-            ));
-        }
     };
     let host = match home {
         Some(home) => home,
@@ -308,9 +700,14 @@ pub async fn deploy(
         .post(
             &format!("/applications/{name}/deployments"),
             Some(&ApplicationDeployRequest {
-                bundle,
-                port,
-                source: Some(definition.root.display().to_string()),
+                artifact: Some(match reference {
+                    Some(reference) => ApplicationArtifactSource::Reference(reference),
+                    None => ApplicationArtifactSource::Inline { data: bytes },
+                }),
+                bundle: vec![],
+                port: None,
+                env: (!env.is_empty()).then(|| env.into_iter().collect()),
+                source: Some(source),
                 placement: Some(placement),
             }),
         )
@@ -321,13 +718,13 @@ pub async fn deploy(
 }
 
 pub async fn status(
-    path: PathBuf,
+    application: String,
     daemon: DaemonLocation,
     location: pool::PoolLocation,
     json: bool,
 ) -> compute_core::Result<()> {
-    let definition = definition(&path)?;
-    let (host, view) = locate(&definition.identity.name, &daemon, &location).await?;
+    let name = target_name(&application).await?;
+    let (host, view) = locate(&name, &daemon, &location).await?;
     if json {
         print_json(&with_provider(&host, &view));
     } else {
@@ -337,13 +734,12 @@ pub async fn status(
 }
 
 pub async fn stop(
-    path: PathBuf,
+    application: String,
     daemon: DaemonLocation,
     location: pool::PoolLocation,
     json: bool,
 ) -> compute_core::Result<()> {
-    let definition = definition(&path)?;
-    let name = definition.identity.name.clone();
+    let name = target_name(&application).await?;
     let (host, _) = locate(&name, &daemon, &location).await?;
     let mut view: ApplicationView = host
         .client
@@ -358,7 +754,7 @@ pub async fn stop(
             )));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-        view = application(&host, &name).await?;
+        view = self::application(&host, &name).await?;
     }
     if json {
         print_json(&with_provider(&host, &view));
@@ -369,8 +765,7 @@ pub async fn stop(
 }
 
 pub async fn logs(command: LogsCommand) -> compute_core::Result<()> {
-    let definition = definition(&command.application)?;
-    let name = definition.identity.name.clone();
+    let name = target_name(&command.application).await?;
     let (host, view) = locate(&name, &command.daemon, &command.location).await?;
     if let Some(version) = command.version
         && view
@@ -404,8 +799,7 @@ pub async fn logs(command: LogsCommand) -> compute_core::Result<()> {
 }
 
 pub async fn history(command: HistoryCommand) -> compute_core::Result<()> {
-    let definition = definition(&command.application)?;
-    let name = definition.identity.name.clone();
+    let name = target_name(&command.application).await?;
     let (host, view) = locate(&name, &command.daemon, &command.location).await?;
     if command.json {
         print_json(&view.deployments);
@@ -432,8 +826,7 @@ pub async fn history(command: HistoryCommand) -> compute_core::Result<()> {
 }
 
 pub async fn rollback(command: RollbackCommand) -> compute_core::Result<()> {
-    let definition = definition(&command.application)?;
-    let name = definition.identity.name.clone();
+    let name = target_name(&command.application).await?;
     let (host, _) = locate(&name, &command.daemon, &command.location).await?;
     let started: ApplicationDeploymentView = host
         .client
@@ -459,7 +852,16 @@ async fn finish(
 ) -> compute_core::Result<()> {
     let view = application(host, name).await?;
     if json {
+        // This release, whatever is active now: identity, where, what,
+        // and its evidence.
         let mut value = with_provider(host, &view);
+        value["application_id"] = serde_json::json!(view.application.id);
+        value["deployment_id"] = serde_json::json!(deployment.deployment_id);
+        value["version"] = serde_json::json!(deployment.version);
+        value["runtime"] = serde_json::json!(deployment.runtime);
+        value["runtime_version"] = serde_json::json!(deployment.runtime_version);
+        value["receipt"] = serde_json::json!(deployment.receipt);
+        value["artifact"] = serde_json::json!(deployment.artifact);
         value["deployment"] = serde_json::to_value(deployment)?;
         print_json(&value);
     } else {
@@ -731,9 +1133,13 @@ fn plain(value: &serde_json::Value) -> String {
 fn with_provider(host: &Host, view: &ApplicationView) -> serde_json::Value {
     let mut value = serde_json::to_value(view).unwrap_or_default();
     value["provider"] = serde_json::json!(host.provider_id);
+    value["application_id"] = serde_json::json!(view.application.id);
     if let Some(active) = &view.active {
         value["version"] = serde_json::json!(active.version);
         value["deployment_id"] = serde_json::json!(active.deployment_id);
+        value["runtime"] = serde_json::json!(active.runtime);
+        value["receipt"] = serde_json::json!(active.receipt);
+        value["artifact"] = serde_json::json!(active.artifact);
     }
     value
 }

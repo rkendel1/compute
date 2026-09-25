@@ -606,6 +606,10 @@ pub struct ApplicationDeploymentView {
     /// The caller's pool placement that chose this node, when one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<compute_state::PoolPlacement>,
+    /// The application artifact this version released, when it came from
+    /// one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<compute_state::ApplicationArtifactEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
     /// The deployment receipt (an artifact digest), once issued.
