@@ -16,8 +16,9 @@ pub use compute_policy::{
 
 use compute_core::{
     BundleInput, BundleWorkloadPlan, DependencyCapsule, ExecutionResult, IsolationProfile,
-    NetworkPolicy, ProviderIdentity, ReceiptPlacement, RuntimeInventory, RuntimeKind,
-    WorkloadBundle, WorkloadSpec,
+    NetworkPolicy, ProviderIdentity, ProviderRuntimeRequirement, ReceiptPlacement,
+    RuntimeDistribution, RuntimeInventory, RuntimeKind, RuntimeLifecycleStatus, RuntimePreparation,
+    RuntimeResolution, WorkloadBundle, WorkloadSpec,
 };
 use compute_runtime::Compute;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -27,8 +28,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 mod jobs;
+mod runtime;
 pub use jobs::JobEvent;
 use jobs::JobManager;
+use runtime::RuntimeManager;
 
 pub const REMOTE_PROTOCOL: &str = "compute.remote@1";
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
@@ -170,6 +173,12 @@ pub struct ExpectedIdentities {
     pub dependency_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution_id: Option<String>,
+    /// Provider-resolved runtime distribution selected during placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_distribution_id: Option<String>,
+    /// Digest of the artifact the provider verified before preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_distribution_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -404,6 +413,42 @@ pub trait ComputeProvider: Send + Sync {
     async fn capabilities(&self) -> Result<ProviderCapabilities, ProviderError>;
     async fn health(&self) -> Result<ProviderHealth, ProviderError>;
 
+    /// Resolve a portable requirement without acquiring or executing it.
+    async fn resolve_runtime(
+        &self,
+        requirement: ProviderRuntimeRequirement,
+    ) -> Result<RuntimeResolution, ProviderError> {
+        Ok(RuntimeResolution {
+            requirement,
+            status: RuntimeLifecycleStatus::Unsupported,
+            distribution: None,
+            detail: Some("this provider has no runtime resolver".into()),
+        })
+    }
+
+    /// Acquire, verify, and prepare an exact resolved distribution.
+    async fn prepare_runtime(
+        &self,
+        distribution: RuntimeDistribution,
+    ) -> Result<RuntimePreparation, ProviderError> {
+        let _ = distribution;
+        Err(ProviderError::new(
+            ProviderErrorKind::DistributionUnavailable,
+            "this provider cannot prepare runtime distributions",
+        ))
+    }
+
+    async fn runtime_status(
+        &self,
+        distribution: RuntimeDistribution,
+    ) -> Result<RuntimeResolution, ProviderError> {
+        let _ = distribution;
+        Err(ProviderError::new(
+            ProviderErrorKind::DistributionUnavailable,
+            "this provider does not report runtime distribution status",
+        ))
+    }
+
     /// Decide admission without executing. The decision carries every
     /// reason; a denial is an `Ok` decision, not an error.
     async fn admit(&self, request: ProviderRequest) -> Result<Admission, ProviderError> {
@@ -428,6 +473,7 @@ pub trait ComputeProvider: Send + Sync {
 
 pub struct LocalProvider {
     compute: Compute,
+    runtimes: RuntimeManager,
     identity: ProviderIdentity,
     policy: ProviderPolicy,
     execution_policy: RwLock<Option<Policy>>,
@@ -445,8 +491,12 @@ impl LocalProvider {
         Self::with_identity(ProviderIdentity::Local { id: "local".into() })
     }
     pub fn with_identity(identity: ProviderIdentity) -> Self {
+        let provider_key = serde_json::to_string(&identity).expect("provider identity serializes");
+        let runtimes = RuntimeManager::new(&provider_key);
+        let compute = Compute::with_distribution_root(runtimes.root().to_path_buf());
         Self {
-            compute: Compute::new(),
+            compute,
+            runtimes,
             identity,
             policy: ProviderPolicy::default(),
             execution_policy: RwLock::new(None),
@@ -745,6 +795,24 @@ impl LocalProvider {
                 ));
             }
         }
+        if let Some(receipt) = result.receipt.as_ref() {
+            if let Some(expected) = &request.expected.runtime_distribution_id
+                && receipt.runtime.distribution_id.as_ref() != Some(expected)
+            {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::DistributionUnavailable,
+                    "executed runtime distribution differs from the prepared distribution",
+                ));
+            }
+            if let Some(expected) = &request.expected.runtime_distribution_digest
+                && receipt.runtime.distribution_digest.as_ref() != Some(expected)
+            {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::EvidenceInvalid,
+                    "executed runtime digest differs from the verified artifact",
+                ));
+            }
+        }
         let identity = self.identity();
         result.provider = Some(identity.clone());
         result.admission = Some(summary.clone());
@@ -840,6 +908,36 @@ impl ComputeProvider for LocalProvider {
             .inventory()
             .await
             .map_err(classify_compute_error)?;
+        for entry in &mut inventory.runtimes {
+            if entry.available && entry.compatible {
+                entry.lifecycle = Some(
+                    if entry.source == compute_core::RuntimeSource::Distribution {
+                        RuntimeLifecycleStatus::Ready
+                    } else {
+                        RuntimeLifecycleStatus::Installed
+                    },
+                );
+            }
+            let resolution = self.runtimes.resolve(
+                ProviderRuntimeRequirement {
+                    runtime: entry.id,
+                    version: Some(entry.version.clone()),
+                    platform: Some(compute_core::PlatformIdentity {
+                        runtime_abi: None,
+                        ..compute_core::PlatformIdentity::current()
+                    }),
+                },
+                entry.capabilities.clone(),
+            );
+            if resolution.distribution.is_some()
+                && (!entry.available || resolution.status == RuntimeLifecycleStatus::Ready)
+            {
+                entry.lifecycle = Some(resolution.status);
+                entry.distribution = resolution.distribution;
+                entry.compatible = resolution.status.can_satisfy();
+                entry.remediation = resolution.detail;
+            }
+        }
         inventory
             .runtimes
             .retain(|runtime| self.policy.allows_runtime(runtime.id));
@@ -898,6 +996,67 @@ impl ComputeProvider for LocalProvider {
             healthy: true,
             executions_started: Some(self.executions_started()),
         })
+    }
+
+    async fn resolve_runtime(
+        &self,
+        requirement: ProviderRuntimeRequirement,
+    ) -> Result<RuntimeResolution, ProviderError> {
+        if !self.policy.allows_runtime(requirement.runtime) {
+            return Ok(RuntimeResolution {
+                requirement,
+                status: RuntimeLifecycleStatus::Unsupported,
+                distribution: None,
+                detail: Some("runtime is restricted by provider policy".into()),
+            });
+        }
+        let capabilities = self
+            .compute
+            .capabilities(requirement.runtime)
+            .map_err(classify_compute_error)?;
+        let managed = self.runtimes.resolve(requirement.clone(), capabilities);
+        if managed.status.can_satisfy() {
+            return Ok(managed);
+        }
+        if let Ok(installed) = self
+            .compute
+            .runtime(requirement.runtime, requirement.version.as_deref())
+            .await
+            && installed.available
+            && installed.compatible
+        {
+            return Ok(RuntimeResolution {
+                requirement,
+                status: if installed.source == compute_core::RuntimeSource::Distribution {
+                    RuntimeLifecycleStatus::Ready
+                } else {
+                    RuntimeLifecycleStatus::Installed
+                },
+                distribution: None,
+                detail: None,
+            });
+        }
+        Ok(managed)
+    }
+
+    async fn prepare_runtime(
+        &self,
+        distribution: RuntimeDistribution,
+    ) -> Result<RuntimePreparation, ProviderError> {
+        if !self.policy.allows_runtime(distribution.runtime) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::CapabilityMismatch,
+                "runtime is restricted by provider policy",
+            ));
+        }
+        self.runtimes.prepare(&distribution)
+    }
+
+    async fn runtime_status(
+        &self,
+        distribution: RuntimeDistribution,
+    ) -> Result<RuntimeResolution, ProviderError> {
+        Ok(self.runtimes.status(&distribution))
     }
 }
 
@@ -1119,6 +1278,45 @@ impl ComputeProvider for RemoteProvider {
     async fn health(&self) -> Result<ProviderHealth, ProviderError> {
         self.get("/compute/health").await
     }
+
+    async fn resolve_runtime(
+        &self,
+        requirement: ProviderRuntimeRequirement,
+    ) -> Result<RuntimeResolution, ProviderError> {
+        self.send(
+            "POST",
+            "/compute/runtimes/resolve",
+            Some(&requirement),
+            None,
+        )
+        .await
+    }
+
+    async fn prepare_runtime(
+        &self,
+        distribution: RuntimeDistribution,
+    ) -> Result<RuntimePreparation, ProviderError> {
+        self.send(
+            "POST",
+            "/compute/runtimes/prepare",
+            Some(&distribution),
+            None,
+        )
+        .await
+    }
+
+    async fn runtime_status(
+        &self,
+        distribution: RuntimeDistribution,
+    ) -> Result<RuntimeResolution, ProviderError> {
+        self.send(
+            "POST",
+            "/compute/runtimes/status",
+            Some(&distribution),
+            None,
+        )
+        .await
+    }
 }
 
 /// Capsules in `COMPUTE_DEPENDENCY_CACHE`, which execution resolves by
@@ -1164,6 +1362,9 @@ pub enum ProviderOperation {
     Execute,
     Capabilities,
     Health,
+    RuntimeResolve,
+    RuntimePrepare,
+    RuntimeStatus,
     Submit,
     Status,
     Result,
@@ -1349,6 +1550,18 @@ async fn handle_connection(
             });
             encode_result(capabilities)
         }
+        ProviderOperation::RuntimeResolve => match decode(&request.body) {
+            Ok(value) => encode_result(state.config.provider.resolve_runtime(value).await),
+            Err(error) => Err(error),
+        },
+        ProviderOperation::RuntimePrepare => match decode(&request.body) {
+            Ok(value) => encode_result(state.config.provider.prepare_runtime(value).await),
+            Err(error) => Err(error),
+        },
+        ProviderOperation::RuntimeStatus => match decode(&request.body) {
+            Ok(value) => encode_result(state.config.provider.runtime_status(value).await),
+            Err(error) => Err(error),
+        },
         ProviderOperation::Inspect => match decode_provider_request(&request.body) {
             Ok(value) => encode_result(state.config.provider.inspect(value).await),
             Err(error) => Err(error),
@@ -1424,6 +1637,9 @@ fn parse_route(
         ("GET", "/compute/inspect") => Some(ProviderOperation::Inspect),
         ("POST", "/compute/execute") => Some(ProviderOperation::Execute),
         ("POST", "/compute/admission") => Some(ProviderOperation::Admission),
+        ("POST", "/compute/runtimes/resolve") => Some(ProviderOperation::RuntimeResolve),
+        ("POST", "/compute/runtimes/prepare") => Some(ProviderOperation::RuntimePrepare),
+        ("POST", "/compute/runtimes/status") => Some(ProviderOperation::RuntimeStatus),
         ("POST", "/compute/jobs") => Some(ProviderOperation::Submit),
         _ => None,
     };
@@ -1468,6 +1684,10 @@ fn encode_result<T: Serialize>(result: Result<T, ProviderError>) -> Result<Vec<u
     serde_json::to_vec(&result?).map_err(transport_error)
 }
 fn decode_provider_request(body: &[u8]) -> Result<ProviderRequest, ProviderError> {
+    decode(body)
+}
+
+fn decode<T: DeserializeOwned>(body: &[u8]) -> Result<T, ProviderError> {
     serde_json::from_slice(body).map_err(|error| {
         ProviderError::new(
             ProviderErrorKind::ArtifactInvalid,

@@ -90,6 +90,10 @@ pub struct ProviderEvaluation {
     pub capability_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_identity: Option<ProviderIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_lifecycle: Option<compute_core::RuntimeLifecycleStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_distribution: Option<compute_core::RuntimeDistribution>,
     pub status: EvaluationStatus,
     /// Capability incompatibilities.
     pub reasons: Vec<IncompatibilityReason>,
@@ -111,6 +115,9 @@ pub struct SelectedProvider {
     pub policy_id: String,
     pub admission_id: String,
     pub selection_reason: SelectionReason,
+    pub runtime_lifecycle: compute_core::RuntimeLifecycleStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_distribution: Option<compute_core::RuntimeDistribution>,
 }
 
 /// What admission evaluates during placement: the caller's effective policy
@@ -248,6 +255,12 @@ impl PlacementReport {
         if receipt.runtime.observed != self.requirements.runtime.kind {
             return Err("receipt runtime differs from the required runtime".into());
         }
+        if let Some(distribution) = &selected.runtime_distribution
+            && (receipt.runtime.distribution_id.as_ref() != Some(&distribution.id)
+                || receipt.runtime.distribution_digest.as_ref() != Some(&distribution.digest))
+        {
+            return Err("receipt runtime distribution differs from placement".into());
+        }
         if receipt.isolation.effective != self.requirements.isolation {
             return Err("receipt isolation differs from the required isolation".into());
         }
@@ -355,6 +368,10 @@ pub fn place(
                     .into(),
                     compatible_candidates: compatible_providers.len() as u64,
                 },
+                runtime_lifecycle: provider
+                    .runtime_lifecycle
+                    .expect("compatible providers offer the required runtime"),
+                runtime_distribution: provider.runtime_distribution.clone(),
             }),
             None,
         ),
@@ -494,6 +511,12 @@ fn evaluate(
         health,
         capability_version: descriptor.map(|descriptor| descriptor.capability_version.clone()),
         provider_identity: descriptor.map(|descriptor| descriptor.provider_identity.clone()),
+        runtime_lifecycle: descriptor
+            .and_then(|descriptor| descriptor.runtime(requirements.runtime.kind))
+            .map(|runtime| runtime.lifecycle),
+        runtime_distribution: descriptor
+            .and_then(|descriptor| descriptor.runtime(requirements.runtime.kind))
+            .and_then(|runtime| runtime.distribution.clone()),
         status,
         reasons,
         admission,
@@ -687,10 +710,20 @@ fn explain(
     let considered = providers
         .iter()
         .map(|provider| {
-            let head = format!(
+            let mut head = format!(
                 "{} ({}, priority {}, health {})",
                 provider.provider_id, provider.provider_kind, provider.priority, provider.health
             );
+            if let Some(lifecycle) = provider.runtime_lifecycle {
+                let status = serde_json::to_value(lifecycle)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                head.push_str(&format!(", runtime {} {status}", requirements.runtime.kind));
+                if let Some(distribution) = &provider.runtime_distribution {
+                    head.push_str(&format!(", distribution {}", distribution.id));
+                }
+            }
             match provider.status {
                 EvaluationStatus::Compatible => format!("{head}: compatible"),
                 EvaluationStatus::PolicyDenied => format!(

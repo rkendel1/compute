@@ -19,7 +19,11 @@ Capability Matching
    ↓
 Selected Provider
    ↓
-Execution Job
+Resolve runtime distribution
+   ↓
+Acquire → verify → prepare
+   ↓
+Admission → Execution Job
    ↓
 Result + Receipt
 ```
@@ -113,6 +117,13 @@ value, and the available value:
 
 Runtime isolation is resolved by the same function execution uses, so
 placement never admits a request that execution would reject.
+
+An immediately executable runtime is compatible as `installed` or `ready`.
+A pinned provider distribution is also compatible as `available`; placement
+records its canonical distribution and lifecycle state. After selection,
+dispatch resolves it again and prepares it before admission. Resolution
+drift, acquisition failure, digest mismatch, or unverified preparation fails
+on the selected provider without fallback.
 
 **Exact distribution matching.** A workload bound to `distribution_id = X`
 matches only providers advertising exactly `X`. The same runtime version is

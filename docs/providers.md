@@ -12,8 +12,9 @@ a workload's contract.
 ## Provider model
 
 ```text
-Workload ──▶ Provider Pool ──▶ Selected Provider ──▶ Runtime ──▶ Result + Receipt
-             (placement)       (execution)
+Workload ──▶ Provider Pool ──▶ Runtime resolution ──▶ Acquire / verify / prepare
+             (placement)                                │
+Result + Receipt ◀──────────── Execution ◀──────── Admission
 ```
 
 - The **pool** evaluates and selects. It never executes.
@@ -46,12 +47,21 @@ platform, complete distribution identity, runtime payload identity, and
 executable identity. Runtime support is therefore never reduced to a boolean
 or assumed portable across platforms.
 
+Runtime lifecycle is explicit: `installed` can execute now, `available` is a
+pinned distribution the provider can obtain, `ready` is verified and
+prepared, `unsupported` has no provider distribution, and
+`unavailable`/`failed` cannot currently become runnable. Distribution IDs are
+derived from artifact, version, platform, executable, and capability data;
+mutable tags are not identities.
+
 ```sh
 compute provider list --json
 compute provider inspect production --json      # validated descriptor
 compute provider capabilities production --json # raw capability response
 compute provider capabilities http://127.0.0.1:8080
 compute runtimes --json
+compute runtimes --provider production
+compute runtimes --provider production --json
 ```
 
 A configured pool ID yields its descriptor. `local` or an `http(s)://`
@@ -95,6 +105,20 @@ Provider identity is included in every execution result and sealed into its
 Placed executions also bind their placement: placement ID, pool provider ID,
 protocol, selection mode (`explicit` or `pool`), and selection reason.
 Receipt verification is local and never contacts the provider.
+Prepared-runtime receipts additionally bind the selected distribution,
+verified artifact digest, prepared payload identity, and actual executable.
+
+## Runtime provider lifecycle
+
+Providers own installation behind resolve, prepare, and status operations.
+Dispatch re-resolves the selected offer, refuses capability drift, requires
+verified preparation before admission, and binds the distribution ID and
+digest into expected execution evidence. Failed staging data is never
+runnable; successful preparation survives provider restarts in
+`COMPUTE_RUNTIME_STORE`.
+
+Node 24 is the first acquired runtime. Linux x86-64 and arm64 artifacts are
+pinned to official release digests in `distribution/runtime-lock.json`.
 
 ## AppPort
 

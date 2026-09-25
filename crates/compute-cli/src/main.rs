@@ -44,7 +44,7 @@ enum Commands {
     /// Create and verify portable dependency capsules.
     Deps(DepsCommand),
     Inspect(InspectCommand),
-    Runtimes(JsonFlag),
+    Runtimes(RuntimesCommand),
     Runtime(RuntimeCommand),
     Capabilities(RuntimeCommand),
     /// Show the versioned isolation profiles and runtime support matrix.
@@ -314,6 +314,17 @@ enum DistributionCommands {
 struct JsonFlag {
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args, Debug)]
+struct RuntimesCommand {
+    #[arg(long)]
+    json: bool,
+    /// Inspect a configured provider (or an http(s) provider endpoint).
+    #[arg(long)]
+    provider: Option<String>,
+    #[command(flatten)]
+    location: pool::PoolLocation,
 }
 
 #[derive(Args, Debug)]
@@ -1042,20 +1053,40 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 }
             }
         }
-        Commands::Runtimes(json_flag) => {
-            let inventory = compute.inventory().await?;
-            if json_flag.json {
+        Commands::Runtimes(command) => {
+            let inventory = match command.provider.as_deref() {
+                Some(provider) => pool::runtime_inventory(&command.location, provider).await?,
+                None => compute.inventory().await?,
+            };
+            if command.json {
                 println!("{}", serde_json::to_string_pretty(&inventory).unwrap());
             } else {
-                println!("Runtime\tVersion\tPlatform\tAvailable\tSource");
+                println!("Runtime\tVersion\tPlatform\tDistribution\tStatus");
                 for runtime in inventory.runtimes {
+                    let status = runtime.lifecycle.unwrap_or(if runtime.available {
+                        compute_core::RuntimeLifecycleStatus::Installed
+                    } else {
+                        compute_core::RuntimeLifecycleStatus::Unavailable
+                    });
                     println!(
-                        "{}\t{}\t{}\t{}\t{:?}",
+                        "{}\t{}\t{}\t{}\t{}",
                         runtime.id,
                         runtime.version,
                         runtime.platform,
-                        if runtime.available { "yes" } else { "no" },
-                        runtime.source
+                        runtime
+                            .distribution
+                            .as_ref()
+                            .map(|distribution| distribution.id.as_str())
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or_else(|| if runtime.distribution_runtime_id.is_empty() {
+                                "-"
+                            } else {
+                                &runtime.distribution_runtime_id
+                            }),
+                        serde_json::to_value(status)
+                            .ok()
+                            .and_then(|value| value.as_str().map(str::to_owned))
+                            .unwrap_or_default()
                     );
                 }
             }

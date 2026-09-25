@@ -148,6 +148,78 @@ fn provider_failure(
     }
 }
 
+async fn prepare_selected_runtime(
+    report: &PlacementReport,
+    member: &crate::pool::PoolMember,
+    mut request: ProviderRequest,
+) -> Result<ProviderRequest, DispatchError> {
+    let selected = report
+        .selected
+        .as_ref()
+        .expect("placement selected provider");
+    // Pre-lifecycle providers and unmanaged host runtimes are already
+    // executable and have no provider-managed distribution to prepare.
+    if selected.runtime_distribution.is_none() {
+        return Ok(request);
+    }
+    let requirement = compute_core::ProviderRuntimeRequirement {
+        runtime: report.requirements.runtime.kind,
+        version: report.requirements.runtime.version.clone(),
+        platform: report.requirements.platform.clone(),
+    };
+    let resolution = member
+        .provider
+        .resolve_runtime(requirement)
+        .await
+        .map_err(|error| provider_failure(report, &member.id, error))?;
+    if !resolution.status.can_satisfy() {
+        return Err(provider_failure(
+            report,
+            &member.id,
+            compute_provider::ProviderError::new(
+                ProviderErrorKind::DistributionUnavailable,
+                resolution.detail.unwrap_or_else(|| {
+                    "selected provider can no longer satisfy the runtime".into()
+                }),
+            ),
+        ));
+    }
+    if resolution.distribution != selected.runtime_distribution {
+        return Err(DispatchError {
+            code: DispatchErrorCode::EvidenceInvalid,
+            placement_id: report.placement_id.clone(),
+            provider_id: Some(member.id.clone()),
+            provider_error: Some(ProviderErrorKind::EvidenceInvalid),
+            message: "runtime resolution changed after placement".into(),
+            admission: None,
+            retried: false,
+        });
+    }
+    if let Some(distribution) = resolution.distribution {
+        let preparation = member
+            .provider
+            .prepare_runtime(distribution.clone())
+            .await
+            .map_err(|error| provider_failure(report, &member.id, error))?;
+        if preparation.status != compute_core::RuntimeLifecycleStatus::Ready
+            || !preparation.verified
+            || preparation.distribution != distribution
+        {
+            return Err(provider_failure(
+                report,
+                &member.id,
+                compute_provider::ProviderError::new(
+                    ProviderErrorKind::EvidenceInvalid,
+                    "provider did not prove the resolved runtime was verified and prepared",
+                ),
+            ));
+        }
+        request.expected.runtime_distribution_id = Some(distribution.id);
+        request.expected.runtime_distribution_digest = Some(distribution.digest);
+    }
+    Ok(request)
+}
+
 /// Execute synchronously on the selected provider and verify the receipt.
 pub async fn execute(
     pool: &ProviderPool,
@@ -155,6 +227,7 @@ pub async fn execute(
     request: ProviderRequest,
 ) -> Result<ExecuteResponse, DispatchError> {
     let (member, request) = prepare(pool, report, request)?;
+    let request = prepare_selected_runtime(report, member, request).await?;
     let response = member
         .provider
         .execute(request)
@@ -191,6 +264,7 @@ pub async fn submit(
     idempotency_key: Option<&str>,
 ) -> Result<PlacedSubmission, DispatchError> {
     let (member, request) = prepare(pool, report, request)?;
+    let request = prepare_selected_runtime(report, member, request).await?;
     let Some(jobs) = &member.jobs else {
         return Err(DispatchError {
             code: DispatchErrorCode::JobsUnsupported,

@@ -1,0 +1,6 @@
+[run]
+runtime = "node"
+entrypoint = "app.js"
+
+[network]
+mode = "network"

@@ -12,10 +12,6 @@ use compute_core::{
     WorkloadValidationStatus, create_execution_receipt, input_receipts, request_workload_identity,
     sha256_identity,
 };
-use compute_runtime_process::{
-    BunRuntime, DenoRuntime, DotnetRuntime, JvmRuntime, NativeRuntime, NodeRuntime, PhpRuntime,
-    PythonRuntime, RubyRuntime, ShellRuntime,
-};
 use compute_runtime_wasm::WasmRuntime;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -28,10 +24,17 @@ struct ReceiptManifestRuntime {
     artifact_sha256: String,
     payload_sha256: String,
     reported_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    distribution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    distribution_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capabilities: Option<compute_core::RuntimeCapabilities>,
 }
 
 pub struct Compute {
     adapters: Vec<Box<dyn RuntimeAdapter>>,
+    distribution_root: Option<PathBuf>,
 }
 
 impl Default for Compute {
@@ -42,20 +45,40 @@ impl Default for Compute {
 
 impl Compute {
     pub fn new() -> Self {
+        Self::with_optional_distribution_root(distribution_root())
+    }
+
+    pub fn with_distribution_root(root: PathBuf) -> Self {
+        Self::with_optional_distribution_root(Some(root))
+    }
+
+    fn with_optional_distribution_root(distribution_root: Option<PathBuf>) -> Self {
+        let process = |kind| -> Box<dyn RuntimeAdapter> {
+            match &distribution_root {
+                Some(root) => Box::new(
+                    compute_runtime_process::ProcessRuntime::with_distribution_root(
+                        kind,
+                        root.clone(),
+                    ),
+                ),
+                None => Box::new(compute_runtime_process::ProcessRuntime::new(kind)),
+            }
+        };
         Self {
             adapters: vec![
                 Box::new(WasmRuntime),
-                Box::new(NodeRuntime),
-                Box::new(BunRuntime),
-                Box::new(DenoRuntime),
-                Box::new(PythonRuntime),
-                Box::new(RubyRuntime),
-                Box::new(PhpRuntime),
-                Box::new(JvmRuntime),
-                Box::new(DotnetRuntime),
-                Box::new(NativeRuntime),
-                Box::new(ShellRuntime),
+                process(RuntimeKind::Node),
+                process(RuntimeKind::Bun),
+                process(RuntimeKind::Deno),
+                process(RuntimeKind::Python),
+                process(RuntimeKind::Ruby),
+                process(RuntimeKind::Php),
+                process(RuntimeKind::Jvm),
+                process(RuntimeKind::Dotnet),
+                process(RuntimeKind::Native),
+                process(RuntimeKind::Shell),
             ],
+            distribution_root,
         }
     }
 
@@ -96,6 +119,12 @@ impl Compute {
                     .cloned()
                     .expect("every known runtime has a distribution identity"),
                 executable_identity,
+                lifecycle: Some(if availability.available && availability.compatible {
+                    compute_core::RuntimeLifecycleStatus::Installed
+                } else {
+                    compute_core::RuntimeLifecycleStatus::Unsupported
+                }),
+                distribution: None,
                 executable: descriptor.executable,
                 available: availability.available,
                 compatible: availability.compatible,
@@ -116,7 +145,11 @@ impl Compute {
     /// Identity of the installed Compute distribution, independent of any
     /// particular runtime selection.
     pub fn installed_distribution_identity(&self) -> Result<DistributionIdentity> {
-        if let Some(home) = distribution_root() {
+        if let Some(home) = self
+            .distribution_root
+            .as_ref()
+            .filter(|root| root.join("runtime-manifest.json").is_file())
+        {
             let manifest_path = home.join("runtime-manifest.json");
             if manifest_path.is_file() {
                 let manifest: serde_json::Value =
@@ -165,7 +198,13 @@ impl Compute {
     /// `runtime.distribution_runtime_id`.
     pub fn runtime_artifact_identities(&self) -> Result<BTreeMap<RuntimeKind, String>> {
         let mut identities = BTreeMap::new();
-        if let Some(root) = distribution_root() {
+        let lock: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../../../distribution/runtime-lock.json"))?;
+        if let Some(root) = self
+            .distribution_root
+            .as_ref()
+            .filter(|root| root.join("runtime-manifest.json").is_file())
+        {
             let manifest_path = root.join("runtime-manifest.json");
             if manifest_path.is_file() {
                 let manifest: serde_json::Value =
@@ -178,13 +217,17 @@ impl Compute {
                         .and_then(serde_json::Value::as_str)
                     {
                         identities.insert(adapter.kind(), prefixed_digest(payload)?);
+                    } else if let Some(entry) = lock
+                        .get("runtimes")
+                        .and_then(|value| value.get(adapter.kind().as_str()))
+                    {
+                        identities
+                            .insert(adapter.kind(), sha256_identity(&serde_json::to_vec(entry)?));
                     }
                 }
                 return Ok(identities);
             }
         }
-        let lock: serde_json::Value =
-            serde_json::from_slice(include_bytes!("../../../distribution/runtime-lock.json"))?;
         for adapter in &self.adapters {
             if let Some(entry) = lock
                 .get("runtimes")
@@ -232,7 +275,10 @@ impl Compute {
     ) -> Result<DistributionIdentity> {
         let adapter = self.adapter(request.runtime.kind)?;
         let resolved = adapter.resolve(request).await?;
-        Ok(receipt_environment(adapter, &resolved)?.distribution)
+        Ok(
+            receipt_environment(adapter, &resolved, self.distribution_root.as_deref())?
+                .distribution,
+        )
     }
 
     pub fn inspect_path(&self, path: &Path, runtime: Option<RuntimeSpec>) -> Result<Inspection> {
@@ -309,7 +355,8 @@ impl Compute {
                 )));
             }
         }
-        let environment = receipt_environment(adapter, &runtime)?;
+        let environment =
+            receipt_environment(adapter, &runtime, self.distribution_root.as_deref())?;
         let started_at = Utc::now();
         let mut result = match control {
             Some(control) => {
@@ -865,6 +912,7 @@ fn load_cached_capsule(identity: &str) -> Result<DependencyCapsule> {
 fn receipt_environment(
     adapter: &dyn RuntimeAdapter,
     runtime: &compute_core::ResolvedRuntime,
+    configured_root: Option<&Path>,
 ) -> Result<ReceiptEnvironment> {
     let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     let executable_identity = runtime
@@ -881,7 +929,13 @@ fn receipt_environment(
                 .unwrap_or_else(|| sha256_identity(adapter.descriptor().id.as_str().as_bytes()))
         });
 
-    if let Some(root) = distribution_root() {
+    let root = configured_root
+        .filter(|root| root.join("runtime-manifest.json").is_file())
+        .map(Path::to_path_buf)
+        .or_else(distribution_root);
+    if let Some(root) = root
+        && distribution_manifest_contains(&root, runtime.kind)?
+    {
         let manifest_path = root.join("runtime-manifest.json");
         let manifest_bytes = std::fs::read(&manifest_path)?;
         let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
@@ -963,6 +1017,19 @@ fn receipt_environment(
             },
             distribution_runtime_id: prefixed_digest(payload)?,
             executable_identity,
+            runtime_distribution_id: runtime_manifest
+                .distribution_id
+                .clone()
+                .unwrap_or_else(|| prefixed_digest(payload).expect("validated payload digest")),
+            runtime_distribution_digest: runtime_manifest
+                .distribution_digest
+                .clone()
+                .map(|value| prefixed_digest(&value))
+                .transpose()?
+                .unwrap_or_else(|| {
+                    prefixed_digest(&runtime_manifest.artifact_sha256)
+                        .expect("validated artifact digest")
+                }),
             runtime_lock_id: prefixed_digest(&lock)?,
             manifest_id: sha256_identity(&manifest_bytes),
         });
@@ -989,9 +1056,20 @@ fn receipt_environment(
         },
         distribution_runtime_id: sha256_identity(&serde_json::to_vec(runtime_entry)?),
         executable_identity,
+        runtime_distribution_id: sha256_identity(&serde_json::to_vec(runtime_entry)?),
+        runtime_distribution_digest: sha256_identity(&serde_json::to_vec(runtime_entry)?),
         runtime_lock_id: sha256_identity(lock_bytes),
         manifest_id: sha256_identity(&descriptor),
     })
+}
+
+fn distribution_manifest_contains(root: &Path, runtime: RuntimeKind) -> Result<bool> {
+    let bytes = std::fs::read(root.join("runtime-manifest.json"))?;
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes)?;
+    Ok(manifest
+        .get("runtimes")
+        .and_then(|value| value.get(runtime.as_str()))
+        .is_some())
 }
 
 fn prefixed_digest(value: &str) -> Result<String> {

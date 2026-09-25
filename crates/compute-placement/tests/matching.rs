@@ -1,6 +1,9 @@
 mod support;
 
-use compute_core::{IsolationProfile, NetworkPolicy, PlatformIdentity, RuntimeKind};
+use compute_core::{
+    IsolationProfile, NetworkPolicy, PlatformIdentity, RuntimeDistribution, RuntimeKind,
+    RuntimeLifecycleStatus,
+};
 use compute_placement::{
     DependencyRequirement, DistributionRequirement, ProviderDescriptor, ProviderKind, ReasonCode,
     SubmissionMode, match_provider,
@@ -48,6 +51,50 @@ fn installed_but_unavailable_runtime_is_distinct_from_unsupported() {
         codes(&requirements(RuntimeKind::Node), &provider.descriptor("p")),
         [ReasonCode::RuntimeUnavailable]
     );
+}
+
+#[test]
+fn obtainable_runtime_is_compatible_before_it_is_installed() {
+    let mut provider = Synthetic::new(ProviderKind::Remote, &[]);
+    provider.unavailable = vec![RuntimeKind::Node];
+    let mut capabilities = provider.capabilities("node-provider");
+    let entry = capabilities
+        .inventory
+        .runtimes
+        .iter_mut()
+        .find(|entry| entry.id == RuntimeKind::Node)
+        .unwrap();
+    let mut distribution = RuntimeDistribution {
+        id: String::new(),
+        runtime: RuntimeKind::Node,
+        version: entry.version.clone(),
+        platform: PlatformIdentity {
+            os: "linux".into(),
+            architecture: "x86_64".into(),
+            runtime_abi: None,
+        },
+        artifact: "https://example.invalid/node.tar.xz".into(),
+        digest: compute_core::sha256_identity(b"node artifact"),
+        source: "test catalog".into(),
+        executable: entry.executable.clone(),
+        capabilities: entry.capabilities.clone(),
+    };
+    distribution.id = distribution.canonical_id().unwrap();
+    entry.lifecycle = Some(RuntimeLifecycleStatus::Available);
+    entry.distribution = Some(distribution.clone());
+    entry.compatible = true;
+    let descriptor = ProviderDescriptor::from_capabilities(
+        "node-provider",
+        ProviderKind::Remote,
+        &capabilities,
+        availability(),
+    )
+    .unwrap();
+    let matched = match_provider(&requirements(RuntimeKind::Node), &descriptor);
+    assert!(matched.compatible, "{matched:?}");
+    let offer = descriptor.runtime(RuntimeKind::Node).unwrap();
+    assert_eq!(offer.lifecycle, RuntimeLifecycleStatus::Available);
+    assert_eq!(offer.distribution.as_ref(), Some(&distribution));
 }
 
 #[test]

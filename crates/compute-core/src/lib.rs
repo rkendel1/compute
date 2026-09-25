@@ -1899,6 +1899,13 @@ pub struct RuntimeInventoryEntry {
     /// Identity of the executable that would run the workload, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable_identity: Option<String>,
+    /// Provider-side lifecycle state. Absent on capability payloads emitted
+    /// before runtime preparation was introduced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<RuntimeLifecycleStatus>,
+    /// Exact distribution the provider can prepare for this runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<RuntimeDistribution>,
     pub executable: String,
     pub available: bool,
     pub compatible: bool,
@@ -1907,6 +1914,128 @@ pub struct RuntimeInventoryEntry {
     pub source: RuntimeSource,
     pub capabilities: RuntimeCapabilities,
     pub remediation: Option<String>,
+}
+
+/// Provider-side state of a runtime distribution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeLifecycleStatus {
+    /// An unmanaged host runtime is immediately executable.
+    Installed,
+    /// A pinned distribution can be acquired by the provider.
+    Available,
+    /// Acquisition or preparation is currently in progress.
+    Preparing,
+    /// A pinned distribution was verified, prepared, and is executable.
+    Ready,
+    /// The provider has no distribution for this requirement.
+    Unsupported,
+    /// The provider supports it, but acquisition cannot currently proceed.
+    Unavailable,
+    /// A previous preparation failed; its staging data is not runnable.
+    Failed,
+}
+
+impl RuntimeLifecycleStatus {
+    pub const fn can_satisfy(self) -> bool {
+        matches!(self, Self::Installed | Self::Available | Self::Ready)
+    }
+
+    pub const fn is_ready(self) -> bool {
+        matches!(self, Self::Installed | Self::Ready)
+    }
+}
+
+/// A content-addressed runtime distribution offered by a provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDistribution {
+    pub id: String,
+    pub runtime: RuntimeKind,
+    pub version: String,
+    pub platform: PlatformIdentity,
+    /// Provider-private acquisition locator. Callers treat this as evidence,
+    /// never as installation instructions.
+    pub artifact: String,
+    /// Digest of the bytes acquired from `artifact`.
+    pub digest: String,
+    pub source: String,
+    pub executable: String,
+    pub capabilities: RuntimeCapabilities,
+}
+
+impl RuntimeDistribution {
+    pub fn canonical_id(&self) -> Result<String> {
+        Ok(sha256_identity(&serde_json::to_vec(&serde_json::json!({
+            "runtime": self.runtime,
+            "version": self.version,
+            "platform": self.platform,
+            "artifact": self.artifact,
+            "digest": self.digest,
+            "executable": self.executable,
+            "capabilities": self.capabilities,
+        }))?))
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_sha256_identity(&self.id)?;
+        validate_sha256_identity(&self.digest)?;
+        if self.id != self.canonical_id()? {
+            return Err(ComputeError::Runtime(
+                "runtime distribution identity is not canonical".into(),
+            ));
+        }
+        if self.version.trim().is_empty()
+            || self.artifact.trim().is_empty()
+            || self.source.trim().is_empty()
+            || self.executable.trim().is_empty()
+        {
+            return Err(ComputeError::Runtime(
+                "runtime distribution contains an empty field".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Portable requirement accepted by the provider runtime API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRuntimeRequirement {
+    pub runtime: RuntimeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<PlatformIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeResolution {
+    pub requirement: ProviderRuntimeRequirement,
+    pub status: RuntimeLifecycleStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<RuntimeDistribution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePreparationStep {
+    pub name: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePreparation {
+    pub distribution: RuntimeDistribution,
+    pub status: RuntimeLifecycleStatus,
+    pub verified: bool,
+    pub steps: Vec<RuntimePreparationStep>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

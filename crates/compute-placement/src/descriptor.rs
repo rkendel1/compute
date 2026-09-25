@@ -79,12 +79,21 @@ pub struct RuntimeOffer {
     /// Content identity of the runtime artifact, as recorded in receipts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_id: Option<String>,
+    /// Whether this runtime is immediately executable or can be prepared.
+    #[serde(default = "ready_lifecycle")]
+    pub lifecycle: compute_core::RuntimeLifecycleStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<compute_core::RuntimeDistribution>,
     /// Isolation profiles this runtime can satisfy (without resource limits).
     pub isolation_profiles: Vec<IsolationProfile>,
     pub network_policies: Vec<NetworkPolicy>,
     /// The runtime adapter's declared capabilities, used verbatim for
     /// matching so that placement and execution apply the same rules.
     pub capabilities: RuntimeCapabilities,
+}
+
+fn ready_lifecycle() -> compute_core::RuntimeLifecycleStatus {
+    compute_core::RuntimeLifecycleStatus::Ready
 }
 
 impl RuntimeOffer {
@@ -348,7 +357,29 @@ impl ProviderDescriptor {
             }
             validate_runtime_capabilities(&entry.capabilities)
                 .map_err(|message| invalid(field.clone(), message))?;
-            if entry.available && entry.compatible {
+            let lifecycle = entry
+                .lifecycle
+                .unwrap_or(if entry.available && entry.compatible {
+                    compute_core::RuntimeLifecycleStatus::Installed
+                } else {
+                    compute_core::RuntimeLifecycleStatus::Unavailable
+                });
+            if let Some(distribution) = &entry.distribution {
+                distribution
+                    .validate()
+                    .map_err(|error| invalid(field.clone(), error.to_string()))?;
+                if distribution.runtime != entry.id
+                    || distribution.version != entry.version
+                    || distribution.platform.label() != capabilities.inventory.platform
+                    || distribution.capabilities != entry.capabilities
+                {
+                    return Err(invalid(
+                        field.clone(),
+                        "runtime distribution contradicts the inventory entry",
+                    ));
+                }
+            }
+            if lifecycle.can_satisfy() && entry.compatible {
                 let artifact_id = if entry.distribution_runtime_id.is_empty() {
                     capabilities.runtime_artifacts.get(&entry.id).cloned()
                 } else {
@@ -359,6 +390,8 @@ impl ProviderDescriptor {
                     version: entry.version.clone(),
                     detected_version: entry.detected_version.clone(),
                     artifact_id,
+                    lifecycle,
+                    distribution: entry.distribution.clone(),
                     isolation_profiles: supported_isolation(entry.id, &entry.capabilities),
                     network_policies: entry
                         .capabilities

@@ -85,6 +85,27 @@ fn remote_commands_resolve_named_providers_from_the_caller_owned_pool() {
     .success()
     .stdout(predicate::str::contains("compute.remote@1"));
 
+    let runtimes = Command::cargo_bin("compute")
+        .unwrap()
+        .args(["runtimes", "--provider", "remote-dev", "--json"])
+        .arg("--pool-config")
+        .arg(&pool)
+        .output()
+        .unwrap();
+    assert!(runtimes.status.success());
+    let runtimes: serde_json::Value = serde_json::from_slice(&runtimes.stdout).unwrap();
+    assert!(runtimes["platform"].as_str().is_some());
+    assert!(
+        runtimes["runtimes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|runtime| {
+                runtime["lifecycle"].as_str().is_some()
+                    && runtime["platform"] == runtimes["platform"]
+            })
+    );
+
     Command::cargo_bin("compute")
         .unwrap()
         .args(["remote", "health", "--provider", "remote-dev", "--json"])

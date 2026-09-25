@@ -90,6 +90,12 @@ pub struct RuntimeIdentity {
     pub version: String,
     pub distribution_runtime_id: String,
     pub executable_identity: String,
+    /// Canonical identity of the selected runtime distribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution_id: Option<String>,
+    /// Verified digest of the acquired runtime artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -446,6 +452,12 @@ impl ExecutionReceipt {
         validate_sha256_identity(&self.distribution.id)?;
         validate_sha256_identity(&self.runtime.distribution_runtime_id)?;
         validate_sha256_identity(&self.runtime.executable_identity)?;
+        if let Some(identity) = &self.runtime.distribution_id {
+            validate_sha256_identity(identity)?;
+        }
+        if let Some(digest) = &self.runtime.distribution_digest {
+            validate_sha256_identity(digest)?;
+        }
         validate_sha256_identity(&self.provenance.distribution_id)?;
         validate_sha256_identity(&self.provenance.runtime_lock_id)?;
         validate_sha256_identity(&self.provenance.manifest_id)?;
@@ -541,6 +553,8 @@ pub struct ReceiptEnvironment {
     pub distribution: DistributionIdentity,
     pub distribution_runtime_id: String,
     pub executable_identity: String,
+    pub runtime_distribution_id: String,
+    pub runtime_distribution_digest: String,
     pub runtime_lock_id: String,
     pub manifest_id: String,
 }
@@ -643,6 +657,8 @@ pub fn create_execution_receipt(
             version,
             distribution_runtime_id: environment.distribution_runtime_id,
             executable_identity: environment.executable_identity,
+            distribution_id: Some(environment.runtime_distribution_id),
+            distribution_digest: Some(environment.runtime_distribution_digest),
         },
         request: ExecutionRequestSummary {
             entrypoint,
@@ -1053,6 +1069,8 @@ mod tests {
             },
             distribution_runtime_id: sha256_identity(b"runtime"),
             executable_identity: sha256_identity(b"executable"),
+            runtime_distribution_id: sha256_identity(b"runtime-distribution"),
+            runtime_distribution_digest: sha256_identity(b"runtime-artifact"),
             runtime_lock_id: sha256_identity(b"lock"),
             manifest_id: sha256_identity(b"manifest"),
         };
@@ -1088,6 +1106,14 @@ mod tests {
             second.canonical_bytes().unwrap()
         );
         assert_eq!(first.receipt_hash, second.receipt_hash);
+        assert_eq!(
+            first.runtime.distribution_id.as_deref(),
+            Some(sha256_identity(b"runtime-distribution").as_str())
+        );
+        assert_eq!(
+            first.runtime.distribution_digest.as_deref(),
+            Some(sha256_identity(b"runtime-artifact").as_str())
+        );
         first.verify().unwrap();
 
         let mut changed = second;

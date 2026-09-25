@@ -434,6 +434,19 @@ fn adhoc(value: &str) -> compute_core::Result<Box<dyn ComputeProvider>> {
     }
 }
 
+pub(crate) async fn runtime_inventory(
+    location: &PoolLocation,
+    provider: &str,
+) -> compute_core::Result<compute_core::RuntimeInventory> {
+    let pool = location.pool()?;
+    let capabilities = match pool.member(provider) {
+        Some(member) => member.provider.capabilities().await,
+        None => adhoc(provider)?.capabilities().await,
+    }
+    .map_err(crate::provider_error)?;
+    Ok(capabilities.inventory)
+}
+
 /// Discover capabilities. `refresh` forces discovery and persists the
 /// result to the capability cache.
 async fn discover(
@@ -495,14 +508,20 @@ fn print_record(record: &DiscoveryRecord) {
     );
     println!("Runtimes:");
     for runtime in &descriptor.runtimes {
+        let status = enum_label(&runtime.lifecycle);
         println!(
-            "  {} {} (isolation: {}; network: {})",
+            "  {} {} ({status}; distribution: {}; isolation: {}; network: {})",
             runtime.kind,
             runtime
                 .effective_version()
                 .lines()
                 .next()
                 .unwrap_or_default(),
+            runtime
+                .distribution
+                .as_ref()
+                .map(|distribution| distribution.id.as_str())
+                .unwrap_or("host/installed"),
             join(runtime.isolation_profiles.iter().map(ToString::to_string)),
             join(runtime.network_policies.iter().map(ToString::to_string))
         );
@@ -723,11 +742,17 @@ fn print_summary(report: &PlacementReport) {
     }
     println!("Providers evaluated:");
     for provider in &report.providers {
+        let runtime = provider
+            .runtime_lifecycle
+            .as_ref()
+            .map(enum_label)
+            .unwrap_or_else(|| "-".into());
         println!(
-            "  {}\t{}\tpriority {}\t{}",
+            "  {}\t{}\tpriority {}\truntime {}\t{}",
             provider.provider_id,
             provider.status.as_str(),
             provider.priority,
+            runtime,
             provider
                 .reasons
                 .iter()

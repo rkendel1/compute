@@ -57,8 +57,15 @@ compute provider list
 compute placement explain ./script.py
 compute run ./script.py --provider auto
 compute run ./script.py --provider production
+compute runtimes --provider production
 compute pool submit --bundle script.compute --json
 ```
+
+A provider may advertise a pinned runtime as `available` before it is
+installed. Compute resolves, acquires, verifies, and prepares that exact
+distribution before admission, then records its distribution ID, artifact
+digest, payload identity, and executable identity in the receipt. Node 24 is
+the first provider-acquired runtime.
 
 Capability asks "can it run?"; policy asks "may it run?". Compute executes
 only when both answers are yes. Every execution is admitted by a

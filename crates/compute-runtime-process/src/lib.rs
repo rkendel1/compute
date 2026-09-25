@@ -21,11 +21,22 @@ mod sandbox;
 #[derive(Debug, Clone)]
 pub struct ProcessRuntime {
     kind: RuntimeKind,
+    distribution_root: Option<PathBuf>,
 }
 
 impl ProcessRuntime {
     pub const fn new(kind: RuntimeKind) -> Self {
-        Self { kind }
+        Self {
+            kind,
+            distribution_root: None,
+        }
+    }
+
+    pub fn with_distribution_root(kind: RuntimeKind, root: PathBuf) -> Self {
+        Self {
+            kind,
+            distribution_root: Some(root),
+        }
     }
 
     fn definition(&self) -> RuntimeDefinition {
@@ -48,13 +59,35 @@ impl ProcessRuntime {
                 )
             };
         }
-        match distribution_root() {
-            Some(Ok(root)) => discover_distribution_runtime(&root, &definition),
+        match self.distribution_root() {
+            Some(Ok(root)) => {
+                let discovered = discover_distribution_runtime(&root, &definition);
+                if !discovered.installed
+                    && discovered
+                        .remediation
+                        .as_deref()
+                        .is_some_and(|message| message.starts_with("runtime is not prepared:"))
+                {
+                    discover_host_runtime(&definition)
+                } else {
+                    discovered
+                }
+            }
             Some(Err(message)) => {
                 DiscoveredRuntime::unavailable(RuntimeSource::Distribution, message)
             }
             None => discover_host_runtime(&definition),
         }
+    }
+
+    fn distribution_root(&self) -> Option<std::result::Result<PathBuf, String>> {
+        if let Some(root) = &self.distribution_root {
+            return root
+                .join("runtime-manifest.json")
+                .is_file()
+                .then(|| Ok(root.clone()));
+        }
+        distribution_root()
     }
 }
 
@@ -188,6 +221,15 @@ struct DistributionRuntime {
     #[serde(default)]
     #[serde(rename = "reported_version")]
     _reported_version: String,
+    #[serde(default)]
+    #[serde(rename = "distribution_id")]
+    _distribution_id: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "distribution_digest")]
+    _distribution_digest: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "capabilities")]
+    _capabilities: Option<RuntimeCapabilities>,
 }
 
 fn distribution_root() -> Option<std::result::Result<PathBuf, String>> {
@@ -243,10 +285,7 @@ fn discover_distribution_runtime(root: &Path, definition: &RuntimeDefinition) ->
     let Some(runtime) = manifest.runtimes.get(definition.kind.as_str()) else {
         return DiscoveredRuntime::unavailable(
             RuntimeSource::Distribution,
-            format!(
-                "runtime {} is missing from the Compute distribution",
-                definition.kind
-            ),
+            format!("runtime is not prepared: {}", definition.kind),
         );
     };
     if runtime.version != definition.version || runtime.executable != definition.executable {
