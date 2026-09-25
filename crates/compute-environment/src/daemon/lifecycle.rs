@@ -492,27 +492,28 @@ impl Daemon {
     }
 
     pub async fn services(&self) -> Result<Vec<ServiceRecord>, EnvironmentError> {
-        let mut services = self
+        Ok(self
             .control()
-            .list::<ServiceRecord>()
+            .query::<ServiceRecord>(
+                compute_state::Query::all(compute_state::Collection::Service).ascending("name"),
+            )
             .await?
             .into_iter()
             .map(|service| service.value)
-            .collect::<Vec<_>>();
-        services.sort_by(|left, right| left.name.cmp(&right.name));
-        Ok(services)
+            .collect())
     }
 
     pub async fn providers(&self) -> Result<Vec<compute_state::ProviderRecord>, EnvironmentError> {
-        let mut providers = self
+        Ok(self
             .control()
-            .list::<compute_state::ProviderRecord>()
+            .query::<compute_state::ProviderRecord>(
+                compute_state::Query::all(compute_state::Collection::Provider)
+                    .ascending("provider_id"),
+            )
             .await?
             .into_iter()
             .map(|provider| provider.value)
-            .collect::<Vec<_>>();
-        providers.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
-        Ok(providers)
+            .collect())
     }
 
     // ---- Helpers ----------------------------------------------------------

@@ -235,6 +235,9 @@ pub async fn check(
     // Every record type round-trips.
     round_trip_every_record(&state, &run).await;
 
+    bounded_reads(&state, &run, &kind).await;
+    revisions_and_snapshots(&state, &run).await;
+
     // Artifacts larger than one chunk round-trip, verified, idempotently.
     let artifacts = crate::artifacts::StateArtifacts::new(state.clone());
     let bytes = (0..(crate::artifacts::StateArtifacts::CHUNK_BYTES * 2 + 1000))
@@ -277,6 +280,217 @@ pub async fn check(
                 .is_some()
         );
     }
+}
+
+/// Identity reads and `In` filters are bounded to what they name.
+async fn bounded_reads(state: &ControlState, run: &str, kind: &str) {
+    let ids = [2, 4, 99]
+        .iter()
+        .map(|sequence| format!("evt_conf{run}_{sequence}"))
+        .collect::<Vec<_>>();
+    let mut read = state
+        .get_many::<EventRecord>(&ids)
+        .await
+        .expect("get many")
+        .into_iter()
+        .map(|event| event.value.sequence)
+        .collect::<Vec<_>>();
+    read.sort_unstable();
+    assert_eq!(
+        read,
+        vec![2, 4],
+        "get_many returns exactly the named records that exist"
+    );
+    let one_of = state
+        .query::<EventRecord>(
+            Query::all(Collection::Event)
+                .eq("kind", kind.to_string())
+                .one_of("sequence", [1u64, 5])
+                .ascending("sequence"),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|event| event.value.sequence)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        one_of,
+        vec![1, 5],
+        "an In filter selects exactly its values"
+    );
+    let limited = state
+        .query::<EventRecord>(
+            Query::all(Collection::Event)
+                .eq("kind", kind.to_string())
+                .ascending("sequence")
+                .limit(3),
+        )
+        .await
+        .unwrap();
+    assert_eq!(limited.len(), 3, "a bounded list respects its limit");
+}
+
+/// The revision moves on every committed write and on nothing else, and
+/// snapshots over it are coherent, bounded, reused, and deterministic.
+async fn revisions_and_snapshots(state: &ControlState, run: &str) {
+    use crate::snapshot::{Coherence, Refreshed, SnapshotDefinition, SnapshotSource, Validation};
+    let store = state.store().clone();
+    let Some(first) = store.revision().await.expect("revision") else {
+        return;
+    };
+    let _ = state.list::<EnvironmentRecord>().await.unwrap();
+    assert_eq!(
+        store.revision().await.unwrap().as_ref(),
+        Some(&first),
+        "reads do not move the revision"
+    );
+    let env_id = format!("env_snap{run}");
+    state
+        .transaction(Batch::new().create(&env_id, &environment(&format!("snap-{run}"))))
+        .await
+        .unwrap();
+    let created = store.revision().await.unwrap().unwrap();
+    assert_eq!(created.scope, first.scope);
+    assert!(created.value > first.value, "a commit moves the revision");
+    let stored = state
+        .get::<EnvironmentRecord>(&env_id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .transaction(Batch::new().delete(&stored))
+        .await
+        .unwrap();
+    let deleted = store.revision().await.unwrap().unwrap();
+    assert!(deleted.value > created.value, "a delete moves the revision");
+
+    // A bounded snapshot: two environments of this run and the events of
+    // this run, nothing else.
+    let kind = format!("snapshot.{run}");
+    let pairs = 3u64;
+    let mut batch = Batch::new();
+    for index in 0..2 {
+        batch = batch.create(
+            &format!("env_snap{run}_{index}"),
+            &environment(&format!("snap-{run}-{index}")),
+        );
+    }
+    state.transaction(batch).await.unwrap();
+    let definition = SnapshotDefinition::new(
+        format!("conformance-{run}"),
+        vec![
+            SnapshotSource::filtered(
+                Query::all(Collection::Environment)
+                    .one_of("name", [format!("snap-{run}-0"), format!("snap-{run}-1")]),
+            ),
+            SnapshotSource::filtered(Query::all(Collection::Event).eq("kind", kind.clone())),
+        ],
+    );
+    let handle = state
+        .snapshot(definition.clone())
+        .expect("define a snapshot");
+    assert!(
+        std::sync::Arc::ptr_eq(&handle, &state.snapshot(definition.clone()).unwrap()),
+        "the same definition resolves the same handle"
+    );
+    let mut conflicting = definition.clone();
+    conflicting.sources.pop();
+    assert!(
+        state.snapshot(conflicting).is_err(),
+        "a name means one definition"
+    );
+    let (snapshot, how) = handle.refresh(false).await.expect("build");
+    assert_eq!(how, Refreshed::Built);
+    assert_eq!(snapshot.basis.validation, Validation::Revision);
+    assert_eq!(snapshot.basis.coherence, Coherence::Proven);
+    assert_eq!(
+        snapshot.all(Collection::Environment).count(),
+        2,
+        "bounded to its filter"
+    );
+    assert_eq!(snapshot.all(Collection::Event).count(), 0);
+    assert!(
+        !snapshot.holds(Collection::Project),
+        "nothing outside its sources"
+    );
+
+    // Unchanged state: reused, with nothing but the revision read.
+    let reads = handle.report().durable_reads;
+    let (again, how) = handle.refresh(false).await.unwrap();
+    assert_eq!(how, Refreshed::Reused);
+    assert_eq!(again.identity.id, snapshot.identity.id);
+    assert_eq!(
+        handle.report().durable_reads,
+        reads + 1,
+        "reuse reads only the revision"
+    );
+    assert_eq!(handle.staleness().await.unwrap().state, "current");
+
+    // Writes land in pairs; every snapshot sees whole pairs only.
+    let writer = {
+        let state = state.clone();
+        let run = run.to_string();
+        let kind = kind.clone();
+        tokio::spawn(async move {
+            for pair in 0..pairs {
+                let mut batch = Batch::new();
+                for half in 0..2 {
+                    let mut record = event(&run, pair * 2 + half + 1);
+                    record.kind = kind.clone();
+                    batch = batch.create(&format!("evt_snap{run}_{pair}_{half}"), &record);
+                }
+                state.transaction(batch).await.expect("write a pair");
+            }
+        })
+    };
+    let mut sizes = vec![];
+    while !writer.is_finished() {
+        if let Ok((snapshot, _)) = handle.refresh(false).await
+            && snapshot.basis.coherence == Coherence::Proven
+        {
+            sizes.push(snapshot.all(Collection::Event).count());
+        }
+    }
+    writer.await.unwrap();
+    assert!(
+        sizes.iter().all(|size| size % 2 == 0),
+        "a coherent snapshot never observes half a transaction: {sizes:?}"
+    );
+    let (latest, _) = handle.refresh(false).await.unwrap();
+    assert_eq!(latest.all(Collection::Event).count() as u64, pairs * 2);
+    assert_ne!(
+        latest.identity.id, snapshot.identity.id,
+        "new state, new identity"
+    );
+    // Any committed write makes the active snapshot stale.
+    state
+        .transaction(Batch::new().create(
+            &format!("evt_snap{run}_last"),
+            &EventRecord {
+                kind: format!("unrelated.{run}"),
+                ..event(run, 99)
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(handle.staleness().await.unwrap().state, "stale");
+    let (latest, how) = handle.refresh(false).await.unwrap();
+    assert_eq!(
+        how,
+        Refreshed::Built,
+        "a stale snapshot is rebuilt, not reused"
+    );
+
+    // Identity is deterministic: a second handle over the same state
+    // derives the same ID.
+    let registry = crate::snapshot::SnapshotRegistry::default();
+    let other = registry.resolve(definition, &store).unwrap();
+    let (same, _) = other.refresh(false).await.unwrap();
+    assert_eq!(same.identity.id, latest.identity.id);
+    assert_eq!(
+        same.identity.definition_digest,
+        latest.identity.definition_digest
+    );
 }
 
 async fn round_trip<T: Document + PartialEq + std::fmt::Debug>(

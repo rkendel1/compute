@@ -13,6 +13,6 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "@feltdb/core": "0.11.7"
+    "@feltdb/core": "0.11.8"
   }
 }

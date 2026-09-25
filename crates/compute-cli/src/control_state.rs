@@ -430,13 +430,131 @@ pub enum ControlPlaneCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Upgrade the configured Compute application to this version's model.
+    /// Upgrade the configured Compute application to this build's model,
+    /// before a controller that needs it runs: inspect the active model,
+    /// refuse a downgrade, take and verify a FeltDB backup, apply the
+    /// model, verify it, and smoke-test it.
     Upgrade {
+        #[command(flatten)]
+        state: StateOptions,
+        /// Where FeltDB writes an online backup, on the FeltDB host.
+        #[arg(long, conflicts_with = "backup_archive")]
+        backup: Option<String>,
+        /// A backup already taken with `feltdb-server backup create`;
+        /// verified again before anything changes.
+        #[arg(long)]
+        backup_archive: Option<String>,
+        /// Environment variable holding a FeltDB key with cluster:write,
+        /// for the backup. Defaults to COMPUTE_FELTDB_BACKUP_TOKEN.
+        #[arg(long, default_value = "COMPUTE_FELTDB_BACKUP_TOKEN")]
+        backup_token_env: String,
+        /// The feltdb-server binary that verifies the backup. Defaults to
+        /// $FELTDB_SERVER_BIN.
+        #[arg(long)]
+        feltdb_server_bin: Option<PathBuf>,
+        /// Upgrade without a backup, for this recorded reason.
+        #[arg(long, conflicts_with_all = ["backup", "backup_archive"])]
+        skip_backup: Option<String>,
+        /// Inspect and plan only; change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare the active Compute model with this build's. Read-only.
+    Inspect {
         #[command(flatten)]
         state: StateOptions,
         #[arg(long)]
         json: bool,
     },
+}
+
+/// The FeltDB configuration of a control-plane command.
+fn control_config(state: &StateOptions) -> compute_core::Result<FeltDbConfig> {
+    let (url, application, environment, token_env) = state.feltdb()?;
+    Ok(FeltDbConfig {
+        url: url.ok_or_else(|| invalid("--feltdb-url or [state.feltdb] url is required"))?,
+        token: std::env::var(&token_env)
+            .map_err(|_| invalid(format!("{token_env} must hold the FeltDB API key")))?,
+        application_id: application.ok_or_else(|| {
+            invalid("the Compute application is required: --feltdb-application or [state.feltdb] application")
+        })?,
+        environment,
+        ca_certificate: state.feltdb_ca()?,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upgrade(
+    state: StateOptions,
+    backup: Option<String>,
+    backup_archive: Option<String>,
+    backup_token_env: String,
+    feltdb_server_bin: Option<PathBuf>,
+    skip_backup: Option<String>,
+    dry_run: bool,
+    json: bool,
+) -> compute_core::Result<()> {
+    let config = control_config(&state)?;
+    let verifier = feltdb_server_bin
+        .clone()
+        .or_else(|| std::env::var_os("FELTDB_SERVER_BIN").map(PathBuf::from));
+    let backup = match (backup, skip_backup) {
+        (_, Some(reason)) => compute_state_feltdb::BackupPlan::Skip { reason },
+        (None, None) if backup_archive.is_some() => compute_state_feltdb::BackupPlan::Archive {
+            archive: backup_archive.expect("checked"),
+            verifier,
+        },
+        (Some(output), None) => compute_state_feltdb::BackupPlan::Online {
+            output,
+            token: std::env::var(&backup_token_env).map_err(|_| {
+                invalid(format!(
+                    "{backup_token_env} must hold a FeltDB key with cluster:write for the backup"
+                ))
+            })?,
+            verifier,
+        },
+        (None, None) if dry_run => compute_state_feltdb::BackupPlan::Skip {
+            reason: "dry run".into(),
+        },
+        (None, None) => {
+            return Err(invalid(
+                "an upgrade takes a verified backup first: --backup-archive PATH (from `feltdb-server backup create`), --backup PATH (an online backup on the FeltDB host), or --skip-backup REASON",
+            ));
+        }
+    };
+    let report =
+        compute_state_feltdb::upgrade_control_plane(compute_state_feltdb::UpgradeRequest {
+            config,
+            backup,
+            dry_run,
+        })
+        .await;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("serializable")
+        );
+    } else {
+        for step in &report.steps {
+            let detail = if step.detail.is_null() {
+                String::new()
+            } else {
+                format!("  {}", step.detail)
+            };
+            println!("{:<24} {:<8}{detail}", step.name, step.status);
+        }
+        println!("\nControl-plane upgrade: {}", report.result);
+    }
+    if report.succeeded() {
+        Ok(())
+    } else {
+        Err(ComputeError::Runtime(format!(
+            "the control-plane upgrade {}",
+            report.result
+        )))
+    }
 }
 
 pub async fn control_plane(command: ControlPlaneCommand) -> compute_core::Result<()> {
@@ -447,7 +565,59 @@ pub async fn control_plane(command: ControlPlaneCommand) -> compute_core::Result
             tenant,
             json,
         } => (state, tenant, tenant_name, json, false),
-        ControlPlaneCommands::Upgrade { state, json } => (state, None, String::new(), json, true),
+        ControlPlaneCommands::Upgrade {
+            state,
+            backup,
+            backup_archive,
+            backup_token_env,
+            feltdb_server_bin,
+            skip_backup,
+            dry_run,
+            json,
+        } => {
+            return self::upgrade(
+                state,
+                backup,
+                backup_archive,
+                backup_token_env,
+                feltdb_server_bin,
+                skip_backup,
+                dry_run,
+                json,
+            )
+            .await;
+        }
+        ControlPlaneCommands::Inspect { state, json } => {
+            let inspection = compute_state_feltdb::inspect_model(&control_config(&state)?)
+                .await
+                .map_err(|error| ComputeError::Runtime(error.to_string()))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&inspection).expect("serializable")
+                );
+            } else {
+                println!(
+                    "Active model: revision {} (schema version {})",
+                    inspection.active_revision.as_deref().unwrap_or("none"),
+                    inspection
+                        .active_schema_version
+                        .map_or("-".into(), |version| version.to_string())
+                );
+                println!(
+                    "This build: {} generation {}",
+                    inspection.required, inspection.required_generation
+                );
+                println!("Relation: {:?}", inspection.comparison.relation);
+                for addition in &inspection.comparison.additions {
+                    println!("  + {addition}");
+                }
+                for unknown in &inspection.comparison.unknown {
+                    println!("  ! {unknown}");
+                }
+            }
+            return Ok(());
+        }
     };
     let (url, application, environment, token_env) = state.feltdb()?;
     let url = url.ok_or_else(|| invalid("--feltdb-url or [state.feltdb] url is required"))?;

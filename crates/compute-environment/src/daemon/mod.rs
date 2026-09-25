@@ -264,9 +264,139 @@ pub(crate) struct Desired {
     /// Instance IDs by workload and deployment, so finding a unit's
     /// instance does not scan every instance.
     pub instance_index: BTreeMap<(Key, String), String>,
+    /// The snapshot this was derived from, when it was derived whole.
+    pub snapshot_id: Option<String>,
+}
+
+/// The durable state the controller works from, as one FeltDB snapshot
+/// definition: explicit, bounded to desired state, and coherent.
+///
+/// - Environments, projects, memberships, workloads, instances, traffic,
+///   domains, DNS records, and certificates: the controller converges every
+///   one of them, so it holds each collection whole. These are desired
+///   state, bounded by what the control plane runs, never history.
+/// - Deployments: only releases in flight (an indexed equality per status),
+///   plus the ones memberships and instances name, read by identity. The
+///   history of finished releases is never read here.
+/// - Revisions: only those deployments name, by identity; immutable, so a
+///   revision the previous snapshot holds is reused.
+pub(crate) fn desired_snapshot() -> compute_state::SnapshotDefinition {
+    use compute_state::{SnapshotDefinition, SnapshotSource};
+    SnapshotDefinition::new(
+        "compute.controller.desired",
+        vec![
+            SnapshotSource::all(Collection::Environment),
+            SnapshotSource::all(Collection::Project),
+            SnapshotSource::all(Collection::EnvironmentProject),
+            SnapshotSource::all(Collection::Workload),
+            SnapshotSource::all(Collection::WorkloadInstance),
+            SnapshotSource::all(Collection::TrafficAssignment),
+            SnapshotSource::all(Collection::Domain),
+            SnapshotSource::all(Collection::DnsRecord),
+            SnapshotSource::all(Collection::Certificate),
+            SnapshotSource::filtered(
+                Query::all(Collection::Deployment)
+                    .one_of("status", IN_FLIGHT.iter().map(|status| status.as_str())),
+            ),
+        ],
+    )
+    .reference(
+        Collection::EnvironmentProject,
+        "deployment_id",
+        Collection::Deployment,
+    )
+    .reference(
+        Collection::WorkloadInstance,
+        "deployment_id",
+        Collection::Deployment,
+    )
+    .immutable_reference(
+        Collection::Deployment,
+        "revision_id",
+        Collection::ProjectRevision,
+    )
+    // A controller keeps working under constant writes: a snapshot whose
+    // coherence could not be proven is used, marked unproven, and never
+    // reused; the next cycle reads again.
+    .on_incoherent(compute_state::Incoherent::PublishUnproven)
+}
+
+/// Observed state this controller writes back: one status per workload.
+/// Bounded by the workloads the control plane has run.
+pub(crate) fn observed_snapshot() -> compute_state::SnapshotDefinition {
+    compute_state::SnapshotDefinition::new(
+        "compute.controller.observed",
+        vec![compute_state::SnapshotSource::all(
+            Collection::WorkloadStatus,
+        )],
+    )
+    .on_incoherent(compute_state::Incoherent::PublishUnproven)
 }
 
 impl Desired {
+    /// Desired state from a published snapshot. No I/O.
+    pub fn from_snapshot(
+        snapshot: &compute_state::Snapshot,
+    ) -> Result<Self, compute_state::StateError> {
+        let mut desired = Desired::default();
+        for environment in snapshot.typed::<EnvironmentRecord>()? {
+            desired
+                .environments
+                .insert(environment.value.name.clone(), environment);
+        }
+        for project in snapshot.typed::<ProjectRecord>()? {
+            desired.projects.insert(project.value.name.clone(), project);
+        }
+        for membership in snapshot.typed::<EnvironmentProjectRecord>()? {
+            desired.memberships.insert(
+                (
+                    membership.value.environment.clone(),
+                    membership.value.project.clone(),
+                ),
+                membership,
+            );
+        }
+        for workload in snapshot.typed::<WorkloadRecord>()? {
+            desired.workloads.insert(
+                (
+                    workload.value.environment.clone(),
+                    workload.value.project.clone(),
+                    workload.value.name.clone(),
+                ),
+                workload,
+            );
+        }
+        for instance in snapshot.typed::<WorkloadInstanceRecord>()? {
+            desired.instances.insert(instance.id.clone(), instance);
+        }
+        for assignment in snapshot.typed::<TrafficAssignmentRecord>()? {
+            desired
+                .traffic
+                .insert(assignment.value.endpoint.clone(), assignment);
+        }
+        for domain in snapshot.typed::<DomainRecord>()? {
+            desired.domains.insert(domain.value.name.clone(), domain);
+        }
+        for record in snapshot.typed::<DnsRecordRecord>()? {
+            desired.dns_records.insert(record.id.clone(), record);
+        }
+        for certificate in snapshot.typed::<CertificateRecord>()? {
+            desired
+                .certificates
+                .insert(certificate.value.domain.clone(), certificate);
+        }
+        for deployment in snapshot.typed::<DeploymentRecord>()? {
+            desired
+                .deployments
+                .insert(deployment.id.clone(), deployment);
+        }
+        for revision in snapshot.typed::<ProjectRevisionRecord>()? {
+            desired.revisions.insert(revision.id, revision.value);
+        }
+        desired.reindex();
+        Ok(desired)
+    }
+
     pub fn environment(&self, name_or_id: &str) -> Option<&Stored<EnvironmentRecord>> {
         self.environments.get(name_or_id).or_else(|| {
             self.environments
@@ -419,6 +549,13 @@ pub(crate) struct Inner {
     pub reconcile: ReconcileMetrics,
     /// What the current cycle changed, counted by the phases.
     pub cycle_changes: usize,
+    /// The snapshot `desired` was derived from whole; `None` once a
+    /// targeted refresh patched it.
+    pub desired_from: Option<String>,
+    /// When durable state last answered a read.
+    pub last_durable_read: Option<DateTime<Utc>>,
+    /// The last outage that ended: (began, ended).
+    pub last_recovery: Option<(DateTime<Utc>, DateTime<Utc>)>,
 }
 
 /// When desired state was read.
@@ -472,6 +609,8 @@ pub struct Daemon {
     sequence: AtomicU64,
     /// Writes this controller has committed: the read cache's generation.
     writes: AtomicU64,
+    /// When durable state last accepted a change, in Unix milliseconds.
+    last_mutation_ms: std::sync::atomic::AtomicI64,
     /// Documents this controller wrote since desired state was last read,
     /// for a targeted refresh.
     dirty: std::sync::Mutex<Vec<(Collection, String)>>,
@@ -717,12 +856,16 @@ impl Daemon {
                 outage_announced: false,
                 reconcile: ReconcileMetrics::default(),
                 cycle_changes: 0,
+                desired_from: None,
+                last_durable_read: None,
+                last_recovery: None,
             }),
             reconciling: Mutex::new(()),
             pool,
             cache: Mutex::new(CapabilityCache::default()),
             sequence: AtomicU64::new(sequence),
             writes: AtomicU64::new(0),
+            last_mutation_ms: std::sync::atomic::AtomicI64::new(0),
             dirty: std::sync::Mutex::new(Vec::new()),
             declared: std::sync::Mutex::new(std::collections::HashMap::new()),
             events,
@@ -748,6 +891,22 @@ impl Daemon {
             inner.degraded_since = Some(Utc::now());
         }
         if degraded.is_none() {
+            // Records an older controller wrote get the indexed identity
+            // this one looks them up by (a no-op once upgraded).
+            let upgraded = daemon.config.state.upgrade_records().await?;
+            if !upgraded.is_empty() {
+                let change = daemon.event(
+                    Change::new(),
+                    compute_state::events::CONTROL_MODEL_UPGRADED,
+                    Scope::default(),
+                    format!(
+                        "gave {} records an indexed identity",
+                        upgraded.values().sum::<u64>()
+                    ),
+                    serde_json::json!({ "records": upgraded }),
+                );
+                daemon.apply(change).await?;
+            }
             daemon.register_providers().await?;
             daemon.load_credentials().await?;
             daemon.bootstrap_admin().await?;
@@ -1013,6 +1172,68 @@ impl Daemon {
         out
     }
 
+    /// The durable-state boundary as this controller sees it.
+    fn authority_view(&self, inner: &Inner) -> AuthorityView {
+        let generation = self.writes.load(Ordering::SeqCst);
+        let max_age_ms = u64::try_from(self.config.read_cache.as_millis()).unwrap_or(u64::MAX);
+        let state = match (&inner.state_error, inner.loaded, inner.recovered_from) {
+            (Some(_), None, _) => "state_unavailable",
+            (Some(_), Some(_), _) => "degraded_control_plane",
+            (None, _, Some(_)) => "recovered",
+            (None, _, None) => "healthy",
+        };
+        let cache = CacheView {
+            generation,
+            as_of: inner.loaded.map(|loaded| loaded.as_of),
+            age_ms: inner
+                .loaded
+                .map(|loaded| u64::try_from(loaded.at.elapsed().as_millis()).unwrap_or(u64::MAX)),
+            max_age_ms,
+            freshness: match inner.loaded {
+                None => "empty",
+                Some(_) if inner.state_error.is_some() => "stale",
+                Some(loaded)
+                    if loaded.writes == generation
+                        && loaded.at.elapsed() < self.config.read_cache =>
+                {
+                    "current"
+                }
+                Some(_) => "expired",
+            }
+            .into(),
+            snapshot_id: inner.desired_from.clone(),
+        };
+        let mutation_ms = self.last_mutation_ms.load(Ordering::SeqCst);
+        AuthorityView {
+            state: state.into(),
+            certified_feltdb: self
+                .config
+                .state
+                .access()
+                .and_then(|access| access.certified_version),
+            model: compute_state::STATE_VERSION.into(),
+            model_generation: compute_state::MODEL_GENERATION,
+            access: self.config.state.access(),
+            last_durable_read: inner.last_durable_read,
+            last_durable_mutation: (mutation_ms > 0)
+                .then(|| DateTime::from_timestamp_millis(mutation_ms))
+                .flatten(),
+            degraded_since: inner.degraded_since,
+            last_recovery: inner.last_recovery.map(|(began, ended)| RecoveryView {
+                began,
+                ended,
+                outage_seconds: (ended - began).num_milliseconds() as f64 / 1000.0,
+            }),
+            cache,
+            pending: PendingView {
+                targeted_refresh: self.dirty.lock().expect("dirty").len(),
+                evidence: inner.pending_evidence.len(),
+                audit: inner.pending_audit.len(),
+            },
+            snapshots: self.control.snapshots().reports(),
+        }
+    }
+
     /// What this controller found on the data plane when it started.
     pub fn recovery(&self) -> Recovery {
         self.recovery.lock().expect("recovery").clone()
@@ -1121,6 +1342,7 @@ impl Daemon {
                 },
                 error: inner.state_error.clone(),
                 last_reconciled_at: inner.last_reconciled_at,
+                authority: Some(self.authority_view(&inner)),
             },
             data_plane,
             reconcile: inner.reconcile.clone(),
@@ -1192,6 +1414,8 @@ impl Daemon {
         let targets = change.batch.targets();
         let result = self.control.transaction(change.batch).await;
         if result.is_ok() {
+            self.last_mutation_ms
+                .store(Utc::now().timestamp_millis(), Ordering::SeqCst);
             self.dirty.lock().expect("dirty").extend(targets);
         } else {
             // Unknown what landed: the next refresh reads everything.
@@ -1215,14 +1439,24 @@ impl Daemon {
     pub(crate) async fn refresh(&self) -> Result<(), EnvironmentError> {
         let writes = self.writes.load(Ordering::SeqCst);
         let dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty"));
-        let loaded = self.load_desired().await;
+        // After an outage nothing derived before it is trusted: the
+        // snapshot is rebuilt from durable state, whatever its revision.
+        let outage = self.inner.lock().await.degraded_since.is_some();
+        if outage {
+            self.control.snapshots().invalidate_all();
+        }
+        let loaded = self.load_desired(outage).await;
         if loaded.is_err() {
             self.dirty.lock().expect("dirty").extend(dirty);
         }
         let mut inner = self.inner.lock().await;
         match loaded {
             Ok(desired) => {
-                inner.desired = Arc::new(desired);
+                if let Some(desired) = desired {
+                    inner.desired_from = desired.snapshot_id.clone();
+                    inner.desired = Arc::new(desired);
+                }
+                inner.last_durable_read = Some(Utc::now());
                 inner.state_error = None;
                 inner.loaded = Some(Loaded {
                     writes,
@@ -1318,6 +1552,8 @@ impl Daemon {
         match result {
             Ok(desired) => {
                 let mut inner = self.inner.lock().await;
+                inner.desired_from = None;
+                inner.last_durable_read = Some(Utc::now());
                 inner.desired = Arc::new(desired);
                 inner.loaded = Some(Loaded {
                     writes,
@@ -1341,17 +1577,37 @@ impl Daemon {
     ) -> Result<Desired, compute_state::StateError> {
         let control = &self.control;
         let mut desired = (*self.inner.lock().await.desired).clone();
+        // The records written, by identity: one bounded read per
+        // collection, issued together.
+        let mut by_collection = BTreeMap::<Collection, Vec<String>>::new();
+        for (collection, id) in targets {
+            by_collection
+                .entry(*collection)
+                .or_default()
+                .push(id.clone());
+        }
         let mut reads = tokio::task::JoinSet::new();
-        for (collection, id) in targets.iter().cloned() {
+        for (collection, ids) in by_collection {
             let control = control.clone();
             reads.spawn(async move {
-                let record = control.store().get(collection, &id).await?;
-                Ok::<_, compute_state::StateError>((collection, id, record))
+                let found = control.store().get_many(collection, &ids).await?;
+                let mut found = found
+                    .into_iter()
+                    .map(|record| (record.id.clone(), record))
+                    .collect::<BTreeMap<_, _>>();
+                Ok::<_, compute_state::StateError>(
+                    ids.into_iter()
+                        .map(|id| {
+                            let record = found.remove(&id);
+                            (collection, id, record)
+                        })
+                        .collect::<Vec<_>>(),
+                )
             });
         }
         let mut read = vec![];
         while let Some(result) = reads.join_next().await {
-            read.push(
+            read.extend(
                 result
                     .map_err(|error| compute_state::StateError::Unavailable(error.to_string()))??,
             );
@@ -1473,34 +1729,28 @@ impl Daemon {
         desired.deployments.retain(|id, deployment| {
             wanted.contains(id) || IN_FLIGHT.contains(&deployment.value.status)
         });
-        let mut gets = tokio::task::JoinSet::new();
-        for id in wanted
+        // Deployments now named, then their revisions: each an indexed
+        // identity read, issued together.
+        let missing = wanted
             .iter()
             .filter(|id| !desired.deployments.contains_key(*id))
             .cloned()
-        {
-            let control = control.clone();
-            gets.spawn(async move { control.get::<DeploymentRecord>(&id).await });
-        }
-        while let Some(result) = gets.join_next().await {
-            if let Some(deployment) = result
-                .map_err(|error| compute_state::StateError::Unavailable(error.to_string()))??
-            {
-                desired
-                    .deployments
-                    .insert(deployment.id.clone(), deployment);
-            }
+            .collect::<Vec<_>>();
+        for deployment in control.get_many::<DeploymentRecord>(&missing).await? {
+            desired
+                .deployments
+                .insert(deployment.id.clone(), deployment);
         }
         let missing = desired
             .deployments
             .values()
             .map(|deployment| deployment.value.revision_id.clone())
             .filter(|id| !desired.revisions.contains_key(id))
-            .collect::<BTreeSet<_>>();
-        for revision_id in missing {
-            if let Some(revision) = control.get::<ProjectRevisionRecord>(&revision_id).await? {
-                desired.revisions.insert(revision_id, revision.value);
-            }
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        for revision in control.get_many::<ProjectRevisionRecord>(&missing).await? {
+            desired.revisions.insert(revision.id, revision.value);
         }
         desired.reindex();
         Ok(desired)
@@ -1509,11 +1759,64 @@ impl Daemon {
     /// Mutations need durable state: while it is unreachable they fail
     /// with `state_unavailable` before anything is attempted.
     pub(crate) async fn require_state(&self) -> Result<(), EnvironmentError> {
-        let degraded = self.inner.lock().await.state_error.is_some();
+        let (degraded, recovering) = {
+            let inner = self.inner.lock().await;
+            (inner.state_error.is_some(), inner.recovered_from.is_some())
+        };
         if degraded {
             self.refresh().await?;
         }
+        // Durable authority answers again: finish recovering before a
+        // change is accepted, so nothing is decided on pre-outage state.
+        if degraded || recovering {
+            self.recover().await;
+            self.wake();
+        }
         Ok(())
+    }
+
+    /// The recovery sequence once durable state answers after an outage.
+    /// `refresh` has already reconnected, re-established the current
+    /// durable state, and dropped every snapshot derived before the
+    /// outage. Then, in order: continue the event sequence from durable
+    /// state, reload credentials, write the evidence and audit held during
+    /// the outage, and record the transition. Reconciliation against the
+    /// re-established state follows in the same cycle (or, from a
+    /// mutation, in the cycle it wakes). Idempotent: only the first caller
+    /// after an outage records it.
+    pub(crate) async fn recover(&self) {
+        let Some(since) = self.inner.lock().await.recovered_from.take() else {
+            self.flush_pending_evidence().await;
+            self.flush_pending_audit().await;
+            return;
+        };
+        if let Ok(last) = self
+            .control
+            .query::<EventRecord>(
+                Query::all(Collection::Event)
+                    .descending("sequence")
+                    .limit(1),
+            )
+            .await
+            && let Some(last) = last.first()
+        {
+            self.sequence
+                .fetch_max(last.value.sequence, Ordering::SeqCst);
+        }
+        let _ = self.load_credentials().await;
+        self.flush_pending_evidence().await;
+        self.flush_pending_audit().await;
+        let now = Utc::now();
+        let seconds = (now - since).num_milliseconds() as f64 / 1000.0;
+        self.inner.lock().await.last_recovery = Some((since, now));
+        let change = self.event(
+            Change::new(),
+            compute_state::events::FELTDB_RECOVERED,
+            Scope::default(),
+            format!("durable control state is reachable again after {seconds:.1}s"),
+            serde_json::json!({ "since": since, "outage_seconds": seconds }),
+        );
+        let _ = self.apply(change).await;
     }
 
     /// Whether the control plane is degraded, and since when.
@@ -1524,165 +1827,26 @@ impl Daemon {
             .and_then(|inner| inner.degraded_since)
     }
 
-    /// Read desired state. The reads are independent, so they are issued
-    /// together: a refresh costs about one round trip per phase (every
-    /// collection and in-flight release; then the deployments they name;
-    /// then revisions not already known), not one per collection.
-    async fn load_desired(&self) -> Result<Desired, compute_state::StateError> {
-        let control = &self.control;
-        let in_flight = async {
-            let mut queries = tokio::task::JoinSet::new();
-            for status in IN_FLIGHT {
-                let control = control.clone();
-                queries.spawn(async move {
-                    control
-                        .query::<DeploymentRecord>(
-                            Query::all(Collection::Deployment).eq("status", status.as_str()),
-                        )
-                        .await
-                });
-            }
-            let mut deployments = vec![];
-            while let Some(result) = queries.join_next().await {
-                deployments.extend(result.map_err(|error| {
-                    compute_state::StateError::Unavailable(error.to_string())
-                })??);
-            }
-            Ok::<_, compute_state::StateError>(deployments)
-        };
-        let (
-            environments,
-            projects,
-            memberships,
-            workloads,
-            instances,
-            traffic,
-            domains,
-            dns_records,
-            certificates,
-            in_flight,
-        ) = tokio::try_join!(
-            control.list::<EnvironmentRecord>(),
-            control.list::<ProjectRecord>(),
-            control.list::<EnvironmentProjectRecord>(),
-            control.list::<WorkloadRecord>(),
-            control.list::<WorkloadInstanceRecord>(),
-            control.list::<TrafficAssignmentRecord>(),
-            control.list::<DomainRecord>(),
-            control.list::<DnsRecordRecord>(),
-            control.list::<CertificateRecord>(),
-            in_flight,
-        )?;
-        let mut desired = Desired::default();
-        for environment in environments {
-            desired
-                .environments
-                .insert(environment.value.name.clone(), environment);
+    /// Read desired state as one coherent, bounded snapshot of durable
+    /// state (see [`desired_snapshot`]). `None` when the authoritative
+    /// revision has not moved since the last snapshot and the desired
+    /// state already derived from it stands: then one revision read is
+    /// the whole cost.
+    async fn load_desired(
+        &self,
+        force: bool,
+    ) -> Result<Option<Desired>, compute_state::StateError> {
+        let handle = self.control.snapshot(desired_snapshot())?;
+        let (snapshot, refreshed) = handle.refresh(force).await?;
+        let derived = self.inner.lock().await.desired_from.clone();
+        if refreshed == compute_state::Refreshed::Reused
+            && derived.as_deref() == Some(snapshot.identity.id.as_str())
+        {
+            return Ok(None);
         }
-        for project in projects {
-            desired.projects.insert(project.value.name.clone(), project);
-        }
-        for membership in memberships {
-            desired.memberships.insert(
-                (
-                    membership.value.environment.clone(),
-                    membership.value.project.clone(),
-                ),
-                membership,
-            );
-        }
-        for workload in workloads {
-            desired.workloads.insert(
-                (
-                    workload.value.environment.clone(),
-                    workload.value.project.clone(),
-                    workload.value.name.clone(),
-                ),
-                workload,
-            );
-        }
-        for instance in instances {
-            desired.instances.insert(instance.id.clone(), instance);
-        }
-        for assignment in traffic {
-            desired
-                .traffic
-                .insert(assignment.value.endpoint.clone(), assignment);
-        }
-        for domain in domains {
-            desired.domains.insert(domain.value.name.clone(), domain);
-        }
-        for record in dns_records {
-            desired.dns_records.insert(record.id.clone(), record);
-        }
-        for certificate in certificates {
-            desired
-                .certificates
-                .insert(certificate.value.domain.clone(), certificate);
-        }
-        // Current deployments, the deployments instances belong to, and
-        // every release in flight.
-        let mut wanted = desired
-            .memberships
-            .values()
-            .filter_map(|membership| membership.value.deployment_id.clone())
-            .chain(
-                desired
-                    .instances
-                    .values()
-                    .map(|instance| instance.value.deployment_id.clone()),
-            )
-            .collect::<BTreeSet<_>>();
-        for deployment in in_flight {
-            wanted.remove(&deployment.id);
-            desired
-                .deployments
-                .insert(deployment.id.clone(), deployment);
-        }
-        let mut gets = tokio::task::JoinSet::new();
-        for deployment_id in wanted {
-            let control = control.clone();
-            gets.spawn(async move { control.get::<DeploymentRecord>(&deployment_id).await });
-        }
-        while let Some(result) = gets.join_next().await {
-            if let Some(deployment) = result
-                .map_err(|error| compute_state::StateError::Unavailable(error.to_string()))??
-            {
-                desired
-                    .deployments
-                    .insert(deployment.id.clone(), deployment);
-            }
-        }
-        // Revisions are immutable: reuse ones already read.
-        let known = self.inner.lock().await.desired.revisions.clone();
-        let revision_ids = desired
-            .deployments
-            .values()
-            .map(|deployment| deployment.value.revision_id.clone())
-            .collect::<BTreeSet<_>>();
-        let mut gets = tokio::task::JoinSet::new();
-        for revision_id in revision_ids {
-            if let Some(revision) = known.get(&revision_id) {
-                desired.revisions.insert(revision_id, revision.clone());
-            } else {
-                let control = control.clone();
-                gets.spawn(async move {
-                    control
-                        .get::<ProjectRevisionRecord>(&revision_id)
-                        .await
-                        .map(|revision| (revision_id, revision))
-                });
-            }
-        }
-        while let Some(result) = gets.join_next().await {
-            if let (revision_id, Some(revision)) = result
-                .map_err(|error| compute_state::StateError::Unavailable(error.to_string()))??
-            {
-                desired.revisions.insert(revision_id, revision.value);
-            }
-        }
-        desired.reindex();
-        Ok(desired)
+        let mut desired = Desired::from_snapshot(&snapshot)?;
+        desired.snapshot_id = Some(snapshot.identity.id.clone());
+        Ok(Some(desired))
     }
 
     /// Read-your-writes: refresh desired state after a change, then

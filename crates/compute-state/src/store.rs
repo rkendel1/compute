@@ -168,6 +168,8 @@ pub enum Comparison {
     Gte,
     Lt,
     Lte,
+    /// The field equals one of the values of an array.
+    In,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -177,13 +179,33 @@ pub struct Filter {
     pub value: Value,
 }
 
+/// The field that names a record's identity in every backend, as in
+/// FeltDB. It is not stored in the document.
+pub const ID_FIELD: &str = "_id";
+
 impl Filter {
     pub fn matches(&self, document: &Map<String, Value>) -> bool {
-        let Some(actual) = document.get(&self.field) else {
+        self.matches_value(document.get(&self.field))
+    }
+
+    /// Whether a record matches, with `_id` meaning its identity.
+    pub fn matches_record(&self, record: &Record) -> bool {
+        if self.field == ID_FIELD {
+            return self.matches_value(Some(&Value::String(record.id.clone())));
+        }
+        self.matches(&record.value)
+    }
+
+    fn matches_value(&self, actual: Option<&Value>) -> bool {
+        let Some(actual) = actual else {
             return false;
         };
         let ordering = compare(actual, &self.value);
         match self.comparison {
+            Comparison::In => self
+                .value
+                .as_array()
+                .is_some_and(|values| values.contains(actual)),
             Comparison::Eq => actual == &self.value,
             Comparison::Gt => ordering == Some(Ordering::Greater),
             Comparison::Gte => matches!(ordering, Some(Ordering::Greater | Ordering::Equal)),
@@ -230,6 +252,17 @@ impl Query {
         self.filter(field, Comparison::Gt, value)
     }
 
+    /// The field equals one of `values`.
+    pub fn one_of<V: Into<Value>>(self, field: &str, values: impl IntoIterator<Item = V>) -> Self {
+        let values = values.into_iter().map(Into::into).collect::<Vec<Value>>();
+        self.filter(field, Comparison::In, Value::Array(values))
+    }
+
+    /// The records whose identity is one of `ids`.
+    pub fn ids<S: Into<String>>(self, ids: impl IntoIterator<Item = S>) -> Self {
+        self.one_of(ID_FIELD, ids.into_iter().map(Into::into))
+    }
+
     pub fn ascending(mut self, field: &str) -> Self {
         self.order_by = Some((field.into(), false));
         self
@@ -249,7 +282,7 @@ impl Query {
     /// backends use this; it defines the semantics FeltDB must match.
     pub fn evaluate(&self, records: impl Iterator<Item = Record>) -> Vec<Record> {
         let mut records = records
-            .filter(|record| self.filters.iter().all(|f| f.matches(&record.value)))
+            .filter(|record| self.filters.iter().all(|f| f.matches_record(record)))
             .collect::<Vec<_>>();
         records.sort_by(|left, right| left.id.cmp(&right.id));
         if let Some((field, descending)) = &self.order_by {
@@ -284,6 +317,47 @@ fn compare(left: &Value, right: &Value) -> Option<Ordering> {
         (Value::Bool(left), Value::Bool(right)) => Some(left.cmp(right)),
         _ => None,
     }
+}
+
+/// The authoritative revision of a backend's state: a counter that moves
+/// on every committed write, within a consistency scope. Two reads that see
+/// the same revision (and scope) saw the same state; this is what proves a
+/// snapshot coherent and a cache current. It is FeltDB's `Revision`
+/// (`freshness.ts`): FeltDB's committed state version, scoped to its store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Revision {
+    pub value: u64,
+    pub scope: String,
+}
+
+/// What a backend has done at its boundary, for diagnostics. Counters
+/// only: never records, credentials, or tokens.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AccessReport {
+    /// The authority's reported server version, when it reports one.
+    pub server_version: Option<String>,
+    /// The client release this backend is certified against (FeltDB:
+    /// the `@feltdb/core` version).
+    pub certified_version: Option<String>,
+    /// `connected`, `unreachable`, `refused`, or `unknown` (never tried).
+    pub connection: String,
+    pub last_read_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_mutation_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_error: Option<String>,
+    pub last_error_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Query requests sent, and how the authority executed them.
+    pub queries: u64,
+    pub indexed_queries: u64,
+    pub scanned_queries: u64,
+    /// Queries whose plan the authority did not report.
+    pub unplanned_queries: u64,
+    pub rows_scanned: u64,
+    pub rows_returned: u64,
+    /// Candidates outside the requested scope that the authority examined.
+    pub unrelated_rows_examined: u64,
+    pub revision_reads: u64,
+    pub transactions: u64,
+    pub failed_transactions: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,6 +408,40 @@ pub trait StateStore: Send + Sync {
 
     /// Apply every write or none.
     async fn commit(&self, writes: Vec<Write>) -> Result<(), StateError>;
+
+    /// The current authoritative revision. `None` when the backend cannot
+    /// report one: then a snapshot is `refresh`-validated and never
+    /// claimed coherent.
+    async fn revision(&self) -> Result<Option<Revision>, StateError> {
+        Ok(None)
+    }
+
+    /// Records by identity, in one bounded request where the backend can:
+    /// never a scan of the collection. Missing IDs are absent.
+    async fn get_many(
+        &self,
+        collection: Collection,
+        ids: &[String],
+    ) -> Result<Vec<Record>, StateError> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        self.query(&Query::all(collection).ids(ids.iter().cloned()))
+            .await
+    }
+
+    /// Boundary diagnostics, for backends that keep them.
+    fn access(&self) -> Option<AccessReport> {
+        None
+    }
+
+    /// Bring records an older Compute wrote up to what this build reads,
+    /// in place and fenced on their versions. Idempotent; returns how many
+    /// records changed, by collection. Never discards or rewrites data a
+    /// record carries.
+    async fn upgrade_records(&self) -> Result<std::collections::BTreeMap<String, u64>, StateError> {
+        Ok(std::collections::BTreeMap::new())
+    }
 }
 
 /// Documents by collection and ID, with their versions: the in-memory form
@@ -410,6 +518,8 @@ pub fn apply_in_memory(
                 }
                 Write::Delete { id, expected, .. } => {
                     fence(expected, &id)?;
+                    // A delete moves the revision too.
+                    *next_version += 1;
                     let previous = table.remove(&id);
                     undo.push((collection, id, previous));
                 }

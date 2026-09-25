@@ -476,8 +476,11 @@ impl Daemon {
         if let Some(label) = selector {
             query = query.eq("revision", label.to_string());
         }
-        let mut revisions = self.control().query::<ProjectRevisionRecord>(query).await?;
-        revisions.sort_by(|left, right| right.value.created_at.cmp(&left.value.created_at));
+        // The newest, chosen by FeltDB within the project's index.
+        let revisions = self
+            .control()
+            .query::<ProjectRevisionRecord>(query.descending("created_at").limit(1))
+            .await?;
         revisions.into_iter().next().ok_or_else(|| {
             EnvironmentError::NotFound(match selector {
                 Some(label) => format!("revision {label} of {project}"),

@@ -3,6 +3,12 @@
 // Managed FeltDB is the durable authority for Compute control state:
 // desired state and evidence. Compute owns live process state and never
 // writes it here. Nested values are json; every other field is typed.
+//
+// `record_id` is every record's identity, as a field: FeltDB indexes
+// declared fields, not `_id`, so an identity lookup through `record_id` is
+// an index lookup and one through `_id` is a scan. The FeltDB adapter
+// writes it; it is optional so records written before it existed stay
+// valid, and `compute control-plane upgrade` backfills them.
 
 app compute {
   collection Project {
@@ -10,6 +16,8 @@ app compute {
     source: text?
     created_at: datetime
     index name using hash(name)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection ProjectRevision {
@@ -22,6 +30,8 @@ app compute {
     created_at: datetime
     index project_id using hash(project_id)
     index revision using hash(revision)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection Environment {
@@ -32,6 +42,8 @@ app compute {
     provider: text?
     created_at: datetime
     index name using hash(name)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection EnvironmentProject {
@@ -47,6 +59,8 @@ app compute {
     updated_at: datetime
     index environment_id using hash(environment_id)
     index project_id using hash(project_id)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection Deployment {
@@ -79,6 +93,8 @@ app compute {
     index environment_id using hash(environment_id)
     index project_id using hash(project_id)
     index status using hash(status)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection Workload {
@@ -97,6 +113,8 @@ app compute {
     deployment_id: text
     index environment_id using hash(environment_id)
     index project_id using hash(project_id)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection Execution {
@@ -120,9 +138,12 @@ app compute {
     provider: text?
     error: text?
     failure: text?
+    index project_id using hash(project_id)
     index workload_id using hash(workload_id)
     index environment_id using hash(environment_id)
     index deployment_id using hash(deployment_id)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection Receipt {
@@ -138,6 +159,9 @@ app compute {
     created_at: datetime
     index execution_id using hash(execution_id)
     index receipt_id using hash(receipt_id)
+    index project_id using hash(project_id)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection Service {
@@ -152,6 +176,8 @@ app compute {
     created_at: datetime
     updated_at: datetime
     index name using hash(name)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection Provider {
@@ -161,6 +187,8 @@ app compute {
     priority: integer
     registered_by: text
     observed_at: datetime
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection Event {
@@ -176,6 +204,10 @@ app compute {
     data: json?
     index sequence using sorted(sequence)
     index kind using hash(kind)
+    index project using hash(project)
+    index deployment_id using hash(deployment_id)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection WorkloadStatus {
@@ -193,6 +225,8 @@ app compute {
     observed_at: datetime
     index workload_id using hash(workload_id)
     index environment using hash(environment)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection Artifact {
@@ -202,6 +236,8 @@ app compute {
     chunks: integer
     created_at: datetime
     index digest using hash(digest)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection ArtifactChunk {
@@ -209,6 +245,8 @@ app compute {
     position: integer
     data: text
     index digest using hash(digest)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection WorkloadInstance {
@@ -230,6 +268,8 @@ app compute {
     updated_at: datetime
     index workload_id using hash(workload_id)
     index deployment_id using hash(deployment_id)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection TrafficAssignment {
@@ -249,6 +289,8 @@ app compute {
     previous_instance_id: text?
     switched_at: datetime
     index endpoint using hash(endpoint)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection Domain {
@@ -268,6 +310,8 @@ app compute {
     created_at: datetime
     index name using hash(name)
     index environment_id using hash(environment_id)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection DnsRecord {
@@ -281,6 +325,8 @@ app compute {
     provider_record_id: text?
     state: json
     index domain using hash(domain)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection Certificate {
@@ -296,6 +342,8 @@ app compute {
     last_error: text?
     last_reconciled_at: datetime?
     index domain using hash(domain)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection OperatorCredential {
@@ -310,6 +358,8 @@ app compute {
     rotated_from: text?
     created_by: text?
     index operator_id using hash(operator_id)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   collection Audit {
@@ -325,6 +375,8 @@ app compute {
     detail: json
     at: datetime
     index operator_id using hash(operator_id)
+    record_id: text?
+    index record_id using hash(record_id)
   }
 
   policy Project {

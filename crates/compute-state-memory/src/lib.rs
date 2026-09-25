@@ -2,14 +2,34 @@
 //! tests and ephemeral daemons.
 
 use async_trait::async_trait;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use compute_state::{
-    BackendInfo, Collection, Query, Record, StateError, StateStore, Tables, Write, apply_in_memory,
+    BackendInfo, Collection, Query, Record, Revision, StateError, StateStore, Tables, Write,
+    apply_in_memory,
 };
 use tokio::sync::Mutex;
 
-#[derive(Default)]
+/// Distinguishes the stores of one process: revisions of two stores are
+/// never comparable.
+static STORES: AtomicU64 = AtomicU64::new(0);
+
 pub struct MemoryState {
     inner: Mutex<(Tables, u64)>,
+    scope: String,
+}
+
+impl Default for MemoryState {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::default(),
+            scope: format!(
+                "memory:{}:{}",
+                std::process::id(),
+                STORES.fetch_add(1, Ordering::Relaxed)
+            ),
+        }
+    }
 }
 
 impl MemoryState {
@@ -61,6 +81,14 @@ impl StateStore for MemoryState {
         let mut inner = self.inner.lock().await;
         let (tables, version) = &mut *inner;
         apply_in_memory(tables, writes, version)
+    }
+
+    /// Every committed write advances the version counter.
+    async fn revision(&self) -> Result<Option<Revision>, StateError> {
+        Ok(Some(Revision {
+            value: self.inner.lock().await.1,
+            scope: self.scope.clone(),
+        }))
     }
 }
 

@@ -144,9 +144,7 @@ impl Daemon {
             return false;
         }
         lap(phases, "refresh");
-        self.record_recovery().await;
-        self.flush_pending_evidence().await;
-        self.flush_pending_audit().await;
+        self.recover().await;
         // Credentials revoked or created elsewhere reach this node's cache.
         if self
             .authority
@@ -216,37 +214,6 @@ impl Daemon {
                 let _ = self.events.send(event);
             }
         }
-    }
-
-    /// Durable state answers again: continue its event sequence, pick up
-    /// credential changes, and record the outage.
-    async fn record_recovery(self: &Arc<Self>) {
-        let Some(since) = self.inner.lock().await.recovered_from.take() else {
-            return;
-        };
-        if let Ok(last) = self
-            .control()
-            .query::<compute_state::EventRecord>(
-                compute_state::Query::all(compute_state::Collection::Event)
-                    .descending("sequence")
-                    .limit(1),
-            )
-            .await
-            && let Some(last) = last.first()
-        {
-            self.sequence
-                .fetch_max(last.value.sequence, std::sync::atomic::Ordering::SeqCst);
-        }
-        let _ = self.load_credentials().await;
-        let seconds = (Utc::now() - since).num_milliseconds() as f64 / 1000.0;
-        let change = self.event(
-            Change::new(),
-            events::FELTDB_RECOVERED,
-            Scope::default(),
-            format!("durable control state is reachable again after {seconds:.1}s"),
-            json!({ "since": since, "outage_seconds": seconds }),
-        );
-        let _ = self.apply(change).await;
     }
 
     /// Start every instance that should run and does not; stop every one
@@ -518,11 +485,24 @@ impl Daemon {
     /// Write observed actual state back to control state, with the events
     /// that mark transitions. Returns whether anything was written.
     pub(crate) async fn observe(self: &Arc<Self>) -> bool {
-        let stored = match self.control().list::<WorkloadStatusRecord>().await {
-            Ok(statuses) => statuses
-                .into_iter()
-                .map(|status| (status.id.clone(), status))
-                .collect::<BTreeMap<_, _>>(),
+        // Observed state as its own snapshot: reused while nothing was
+        // written, so a quiet cycle reads one revision, not every status.
+        let observed = self.control().snapshot(super::observed_snapshot());
+        let stored = match observed {
+            Ok(handle) => match handle
+                .refresh(false)
+                .await
+                .and_then(|(snapshot, _)| snapshot.typed::<WorkloadStatusRecord>())
+            {
+                Ok(statuses) => statuses
+                    .into_iter()
+                    .map(|status| (status.id.clone(), status))
+                    .collect::<BTreeMap<_, _>>(),
+                Err(error) => {
+                    self.inner.lock().await.state_error = Some(error.to_string());
+                    return false;
+                }
+            },
             Err(error) => {
                 self.inner.lock().await.state_error = Some(error.to_string());
                 return false;

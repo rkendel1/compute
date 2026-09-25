@@ -627,6 +627,54 @@ pub async fn controller_diagnosis(location: &DaemonLocation) -> serde_json::Valu
             "error": control.error,
             "last_reconciled_at": control.last_reconciled_at,
         },
+        // The durable-state boundary: versions, authority state, freshness,
+        // and how FeltDB executed Compute's reads. No credentials or
+        // record contents.
+        "feltdb": control.authority.as_ref().map(|authority| {
+            let access = authority.access.clone().unwrap_or_default();
+            json!({
+                "certified_version": authority.certified_feltdb,
+                "server_version": access.server_version,
+                "model": authority.model,
+                "model_generation": authority.model_generation,
+                "connection": access.connection,
+                "authority_state": authority.state,
+                "last_durable_read": authority.last_durable_read,
+                "last_durable_mutation": authority.last_durable_mutation,
+                "last_error": access.last_error,
+                "degraded_since": authority.degraded_since,
+                "last_recovery": authority.last_recovery,
+                "cache": authority.cache,
+                "pending": authority.pending,
+                "snapshots": authority.snapshots.iter().map(|snapshot| json!({
+                    "name": snapshot.name,
+                    "generation": snapshot.generation,
+                    "builds": snapshot.builds,
+                    "reused": snapshot.reused,
+                    "failures": snapshot.failures,
+                    "unproven": snapshot.unproven,
+                    "durable_reads": snapshot.durable_reads,
+                    "coherence": snapshot.active.as_ref().map(|active| active.basis.coherence),
+                    "revision": snapshot.active.as_ref().and_then(|active| active.identity.version),
+                    "records": snapshot.active.as_ref().map(|active| active.records),
+                    "last_failure": snapshot.last_failure,
+                })).collect::<Vec<_>>(),
+                "queries": {
+                    "total": access.queries,
+                    "indexed": access.indexed_queries,
+                    "scanned": access.scanned_queries,
+                    "unplanned": access.unplanned_queries,
+                    "rows_scanned": access.rows_scanned,
+                    "rows_returned": access.rows_returned,
+                    "unrelated_rows_examined": access.unrelated_rows_examined,
+                    "revision_reads": access.revision_reads,
+                },
+                "transactions": {
+                    "committed": access.transactions,
+                    "failed": access.failed_transactions,
+                },
+            })
+        }),
         "state": {
             "kind": control.state.kind,
             "location": control.state.location,
@@ -706,6 +754,57 @@ pub fn print_diagnosis(diagnosis: &serde_json::Value) {
             .map(|error| format!(" ({error})"))
             .unwrap_or_default()
     );
+    let feltdb = &diagnosis["feltdb"];
+    if feltdb.is_object() {
+        println!(
+            "  authority: {} (connection {}, model {} generation {}, certified FeltDB {}, server {})",
+            text(&feltdb["authority_state"]),
+            text(&feltdb["connection"]),
+            text(&feltdb["model"]),
+            text(&feltdb["model_generation"]),
+            text(&feltdb["certified_version"]),
+            text(&feltdb["server_version"]),
+        );
+        println!(
+            "    last durable read {}, last durable mutation {}, last recovery {}",
+            text(&feltdb["last_durable_read"]),
+            text(&feltdb["last_durable_mutation"]),
+            text(&feltdb["last_recovery"]["ended"]),
+        );
+        let cache = &feltdb["cache"];
+        println!(
+            "    cache: {} (generation {}, age {} ms of {} ms); pending: {} targeted, {} evidence, {} audit",
+            text(&cache["freshness"]),
+            text(&cache["generation"]),
+            text(&cache["age_ms"]),
+            text(&cache["max_age_ms"]),
+            text(&feltdb["pending"]["targeted_refresh"]),
+            text(&feltdb["pending"]["evidence"]),
+            text(&feltdb["pending"]["audit"]),
+        );
+        for snapshot in feltdb["snapshots"].as_array().into_iter().flatten() {
+            println!(
+                "    snapshot {}: generation {}, {} builds, {} reused, {} failed, coherence {}",
+                text(&snapshot["name"]),
+                text(&snapshot["generation"]),
+                text(&snapshot["builds"]),
+                text(&snapshot["reused"]),
+                text(&snapshot["failures"]),
+                text(&snapshot["coherence"]),
+            );
+        }
+        let queries = &feltdb["queries"];
+        if queries["total"].as_u64().unwrap_or_default() > 0 {
+            println!(
+                "    queries: {} ({} indexed, {} scanned); rows {} scanned, {} returned",
+                text(&queries["total"]),
+                text(&queries["indexed"]),
+                text(&queries["scanned"]),
+                text(&queries["rows_scanned"]),
+                text(&queries["rows_returned"]),
+            );
+        }
+    }
     let state = &diagnosis["state"];
     println!(
         "  state: {} at {} ({})",

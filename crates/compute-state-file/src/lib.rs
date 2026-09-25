@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use compute_state::{
-    BackendInfo, Collection, Query, Record, STATE_VERSION, StateError, StateStore, Tables, Write,
-    apply_in_memory,
+    BackendInfo, Collection, Query, Record, Revision, STATE_VERSION, StateError, StateStore,
+    Tables, Write, apply_in_memory,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -187,6 +187,15 @@ impl StateStore for FileState {
         self.write(&tables, next_version)?;
         *inner = (tables, next_version);
         Ok(())
+    }
+
+    /// Every committed write advances the version counter, which the file
+    /// keeps across restarts.
+    async fn revision(&self) -> Result<Option<Revision>, StateError> {
+        Ok(Some(Revision {
+            value: self.inner.lock().await.1,
+            scope: format!("file:{}", self.path.display()),
+        }))
     }
 }
 
