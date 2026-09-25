@@ -62,6 +62,10 @@ enum Commands {
     Remote(RemoteCommand),
     /// Discover, inspect, and refresh providers in the caller-owned pool.
     Provider(pool::ProviderCommand),
+    /// Show configured, reserved, and currently available provider capacity.
+    Capacity(pool::CapacityCommand),
+    /// List durable jobs and their reservation state.
+    Jobs(pool::JobsCommand),
     /// Evaluate which provider can satisfy a workload. Never executes.
     Placement(pool::PlacementCommand),
     /// Place a workload on a compatible provider and execute or submit it.
@@ -1381,6 +1385,8 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 .map_err(provider_error)?;
         }
         Commands::Provider(command) => pool::provider(command).await?,
+        Commands::Capacity(command) => pool::capacity(command).await?,
+        Commands::Jobs(command) => pool::jobs(command).await?,
         Commands::Placement(command) => pool::placement(command).await?,
         Commands::Pool(command) => pool::pool(command).await?,
         Commands::Policy(command) => policy_cmd::policy(command).await?,

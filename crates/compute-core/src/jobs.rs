@@ -11,6 +11,7 @@ use crate::{
 
 pub const EXECUTION_JOB_VERSION: &str = "compute.job@1";
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_RESERVATION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -52,12 +53,101 @@ impl std::fmt::Display for JobId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReservationId(pub String);
+
+impl ReservationId {
+    pub fn generate() -> Self {
+        let sequence = NEXT_RESERVATION_ID.fetch_add(1, Ordering::Relaxed);
+        let seed = format!(
+            "reservation:{}:{}:{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+            std::process::id(),
+            sequence
+        );
+        Self(format!("rsv_{:x}", Sha256::digest(seed.as_bytes())))
+    }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        let digest = value.strip_prefix("rsv_").ok_or_else(|| {
+            crate::ComputeError::InvalidWorkload("malformed reservation identity".into())
+        })?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(crate::ComputeError::InvalidWorkload(
+                "malformed reservation identity".into(),
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+impl std::fmt::Display for ReservationId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReservationState {
+    Pending,
+    Reserved,
+    Released,
+    Expired,
+}
+
+impl ReservationState {
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Reserved)
+    }
+
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Released | Self::Expired)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputeReservation {
+    pub reservation_id: ReservationId,
+    pub job_id: JobId,
+    pub provider_id: String,
+    pub resources: crate::ResourceRequirements,
+    pub state: ReservationState,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_snapshot: Option<crate::CapacitySnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityWait {
+    pub required: crate::ResourceRequirements,
+    pub available: crate::ResourceRequirements,
+    pub reasons: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Created,
     Accepted,
     Queued,
+    WaitingForCapacity,
+    Reserved,
+    Admitted,
     Preparing,
     Running,
     Succeeded,
@@ -125,6 +215,10 @@ pub struct ExecutionJob {
     /// created from an admitted decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission: Option<crate::ExecutionAdmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation: Option<ComputeReservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_wait: Option<CapacityWait>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

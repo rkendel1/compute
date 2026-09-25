@@ -148,6 +148,7 @@ fn bundle(script: &str) -> Vec<u8> {
         version: WORKLOAD_SPEC_VERSION.into(),
         runtime: RuntimeKind::Shell,
         runtime_version: None,
+        architecture: None,
         entrypoint: "main.sh".into(),
         args: vec![],
         env: BTreeMap::new(),

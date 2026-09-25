@@ -194,6 +194,11 @@ pub struct ExecutionReceipt {
     /// for executions that were not placed through a provider pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<ReceiptPlacement>,
+    /// Durable scheduler reservation that authorized this execution's use
+    /// of provider capacity. Present for durable jobs, including jobs that
+    /// were submitted directly rather than through pool placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation: Option<ReceiptReservation>,
     /// Environment, project, and workload this execution belongs to, when
     /// it ran inside a Compute environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -319,6 +324,18 @@ pub struct ReceiptPlacement {
     /// Platform the selected provider advertised and executed on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_platform: Option<PlatformIdentity>,
+    /// Durable capacity grant established before provider admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation: Option<ReceiptReservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptReservation {
+    pub reservation_id: crate::ReservationId,
+    pub requested_resources: crate::ResourceRequirements,
+    pub reserved_resources: crate::ResourceRequirements,
+    pub provider_capacity_snapshot: crate::CapacitySnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,6 +357,8 @@ struct ReceiptBody<'a> {
     provider_protocol: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     placement: &'a Option<ReceiptPlacement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reservation: &'a Option<ReceiptReservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: &'a Option<ReceiptScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -446,6 +465,57 @@ impl ExecutionReceipt {
                 return Err(invalid("placement selected an incompatible provider"));
             }
         }
+        if let Some(reservation) = &self.reservation {
+            crate::ReservationId::parse(reservation.reservation_id.0.clone())?;
+            if reservation.requested_resources != reservation.reserved_resources {
+                return Err(invalid(
+                    "reserved resources differ from requested resources",
+                ));
+            }
+            let snapshot = &reservation.provider_capacity_snapshot;
+            if snapshot.capacity.cpu_millis
+                != snapshot
+                    .reserved
+                    .cpu_millis
+                    .saturating_add(snapshot.available.cpu_millis)
+                || snapshot.capacity.memory_bytes
+                    != snapshot
+                        .reserved
+                        .memory_bytes
+                        .saturating_add(snapshot.available.memory_bytes)
+                || snapshot.capacity.disk_bytes
+                    != snapshot
+                        .reserved
+                        .disk_bytes
+                        .saturating_add(snapshot.available.disk_bytes)
+                || snapshot.capacity.max_concurrency
+                    != snapshot
+                        .reserved
+                        .concurrency
+                        .saturating_add(snapshot.available.concurrency)
+            {
+                return Err(invalid("capacity snapshot does not balance"));
+            }
+            if reservation.reserved_resources.cpu_millis > snapshot.reserved.cpu_millis
+                || reservation.reserved_resources.memory_bytes > snapshot.reserved.memory_bytes
+                || reservation.reserved_resources.disk_bytes > snapshot.reserved.disk_bytes
+                || reservation.reserved_resources.concurrency > snapshot.reserved.concurrency
+            {
+                return Err(invalid(
+                    "reservation exceeds the recorded capacity snapshot",
+                ));
+            }
+        }
+        if self
+            .placement
+            .as_ref()
+            .and_then(|placement| placement.reservation.as_ref())
+            .is_some_and(|placement| Some(placement) != self.reservation.as_ref())
+        {
+            return Err(invalid(
+                "placement reservation differs from receipt reservation",
+            ));
+        }
         if let Some(scope) = &self.scope {
             scope.validate()?;
         }
@@ -534,6 +604,7 @@ impl ExecutionReceipt {
             provider: &self.provider,
             provider_protocol: &self.provider_protocol,
             placement: &self.placement,
+            reservation: &self.reservation,
             scope: &self.scope,
             policy_id: &self.policy_id,
             admission_id: &self.admission_id,
@@ -658,6 +729,7 @@ pub fn create_execution_receipt(
         provider: None,
         provider_protocol: None,
         placement: None,
+        reservation: None,
         scope: None,
         policy_id: None,
         admission_id: None,

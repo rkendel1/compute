@@ -198,6 +198,8 @@ impl Synthetic {
             max_output_bytes: self.max_output_bytes,
             distribution_id: self.distribution.clone(),
             max_concurrent_jobs: self.jobs.then_some(4),
+            available_concurrent_jobs: self.jobs.then_some(4),
+            reserved_resources: None,
             job_retention_seconds: self.jobs.then_some(3600),
             dependency_capsules: self.resident.clone(),
             runtime_artifacts: self.artifacts.clone(),

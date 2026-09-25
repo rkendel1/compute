@@ -434,6 +434,63 @@ pub struct ProviderResourceInventory {
     pub available: ResourceVector,
 }
 
+/// Canonical capacity units used by durable scheduling. CPU is normalized to
+/// millicpus so the scheduler never relies on floating-point arithmetic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProviderCapacity {
+    pub cpu_millis: u64,
+    pub memory_bytes: u64,
+    pub disk_bytes: u64,
+    pub max_concurrency: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResourceRequirements {
+    pub cpu_millis: u64,
+    pub memory_bytes: u64,
+    pub disk_bytes: u64,
+    pub concurrency: u32,
+}
+
+impl ResourceRequirements {
+    pub fn from_limits(resources: &ResourceLimits) -> Self {
+        Self {
+            cpu_millis: resources
+                .cpu_count
+                .map(u64::from)
+                .unwrap_or(0)
+                .saturating_mul(1_000),
+            memory_bytes: resources
+                .memory_required_bytes
+                .or(resources.memory_bytes)
+                .unwrap_or(0),
+            disk_bytes: resources.disk_bytes.unwrap_or(0),
+            // Durable jobs have always consumed one concurrency slot. Making
+            // that explicit preserves the behavior of unspecified resources.
+            concurrency: 1,
+        }
+    }
+
+    pub fn checked_add(&self, other: &Self) -> Option<Self> {
+        Some(Self {
+            cpu_millis: self.cpu_millis.checked_add(other.cpu_millis)?,
+            memory_bytes: self.memory_bytes.checked_add(other.memory_bytes)?,
+            disk_bytes: self.disk_bytes.checked_add(other.disk_bytes)?,
+            concurrency: self.concurrency.checked_add(other.concurrency)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CapacitySnapshot {
+    pub capacity: ProviderCapacity,
+    pub reserved: ResourceRequirements,
+    pub available: ResourceRequirements,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionRequest {
     pub runtime: RuntimeSpec,

@@ -3,8 +3,9 @@ mod support;
 use chrono::Duration;
 use compute_core::{IsolationProfile, RuntimeKind, SelectionMode};
 use compute_placement::{
-    Availability, DiscoveryRecord, DiscoveryStatus, EvaluationStatus, Health, PlacementOutcome,
-    PlacementPolicy, PoolPolicy, ProviderDescriptor, ProviderKind, place, place_with_policy,
+    Availability, CapacityStatus, DiscoveryRecord, DiscoveryStatus, EvaluationStatus, Health,
+    PlacementOutcome, PlacementPolicy, PoolPolicy, ProviderDescriptor, ProviderKind, ReasonCode,
+    place, place_with_policy,
 };
 use support::*;
 
@@ -12,6 +13,50 @@ fn wasm_strict() -> compute_placement::PlacementRequirements {
     let mut requirements = requirements(RuntimeKind::Wasm);
     requirements.isolation = IsolationProfile::Strict;
     requirements
+}
+
+#[test]
+fn temporary_capacity_is_separate_from_eligibility_and_auto_prefers_available() {
+    let config = config(&[
+        ("busy", ProviderKind::Remote, 100),
+        ("ready", ProviderKind::Remote, 50),
+    ]);
+    let mut busy = sized_provider(ProviderKind::Remote, 8, 16);
+    busy.resources.available.cpu_count = 1;
+    busy.resources.available.memory_bytes = 512 * 1024 * 1024;
+    let ready = sized_provider(ProviderKind::Remote, 8, 16);
+    let records = vec![busy.record("busy"), ready.record("ready")];
+    let mut required = wasm_strict();
+    required.resources.cpu_count = Some(2);
+    required.resources.memory_bytes = Some(2 * 1024 * 1024 * 1024);
+
+    let report = place(
+        &config.providers,
+        &config.pool,
+        &records,
+        &required,
+        &baseline(&required),
+        None,
+    );
+
+    assert_eq!(report.compatible_providers, ["busy", "ready"]);
+    assert_eq!(report.capacity_available_providers, ["ready"]);
+    assert_eq!(report.capacity_unavailable_providers, ["busy"]);
+    assert_eq!(report.selected.as_ref().unwrap().provider_id, "ready");
+    let busy = report
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "busy")
+        .unwrap();
+    assert_eq!(busy.status, EvaluationStatus::Compatible);
+    assert_eq!(busy.capacity_status, CapacityStatus::Unavailable);
+    assert_eq!(
+        busy.capacity_reasons
+            .iter()
+            .map(|reason| reason.code)
+            .collect::<Vec<_>>(),
+        [ReasonCode::CpuUnavailable, ReasonCode::MemoryUnavailable]
+    );
 }
 
 fn sized_provider(kind: ProviderKind, cpu: u64, memory_gib: u64) -> Synthetic {
@@ -534,10 +579,9 @@ fn explanation_answers_the_four_questions() {
         "a (remote, priority 100, health healthy): incompatible (policy would admit): runtime_unsupported"
     ));
     assert!(
-        explanation
-            .considered
-            .iter()
-            .any(|line| line.starts_with("b ") && line.ends_with(": compatible"))
+        explanation.considered.iter().any(
+            |line| line.starts_with("b ") && line.ends_with(": compatible; capacity available")
+        )
     );
     assert!(explanation.selection.starts_with(
         "selected provider b: compatible and admitted by policy, with selection priority 50"

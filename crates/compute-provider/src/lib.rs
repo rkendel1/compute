@@ -291,6 +291,10 @@ pub struct ProviderCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_jobs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_concurrent_jobs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_resources: Option<ResourceVector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_retention_seconds: Option<u64>,
     /// Dependency capsules already resident at the provider and resolvable
     /// by identity without transfer.
@@ -1180,6 +1184,8 @@ impl ComputeProvider for LocalProvider {
             max_output_bytes: 16 * 1024 * 1024,
             distribution_id: Some(distribution.id),
             max_concurrent_jobs: None,
+            available_concurrent_jobs: None,
+            reserved_resources: None,
             job_retention_seconds: None,
             dependency_capsules: resident_dependency_capsules(),
             runtime_artifacts,
@@ -1364,6 +1370,16 @@ impl RemoteProvider {
         }
         self.send("POST", "/compute/jobs", Some(&request), idempotency_key)
             .await
+    }
+
+    /// Live scheduler capacity. Unlike capabilities, this snapshot is
+    /// expected to change as reservations are acquired and released.
+    pub async fn capacity_snapshot(&self) -> Result<compute_core::CapacitySnapshot, ProviderError> {
+        self.get("/compute/capacity").await
+    }
+
+    pub async fn jobs(&self) -> Result<Vec<compute_core::ExecutionJob>, ProviderError> {
+        self.get("/compute/jobs").await
     }
 
     pub async fn job_status(
@@ -1563,11 +1579,13 @@ pub enum ProviderOperation {
     Admission,
     Execute,
     Capabilities,
+    Capacity,
     Health,
     RuntimeResolve,
     RuntimePrepare,
     RuntimeStatus,
     Submit,
+    Jobs,
     Status,
     Result,
     Receipt,
@@ -1661,10 +1679,21 @@ pub async fn serve_listener(
     listener: TcpListener,
     config: ServerConfig,
 ) -> Result<(), ProviderError> {
+    let advertised = config.provider.capabilities().await?;
+    let capacity = compute_core::ProviderCapacity {
+        cpu_millis: advertised
+            .resources
+            .capacity
+            .cpu_count
+            .saturating_mul(1_000),
+        memory_bytes: advertised.resources.capacity.memory_bytes,
+        disk_bytes: advertised.resources.capacity.disk_bytes,
+        max_concurrency: u32::try_from(config.max_concurrent_jobs.max(1)).unwrap_or(u32::MAX),
+    };
     let jobs = JobManager::new(
         config.job_store.clone(),
         config.job_retention,
-        config.max_concurrent_jobs,
+        capacity,
         config.provider.clone(),
     )?;
     let state = Arc::new(ServerState { config, jobs });
@@ -1744,14 +1773,30 @@ async fn handle_connection(
             ))
         }
         ProviderOperation::Health => encode_result(state.config.provider.health().await),
-        ProviderOperation::Capabilities => {
-            let capabilities = state.config.provider.capabilities().await.map(|mut value| {
-                value.max_concurrent_jobs = Some(state.config.max_concurrent_jobs as u64);
-                value.job_retention_seconds = Some(state.config.job_retention.as_secs());
-                value
-            });
-            encode_result(capabilities)
-        }
+        ProviderOperation::Capabilities => match state.config.provider.capabilities().await {
+            Ok(mut value) => match state.jobs.capacity_snapshot().await {
+                Ok(snapshot) => {
+                    value.max_concurrent_jobs = Some(u64::from(snapshot.capacity.max_concurrency));
+                    value.available_concurrent_jobs =
+                        Some(u64::from(snapshot.available.concurrency));
+                    value.job_retention_seconds = Some(state.config.job_retention.as_secs());
+                    value.resources.available = ResourceVector {
+                        cpu_count: snapshot.available.cpu_millis / 1_000,
+                        memory_bytes: snapshot.available.memory_bytes,
+                        disk_bytes: snapshot.available.disk_bytes,
+                    };
+                    value.reserved_resources = Some(ResourceVector {
+                        cpu_count: snapshot.reserved.cpu_millis / 1_000,
+                        memory_bytes: snapshot.reserved.memory_bytes,
+                        disk_bytes: snapshot.reserved.disk_bytes,
+                    });
+                    encode_result(Ok(value))
+                }
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        },
+        ProviderOperation::Capacity => encode_result(state.jobs.capacity_snapshot().await),
         ProviderOperation::RuntimeResolve => match decode(&request.body) {
             Ok(value) => encode_result(state.config.provider.resolve_runtime(value).await),
             Err(error) => Err(error),
@@ -1783,6 +1828,7 @@ async fn handle_connection(
             }
             Err(error) => Err(error),
         },
+        ProviderOperation::Jobs => encode_result(state.jobs.list(&owner).await),
         ProviderOperation::Status => encode_result(
             state
                 .jobs
@@ -1836,6 +1882,7 @@ fn parse_route(
     let static_route = match (method, path) {
         ("GET", "/compute/health") => Some(ProviderOperation::Health),
         ("GET", "/compute/capabilities") => Some(ProviderOperation::Capabilities),
+        ("GET", "/compute/capacity") => Some(ProviderOperation::Capacity),
         ("GET", "/compute/inspect") => Some(ProviderOperation::Inspect),
         ("POST", "/compute/execute") => Some(ProviderOperation::Execute),
         ("POST", "/compute/admission") => Some(ProviderOperation::Admission),
@@ -1843,6 +1890,7 @@ fn parse_route(
         ("POST", "/compute/runtimes/prepare") => Some(ProviderOperation::RuntimePrepare),
         ("POST", "/compute/runtimes/status") => Some(ProviderOperation::RuntimeStatus),
         ("POST", "/compute/jobs") => Some(ProviderOperation::Submit),
+        ("GET", "/compute/jobs") => Some(ProviderOperation::Jobs),
         _ => None,
     };
     if let Some(operation) = static_route {

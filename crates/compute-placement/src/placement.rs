@@ -93,6 +93,15 @@ pub enum EvaluationStatus {
     PolicyDenied,
 }
 
+/// Transient allocatability, evaluated only after static compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapacityStatus {
+    Available,
+    Unavailable,
+    Unknown,
+}
+
 impl EvaluationStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -129,6 +138,11 @@ pub struct ProviderEvaluation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ProviderResourceInventory>,
     pub status: EvaluationStatus,
+    pub capacity_status: CapacityStatus,
+    /// Temporary capacity shortages. These never make a provider
+    /// statically incompatible and may cause a durable job to wait.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capacity_reasons: Vec<IncompatibilityReason>,
     /// Capability incompatibilities.
     pub reasons: Vec<IncompatibilityReason>,
     /// Admission under this provider's effective policy, evaluated
@@ -237,6 +251,10 @@ pub struct PlacementReport {
     /// Every evaluated provider, in selection order.
     pub providers: Vec<ProviderEvaluation>,
     pub compatible_providers: Vec<String>,
+    /// Compatible providers able to reserve the workload immediately.
+    pub capacity_available_providers: Vec<String>,
+    /// Compatible providers that would currently queue the workload.
+    pub capacity_unavailable_providers: Vec<String>,
     /// Providers proven unable to satisfy the requirements.
     pub incompatible_providers: Vec<String>,
     /// Providers whose compatibility could not be established (stale,
@@ -281,6 +299,7 @@ impl PlacementReport {
                 disk_bytes: self.requirements.resources.disk_bytes.unwrap_or(0),
             },
             execution_platform: Some(selected.platform.clone()),
+            reservation: None,
         })
     }
 
@@ -292,7 +311,11 @@ impl PlacementReport {
             .as_ref()
             .ok_or_else(|| "placement did not select a provider".to_string())?;
         receipt.verify().map_err(|error| error.to_string())?;
-        if receipt.placement.as_ref() != self.receipt_binding().as_ref() {
+        let mut actual_placement = receipt.placement.clone();
+        if let Some(actual) = actual_placement.as_mut() {
+            actual.reservation = None;
+        }
+        if actual_placement.as_ref() != self.receipt_binding().as_ref() {
             return Err("receipt placement differs from the placement decision".into());
         }
         if receipt.provider.as_ref() != Some(&selected.provider_identity) {
@@ -411,9 +434,29 @@ pub fn place_with_policy(
         )
     });
 
-    let chosen = providers.iter().find(|provider| {
-        provider.status == EvaluationStatus::Compatible && placement_policy.accepts(provider)
-    });
+    let candidates = || {
+        providers.iter().filter(|provider| {
+            provider.status == EvaluationStatus::Compatible && placement_policy.accepts(provider)
+        })
+    };
+    let chosen = candidates()
+        .find(|provider| provider.capacity_status == CapacityStatus::Available)
+        .or_else(|| candidates().next());
+    let capacity_available_providers = compatible_providers
+        .iter()
+        .filter(|id| {
+            providers.iter().any(|provider| {
+                &provider.provider_id == *id
+                    && provider.capacity_status == CapacityStatus::Available
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let capacity_unavailable_providers = compatible_providers
+        .iter()
+        .filter(|id| !capacity_available_providers.contains(id))
+        .cloned()
+        .collect::<Vec<_>>();
     let (selected, failure) = match (chosen, explicit) {
         (Some(provider), _) => (
             Some(SelectedProvider {
@@ -552,6 +595,8 @@ pub fn place_with_policy(
         admission: admission.clone(),
         providers,
         compatible_providers,
+        capacity_available_providers,
+        capacity_unavailable_providers,
         incompatible_providers,
         excluded_providers,
         selected,
@@ -595,6 +640,16 @@ fn evaluate(
         (DiscoveryStatus::Invalid, None) => (EvaluationStatus::CapabilitiesInvalid, vec![]),
         _ => (EvaluationStatus::ProviderUnavailable, vec![]),
     };
+    let capacity_reasons = usable
+        .map(|descriptor| capacity_reasons(requirements, &descriptor.resources))
+        .unwrap_or_default();
+    let capacity_status = if usable.is_none() {
+        CapacityStatus::Unknown
+    } else if capacity_reasons.is_empty() {
+        CapacityStatus::Available
+    } else {
+        CapacityStatus::Unavailable
+    };
     let error = match status {
         EvaluationStatus::CapabilitiesUnknown => Some(DiscoveryError {
             code: "provider_capabilities_stale".into(),
@@ -625,10 +680,68 @@ fn evaluate(
         platform: descriptor.map(|descriptor| descriptor.distribution.platform.clone()),
         resources: descriptor.map(|descriptor| descriptor.resources.clone()),
         status,
+        capacity_status,
+        capacity_reasons,
         reasons,
         admission,
         error,
     }
+}
+
+fn capacity_reasons(
+    requirements: &PlacementRequirements,
+    inventory: &ProviderResourceInventory,
+) -> Vec<IncompatibilityReason> {
+    let mut reasons = Vec::new();
+    let mut push = |code, required, available, detail| {
+        reasons.push(IncompatibilityReason {
+            code,
+            dimension: "capacity".into(),
+            required,
+            available,
+            detail: Some(detail),
+        });
+    };
+    if let Some(required) = requirements.resources.cpu_count
+        && u64::from(required) > inventory.available.cpu_count
+    {
+        push(
+            crate::ReasonCode::CpuUnavailable,
+            serde_json::json!(required),
+            serde_json::json!(inventory.available.cpu_count),
+            format!(
+                "cpu requires {required}, currently available {}",
+                inventory.available.cpu_count
+            ),
+        );
+    }
+    if let Some(required) = requirements.resources.memory_bytes
+        && required > inventory.available.memory_bytes
+    {
+        push(
+            crate::ReasonCode::MemoryUnavailable,
+            serde_json::json!(required),
+            serde_json::json!(inventory.available.memory_bytes),
+            format!(
+                "memory requires {required} bytes, currently available {} bytes",
+                inventory.available.memory_bytes
+            ),
+        );
+    }
+    if let Some(required) = requirements.resources.disk_bytes
+        && required > inventory.available.disk_bytes
+    {
+        push(
+            crate::ReasonCode::DiskUnavailable,
+            serde_json::json!(required),
+            serde_json::json!(inventory.available.disk_bytes),
+            format!(
+                "disk requires {required} bytes, currently available {} bytes",
+                inventory.available.disk_bytes
+            ),
+        );
+    }
+    reasons
 }
 
 /// Admission on one provider: the caller's policy intersected with the
@@ -868,7 +981,23 @@ fn explain(
                 }
             }
             match provider.status {
-                EvaluationStatus::Compatible => format!("{head}: compatible"),
+                EvaluationStatus::Compatible => match provider.capacity_status {
+                    CapacityStatus::Available => {
+                        format!("{head}: compatible; capacity available")
+                    }
+                    CapacityStatus::Unavailable => format!(
+                        "{head}: compatible; capacity temporarily unavailable (will queue): {}",
+                        provider
+                            .capacity_reasons
+                            .iter()
+                            .filter_map(|reason| reason.detail.as_deref())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
+                    CapacityStatus::Unknown => {
+                        format!("{head}: compatible; capacity unknown")
+                    }
+                },
                 EvaluationStatus::PolicyDenied => format!(
                     "{head}: capable, but policy denied: {}",
                     policy_reasons(provider)

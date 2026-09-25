@@ -260,13 +260,16 @@ async fn every_denial_is_explained_and_never_reaches_a_runtime() {
         let evidence = error.admission.expect("denial carries evidence");
         assert_eq!(evidence.admission_id, decision.admission_id, "{code}");
 
-        let error = client.submit(request, None).await.unwrap_err();
-        assert_eq!(
-            error.kind,
-            ProviderErrorKind::AdmissionDenied,
-            "{code}: job"
+        let submitted = client.submit(request, None).await.unwrap();
+        let job = wait(&client, &submitted.job_id.0).await;
+        assert_eq!(job.status, compute_core::JobStatus::Rejected, "{code}: job");
+        assert!(
+            job.failure
+                .as_deref()
+                .is_some_and(|failure| failure.contains("admission_denied")),
+            "{code}: {:?}",
+            job.failure
         );
-        assert!(error.admission.is_some());
 
         assert_eq!(
             server.provider.executions_started(),
@@ -353,7 +356,9 @@ async fn policy_changes_never_mutate_an_admitted_execution() {
     swapped.policy.policy = replacement.clone();
     assert!(provider.execute_admitted(request, swapped).await.is_err());
 
-    // Server level: a queued job keeps the policy it was admitted under.
+    // Server level: admission happens only after an atomic reservation. A
+    // capacity-waiting job has not been admitted yet and observes the policy
+    // in force when it eventually reserves.
     let server = serve(Some(original.clone()), 1).await;
     let client = RemoteProvider::new(server.endpoint.clone());
     let blocker = client
@@ -362,25 +367,19 @@ async fn policy_changes_never_mutate_an_admitted_execution() {
         .unwrap();
     let queued_request = ProviderRequest::bundle(shell("printf queued", |_| {}));
     let queued = client.submit(queued_request.clone(), None).await.unwrap();
-    let admitted_under = client
-        .job_status(&queued.job_id.0)
-        .await
-        .unwrap()
-        .admission
-        .unwrap();
+    let waiting = client.job_status(&queued.job_id.0).await.unwrap();
+    assert!(waiting.admission.is_none());
     server.provider.set_execution_policy(Some(replacement));
     let job = wait(&client, &queued.job_id.0).await;
     wait(&client, &blocker.job_id.0).await;
-    assert_eq!(job.status, compute_core::JobStatus::Succeeded);
-    assert_eq!(job.admission.as_ref(), Some(&admitted_under));
-    let receipt = client.job_receipt(&queued.job_id.0).await.unwrap().receipt;
-    assert_eq!(receipt.policy_id.as_ref(), Some(&admitted_under.policy_id));
-    assert_eq!(
-        receipt.admission_id.as_ref(),
-        Some(&admitted_under.admission_id)
+    assert_eq!(job.status, compute_core::JobStatus::Rejected);
+    assert!(
+        job.failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("admission_denied"))
     );
-    // New submissions evaluate the new policy.
-    let error = client.submit(queued_request, None).await.unwrap_err();
-    assert_eq!(error.kind, ProviderErrorKind::AdmissionDenied);
-    assert_ne!(error.admission.unwrap().policy_id, admitted_under.policy_id);
+    // New submissions also evaluate the new policy after reservation.
+    let submitted = client.submit(queued_request, None).await.unwrap();
+    let denied = wait(&client, &submitted.job_id.0).await;
+    assert_eq!(denied.status, compute_core::JobStatus::Rejected);
 }

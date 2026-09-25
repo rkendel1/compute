@@ -374,7 +374,8 @@ async fn certify_placement(bundle: &WorkloadBundle) -> Result<String, String> {
     Ok("capable providers denied by policy were excluded, explicit selection never bypassed policy, and the executed receipt reproduced the placement's admission".into())
 }
 
-/// Jobs are created only from admitted decisions and persist them.
+/// Durable jobs reserve before admission and persist both admitted and denied
+/// decisions; denied jobs release capacity without executing.
 async fn certify_jobs(bundle: &WorkloadBundle) -> Result<String, String> {
     let kind = bundle.workload.runtime;
     let locked = serve(Some(policy(serde_json::json!({
@@ -383,13 +384,32 @@ async fn certify_jobs(bundle: &WorkloadBundle) -> Result<String, String> {
     .await?;
     let open = serve(None).await?;
     let request = ProviderRequest::bundle(bundle.to_bytes().map_err(|e| e.to_string())?);
-    match RemoteProvider::new(locked.endpoint.clone())
+    let locked_client = RemoteProvider::new(locked.endpoint.clone());
+    let denied_submission = locked_client
         .submit(request.clone(), None)
         .await
+        .map_err(|error| error.to_string())?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let denied = loop {
+        let job = locked_client
+            .job_status(&denied_submission.job_id.0)
+            .await
+            .map_err(|error| error.to_string())?;
+        if job.status.is_terminal() {
+            break job;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("denied job did not finish admission".into());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    if denied.status != compute_core::JobStatus::Rejected
+        || denied
+            .admission
+            .as_ref()
+            .is_none_or(|admission| admission.admission_status != "denied")
     {
-        Err(error)
-            if error.kind == ProviderErrorKind::AdmissionDenied && error.admission.is_some() => {}
-        _ => return Err("a denied request became a job".into()),
+        return Err("a denied job did not preserve its admission decision".into());
     }
     let client = RemoteProvider::new(open.endpoint.clone());
     let submission = client
@@ -422,7 +442,7 @@ async fn certify_jobs(bundle: &WorkloadBundle) -> Result<String, String> {
     {
         return Err("job admission evidence is inconsistent".into());
     }
-    Ok("denied submissions created no job and ran nothing; admitted jobs persisted policy_id and admission_id into their receipts".into())
+    Ok("denied jobs persisted their decision, released capacity, and ran nothing; admitted jobs persisted policy_id and admission_id into their receipts".into())
 }
 
 /// Receipts bind admission; tampering and policy changes cannot alter an

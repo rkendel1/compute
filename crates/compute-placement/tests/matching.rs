@@ -53,19 +53,8 @@ fn resource_availability_is_distinct_from_capacity_and_explained() {
     required.resources.disk_bytes = Some(5 * 1024 * 1024 * 1024);
 
     let matched = match_provider(&required, &provider.descriptor("busy"));
-    assert_eq!(
-        matched.codes(),
-        [
-            ReasonCode::CpuUnavailable,
-            ReasonCode::MemoryUnavailable,
-            ReasonCode::DiskUnavailable,
-        ]
-    );
-    assert!(matched.reasons.iter().all(|reason| {
-        reason.available.get("capacity").is_some()
-            && reason.available.get("available").is_some()
-            && reason.detail.is_some()
-    }));
+    assert!(matched.compatible);
+    assert!(matched.reasons.is_empty());
 }
 
 fn wasm_requirements() -> compute_placement::PlacementRequirements {

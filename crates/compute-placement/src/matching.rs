@@ -331,41 +331,41 @@ pub fn match_provider(
     let limits = &descriptor.resource_capabilities;
     let inventory = &descriptor.resources;
     if let Some(cpu) = resources.cpu_count
-        && u64::from(cpu) > inventory.available.cpu_count
+        && u64::from(cpu) > inventory.capacity.cpu_count
     {
         reasons.push(
             ReasonCode::CpuUnavailable,
             json!(cpu),
-            json!({"available": inventory.available.cpu_count, "capacity": inventory.capacity.cpu_count}),
+            json!({"capacity": inventory.capacity.cpu_count}),
             Some(format!(
-                "cpu requires {cpu}, available {} (capacity {})",
-                inventory.available.cpu_count, inventory.capacity.cpu_count
+                "cpu requires {cpu}, provider capacity is {}",
+                inventory.capacity.cpu_count
             )),
         );
     }
     if let Some(memory) = resources.memory_bytes
-        && memory > inventory.available.memory_bytes
+        && memory > inventory.capacity.memory_bytes
     {
         reasons.push(
             ReasonCode::MemoryUnavailable,
             json!(memory),
-            json!({"available": inventory.available.memory_bytes, "capacity": inventory.capacity.memory_bytes}),
+            json!({"capacity": inventory.capacity.memory_bytes}),
             Some(format!(
-                "memory requires {memory} bytes, available {} bytes (capacity {} bytes)",
-                inventory.available.memory_bytes, inventory.capacity.memory_bytes
+                "memory requires {memory} bytes, provider capacity is {} bytes",
+                inventory.capacity.memory_bytes
             )),
         );
     }
     if let Some(disk) = resources.disk_bytes
-        && disk > inventory.available.disk_bytes
+        && disk > inventory.capacity.disk_bytes
     {
         reasons.push(
             ReasonCode::DiskUnavailable,
             json!(disk),
-            json!({"available": inventory.available.disk_bytes, "capacity": inventory.capacity.disk_bytes}),
+            json!({"capacity": inventory.capacity.disk_bytes}),
             Some(format!(
-                "disk requires {disk} bytes, available {} bytes (capacity {} bytes)",
-                inventory.available.disk_bytes, inventory.capacity.disk_bytes
+                "disk requires {disk} bytes, provider capacity is {} bytes",
+                inventory.capacity.disk_bytes
             )),
         );
     }

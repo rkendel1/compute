@@ -11,8 +11,8 @@ use std::time::Duration;
 use chrono::Utc;
 use clap::{Args, Subcommand};
 use compute_core::{
-    ComputeError, DependencyCapsule, EnvironmentVariable, IsolationProfile, NetworkPolicy,
-    PlatformIdentity, WorkloadBundle,
+    CapacitySnapshot, ComputeError, DependencyCapsule, EnvironmentVariable, IsolationProfile,
+    NetworkPolicy, PlatformIdentity, ProviderCapacity, ResourceRequirements, WorkloadBundle,
 };
 use compute_placement::{
     CapabilityCache, DiscoveryMode, DiscoveryRecord, PlacementOutcome, PlacementPolicy,
@@ -106,6 +106,28 @@ impl PoolLocation {
 pub struct ProviderCommand {
     #[command(subcommand)]
     pub command: ProviderCommands,
+    #[command(flatten)]
+    pub location: PoolLocation,
+}
+
+#[derive(Args, Debug)]
+pub struct CapacityCommand {
+    /// Restrict the view to one configured provider.
+    #[arg(long)]
+    pub provider: Option<String>,
+    #[arg(long)]
+    pub json: bool,
+    #[command(flatten)]
+    pub location: PoolLocation,
+}
+
+#[derive(Args, Debug)]
+pub struct JobsCommand {
+    /// Restrict the view to one configured remote provider.
+    #[arg(long)]
+    pub provider: Option<String>,
+    #[arg(long)]
+    pub json: bool,
     #[command(flatten)]
     pub location: PoolLocation,
 }
@@ -422,6 +444,163 @@ pub async fn provider(command: ProviderCommand) -> compute_core::Result<()> {
     Ok(())
 }
 
+pub async fn capacity(command: CapacityCommand) -> compute_core::Result<()> {
+    let pool = command.location.pool()?;
+    let inspection = pool.inspect();
+    let mut rows = Vec::new();
+    for member in inspection.providers {
+        if command
+            .provider
+            .as_deref()
+            .is_some_and(|wanted| wanted != member.provider_id)
+        {
+            continue;
+        }
+        let pool_member = pool
+            .member(&member.provider_id)
+            .expect("inspected member exists");
+        let snapshot = match &pool_member.jobs {
+            Some(remote) => remote
+                .capacity_snapshot()
+                .await
+                .map_err(crate::provider_error)?,
+            None => {
+                let capabilities = pool_member
+                    .provider
+                    .capabilities()
+                    .await
+                    .map_err(crate::provider_error)?;
+                let capacity = ProviderCapacity {
+                    cpu_millis: capabilities
+                        .resources
+                        .capacity
+                        .cpu_count
+                        .saturating_mul(1_000),
+                    memory_bytes: capabilities.resources.capacity.memory_bytes,
+                    disk_bytes: capabilities.resources.capacity.disk_bytes,
+                    max_concurrency: capabilities
+                        .max_concurrent_jobs
+                        .unwrap_or(1)
+                        .try_into()
+                        .unwrap_or(u32::MAX),
+                };
+                CapacitySnapshot {
+                    available: ResourceRequirements {
+                        cpu_millis: capacity.cpu_millis,
+                        memory_bytes: capacity.memory_bytes,
+                        disk_bytes: capacity.disk_bytes,
+                        concurrency: capacity.max_concurrency,
+                    },
+                    reserved: ResourceRequirements::default(),
+                    capacity,
+                }
+            }
+        };
+        rows.push(serde_json::json!({
+            "provider_id": member.provider_id,
+            "capacity": snapshot.capacity,
+            "reserved": snapshot.reserved,
+            "available": snapshot.available,
+        }));
+    }
+    if command.provider.is_some() && rows.is_empty() {
+        return Err(ComputeError::InvalidWorkload(format!(
+            "provider {} is not configured in this pool",
+            command.provider.as_deref().unwrap_or_default()
+        )));
+    }
+    if command.json {
+        print_json(&serde_json::json!({ "providers": rows }));
+    } else {
+        println!(
+            "Provider\tCPU (available/capacity)\tMemory (available/capacity)\tDisk (available/capacity)\tJobs (available/capacity)"
+        );
+        for row in rows {
+            let id = row["provider_id"].as_str().unwrap_or("-");
+            let capacity: ProviderCapacity =
+                serde_json::from_value(row["capacity"].clone()).expect("capacity serializes");
+            let available: ResourceRequirements =
+                serde_json::from_value(row["available"].clone()).expect("capacity serializes");
+            println!(
+                "{}\t{:.3}/{}\t{}/{}\t{}/{}\t{}/{}",
+                id,
+                available.cpu_millis as f64 / 1_000.0,
+                capacity.cpu_millis as f64 / 1_000.0,
+                format_bytes(available.memory_bytes),
+                format_bytes(capacity.memory_bytes),
+                format_bytes(available.disk_bytes),
+                format_bytes(capacity.disk_bytes),
+                available.concurrency,
+                capacity.max_concurrency
+            );
+        }
+    }
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    if bytes >= GIB && bytes % GIB == 0 {
+        format!("{} GiB", bytes / GIB)
+    } else if bytes >= MIB && bytes % MIB == 0 {
+        format!("{} MiB", bytes / MIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+pub async fn jobs(command: JobsCommand) -> compute_core::Result<()> {
+    let pool = command.location.pool()?;
+    let inspection = pool.inspect();
+    let mut rows = Vec::new();
+    for member in inspection.providers {
+        if command
+            .provider
+            .as_deref()
+            .is_some_and(|wanted| wanted != member.provider_id)
+        {
+            continue;
+        }
+        let Some(remote) = &pool
+            .member(&member.provider_id)
+            .expect("member exists")
+            .jobs
+        else {
+            continue;
+        };
+        for job in remote.jobs().await.map_err(crate::provider_error)? {
+            rows.push(serde_json::json!({
+                "provider_id": member.provider_id,
+                "job": job,
+            }));
+        }
+    }
+    if command.json {
+        print_json(&serde_json::json!({ "jobs": rows }));
+    } else {
+        println!("Provider\tJob\tStatus\tReservation\tResources");
+        for row in rows {
+            let job: compute_core::ExecutionJob =
+                serde_json::from_value(row["job"].clone()).expect("job serializes");
+            let reservation = job.reservation.as_ref();
+            println!(
+                "{}\t{}\t{:?}\t{}\t{}m CPU, {} bytes memory, {} bytes disk",
+                row["provider_id"].as_str().unwrap_or("-"),
+                job.job_id,
+                job.status,
+                reservation
+                    .map(|value| format!("{}:{:?}", value.reservation_id, value.state))
+                    .unwrap_or_else(|| "-".into()),
+                reservation.map_or(0, |value| value.resources.cpu_millis),
+                reservation.map_or(0, |value| value.resources.memory_bytes),
+                reservation.map_or(0, |value| value.resources.disk_bytes),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn adhoc(value: &str) -> compute_core::Result<Box<dyn ComputeProvider>> {
     if value == "local" {
         Ok(Box::new(LocalProvider::new()))
@@ -733,7 +912,9 @@ pub async fn placement(command: PlacementCommand) -> compute_core::Result<()> {
             "providers": report.providers.iter().map(|provider| serde_json::json!({
                 "provider_id": provider.provider_id,
                 "status": provider.status,
+                "capacity_status": provider.capacity_status,
                 "reasons": provider.reasons,
+                "capacity_reasons": provider.capacity_reasons,
                 "error": provider.error,
             })).collect::<Vec<_>>(),
         })),
@@ -792,6 +973,26 @@ fn print_summary(report: &PlacementReport) {
                 ))
             );
         }
+        match provider.capacity_status {
+            compute_placement::CapacityStatus::Available => {
+                println!("    ✓ capacity currently available");
+            }
+            compute_placement::CapacityStatus::Unavailable => {
+                for reason in &provider.capacity_reasons {
+                    println!(
+                        "    ⏳ {}: {}",
+                        reason.code.as_str(),
+                        reason
+                            .detail
+                            .as_deref()
+                            .unwrap_or("temporarily unavailable")
+                    );
+                }
+            }
+            compute_placement::CapacityStatus::Unknown => {
+                println!("    ? capacity unknown");
+            }
+        }
     }
     println!(
         "Compatible: {}",
@@ -800,6 +1001,14 @@ fn print_summary(report: &PlacementReport) {
     println!(
         "Incompatible: {}",
         join(report.incompatible_providers.iter().cloned())
+    );
+    println!(
+        "Capacity available: {}",
+        join(report.capacity_available_providers.iter().cloned())
+    );
+    println!(
+        "Capacity unavailable (will queue if selected): {}",
+        join(report.capacity_unavailable_providers.iter().cloned())
     );
     println!(
         "Excluded: {}",
@@ -1011,6 +1220,19 @@ fn placed(report: &PlacementReport, json: bool) -> bool {
         for reason in &provider.reasons {
             eprintln!(
                 "  {}: required {}, available {}{}",
+                reason.code.as_str(),
+                reason.required,
+                reason.available,
+                reason
+                    .detail
+                    .as_deref()
+                    .map(|detail| format!(" ({detail})"))
+                    .unwrap_or_default()
+            );
+        }
+        for reason in &provider.capacity_reasons {
+            eprintln!(
+                "  temporary {}: required {}, available {}{}",
                 reason.code.as_str(),
                 reason.required,
                 reason.available,
