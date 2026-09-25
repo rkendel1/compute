@@ -1,0 +1,10 @@
+[pool]
+
+[providers.local]
+kind = "local"
+priority = 100
+
+[providers.remote-dev]
+kind = "remote"
+endpoint = "http://127.0.0.1:8080"
+priority = 50
