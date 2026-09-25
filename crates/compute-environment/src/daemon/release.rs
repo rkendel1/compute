@@ -272,6 +272,11 @@ impl Daemon {
                 name: workload.name.clone(),
                 kind: workload.kind,
                 bundle_id: workload.bundle_id.clone(),
+                artifact: workload.artifact.clone(),
+                runtime: workload.runtime.clone(),
+                runtime_version: workload.runtime_version.clone(),
+                resolved_runtime_version: None,
+                distribution: workload.distribution.clone(),
                 admitted: false,
                 policy_id: Some(report.policy_id.clone()),
                 admission_id: None,
@@ -280,6 +285,14 @@ impl Daemon {
                 reasons: vec![],
                 endpoints,
             };
+            if let Some(distribution) = report
+                .selected
+                .as_ref()
+                .and_then(|selected| selected.runtime_distribution.as_ref())
+            {
+                admitted.resolved_runtime_version = Some(distribution.version.clone());
+                admitted.distribution = Some(distribution.id.clone());
+            }
             match &report.selected {
                 Some(selected)
                     if service
@@ -1651,6 +1664,7 @@ impl Daemon {
         deployment_id: &str,
         record: &DeploymentRecord,
     ) -> Result<String, EnvironmentError> {
+        let application = compute_core::ApplicationIdentity::new(&record.project, None)?;
         let transitions = self
             .events(super::EventFilter {
                 deployment_id: Some(deployment_id.into()),
@@ -1665,6 +1679,8 @@ impl Daemon {
         let receipt = json!({
             "format": "compute.deployment-receipt@1",
             "deployment_id": deployment_id,
+            "deployment_version": record.version,
+            "application": application,
             "environment_id": record.environment_id,
             "environment": record.environment,
             "project_id": record.project_id,

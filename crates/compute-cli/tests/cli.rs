@@ -63,6 +63,26 @@ fn init_refuses_to_overwrite_an_existing_application_directory() {
     );
 }
 
+#[test]
+fn application_deployment_commands_have_product_level_spellings() {
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["rollback", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Deployment ID or application-scoped version",
+        ));
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["deployment", "dep_example", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Usage: compute deployment inspect",
+        ));
+}
+
 fn fixture_distribution_lock(
     artifact: &[u8],
     platform: &str,

@@ -255,20 +255,25 @@ impl Daemon {
         );
 
         let now = Utc::now();
-        let deployment_id = format!(
-            "dep_{}",
-            short_digest(&[
-                &environment.id,
-                &revision.id,
-                &now.timestamp_nanos_opt().unwrap_or_default().to_string(),
-                &self.instance_id,
-            ])
-        );
+        let latest = self
+            .control()
+            .query::<DeploymentRecord>(
+                Query::all(Collection::Deployment)
+                    .eq("project_id", project_id.clone())
+                    .descending("created_at")
+                    .limit(1),
+            )
+            .await?;
+        let version = latest.first().map_or(1, |deployment| {
+            deployment.value.version.saturating_add(1).max(1)
+        });
+        let deployment_id = format!("dep_{}", short_digest(&[&project_id, &version.to_string()]));
         let record = DeploymentRecord {
             environment_id: environment.id.clone(),
             environment: env_name.clone(),
             project_id: project_id.clone(),
             project: project.clone(),
+            version,
             revision_id: revision.id.clone(),
             revision: revision.value.revision.clone(),
             revision_digest: revision.value.revision_digest.clone(),

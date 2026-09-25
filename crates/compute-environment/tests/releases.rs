@@ -283,6 +283,7 @@ async fn serving_v1(daemon: &Arc<Daemon>) -> u16 {
         "{:?}",
         first.record
     );
+    assert_eq!(first.record.version, 1);
     let endpoint = daemon
         .workload("production", "site", "web")
         .await
@@ -332,6 +333,7 @@ async fn a_release_moves_traffic_without_dropping_a_request() {
 
     let record = &settled.record;
     assert_eq!(record.status, DeploymentStatus::Complete, "{record:?}");
+    assert_eq!(record.version, 2);
     assert!(
         report.failures.is_empty(),
         "{} of {} requests failed during the release: {:?}",
@@ -418,6 +420,8 @@ async fn a_release_moves_traffic_without_dropping_a_request() {
         .await
         .unwrap();
     assert_eq!(receipt["format"], "compute.deployment-receipt@1");
+    assert_eq!(receipt["deployment_version"], 2);
+    assert_eq!(receipt["application"]["name"], "site");
     assert_eq!(receipt["revision"], "v2");
     assert_eq!(receipt["old_revision"], "v1");
     assert_eq!(receipt["status"], "complete");
@@ -663,6 +667,7 @@ async fn an_operator_rolls_a_release_back_to_the_revision_it_replaced() {
     let report = load.stop().await;
     assert_eq!(back.record.status, DeploymentStatus::Complete);
     assert_eq!(back.record.revision, "v1");
+    assert_eq!(back.record.version, 3);
     assert!(report.failures.is_empty(), "{:?}", report.failures);
     assert_eq!(get(endpoint).await.unwrap(), "v1");
 
@@ -670,6 +675,7 @@ async fn an_operator_rolls_a_release_back_to_the_revision_it_replaced() {
     let v3 = release(&daemon, "v3", web("v3", "time.sleep(3600)")).await;
     let abandoned = daemon.rollback(&v3.deployment_id).await.unwrap();
     assert_eq!(abandoned.record.status, DeploymentStatus::Failed);
+    assert_eq!(abandoned.record.version, 4);
     assert_eq!(get(endpoint).await.unwrap(), "v1");
     daemon.shutdown().await;
 }

@@ -9,7 +9,7 @@ build_context="$root/.compute-acceptance-context-$$"
 export COMPUTE_CAPABILITY_CACHE="$temporary/provider-capabilities.json"
 
 cleanup() {
-  for name in "$prefix-a" "$prefix-b" "$prefix-c"; do
+  for name in "$prefix-a" "$prefix-b" "$prefix-c" "$prefix-deploy"; do
     container stop "$name" >/dev/null 2>&1 || true
   done
   rm -rf "$build_context"
@@ -27,6 +27,8 @@ port_c=$(free_port)
 app_port_a=$(free_port)
 app_port_b=$(free_port)
 app_port_c=$(free_port)
+daemon_port=$(free_port)
+deployment_port=$(free_port)
 
 # Apple Container otherwise walks the entire workspace (including the multi-GB
 # Rust target directory) before Dockerfile excludes are applied. Build from a
@@ -68,6 +70,24 @@ start_provider() {
 start_provider "$prefix-a" "$port_a" 2 2G 2GiB node 2 "$app_port_a"
 start_provider "$prefix-b" "$port_b" 8 8G 8GiB node 4 "$app_port_b"
 start_provider "$prefix-c" "$port_c" 4 4G 4GiB python 2 "$app_port_c"
+
+mkdir -p "$temporary/deployment-state"
+start_deployment_daemon() {
+  container run --detach --rm --name "$prefix-deploy" \
+    --cpus 4 --memory 4G \
+    --volume "$temporary/deployment-state:/state" \
+    --publish "127.0.0.1:$daemon_port:8787" \
+    --publish "127.0.0.1:$deployment_port:$deployment_port" \
+    "$image" start \
+    --listen 0.0.0.0:8787 \
+    --state-dir /state \
+    --port-range "$deployment_port-$deployment_port" \
+    --instance-port-range 32000-32010 \
+    --endpoint-address 0.0.0.0 \
+    --data-plane in-process \
+    --insecure >/dev/null
+}
+start_deployment_daemon
 
 cat >"$temporary/compute-pool.toml" <<EOF
 [pool]
@@ -232,5 +252,74 @@ history=$("$compute" history "$application" --pool-config "$pool" --json)
 application_job=$(printf '%s' "$history" | python3 -c 'import json,sys; h=json.load(sys.stdin); assert h[0]["job"]["status"]=="cancelled"; print(h[0]["job"]["job_id"])')
 $compute remote receipt --provider provider-a "$application_job" --pool-config "$pool" --json |
   python3 -c 'import json,sys; receipt=json.load(sys.stdin); assert receipt["application"]["name"]=="compute-demo"; assert receipt["application"]["port"]==3000'
+
+# First-class deployments: immutable versions, stable endpoint, recovery,
+# replacement, history, rollback activation, receipt, and terminal stop.
+mkdir -p "$temporary/deploy-demo"
+cat >"$temporary/deploy-demo/main.py" <<'EOF'
+import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"version=1\n")
+    def log_message(self, *_args):
+        pass
+ThreadingHTTPServer(("0.0.0.0", int(os.environ["PORT"])), Handler).serve_forever()
+EOF
+cat >"$temporary/deploy-demo/compute.toml" <<'EOF'
+[application]
+name = "deploy-demo"
+port = 3000
+[runtime]
+name = "python"
+[run]
+entrypoint = "main.py"
+[network]
+mode = "network"
+[resources]
+cpu = 1
+memory = "512MiB"
+EOF
+
+daemon="http://127.0.0.1:$daemon_port"
+wait_daemon() {
+  attempts=0
+  until "$compute" status --daemon "$daemon" --json >/dev/null 2>&1; do
+    attempts=$((attempts + 1))
+    test "$attempts" -lt 200
+    sleep 0.1
+  done
+}
+wait_daemon
+v1=$("$compute" deploy "$temporary/deploy-demo" --daemon "$daemon" --json)
+v1_id=$(printf '%s' "$v1" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["version"]==1; assert d["status"]=="running"; print(d["deployment_id"])')
+test "$(curl -fsS "http://127.0.0.1:$deployment_port")" = "version=1"
+
+# Durable active deployment reconstruction after a controller restart.
+container stop "$prefix-deploy" >/dev/null
+start_deployment_daemon
+wait_daemon
+"$compute" status "$temporary/deploy-demo" --daemon "$daemon" --json |
+  python3 -c 'import json,sys; s=json.load(sys.stdin); assert s["version"]==1; assert s["status"]=="running"'
+test "$(curl -fsS "http://127.0.0.1:$deployment_port")" = "version=1"
+
+sed -i '' 's/version=1/version=2/' "$temporary/deploy-demo/main.py" 2>/dev/null ||
+  sed -i 's/version=1/version=2/' "$temporary/deploy-demo/main.py"
+v2=$("$compute" deploy "$temporary/deploy-demo" --daemon "$daemon" --json)
+printf '%s' "$v2" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["version"]==2; assert d["status"]=="running"'
+test "$(curl -fsS "http://127.0.0.1:$deployment_port")" = "version=2"
+"$compute" history "$temporary/deploy-demo" --daemon "$daemon" --json |
+  python3 -c 'import json,sys; h=json.load(sys.stdin); assert [d["version"] for d in h[:2]]==[2,1]'
+
+rollback=$("$compute" rollback "$temporary/deploy-demo" 1 --daemon "$daemon" --json)
+printf '%s' "$rollback" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["version"]==3; assert d["status"]=="running"'
+test "$(curl -fsS "http://127.0.0.1:$deployment_port")" = "version=1"
+"$compute" deployment receipt "$v1_id" --daemon "$daemon" |
+  python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["deployment_version"]==1; assert r["application"]["name"]=="deploy-demo"'
+"$compute" stop "$temporary/deploy-demo" --daemon "$daemon" --json >/dev/null
+"$compute" status "$temporary/deploy-demo" --daemon "$daemon" --json |
+  python3 -c 'import json,sys; s=json.load(sys.stdin); assert s["status"]=="stopped"'
 
 echo "Apple Container placement/scheduling acceptance passed"

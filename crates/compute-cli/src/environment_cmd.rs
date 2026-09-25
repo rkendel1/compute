@@ -1859,13 +1859,15 @@ fn print_deployment(view: &DeploymentView, json: bool) {
     }
     let record = &view.record;
     println!(
-        "Deployment {}: {} {} → {} ({})",
+        "Deployment {}: {} v{} ({})",
         view.deployment_id,
         record.project,
-        record.revision,
-        record.environment,
+        record.version,
         record.status.as_str()
     );
+    println!("Application: {}", record.project);
+    println!("Environment: {}", record.environment);
+    println!("Created: {}", record.created_at.to_rfc3339());
     println!(
         "Revision: {} ({})",
         record.revision_id, record.revision_digest
@@ -1938,6 +1940,26 @@ fn print_deployment(view: &DeploymentView, json: bool) {
     }
     println!("\nWORKLOAD\tKIND\tADMITTED\tPROVIDER\tADMISSION");
     for workload in &record.workloads {
+        println!(
+            "  Runtime: {}{}{}",
+            workload.runtime,
+            workload
+                .runtime_version
+                .as_deref()
+                .map(|version| format!(" requested {version}"))
+                .unwrap_or_default(),
+            workload
+                .resolved_runtime_version
+                .as_deref()
+                .map(|version| format!(", resolved {version}"))
+                .unwrap_or_default()
+        );
+        if !workload.artifact.is_empty() {
+            println!("  Artifact: {}", workload.artifact);
+        }
+        if let Some(distribution) = &workload.distribution {
+            println!("  Distribution: {distribution}");
+        }
         println!(
             "{}\t{}\t{}\t{}\t{}",
             workload.name,
@@ -2052,13 +2074,14 @@ pub async fn deployment(command: DeploymentCommand) -> compute_core::Result<()> 
             if json {
                 print_json(&deployments);
             } else {
-                println!("DEPLOYMENT\tPROJECT\tENVIRONMENT\tREVISION\tSTATUS\tCREATED");
+                println!("DEPLOYMENT\tPROJECT\tVERSION\tENVIRONMENT\tREVISION\tSTATUS\tCREATED");
                 for deployment in deployments {
                     let record = &deployment.record;
                     println!(
-                        "{}\t{}\t{}\t{}\t{}\t{}",
+                        "{}\t{}\tv{}\t{}\t{}\t{}\t{}",
                         deployment.deployment_id,
                         record.project,
+                        record.version,
                         record.environment,
                         record.revision,
                         record.status.as_str(),

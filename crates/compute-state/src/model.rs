@@ -36,7 +36,7 @@ pub const STATE_VERSION: &str = "compute.state@1";
 ///   every collection, and indexes for the filters Compute's views use
 ///   (`Execution.project_id`, `Receipt.project_id`, `Event.environment`,
 ///   `Event.project`, `Event.deployment_id`).
-pub const MODEL_GENERATION: u32 = 2;
+pub const MODEL_GENERATION: u32 = 3;
 
 /// A typed document of one collection.
 pub trait Document: Serialize + DeserializeOwned + Clone + Send + Sync {
@@ -350,6 +350,16 @@ pub struct DeploymentWorkload {
     pub name: String,
     pub kind: WorkloadKind,
     pub bundle_id: String,
+    #[serde(default)]
+    pub artifact: String,
+    #[serde(default)]
+    pub runtime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_runtime_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<String>,
     pub admitted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_id: Option<String>,
@@ -374,6 +384,10 @@ pub struct DeploymentRecord {
     pub environment: String,
     pub project_id: String,
     pub project: String,
+    /// Monotonic deployment version scoped to the application/project.
+    /// Legacy records predate versioning and deserialize as zero.
+    #[serde(default)]
+    pub version: u64,
     pub revision_id: String,
     pub revision: String,
     pub revision_digest: String,

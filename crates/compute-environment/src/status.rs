@@ -313,6 +313,7 @@ pub struct WorkloadView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploymentSummary {
     pub deployment_id: String,
+    pub version: u64,
     pub status: DeploymentStatus,
     pub revision: String,
     pub created_at: DateTime<Utc>,

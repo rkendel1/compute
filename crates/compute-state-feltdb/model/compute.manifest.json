@@ -209,6 +209,11 @@
           "required": true
         },
         {
+          "name": "version",
+          "type": "integer",
+          "required": false
+        },
+        {
           "name": "revision_id",
           "type": "text",
           "required": true

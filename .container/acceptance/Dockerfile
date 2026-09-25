@@ -12,7 +12,7 @@ RUN --mount=type=cache,id=compute-acceptance-cargo-registry,target=/usr/local/ca
 
 FROM ubuntu:24.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    ca-certificates curl tar unzip xz-utils && \
+    ca-certificates curl python3 tar unzip xz-utils && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=build /tmp/compute /usr/local/bin/compute
 ENTRYPOINT ["/usr/local/bin/compute"]

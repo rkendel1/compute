@@ -68,6 +68,7 @@ app compute {
     environment: text
     project_id: text
     project: text
+    version: integer?
     revision_id: text
     revision: text
     revision_digest: text

@@ -88,6 +88,8 @@ enum Commands {
     Logs(application::LogsCommand),
     /// List an application's durable execution history.
     History(application::HistoryCommand),
+    /// Activate a previous immutable application deployment as a new version.
+    Rollback(application::RollbackCommand),
     /// Create, inspect, and operate environments.
     Environment(environment_cmd::EnvironmentCommand),
     /// Add, remove, inspect, and operate projects within an environment.
@@ -635,6 +637,14 @@ fn parse_cli() -> Cli {
         && !matches!(
             arguments.get(2).and_then(|value| value.to_str()),
             Some("inspect" | "explain" | "--help" | "-h")
+        )
+    {
+        arguments.insert(2, "inspect".into());
+    }
+    if arguments.get(1).and_then(|value| value.to_str()) == Some("deployment")
+        && !matches!(
+            arguments.get(2).and_then(|value| value.to_str()),
+            Some("list" | "inspect" | "status" | "rollback" | "receipt" | "--help" | "-h")
         )
     {
         arguments.insert(2, "inspect".into());
@@ -1431,20 +1441,33 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Start(command) => environment_cmd::start(command).await?,
         Commands::Stop(command) => {
             if let Some(path) = command.application.clone() {
-                application::stop(path, command.pool, command.json).await?;
+                application::stop(
+                    path,
+                    command.daemon.clone(),
+                    command.pool.clone(),
+                    command.json,
+                )
+                .await?;
             } else {
                 environment_cmd::stop(command).await?;
             }
         }
         Commands::Status(command) => {
             if let Some(path) = command.application.clone() {
-                application::status(path, command.pool, command.json).await?;
+                application::status(
+                    path,
+                    command.daemon.clone(),
+                    command.pool.clone(),
+                    command.json,
+                )
+                .await?;
             } else {
                 environment_cmd::status(command).await?;
             }
         }
         Commands::Logs(command) => application::logs(command).await?,
         Commands::History(command) => application::history(command).await?,
+        Commands::Rollback(command) => application::rollback(command).await?,
         Commands::Environment(command) => environment_cmd::environment(command).await?,
         Commands::Project(command) => environment_cmd::project(command).await?,
         Commands::Workload(command) => environment_cmd::workload(command).await?,
@@ -1452,7 +1475,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Deploy(command) => {
             let path = PathBuf::from(&command.project);
             if application::is_application(&path) {
-                application::deploy(path, command.pool, command.json).await?;
+                application::deploy(path, command.daemon.clone(), command.json).await?;
             } else {
                 environment_cmd::deploy(command).await?;
             }

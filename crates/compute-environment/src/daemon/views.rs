@@ -738,6 +738,7 @@ impl Daemon {
 fn summary(deployment: Stored<DeploymentRecord>) -> DeploymentSummary {
     DeploymentSummary {
         deployment_id: deployment.id,
+        version: deployment.value.version,
         status: deployment.value.status,
         revision: deployment.value.revision,
         created_at: deployment.value.created_at,
