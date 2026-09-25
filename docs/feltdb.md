@@ -146,14 +146,27 @@ A cycle in which nothing was written reads two revisions and nothing else.
 The controller tracks the revision its working copy of desired state
 provably represents. FeltDB states, for every committed transaction, the
 committed revision immediately before and after it (read inside its commit
-critical section). So after one of its own commits the controller reads back
-what it wrote, by identity, and if the commit began exactly at its working
-copy's revision, the working copy now represents the revision the commit
-ended at. A periodic cycle then reads the revision once: equal means nobody
-else wrote, and nothing is rebuilt; different means another writer did, and
-the snapshot is rebuilt. `compute doctor` reports the working copy's
-revision, how often a refresh was answered by it, and how many of the
-controller's own commits were carried forward.
+critical section), and the state store records that, with the collections
+the commit wrote, for every commit made through it.
+
+Before each refresh the controller reads back, by identity, the desired
+state it wrote itself, then walks the recorded commits from its working
+copy's revision:
+
+- a commit that begins exactly where the working copy stands, and either
+  wrote no desired-state collection (evidence, events, artifacts, statuses)
+  or is one of the controller's own changes (whose writes were just read
+  back), moves the working copy to the revision it ended at;
+- anything else (a gap: a commit this process never saw; or a commit to
+  desired state that was not the controller's own, even through the same
+  store object) makes the working copy's revision unknown.
+
+A refresh then reads the revision once: equal to the working copy's means
+no other writer changed anything, and nothing else is read; otherwise the
+snapshot is rebuilt. A commit and the queueing of its writes for read-back
+happen under one gate, so a commit is never chained before its writes are
+read back. `compute doctor` reports the working copy's revision, how often
+a refresh was answered by it, and how many commits were carried forward.
 
 ## Controller working state
 
@@ -276,6 +289,7 @@ answer after a restore.
 
 | Behaviour | Effect on Compute |
 | --- | --- |
+| Each request costs time proportional to the committed state, even one that reads no record (`/v1/state/version`) | Compute minimizes requests: a quiet cycle makes two; its own writes are carried forward instead of re-read ([certification](feltdb-0.11.8-consumer-certification.md#feltdbs-own-cost-per-request)) |
 | Only the first equality on a declared field uses an index | The indexed `record_id`, the adapter's planning, the view indexes |
 | No ordered index access | "Newest event" and unscoped operator listings scan server-side (the table above) |
 | `datetime` values compare as strings | Fields Compute orders by are written with a fixed nine-digit fraction |

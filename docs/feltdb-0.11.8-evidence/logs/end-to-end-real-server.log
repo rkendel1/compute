@@ -1,14 +1,14 @@
    Compiling compute-environment v0.1.0 (/home/user/compute/crates/compute-environment)
    Compiling compute-cli v0.1.0 (/home/user/compute/crates/compute-cli)
-    Finished `test` profile [unoptimized] target(s) in 18.54s
+    Finished `test` profile [unoptimized] target(s) in 20.45s
      Running tests/recovery.rs (target/debug/deps/recovery-342de21302f1c342)
 
 running 1 test
-Compute daemon daemon_0aea645cc4890d72edc75b87 started (pid 27027) at http://127.0.0.1:37765
-Compute daemon daemon_1f3748d0f675430e83c9ceeb started (pid 27149) at http://127.0.0.1:37765
-Compute daemon daemon_6851a105f818acc0bd943290 started (pid 27190) at http://127.0.0.1:37765
-Compute daemon daemon_f66aea1fbc0d168652111e56 started (pid 27294) at http://127.0.0.1:37765
+Compute daemon daemon_c9cd7dc514b0d2fa937425c2 started (pid 23200) at http://127.0.0.1:42889
+Compute daemon daemon_aa744aa3272de4d15105c2ad started (pid 23321) at http://127.0.0.1:42889
+Compute daemon daemon_a70396864d999d34f9894858 started (pid 23363) at http://127.0.0.1:42889
+Compute daemon daemon_fd4c873a1b1a144fb9535cde started (pid 23464) at http://127.0.0.1:42889
 test managed_feltdb_is_the_durable_authority ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 7.17s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 7.26s
 

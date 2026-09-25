@@ -1,24 +1,10 @@
    Compiling compute-state v0.1.0 (/home/user/compute/crates/compute-state)
    Compiling compute-environment v0.1.0 (/home/user/compute/crates/compute-environment)
+   Compiling compute-state-file v0.1.0 (/home/user/compute/crates/compute-state-file)
    Compiling compute-state-memory v0.1.0 (/home/user/compute/crates/compute-state-memory)
    Compiling compute-state-feltdb v0.1.0 (/home/user/compute/crates/compute-state-feltdb)
-   Compiling compute-state-file v0.1.0 (/home/user/compute/crates/compute-state-file)
-    Finished `release` profile [optimized] target(s) in 1m 02s
+    Finished `release` profile [optimized] target(s) in 1m 13s
      Running tests/feltdb_consumer.rs (target/release/deps/feltdb_consumer-9f2348429a51da64)
 
 running 1 test
 test benchmark has been running for over 60 seconds
-{"feltdb_queries_per_call":25.2,"feltdb_revision_reads_per_call":4.0,"feltdb_rows_returned_per_call":69.5,"feltdb_rows_scanned_per_call":69.5,"feltdb_transactions_per_call":12.0,"max_ms":6057.41,"n":10,"operation":"add project/service","p50_ms":5496.58,"p95_ms":6057.41,"pattern":"after","scope":"end-to-end"}
-{"feltdb_queries_per_call":1.0,"feltdb_revision_reads_per_call":0.0,"feltdb_rows_returned_per_call":1.0,"feltdb_rows_scanned_per_call":1.0,"feltdb_transactions_per_call":0.0,"max_ms":185.22,"n":30,"operation":"single indexed lookup","p50_ms":134.7,"p95_ms":167.88,"pattern":"after","scope":"feltdb-only"}
-{"feltdb_queries_per_call":0.0,"feltdb_revision_reads_per_call":0.0,"feltdb_rows_returned_per_call":0.0,"feltdb_rows_scanned_per_call":0.0,"feltdb_transactions_per_call":0.0,"max_ms":193.61,"n":30,"operation":"single indexed lookup","p50_ms":153.05,"p95_ms":181.63,"pattern":"before (_id scan)","scope":"feltdb-only"}
-{"feltdb_queries_per_call":1.0,"feltdb_revision_reads_per_call":0.0,"feltdb_rows_returned_per_call":20.0,"feltdb_rows_scanned_per_call":100.0,"feltdb_transactions_per_call":0.0,"max_ms":152.06,"n":30,"operation":"bounded list (a project's 20 newest executions)","p50_ms":137.27,"p95_ms":151.25,"pattern":"after","scope":"feltdb-only"}
-{"feltdb_queries_per_call":4.0,"feltdb_revision_reads_per_call":0.0,"feltdb_rows_returned_per_call":4000.0,"feltdb_rows_scanned_per_call":16000.0,"feltdb_transactions_per_call":0.0,"max_ms":868.13,"n":10,"operation":"bounded list (a project's 20 newest executions)","p50_ms":842.29,"p95_ms":868.13,"pattern":"before (whole collection, filtered in Compute)","scope":"feltdb-only"}
-{"feltdb_queries_per_call":1.0,"feltdb_revision_reads_per_call":0.0,"feltdb_rows_returned_per_call":1.0,"feltdb_rows_scanned_per_call":1.0,"feltdb_transactions_per_call":0.0,"max_ms":160.04,"n":30,"operation":"execution lookup","p50_ms":135.1,"p95_ms":157.74,"pattern":"after","scope":"end-to-end"}
-{"feltdb_queries_per_call":1.0,"feltdb_revision_reads_per_call":1.0,"feltdb_rows_returned_per_call":20.0,"feltdb_rows_scanned_per_call":100.0,"feltdb_transactions_per_call":0.0,"max_ms":224.84,"n":30,"operation":"executions view (project, 20)","p50_ms":201.01,"p95_ms":222.06,"pattern":"after","scope":"end-to-end"}
-{"feltdb_queries_per_call":0.0,"feltdb_revision_reads_per_call":0.0,"feltdb_rows_returned_per_call":0.0,"feltdb_rows_scanned_per_call":0.0,"feltdb_transactions_per_call":0.0,"max_ms":0.53,"n":30,"operation":"environment view","p50_ms":0.31,"p95_ms":0.36,"pattern":"after","scope":"end-to-end"}
-{"feltdb_queries_per_call":0.0,"feltdb_revision_reads_per_call":0.0,"feltdb_rows_returned_per_call":0.0,"feltdb_rows_scanned_per_call":0.0,"feltdb_transactions_per_call":0.0,"max_ms":0.02,"n":30,"operation":"project view","p50_ms":0.01,"p95_ms":0.01,"pattern":"after","scope":"end-to-end"}
-{"feltdb_queries_per_call":2.0,"feltdb_revision_reads_per_call":0.0,"feltdb_rows_returned_per_call":1.0,"feltdb_rows_scanned_per_call":1.0,"feltdb_transactions_per_call":0.0,"max_ms":336.74,"n":30,"operation":"release lookup","p50_ms":269.65,"p95_ms":295.43,"pattern":"after","scope":"end-to-end"}
-{"feltdb_queries_per_call":2.0,"feltdb_revision_reads_per_call":2.0,"feltdb_rows_returned_per_call":2.0,"feltdb_rows_scanned_per_call":2.0,"feltdb_transactions_per_call":0.0,"max_ms":358.79,"n":30,"operation":"small bounded snapshot (2 records, build)","p50_ms":329.22,"p95_ms":353.79,"pattern":"after","scope":"feltdb-only"}
-{"feltdb_queries_per_call":4.0,"feltdb_revision_reads_per_call":2.0,"feltdb_rows_returned_per_call":4000.0,"feltdb_rows_scanned_per_call":16000.0,"feltdb_transactions_per_call":0.0,"max_ms":1050.14,"n":10,"operation":"large bounded snapshot (every execution, build)","p50_ms":998.6,"p95_ms":1050.14,"pattern":"after","scope":"feltdb-only"}
-{"feltdb_queries_per_call":67.7,"feltdb_revision_reads_per_call":2.0,"feltdb_rows_returned_per_call":202.7,"feltdb_rows_scanned_per_call":202.7,"feltdb_transactions_per_call":0.0,"max_ms":9095.25,"n":30,"operation":"multi-source coherent snapshot (desired state, build)","p50_ms":5523.5,"p95_ms":5855.14,"pattern":"after","scope":"feltdb-only"}
-{"feltdb_queries_per_call":0.0,"feltdb_revision_reads_per_call":1.0,"feltdb_rows_returned_per_call":0.0,"feltdb_rows_scanned_per_call":0.0,"feltdb_transactions_per_call":0.0,"max_ms":101.06,"n":30,"operation":"multi-source coherent snapshot (desired state, unchanged: reuse)","p50_ms":72.13,"p95_ms":100.54,"pattern":"after","scope":"feltdb-only"}

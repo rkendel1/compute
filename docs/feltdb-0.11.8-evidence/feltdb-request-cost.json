@@ -3,43 +3,43 @@
   "rows": [
     {
       "executions": 0,
-      "health_p50_ms": 0.53,
-      "indexed_lookup_p50_ms": 1.66,
+      "health_p50_ms": 0.45,
+      "indexed_lookup_p50_ms": 1.42,
       "indexed_lookup_server_reported_p50_ms": 0.06,
       "revision": 0,
-      "state_version_p50_ms": 1.24
+      "state_version_p50_ms": 1.09
     },
     {
       "executions": 500,
-      "health_p50_ms": 0.53,
-      "indexed_lookup_p50_ms": 10.47,
-      "indexed_lookup_server_reported_p50_ms": 3.77,
+      "health_p50_ms": 0.5,
+      "indexed_lookup_p50_ms": 10.36,
+      "indexed_lookup_server_reported_p50_ms": 3.63,
       "revision": 500,
-      "state_version_p50_ms": 4.96
+      "state_version_p50_ms": 5.51
     },
     {
       "executions": 1000,
-      "health_p50_ms": 0.53,
-      "indexed_lookup_p50_ms": 19.26,
-      "indexed_lookup_server_reported_p50_ms": 6.66,
+      "health_p50_ms": 0.57,
+      "indexed_lookup_p50_ms": 19.86,
+      "indexed_lookup_server_reported_p50_ms": 7.41,
       "revision": 1000,
-      "state_version_p50_ms": 9.95
+      "state_version_p50_ms": 10.14
     },
     {
       "executions": 2000,
-      "health_p50_ms": 0.57,
-      "indexed_lookup_p50_ms": 40.72,
-      "indexed_lookup_server_reported_p50_ms": 15.98,
+      "health_p50_ms": 0.59,
+      "indexed_lookup_p50_ms": 41.55,
+      "indexed_lookup_server_reported_p50_ms": 16.54,
       "revision": 2000,
-      "state_version_p50_ms": 20.18
+      "state_version_p50_ms": 21.02
     },
     {
       "executions": 4000,
-      "health_p50_ms": 0.66,
-      "indexed_lookup_p50_ms": 94.55,
-      "indexed_lookup_server_reported_p50_ms": 37.45,
+      "health_p50_ms": 0.71,
+      "indexed_lookup_p50_ms": 94.73,
+      "indexed_lookup_server_reported_p50_ms": 38.54,
       "revision": 4000,
-      "state_version_p50_ms": 46.28
+      "state_version_p50_ms": 47.47
     }
   ],
   "samples_per_size": 15,

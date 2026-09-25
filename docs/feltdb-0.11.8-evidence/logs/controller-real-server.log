@@ -1,5 +1,5 @@
    Compiling compute-environment v0.1.0 (/home/user/compute/crates/compute-environment)
-    Finished `test` profile [unoptimized] target(s) in 11.81s
+    Finished `test` profile [unoptimized] target(s) in 12.58s
      Running tests/feltdb_consumer.rs (target/debug/deps/feltdb_consumer-71d929fe7197dda0)
 
 running 3 tests
@@ -7,5 +7,5 @@ test concurrent_operations_keep_every_record_and_event ... ok
 test diagnose_a_release ... ok
 test the_controller_keeps_authority_in_feltdb_through_an_outage ... ok
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 6.83s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 7.46s
 

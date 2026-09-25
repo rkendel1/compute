@@ -1,7 +1,7 @@
    Compiling compute-state v0.1.0 (/home/user/compute/crates/compute-state)
    Compiling compute-state-memory v0.1.0 (/home/user/compute/crates/compute-state-memory)
    Compiling compute-state-feltdb v0.1.0 (/home/user/compute/crates/compute-state-feltdb)
-    Finished `test` profile [unoptimized] target(s) in 5.21s
+    Finished `test` profile [unoptimized] target(s) in 5.59s
      Running unittests src/lib.rs (target/debug/deps/compute_state_feltdb-ebd4e042c85b8b97)
 
 running 0 tests
@@ -18,7 +18,7 @@ test snapshots_are_authorized_by_the_authority ... ok
 test targeted_reads_are_indexed_and_bounded ... ok
 test the_upgrade_backs_up_migrates_and_verifies ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 3.03s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 3.21s
 
      Running tests/feltdb.rs (target/debug/deps/feltdb-fa5c8b969d7d251f)
 
@@ -28,7 +28,7 @@ test an_older_compute_model_is_upgraded_in_place ... ok
 test compute_speaks_to_feltdb_over_verified_https ... ok
 test feltdb_is_a_conforming_durable_authority ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.50s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.69s
 
      Running tests/model.rs (target/debug/deps/model-aeb499ef44b0aba8)
 
