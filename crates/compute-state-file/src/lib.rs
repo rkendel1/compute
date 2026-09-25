@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use compute_state::{
     BackendInfo, Collection, Query, Record, Revision, STATE_VERSION, StateError, StateStore,
-    Tables, Write, apply_in_memory,
+    Tables, Transitions, Write, apply_in_memory,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -37,6 +37,7 @@ struct StoredDocument {
 pub struct FileState {
     path: PathBuf,
     inner: Mutex<(Tables, u64)>,
+    transitions: Transitions,
 }
 
 fn io(path: &Path, error: std::io::Error) -> StateError {
@@ -84,6 +85,7 @@ impl FileState {
         Ok(Self {
             path,
             inner: Mutex::new((tables, next_version)),
+            transitions: Transitions::default(),
         })
     }
 
@@ -191,7 +193,12 @@ impl StateStore for FileState {
         // Durable first: memory changes only once the file does.
         self.write(&tables, next_version)?;
         *inner = (tables, next_version);
+        self.transitions.record(Some((before, next_version)));
         Ok(Some((before, next_version)))
+    }
+
+    fn take_transitions(&self) -> Option<Vec<(u64, u64)>> {
+        Some(self.transitions.take())
     }
 
     /// Every committed write advances the version counter, which the file

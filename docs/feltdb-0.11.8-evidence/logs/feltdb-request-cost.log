@@ -1,0 +1,124 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.26
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+   Compiling stable_deref_trait v1.2.1
+   Compiling pin-project-lite v0.2.17
+   Compiling bytes v1.12.1
+   Compiling itoa v1.0.18
+   Compiling shlex v2.0.1
+   Compiling cfg-if v1.0.5
+   Compiling find-msvc-tools v0.1.13
+   Compiling futures-core v0.3.34
+   Compiling syn v3.0.6
+   Compiling cc v1.4.7
+   Compiling errno v0.3.14
+   Compiling socket2 v0.6.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling mio v1.2.3
+   Compiling writeable v0.6.4
+   Compiling version_check v0.9.5
+   Compiling litemap v0.8.3
+   Compiling smallvec v1.16.1
+   Compiling serde_core v1.0.229
+   Compiling generic-array v0.14.7
+   Compiling ring v0.17.14
+   Compiling icu_properties_data v2.3.0
+   Compiling icu_normalizer_data v2.3.0
+   Compiling utf8_iter v1.0.4
+   Compiling http v1.5.0
+   Compiling synstructure v0.14.0
+   Compiling once_cell v1.21.4
+   Compiling typenum v1.20.1
+   Compiling zeroize v1.9.0
+   Compiling serde v1.0.229
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.3
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling tokio-macros v2.7.2
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling tokio v1.53.1
+   Compiling percent-encoding v2.3.2
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling icu_locale_core v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling icu_provider v2.3.1
+   Compiling serde_derive v1.0.229
+   Compiling rustls-pki-types v1.15.1
+   Compiling http-body v1.1.0
+   Compiling getrandom v0.2.17
+   Compiling zmij v1.0.23
+   Compiling autocfg v1.5.1
+   Compiling httparse v1.10.1
+   Compiling futures-task v0.3.34
+   Compiling slab v0.4.12
+   Compiling untrusted v0.9.0
+   Compiling futures-util v0.3.34
+   Compiling num-traits v0.2.19
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling tower-service v0.3.3
+   Compiling serde_json v1.0.151
+   Compiling try-lock v0.2.5
+   Compiling rustls v0.23.45
+   Compiling want v0.3.1
+   Compiling rustls-webpki v0.103.15
+   Compiling idna_adapter v1.2.2
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling form_urlencoded v1.2.2
+   Compiling tracing-core v0.1.36
+   Compiling futures-channel v0.3.34
+   Compiling subtle v2.6.1
+   Compiling memchr v2.8.3
+   Compiling thiserror v2.0.21
+   Compiling atomic-waker v1.1.2
+   Compiling hyper v1.11.1
+   Compiling tracing v0.1.44
+   Compiling digest v0.10.7
+   Compiling idna v1.1.0
+   Compiling thiserror-impl v2.0.21
+   Compiling sync_wrapper v1.0.2
+   Compiling base64 v0.22.1
+   Compiling base64 v0.23.1
+   Compiling cpufeatures v0.2.17
+   Compiling ipnet v2.12.2
+   Compiling tower-layer v0.3.3
+   Compiling iana-time-zone v0.1.65
+   Compiling chrono v0.4.45
+   Compiling tower v0.5.3
+   Compiling hyper-util v0.1.21
+   Compiling sha2 v0.10.9
+   Compiling tokio-rustls v0.26.5
+   Compiling url v2.5.8
+   Compiling webpki-roots v1.0.9
+   Compiling async-trait v0.1.92
+   Compiling ryu v1.0.23
+   Compiling bitflags v2.13.2
+   Compiling tower-http v0.6.11
+   Compiling serde_urlencoded v0.7.1
+   Compiling compute-state v0.1.0 (/home/user/compute/crates/compute-state)
+   Compiling hyper-rustls v0.27.10
+   Compiling http-body-util v0.1.5
+   Compiling log v0.4.34
+   Compiling reqwest v0.12.28
+   Compiling compute-state-feltdb v0.1.0 (/home/user/compute/crates/compute-state-feltdb)
+   Compiling compute-state-memory v0.1.0 (/home/user/compute/crates/compute-state-memory)
+    Finished `release` profile [optimized] target(s) in 42.99s
+     Running tests/consumer.rs (target/release/deps/consumer-0afe2b31356ff5e5)
+
+running 1 test
+{"executions":0,"health_p50_ms":0.51,"indexed_lookup_p50_ms":1.53,"indexed_lookup_server_reported_p50_ms":0.05,"revision":0,"state_version_p50_ms":1.18}
+{"executions":500,"health_p50_ms":0.47,"indexed_lookup_p50_ms":9.59,"indexed_lookup_server_reported_p50_ms":3.59,"revision":500,"state_version_p50_ms":4.83}
+{"executions":1000,"health_p50_ms":0.49,"indexed_lookup_p50_ms":18.18,"indexed_lookup_server_reported_p50_ms":6.99,"revision":1000,"state_version_p50_ms":9.19}
+{"executions":2000,"health_p50_ms":0.56,"indexed_lookup_p50_ms":40.35,"indexed_lookup_server_reported_p50_ms":14.85,"revision":2000,"state_version_p50_ms":18.92}
+{"executions":4000,"health_p50_ms":0.65,"indexed_lookup_p50_ms":81.04,"indexed_lookup_server_reported_p50_ms":32.28,"revision":4000,"state_version_p50_ms":41.84}
+test feltdb_request_cost_by_state_size ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 37.81s
+

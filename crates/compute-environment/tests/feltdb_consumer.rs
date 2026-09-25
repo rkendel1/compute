@@ -1175,3 +1175,83 @@ async fn legacy_load_desired(authority: &Authority, control: &ControlState) {
         get.await;
     }
 }
+
+/// Where a release's FeltDB requests go: printed, not asserted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires FELTDB_SERVER_BIN; diagnoses"]
+async fn diagnose_a_release() {
+    let authority = authority("compute-diagnose-release").await;
+    let node = tempfile::tempdir().unwrap();
+    let (daemon, state) = controller(&authority.config, node.path(), 27900).await;
+    daemon
+        .create_environment(EnvironmentDefinition {
+            name: "prod".into(),
+            desired_state: DesiredState::Running,
+            env: BTreeMap::new(),
+            policy: None,
+            provider: None,
+        })
+        .await
+        .unwrap();
+    let bundle = bundle("echo done");
+    for index in 0..5 {
+        daemon
+            .add_project("prod", task(&format!("p{index}"), &bundle))
+            .await
+            .unwrap();
+    }
+    let view = |daemon: &Arc<Daemon>| {
+        let daemon = daemon.clone();
+        async move { authority_view(&daemon.info().await) }
+    };
+    let before = access(&state);
+    let cache = view(&daemon).await.cache;
+    let builds = view(&daemon)
+        .await
+        .snapshots
+        .iter()
+        .map(|s| (s.name.clone(), s.builds))
+        .collect::<Vec<_>>();
+    let mut definition = task("p1", &bundle);
+    definition.revision = "r2".into();
+    let registered = daemon
+        .register_revision("p1", definition.revision_definition())
+        .await
+        .unwrap();
+    let after_register = access(&state);
+    let deployment = daemon
+        .deploy(DeployRequest {
+            project: "p1".into(),
+            environment: "prod".into(),
+            revision: Some(registered.revision_id),
+            config: Some(BTreeMap::new()),
+            desired_state: Some(DesiredState::Running),
+        })
+        .await
+        .unwrap();
+    let after_deploy = access(&state);
+    daemon
+        .await_release(&deployment.deployment_id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    let after = access(&state);
+    let cache_after = view(&daemon).await.cache;
+    let builds_after = view(&daemon)
+        .await
+        .snapshots
+        .iter()
+        .map(|s| (s.name.clone(), s.builds))
+        .collect::<Vec<_>>();
+    eprintln!("register: {}", difference(&before, &after_register));
+    eprintln!("deploy: {}", difference(&after_register, &after_deploy));
+    eprintln!("release: {}", difference(&after_deploy, &after));
+    eprintln!("cache before {cache:?}\ncache after {cache_after:?}");
+    eprintln!("snapshot builds {builds:?} -> {builds_after:?}");
+    let mut scans = after.scans.clone();
+    for (shape, count) in &before.scans {
+        *scans.entry(shape.clone()).or_default() -= count;
+    }
+    scans.retain(|_, count| *count > 0);
+    eprintln!("scans during the release: {scans:?}");
+    daemon.shutdown().await;
+}

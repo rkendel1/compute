@@ -1,0 +1,389 @@
+//! The pre-change Compute build on the certified FeltDB server, for the
+//! before/after comparison in the FeltDB 0.11.8 consumer certification.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use compute_core::{
+    IsolationRequirement, NetworkPolicy, ResourceLimits, RuntimeKind, WORKLOAD_SPEC_VERSION,
+    WorkloadBundle, WorkloadSpec,
+};
+use compute_environment::*;
+use compute_state::{Batch, Collection, ControlState, ExecutionRecord, Query};
+use compute_state_feltdb::{FeltDbConfig, FeltDbState, ProvisionRequest, provision};
+#[allow(unused_imports)]
+use std::collections::BTreeSet as _Unused;
+use serde_json::{Value, json};
+
+// ---- A real FeltDB ---------------------------------------------------------
+
+const MASTER_KEY: &str = "compute-consumer-certification";
+
+struct Server {
+    child: Child,
+    url: String,
+    port: u16,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn binary() -> PathBuf {
+    PathBuf::from(std::env::var("FELTDB_SERVER_BIN").expect("FELTDB_SERVER_BIN"))
+}
+
+fn create_key(data: &Path) -> String {
+    let output = Command::new(binary())
+        .args(["keys", "create", "--keys"])
+        .arg(data.join("keys.json"))
+        .args(["--name", "compute", "--namespace", "compute", "--scope"])
+        .arg(
+            "state:read,state:write,events:read,application:read,application:write,\
+             application:revision:read,application:revision:create,application:revision:promote,\
+             application:environment:read,application:environment:write",
+        )
+        .env("FELTDB_MASTER_KEY", MASTER_KEY)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .find(|word| word.starts_with("fdb_live_"))
+        .unwrap()
+        .to_string()
+}
+
+fn start(data: &Path, port: u16) -> Server {
+    let mut child = Command::new(binary())
+        .args(["--host", "127.0.0.1", "--port", &port.to_string()])
+        .args(["--namespace", "compute", "--auth"])
+        .arg("--data")
+        .arg(data.join("state.log"))
+        .arg("--keys")
+        .arg(data.join("keys.json"))
+        .arg("--audit")
+        .arg(data.join("audit.log"))
+        .env("FELTDB_MASTER_KEY", MASTER_KEY)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let url = loop {
+        let line = lines.next().unwrap().unwrap();
+        if let Some(index) = line.find("http://") {
+            break line[index..].split_whitespace().next().unwrap().to_string();
+        }
+    };
+    std::thread::spawn(move || for _ in lines {});
+    let port = url
+        .trim_end_matches('/')
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    Server { child, url, port }
+}
+
+struct Authority {
+    server: Server,
+    data: tempfile::TempDir,
+    config: FeltDbConfig,
+    revision_id: String,
+}
+
+async fn authority(tenant: &str) -> Authority {
+    let data = tempfile::tempdir().unwrap();
+    let token = create_key(data.path());
+    let server = start(data.path(), 0);
+    let provisioned = provision(ProvisionRequest {
+        url: server.url.clone(),
+        token: token.clone(),
+        application_id: None,
+        tenant_id: None,
+        tenant_name: tenant.into(),
+        environment: "production".into(),
+        ca_certificate: None,
+    })
+    .await
+    .unwrap();
+    Authority {
+        config: FeltDbConfig {
+            url: server.url.clone(),
+            token,
+            application_id: provisioned.application_id,
+            environment: "production".into(),
+            ca_certificate: None,
+        },
+        revision_id: provisioned.revision_id,
+        server,
+        data,
+    }
+}
+
+// ---- A controller on it ----------------------------------------------------
+
+fn bundle(script: &str) -> Vec<u8> {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("main.sh"), script).unwrap();
+    let spec = WorkloadSpec {
+        version: WORKLOAD_SPEC_VERSION.into(),
+        runtime: RuntimeKind::Shell,
+        runtime_version: None,
+        entrypoint: "main.sh".into(),
+        args: vec![],
+        env: BTreeMap::new(),
+        inputs: vec![],
+        outputs: vec![],
+        resources: ResourceLimits::default(),
+        network: NetworkPolicy::Network,
+        isolation: IsolationRequirement::default(),
+        dependencies: None,
+    };
+    WorkloadBundle::create_from(spec, root.path())
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+}
+
+fn task(name: &str, bundle: &[u8]) -> ProjectDefinition {
+    ProjectDefinition {
+        name: name.into(),
+        revision: "r1".into(),
+        source: None,
+        desired_state: DesiredState::Running,
+        env: BTreeMap::new(),
+        workloads: vec![WorkloadDefinition {
+            name: "job".into(),
+            kind: WorkloadKind::Task,
+            bundle: bundle.to_vec(),
+            ports: vec![],
+            restart: RestartPolicy::Never,
+            desired_state: DesiredState::Running,
+            readiness: None,
+        }],
+    }
+}
+
+async fn controller(
+    config: &FeltDbConfig,
+    node: &Path,
+    ports: u16,
+) -> (Arc<Daemon>, Arc<FeltDbState>) {
+    let (state, _) = FeltDbState::connect_or_defer(config.clone()).await.unwrap();
+    let state = Arc::new(state);
+    let artifacts = Arc::new(compute_state::StateArtifacts::new(ControlState::new(
+        state.clone(),
+    )));
+    let mut daemon_config = DaemonConfig::new(node, state.clone(), artifacts);
+    daemon_config.port_range = (ports, ports + 99);
+    daemon_config.instance_port_range = (ports + 20000, ports + 20099);
+    // The test drives every cycle.
+    daemon_config.reconcile_interval = Duration::from_secs(3600);
+    (Daemon::start(daemon_config).await.unwrap(), state)
+}
+
+
+async fn measure<F, Fut>(rows: &mut Vec<Value>, name: &str, n: usize, mut operation: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut times = vec![];
+    for _ in 0..n {
+        let started = Instant::now();
+        operation().await;
+        times.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let at = |q: f64| (times[((times.len() - 1) as f64 * q).round() as usize] * 100.0).round() / 100.0;
+    let row = json!({ "operation": name, "scope": "end-to-end", "pattern": "before (Compute eac2be8)", "n": n, "p50_ms": at(0.5), "p95_ms": at(0.95), "max_ms": at(1.0) });
+    eprintln!("{row}");
+    rows.push(row);
+}
+
+/// The same dataset and operations as `feltdb_consumer.rs::benchmark`, on
+/// the Compute build before FeltDB 0.11.8 consumption.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires FELTDB_SERVER_BIN; measures"]
+async fn benchmark_before() {
+    let n = 30usize;
+    let projects = 40usize;
+    let history = 4000usize;
+    let authority = authority("compute-benchmark-before").await;
+    let node = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let (daemon, state) = controller(&authority.config, node.path(), 27500).await;
+    let startup_empty_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let control = ControlState::new(state.clone());
+    let mut rows = vec![];
+    daemon
+        .create_environment(EnvironmentDefinition {
+            name: "prod".into(),
+            desired_state: DesiredState::Running,
+            env: BTreeMap::new(),
+            policy: None,
+            provider: None,
+        })
+        .await
+        .unwrap();
+    let bundle = bundle("echo done");
+    for index in 0..projects {
+        daemon.add_project("prod", task(&format!("p{index}"), &bundle)).await.unwrap();
+    }
+    let environment_id = daemon.environment("prod").await.unwrap().environment_id.clone();
+    let mut batch = Batch::new();
+    for index in 0..history {
+        let project = index % projects;
+        let record: ExecutionRecord = serde_json::from_value(json!({
+            "execution_id": format!("bench_{index}"),
+            "environment_id": environment_id,
+            "environment": "prod",
+            "project_id": compute_state::ids::project(&format!("p{project}")),
+            "project": format!("p{project}"),
+            "workload_id": format!("wl_bench_{project}"),
+            "workload": "job",
+            "kind": "task",
+            "status": "completed",
+            "started_at": chrono::Utc::now(),
+        }))
+        .unwrap();
+        batch = batch.create(&compute_state::ids::execution(&format!("bench_{index}")), &record);
+        if batch.len() == 200 {
+            control.transaction(std::mem::take(&mut batch)).await.unwrap();
+        }
+    }
+    control.transaction(batch).await.unwrap();
+    // Early: placement's capability cache is not re-discovered after its
+    // TTL (a pre-existing placement issue), so adds are measured first.
+    let mut index = projects;
+    measure(&mut rows, "add project/service", n.min(10), || {
+        index += 1;
+        let daemon = daemon.clone();
+        let definition = task(&format!("p{index}"), &bundle);
+        async move {
+            daemon.add_project("prod", definition).await.unwrap();
+        }
+    })
+    .await;
+    let _ = Query::all(Collection::Execution);
+    measure(&mut rows, "execution lookup", n, || async {
+        daemon.execution(&format!("bench_{}", history / 3)).await.unwrap();
+    })
+    .await;
+    measure(&mut rows, "executions view (project, 20)", n, || async {
+        assert_eq!(daemon.executions("prod", "p7", 20).await.unwrap().len(), 20);
+    })
+    .await;
+    measure(&mut rows, "environment view", n, || async {
+        daemon.environment("prod").await.unwrap();
+    })
+    .await;
+    measure(&mut rows, "project view", n, || async {
+        daemon.project("prod", "p3").await.unwrap();
+    })
+    .await;
+    let deployment_id = daemon
+        .deployments(Some("prod".into()), Some("p5".into()), Some(1))
+        .await
+        .unwrap()[0]
+        .deployment_id
+        .clone();
+    measure(&mut rows, "release lookup", n, || async {
+        daemon.deployment(&deployment_id).await.unwrap();
+    })
+    .await;
+    let mut counter = 0u64;
+    measure(&mut rows, "mutation + event (environment create)", n, || {
+        counter += 1;
+        let daemon = daemon.clone();
+        async move {
+            daemon
+                .create_environment(EnvironmentDefinition {
+                    name: format!("bench{counter}"),
+                    desired_state: DesiredState::Stopped,
+                    env: BTreeMap::new(),
+                    policy: None,
+                    provider: None,
+                })
+                .await
+                .unwrap();
+        }
+    })
+    .await;
+    let mut stopped = false;
+    measure(&mut rows, "project update (stop/start)", n, || {
+        stopped = !stopped;
+        let daemon = daemon.clone();
+        let desired = if stopped { DesiredState::Stopped } else { DesiredState::Running };
+        async move {
+            daemon.set_project_state("prod", "p9", desired, false).await.unwrap();
+        }
+    })
+    .await;
+    let mut revision = 0u64;
+    measure(&mut rows, "release update (register, deploy, complete)", n.min(10), || {
+        revision += 1;
+        let daemon = daemon.clone();
+        let bundle = bundle.clone();
+        async move {
+            let mut definition = task("p11", &bundle);
+            definition.revision = format!("r-bench-{revision}");
+            let registered = daemon
+                .register_revision("p11", definition.revision_definition())
+                .await
+                .unwrap();
+            let deployment = daemon
+                .deploy(DeployRequest {
+                    project: "p11".into(),
+                    environment: "prod".into(),
+                    revision: Some(registered.revision_id),
+                    config: Some(BTreeMap::new()),
+                    desired_state: Some(DesiredState::Running),
+                })
+                .await
+                .unwrap();
+            daemon
+                .await_release(&deployment.deployment_id, Duration::from_secs(60))
+                .await
+                .unwrap();
+        }
+    })
+    .await;
+    measure(&mut rows, "reconciliation (full cycle, nothing changed)", n, || async {
+        daemon.reconcile().await;
+    })
+    .await;
+    daemon.shutdown().await;
+    let node = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let (restarted, _) = controller(&authority.config, node.path(), 27700).await;
+    let startup_loaded_ms = started.elapsed().as_secs_f64() * 1000.0;
+    restarted.shutdown().await;
+    let report = json!({
+        "format": "compute.feltdb-consumer-benchmark@1",
+        "compute": "eac2be8 (before this change)",
+        "measured_at": chrono::Utc::now(),
+        "feltdb": { "server": "built from @feltdb/core 0.11.8", "transport": "feltdb-server on this host, HTTP over loopback" },
+        "dataset": { "projects": projects, "executions": history },
+        "samples": n,
+        "controller": { "startup_empty_ms": startup_empty_ms, "startup_with_state_ms": startup_loaded_ms },
+        "results": rows,
+    });
+    if let Ok(directory) = std::env::var("COMPUTE_CERTIFICATION_OUT") {
+        std::fs::write(
+            Path::new(&directory).join("feltdb-consumer-benchmark-before.json"),
+            serde_json::to_string_pretty(&report).unwrap(),
+        )
+        .unwrap();
+    }
+}

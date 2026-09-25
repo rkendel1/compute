@@ -1,0 +1,47 @@
+{
+  "format": "compute.feltdb-request-cost@1",
+  "rows": [
+    {
+      "executions": 0,
+      "health_p50_ms": 0.51,
+      "indexed_lookup_p50_ms": 1.53,
+      "indexed_lookup_server_reported_p50_ms": 0.05,
+      "revision": 0,
+      "state_version_p50_ms": 1.18
+    },
+    {
+      "executions": 500,
+      "health_p50_ms": 0.47,
+      "indexed_lookup_p50_ms": 9.59,
+      "indexed_lookup_server_reported_p50_ms": 3.59,
+      "revision": 500,
+      "state_version_p50_ms": 4.83
+    },
+    {
+      "executions": 1000,
+      "health_p50_ms": 0.49,
+      "indexed_lookup_p50_ms": 18.18,
+      "indexed_lookup_server_reported_p50_ms": 6.99,
+      "revision": 1000,
+      "state_version_p50_ms": 9.19
+    },
+    {
+      "executions": 2000,
+      "health_p50_ms": 0.56,
+      "indexed_lookup_p50_ms": 40.35,
+      "indexed_lookup_server_reported_p50_ms": 14.85,
+      "revision": 2000,
+      "state_version_p50_ms": 18.92
+    },
+    {
+      "executions": 4000,
+      "health_p50_ms": 0.65,
+      "indexed_lookup_p50_ms": 81.04,
+      "indexed_lookup_server_reported_p50_ms": 32.28,
+      "revision": 4000,
+      "state_version_p50_ms": 41.84
+    }
+  ],
+  "samples_per_size": 15,
+  "scope": "feltdb-only"
+}

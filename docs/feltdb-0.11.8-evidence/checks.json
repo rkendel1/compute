@@ -1,3 +1,11 @@
 [
   {"check": "resolved-version", "status": "PASS", "command": "node scripts/feltdb/verify-version.mjs --json", "log": "logs/resolved-version.log"},
-  {"check": "model-compiles", "status": "PASS", "command": "bash -c cd packages/compute-state-model && npm run check && npm test", "log": "logs/model-compiles.log"}
+  {"check": "model-compiles", "status": "PASS", "command": "bash -c cd packages/compute-state-model && npm run check && npm test", "log": "logs/model-compiles.log"},
+  {"check": "workspace-tests", "status": "PASS", "command": "cargo test --workspace --no-fail-fast", "log": "logs/workspace-tests.log"},
+  {"check": "adapter-real-server", "status": "PASS", "command": "cargo test -p compute-state-feltdb -- --include-ignored --test-threads 1 --skip state_written_by_the_previous_server --skip feltdb_request_cost", "log": "logs/adapter-real-server.log"},
+  {"check": "previous-server-compatibility", "status": "PASS", "command": "cargo test -p compute-state-feltdb --test consumer state_written_by_the_previous_server -- --ignored", "log": "logs/previous-server-compatibility.log"},
+  {"check": "controller-real-server", "status": "PASS", "command": "cargo test -p compute-environment --test feltdb_consumer -- --ignored --test-threads 1 --skip benchmark", "log": "logs/controller-real-server.log"},
+  {"check": "end-to-end-real-server", "status": "PASS", "command": "cargo test -p compute-cli --test recovery managed_feltdb -- --ignored", "log": "logs/end-to-end-real-server.log"},
+  {"check": "feltdb-request-cost", "status": "PASS", "command": "env COMPUTE_CERTIFICATION_OUT=/home/user/compute/docs/feltdb-0.11.8-evidence cargo test --release -p compute-state-feltdb --test consumer feltdb_request_cost -- --ignored --nocapture", "log": "logs/feltdb-request-cost.log"},
+  {"check": "benchmark", "status": "PASS", "command": "env COMPUTE_CERTIFICATION_OUT=/home/user/compute/docs/feltdb-0.11.8-evidence cargo test --release -p compute-environment --test feltdb_consumer benchmark -- --ignored --nocapture", "log": "logs/benchmark.log"}
+]

@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use compute_state::{
-    BackendInfo, Collection, Query, Record, Revision, StateError, StateStore, Tables, Write,
-    apply_in_memory,
+    BackendInfo, Collection, Query, Record, Revision, StateError, StateStore, Tables, Transitions,
+    Write, apply_in_memory,
 };
 use tokio::sync::Mutex;
 
@@ -17,6 +17,7 @@ static STORES: AtomicU64 = AtomicU64::new(0);
 pub struct MemoryState {
     inner: Mutex<(Tables, u64)>,
     scope: String,
+    transitions: Transitions,
 }
 
 impl Default for MemoryState {
@@ -28,6 +29,7 @@ impl Default for MemoryState {
                 std::process::id(),
                 STORES.fetch_add(1, Ordering::Relaxed)
             ),
+            transitions: Transitions::default(),
         }
     }
 }
@@ -86,7 +88,12 @@ impl StateStore for MemoryState {
         let (tables, version) = &mut *inner;
         let before = *version;
         apply_in_memory(tables, writes, version)?;
+        self.transitions.record(Some((before, *version)));
         Ok(Some((before, *version)))
+    }
+
+    fn take_transitions(&self) -> Option<Vec<(u64, u64)>> {
+        Some(self.transitions.take())
     }
 
     /// Every committed write advances the version counter.

@@ -444,6 +444,15 @@ pub trait StateStore: Send + Sync {
             .await
     }
 
+    /// The (before, after) revisions of every commit made through this
+    /// store since the last call, in no particular order. `None` when the
+    /// backend does not record them. A commit whose revisions could not be
+    /// stated is recorded as [`UNCHAINED`], which never chains. One
+    /// consumer (the controller) drains it.
+    fn take_transitions(&self) -> Option<Vec<(u64, u64)>> {
+        None
+    }
+
     /// Boundary diagnostics, for backends that keep them.
     fn access(&self) -> Option<AccessReport> {
         None
@@ -455,6 +464,32 @@ pub trait StateStore: Send + Sync {
     /// record carries.
     async fn upgrade_records(&self) -> Result<std::collections::BTreeMap<String, u64>, StateError> {
         Ok(std::collections::BTreeMap::new())
+    }
+}
+
+/// A commit whose revisions are unknown: it breaks any chain.
+pub const UNCHAINED: (u64, u64) = (u64::MAX - 1, u64::MAX);
+
+/// Commit transitions a backend has recorded, bounded: past the bound the
+/// record is replaced by one [`UNCHAINED`] entry, which only costs the
+/// consumer a full read.
+#[derive(Default)]
+pub struct Transitions(std::sync::Mutex<Vec<(u64, u64)>>);
+
+impl Transitions {
+    const CAPACITY: usize = 65_536;
+
+    pub fn record(&self, transition: Option<(u64, u64)>) {
+        let mut recorded = self.0.lock().expect("transitions");
+        if recorded.len() >= Self::CAPACITY {
+            recorded.clear();
+            recorded.push(UNCHAINED);
+        }
+        recorded.push(transition.unwrap_or(UNCHAINED));
+    }
+
+    pub fn take(&self) -> Vec<(u64, u64)> {
+        std::mem::take(&mut *self.0.lock().expect("transitions"))
     }
 }
 

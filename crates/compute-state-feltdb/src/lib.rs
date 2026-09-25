@@ -176,6 +176,7 @@ pub struct FeltDbState {
     revision: std::sync::Arc<RwLock<Option<String>>>,
     transactions: std::sync::Arc<AtomicU64>,
     access: std::sync::Arc<std::sync::Mutex<AccessReport>>,
+    transitions: std::sync::Arc<compute_state::Transitions>,
 }
 
 /// A refusal from FeltDB, with its error code.
@@ -208,6 +209,7 @@ impl FeltDbState {
                 ..config
             },
             revision: std::sync::Arc::new(RwLock::new(None)),
+            transitions: std::sync::Arc::default(),
             transactions: std::sync::Arc::new(AtomicU64::new(0)),
             access: std::sync::Arc::new(std::sync::Mutex::new(AccessReport {
                 connection: "unknown".into(),
@@ -465,6 +467,34 @@ impl FeltDbState {
             records.truncate(limit);
         }
         Ok(records)
+    }
+
+    /// Records of `collection` written without `record_id`, at most `limit`.
+    async fn without_identity(
+        &self,
+        collection: Collection,
+        limit: usize,
+    ) -> Result<Vec<Record>, StateError> {
+        let response = self
+            .scoped(
+                "/v1/query",
+                "query",
+                json!({
+                    "collection": collection.name(),
+                    "filter": { "operator": "exists", "field": IDENTITY_FIELD, "exists": false },
+                    "order_by": [{ "field": ID_FIELD, "direction": "asc" }],
+                    "limit": limit,
+                }),
+            )
+            .await
+            .map_err(|refusal| refused(refusal, &[]))?;
+        response["records"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(record)
+            .collect()
     }
 
     async fn query_page(
@@ -771,35 +801,38 @@ impl StateStore for FeltDbState {
         Some(self.access.lock().expect("access").clone())
     }
 
+    fn take_transitions(&self) -> Option<Vec<(u64, u64)>> {
+        Some(self.transitions.take())
+    }
+
     /// Give every record written before `record_id` existed its identity
     /// field, so identity lookups through the index find it. Each batch is
     /// one transaction of merge-updates fenced on the versions read; a
     /// record another writer changed meanwhile is picked up next pass.
     async fn upgrade_records(&self) -> Result<std::collections::BTreeMap<String, u64>, StateError> {
         let mut upgraded = std::collections::BTreeMap::new();
+        // Which collections hold records without it: one probe each, all
+        // at once. Once upgraded, this is the whole cost of a start.
+        let mut probes = tokio::task::JoinSet::new();
         for collection in Collection::ALL {
+            let this = self.clone();
+            probes.spawn(async move {
+                let missing = this.without_identity(collection, 1).await?;
+                Ok::<_, StateError>((collection, !missing.is_empty()))
+            });
+        }
+        let mut pending = vec![];
+        while let Some(probe) = probes.join_next().await {
+            let (collection, missing) =
+                probe.map_err(|error| StateError::Unavailable(error.to_string()))??;
+            if missing {
+                pending.push(collection);
+            }
+        }
+        for collection in pending {
             let mut total = 0;
             loop {
-                let response = self
-                    .scoped(
-                        "/v1/query",
-                        "query",
-                        json!({
-                            "collection": collection.name(),
-                            "filter": { "operator": "exists", "field": IDENTITY_FIELD, "exists": false },
-                            "order_by": [{ "field": ID_FIELD, "direction": "asc" }],
-                            "limit": 200,
-                        }),
-                    )
-                    .await
-                    .map_err(|refusal| refused(refusal, &[]))?;
-                let records = response["records"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(record)
-                    .collect::<Result<Vec<_>, _>>()?;
+                let records = self.without_identity(collection, 200).await?;
                 if records.is_empty() {
                     break;
                 }
@@ -916,9 +949,11 @@ impl StateStore for FeltDbState {
                         access.transactions += 1;
                         access.last_mutation_at = Some(chrono::Utc::now());
                     });
-                    return Ok(result["state_before"]
+                    let transition = result["state_before"]
                         .as_u64()
-                        .zip(result["state_after"].as_u64()));
+                        .zip(result["state_after"].as_u64());
+                    self.transitions.record(transition);
+                    return Ok(transition);
                 }
                 Err(refusal) if refusal.status == 0 && attempts == 1 => continue,
                 Err(refusal) => {

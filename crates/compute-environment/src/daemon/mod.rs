@@ -622,9 +622,13 @@ pub struct Daemon {
     /// Documents this controller wrote since desired state was last read,
     /// for a targeted refresh.
     dirty: std::sync::Mutex<Vec<(Collection, String)>>,
-    /// The revisions just before and after each of this controller's
-    /// commits since, to carry its working copy's revision forward.
+    /// Commit transitions drained from the store and not yet chained.
     transitions: std::sync::Mutex<Vec<(u64, u64)>>,
+    /// A commit made through `apply` and the queueing of what it wrote for
+    /// read-back happen under the read side; draining happens under the
+    /// write side. So a commit is never chained before its writes are
+    /// queued to be read back.
+    commit_gate: tokio::sync::RwLock<()>,
     /// What each bundle declares, by bundle identity.
     declared:
         std::sync::Mutex<std::collections::HashMap<String, (Option<u64>, Option<u64>, String)>>,
@@ -882,6 +886,7 @@ impl Daemon {
             last_mutation_ms: std::sync::atomic::AtomicI64::new(0),
             dirty: std::sync::Mutex::new(Vec::new()),
             transitions: std::sync::Mutex::new(Vec::new()),
+            commit_gate: tokio::sync::RwLock::new(()),
             declared: std::sync::Mutex::new(std::collections::HashMap::new()),
             events,
             data_plane,
@@ -1433,19 +1438,12 @@ impl Daemon {
     /// a change that did not commit.
     pub(crate) async fn apply(&self, change: Change) -> Result<(), EnvironmentError> {
         let targets = change.batch.targets();
-        let result = self.control.transaction_tracked(change.batch).await;
-        if let Ok(transition) = &result {
+        let gate = self.commit_gate.read().await;
+        let result = self.control.transaction(change.batch).await;
+        if result.is_ok() {
             self.last_mutation_ms
                 .store(Utc::now().timestamp_millis(), Ordering::SeqCst);
-            let mut dirty = self.dirty.lock().expect("dirty");
-            if !targets.is_empty() {
-                // A commit whose revisions are not stated cannot be chained.
-                self.transitions
-                    .lock()
-                    .expect("transitions")
-                    .push(transition.unwrap_or((u64::MAX - 1, u64::MAX)));
-            }
-            dirty.extend(targets);
+            self.dirty.lock().expect("dirty").extend(targets);
         } else {
             // Unknown what landed: the next refresh reads everything.
             self.dirty
@@ -1453,6 +1451,7 @@ impl Daemon {
                 .expect("dirty")
                 .push((Collection::Environment, String::new()));
         }
+        drop(gate);
         // Whatever the outcome, a write was attempted: cached reads must
         // look again.
         self.writes.fetch_add(1, Ordering::SeqCst);
@@ -1481,6 +1480,7 @@ impl Daemon {
             self.control.snapshots().invalidate_all();
             dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty"));
             self.transitions.lock().expect("transitions").clear();
+            let _ = self.control.store().take_transitions();
             self.inner.lock().await.desired_revision = None;
         }
         let loaded = match if outage {
@@ -1592,8 +1592,21 @@ impl Daemon {
     /// Returns whether a full read is needed (a write whose outcome is
     /// unknown, or too many to read back).
     async fn catch_up(&self, writes: u64) -> Result<bool, compute_state::StateError> {
-        let dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty"));
-        let transitions = std::mem::take(&mut *self.transitions.lock().expect("transitions"));
+        let (dirty, transitions) = {
+            let _gate = self.commit_gate.write().await;
+            let dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty"));
+            let mut transitions =
+                std::mem::take(&mut *self.transitions.lock().expect("transitions"));
+            // Every commit through the store, the controller's own writes of
+            // evidence and artifacts included: none of them may look like
+            // another writer. A store that does not record them cannot be
+            // chained at all.
+            match self.control.store().take_transitions() {
+                Some(recorded) => transitions.extend(recorded),
+                None => transitions.push(compute_state::UNCHAINED),
+            }
+            (dirty, transitions)
+        };
         let relevant = dirty
             .iter()
             .filter(|(collection, _)| {

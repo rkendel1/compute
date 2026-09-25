@@ -29,5 +29,5 @@ pub use snapshot::{
 };
 pub use store::{
     AccessReport, BackendInfo, Collection, Comparison, Filter, ID_FIELD, Query, Record, Revision,
-    StateError, StateStore, Tables, Write, apply_in_memory,
+    StateError, StateStore, Tables, Transitions, UNCHAINED, Write, apply_in_memory,
 };
