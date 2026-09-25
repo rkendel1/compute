@@ -310,10 +310,50 @@ impl ProviderDescriptor {
             {
                 return Err(invalid(field, "detected version is malformed"));
             }
+            if !entry.platform.is_empty() && entry.platform != capabilities.inventory.platform {
+                return Err(invalid(
+                    field,
+                    "runtime platform differs from the inventory platform",
+                ));
+            }
+            if !entry.distribution_id.is_empty() {
+                compute_core::validate_sha256_identity(&entry.distribution_id)
+                    .map_err(|error| invalid(field.clone(), error.to_string()))?;
+            }
+            if !entry.distribution_runtime_id.is_empty() {
+                compute_core::validate_sha256_identity(&entry.distribution_runtime_id)
+                    .map_err(|error| invalid(field.clone(), error.to_string()))?;
+            }
+            if let Some(executable) = &entry.executable_identity {
+                compute_core::validate_sha256_identity(executable)
+                    .map_err(|error| invalid(field.clone(), error.to_string()))?;
+            }
+            if let Some(distribution) = &capabilities.distribution_id
+                && !entry.distribution_id.is_empty()
+                && distribution != &entry.distribution_id
+            {
+                return Err(invalid(
+                    field,
+                    "runtime distribution differs from the provider distribution",
+                ));
+            }
+            if let Some(artifact) = capabilities.runtime_artifacts.get(&entry.id)
+                && !entry.distribution_runtime_id.is_empty()
+                && artifact != &entry.distribution_runtime_id
+            {
+                return Err(invalid(
+                    field,
+                    "runtime distribution identity contradicts runtime_artifacts",
+                ));
+            }
             validate_runtime_capabilities(&entry.capabilities)
                 .map_err(|message| invalid(field.clone(), message))?;
             if entry.available && entry.compatible {
-                let artifact_id = capabilities.runtime_artifacts.get(&entry.id).cloned();
+                let artifact_id = if entry.distribution_runtime_id.is_empty() {
+                    capabilities.runtime_artifacts.get(&entry.id).cloned()
+                } else {
+                    Some(entry.distribution_runtime_id.clone())
+                };
                 runtimes.push(RuntimeOffer {
                     kind: entry.id,
                     version: entry.version.clone(),

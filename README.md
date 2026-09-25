@@ -55,8 +55,8 @@ and [docs/placement.md](docs/placement.md).
 ```sh
 compute provider list
 compute placement explain ./script.py
-compute pool run ./script.py
-compute pool run --provider production ./script.py
+compute run ./script.py --provider auto
+compute run ./script.py --provider production
 compute pool submit --bundle script.compute --json
 ```
 

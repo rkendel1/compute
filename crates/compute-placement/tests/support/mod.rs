@@ -114,23 +114,45 @@ impl Synthetic {
         let mut entries = self
             .runtimes
             .iter()
-            .map(|kind| RuntimeInventoryEntry {
-                id: *kind,
-                version: version_for(*kind).into(),
-                executable: format!("runtimes/{kind}/bin/{kind}"),
-                available: true,
-                compatible: true,
-                detected_version: Some(version_for(*kind).into()),
-                detected_executable: None,
-                source: RuntimeSource::Distribution,
-                capabilities: capabilities_for(*kind),
-                remediation: None,
+            .map(|kind| {
+                let artifact = self.artifacts.get(kind).cloned().unwrap_or_else(|| {
+                    compute_core::sha256_identity(format!("runtime:{kind}").as_bytes())
+                });
+                RuntimeInventoryEntry {
+                    id: *kind,
+                    version: version_for(*kind).into(),
+                    platform: self.platform.clone(),
+                    distribution_id: self
+                        .distribution
+                        .clone()
+                        .unwrap_or_else(|| DISTRIBUTION_A.into()),
+                    distribution_runtime_id: artifact.clone(),
+                    executable_identity: Some(artifact),
+                    executable: format!("runtimes/{kind}/bin/{kind}"),
+                    available: true,
+                    compatible: true,
+                    detected_version: Some(version_for(*kind).into()),
+                    detected_executable: None,
+                    source: RuntimeSource::Distribution,
+                    capabilities: capabilities_for(*kind),
+                    remediation: None,
+                }
             })
             .collect::<Vec<_>>();
         for kind in &self.unavailable {
+            let artifact = self.artifacts.get(kind).cloned().unwrap_or_else(|| {
+                compute_core::sha256_identity(format!("runtime:{kind}").as_bytes())
+            });
             entries.push(RuntimeInventoryEntry {
                 id: *kind,
                 version: version_for(*kind).into(),
+                platform: self.platform.clone(),
+                distribution_id: self
+                    .distribution
+                    .clone()
+                    .unwrap_or_else(|| DISTRIBUTION_A.into()),
+                distribution_runtime_id: artifact,
+                executable_identity: None,
                 executable: format!("runtimes/{kind}/bin/{kind}"),
                 available: false,
                 compatible: false,

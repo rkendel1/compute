@@ -1887,6 +1887,18 @@ pub struct RuntimeInventory {
 pub struct RuntimeInventoryEntry {
     pub id: RuntimeKind,
     pub version: String,
+    /// Platform on which this runtime offer is valid.
+    #[serde(default)]
+    pub platform: String,
+    /// Identity of the complete Compute distribution containing the runtime.
+    #[serde(default)]
+    pub distribution_id: String,
+    /// Identity of this runtime's payload within the distribution.
+    #[serde(default)]
+    pub distribution_runtime_id: String,
+    /// Identity of the executable that would run the workload, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_identity: Option<String>,
     pub executable: String,
     pub available: bool,
     pub compatible: bool,

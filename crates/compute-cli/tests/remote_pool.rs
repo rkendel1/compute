@@ -142,6 +142,41 @@ fn remote_commands_resolve_named_providers_from_the_caller_owned_pool() {
     )
     .assert()
     .success();
+
+    let placed = Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "run",
+            wasm.to_str().unwrap(),
+            "--provider",
+            "remote-dev",
+            "--json",
+        ])
+        .arg("--pool-config")
+        .arg(&pool)
+        .output()
+        .unwrap();
+    assert!(
+        placed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&placed.stderr)
+    );
+    let placed: serde_json::Value = serde_json::from_slice(&placed.stdout).unwrap();
+    let placed_job = placed["job_id"].as_str().unwrap();
+    assert_ne!(placed_job, placed["execution_id"]);
+    assert_eq!(placed["placement"]["selection_mode"], "explicit");
+    assert_eq!(placed["placement"]["selected"]["provider_id"], "remote-dev");
+    assert_eq!(
+        placed["receipt"]["placement"]["placement_id"],
+        placed["placement"]["placement_id"]
+    );
+    remote(
+        &pool,
+        &["status", "--provider", "remote-dev", placed_job, "--json"],
+    )
+    .assert()
+    .success();
+
     let run = remote(
         &pool,
         &[

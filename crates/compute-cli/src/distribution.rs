@@ -5,7 +5,8 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-use compute_core::{ComputeError, Result};
+use compute_core::{ComputeError, Result, RuntimeCapabilities, RuntimeKind};
+use compute_runtime::Compute;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
@@ -96,6 +97,8 @@ struct ManifestRuntime {
     artifact_sha256: String,
     payload_sha256: String,
     reported_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capabilities: Option<RuntimeCapabilities>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,7 +159,13 @@ pub fn build(options: BuildOptions) -> Result<()> {
     fs::create_dir_all(cache.join("sha256")).map_err(error)?;
 
     let mut runtimes = BTreeMap::new();
+    let compute = Compute::new();
     for (name, runtime) in &lock.runtimes {
+        let capabilities = name
+            .parse::<RuntimeKind>()
+            .ok()
+            .map(|kind| compute.capabilities(kind))
+            .transpose()?;
         let artifact_hash = if runtime.artifacts.is_empty() {
             sha256_file(&root.join("bin/compute"))?
         } else {
@@ -195,6 +204,7 @@ pub fn build(options: BuildOptions) -> Result<()> {
                 artifact_sha256: artifact_hash,
                 payload_sha256: payload_hash,
                 reported_version,
+                capabilities,
             },
         );
     }

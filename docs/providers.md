@@ -41,11 +41,17 @@ Placement turns this response into a canonical, validated **provider
 descriptor** with a `capability_version` digest. See
 [placement.md](placement.md#security).
 
+Each runtime inventory entry binds availability and capabilities to its
+platform, complete distribution identity, runtime payload identity, and
+executable identity. Runtime support is therefore never reduced to a boolean
+or assumed portable across platforms.
+
 ```sh
 compute provider list --json
 compute provider inspect production --json      # validated descriptor
 compute provider capabilities production --json # raw capability response
 compute provider capabilities http://127.0.0.1:8080
+compute runtimes --json
 ```
 
 A configured pool ID yields its descriptor. `local` or an `http(s)://`

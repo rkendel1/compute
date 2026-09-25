@@ -482,6 +482,25 @@ fn valid() -> compute_provider::ProviderCapabilities {
     .capabilities("r")
 }
 
+#[test]
+fn additive_runtime_identities_accept_pre_upgrade_capability_payloads() {
+    let capabilities = valid();
+    let mut value = serde_json::to_value(&capabilities).unwrap();
+    for runtime in value["inventory"]["runtimes"].as_array_mut().unwrap() {
+        let runtime = runtime.as_object_mut().unwrap();
+        runtime.remove("platform");
+        runtime.remove("distribution_id");
+        runtime.remove("distribution_runtime_id");
+        runtime.remove("executable_identity");
+    }
+    let decoded: compute_provider::ProviderCapabilities = serde_json::from_value(value).unwrap();
+    let descriptor =
+        ProviderDescriptor::from_capabilities("r", ProviderKind::Remote, &decoded, availability())
+            .unwrap();
+    assert_eq!(descriptor.distribution.id, capabilities.distribution_id);
+    assert_eq!(descriptor.runtimes.len(), 2);
+}
+
 fn reject(mut mutate: impl FnMut(&mut compute_provider::ProviderCapabilities), field: &str) {
     let mut capabilities = valid();
     mutate(&mut capabilities);

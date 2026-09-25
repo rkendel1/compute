@@ -235,8 +235,84 @@ fn runtimes_json_lists_wasm() {
     let runtimes = document["runtimes"].as_array().unwrap();
     assert_eq!(runtimes.len(), 11);
     assert!(runtimes.iter().any(|runtime| {
-        runtime["id"] == "wasm" && runtime["version"].is_string() && runtime["available"] == true
+        runtime["id"] == "wasm"
+            && runtime["version"].is_string()
+            && runtime["platform"] == document["platform"]
+            && runtime["distribution_id"].is_string()
+            && runtime["distribution_runtime_id"].is_string()
+            && runtime["executable_identity"].is_string()
+            && runtime["capabilities"].is_object()
+            && runtime["available"] == true
     }));
+}
+
+#[test]
+fn run_provider_auto_and_explicit_use_canonical_placement() {
+    let temporary = tempfile::tempdir().unwrap();
+    let wasm = temporary.path().join("empty.wasm");
+    std::fs::write(
+        &wasm,
+        wat::parse_str(r#"(module (func (export "_start")))"#).unwrap(),
+    )
+    .unwrap();
+    let pool = temporary.path().join("compute-pool.toml");
+    std::fs::write(
+        &pool,
+        "[pool]\n[providers.local]\nkind = \"local\"\npriority = 100\n",
+    )
+    .unwrap();
+
+    for provider in ["auto", "local"] {
+        let output = Command::cargo_bin("compute")
+            .unwrap()
+            .args(["run", wasm.to_str().unwrap(), "--provider", provider])
+            .arg("--pool-config")
+            .arg(&pool)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["placement"]["selected"]["provider_id"], "local");
+        assert_eq!(
+            result["placement"]["selection_mode"],
+            if provider == "auto" {
+                "pool"
+            } else {
+                "explicit"
+            }
+        );
+        assert_eq!(
+            result["receipt"]["placement"]["placement_id"],
+            result["placement"]["placement_id"]
+        );
+    }
+
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["run", wasm.to_str().unwrap(), "--provider", "missing"])
+        .arg("--pool-config")
+        .arg(&pool)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("provider_not_configured"));
+
+    let placement = Command::cargo_bin("compute")
+        .unwrap()
+        .args(["placement", wasm.to_str().unwrap(), "--json"])
+        .arg("--pool-config")
+        .arg(&pool)
+        .output()
+        .unwrap();
+    assert!(placement.status.success());
+    let placement: serde_json::Value = serde_json::from_slice(&placement.stdout).unwrap();
+    assert_eq!(placement["outcome"], "placed");
+    assert_eq!(placement["selected"]["provider_id"], "local");
 }
 
 #[test]

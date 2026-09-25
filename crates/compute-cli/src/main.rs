@@ -474,6 +474,18 @@ struct RunCommand {
     bundle: Option<PathBuf>,
     #[arg(long)]
     runtime: Option<String>,
+    /// Execute through the caller-owned provider pool. `auto` selects the
+    /// highest-priority compatible provider; an ID requires that provider.
+    #[arg(long)]
+    provider: Option<String>,
+    /// Discover provider capabilities now instead of using a fresh cache.
+    #[arg(long, requires = "provider")]
+    refresh: bool,
+    /// Write the complete structured placement decision to this file.
+    #[arg(long, requires = "provider")]
+    placement_output: Option<PathBuf>,
+    #[command(flatten)]
+    location: pool::PoolLocation,
     #[arg(long = "env", value_parser = parse_env)]
     env: Vec<EnvironmentVariable>,
     #[arg(long)]
@@ -559,7 +571,7 @@ struct ExecCommand {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let cli = parse_cli();
     let compute = Compute::new();
 
     if let Err(error) = run(cli, compute).await {
@@ -568,10 +580,26 @@ async fn main() {
     }
 }
 
+fn parse_cli() -> Cli {
+    let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    if arguments.get(1).and_then(|value| value.to_str()) == Some("placement")
+        && !matches!(
+            arguments.get(2).and_then(|value| value.to_str()),
+            Some("inspect" | "explain" | "--help" | "-h")
+        )
+    {
+        arguments.insert(2, "inspect".into());
+    }
+    Cli::parse_from(arguments)
+}
+
 async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
     match cli.command {
         Commands::Run(command) => {
             let command = *command;
+            if command.provider.is_some() {
+                return run_with_provider(command).await;
+            }
             let dependency_capsule = command
                 .deps
                 .as_deref()
@@ -1015,19 +1043,19 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
             }
         }
         Commands::Runtimes(json_flag) => {
-            let inventory = compute.inventory().await;
+            let inventory = compute.inventory().await?;
             if json_flag.json {
                 println!("{}", serde_json::to_string_pretty(&inventory).unwrap());
             } else {
-                println!("Runtime\tPinned\tDetected\tSource\tAvailable");
+                println!("Runtime\tVersion\tPlatform\tAvailable\tSource");
                 for runtime in inventory.runtimes {
                     println!(
-                        "{}\t{}\t{}\t{:?}\t{}",
+                        "{}\t{}\t{}\t{}\t{:?}",
                         runtime.id,
                         runtime.version,
-                        runtime.detected_version.unwrap_or_else(|| "-".to_string()),
-                        runtime.source,
-                        if runtime.available { "yes" } else { "no" }
+                        runtime.platform,
+                        if runtime.available { "yes" } else { "no" },
+                        runtime.source
                     );
                 }
             }
@@ -1524,6 +1552,77 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_with_provider(command: RunCommand) -> compute_core::Result<()> {
+    if command.workload.is_some() {
+        return Err(compute_core::ComputeError::InvalidWorkload(
+            "--provider with --workload is not yet supported; create a bundle or pass the workload path directly"
+                .into(),
+        ));
+    }
+    if !command.mounts.is_empty() || command.stdin.is_some() {
+        return Err(compute_core::ComputeError::InvalidWorkload(
+            "provider placement requires portable inputs; --mount and --stdin are local-only"
+                .into(),
+        ));
+    }
+    if command.expected_workload_id.is_some() || command.expected_bundle_id.is_some() {
+        return Err(compute_core::ComputeError::InvalidWorkload(
+            "expected identity flags are not yet supported with provider placement".into(),
+        ));
+    }
+    let provider = command
+        .provider
+        .as_deref()
+        .filter(|provider| *provider != "auto")
+        .map(str::to_owned);
+    let artifact = pool::PlacementArtifact {
+        path: command.path,
+        bundle: command.bundle,
+        provider,
+        refresh: command.refresh,
+        submit: false,
+        distribution: None,
+        runtime_artifact: None,
+        platform: None,
+        runtime: command.runtime,
+        env: command.env,
+        env_file: command.env_file,
+        inputs: command.inputs,
+        outputs: command.outputs,
+        cwd: command.cwd,
+        entrypoint: command.entrypoint,
+        deps: command.deps,
+        network: command.network,
+        isolation: command.isolation,
+        memory: command.memory,
+        timeout: command.timeout,
+        receipt: command.receipt,
+        placement_output: command.placement_output,
+        idempotency_key: None,
+        json: command.json,
+        args: command.args,
+    };
+    if command.explain || command.dry_run {
+        pool::placement(pool::PlacementCommand {
+            command: if command.explain {
+                pool::PlacementCommands::Explain(Box::new(artifact))
+            } else {
+                pool::PlacementCommands::Inspect(Box::new(artifact))
+            },
+            location: command.location,
+            policy: command.policy,
+        })
+        .await
+    } else {
+        pool::pool(pool::PoolCommand {
+            command: pool::PoolCommands::Run(Box::new(artifact)),
+            location: command.location,
+            policy: command.policy,
+        })
+        .await
+    }
 }
 
 type RemotePrepared = (

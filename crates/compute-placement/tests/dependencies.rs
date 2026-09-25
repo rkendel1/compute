@@ -164,7 +164,7 @@ async fn dependency_capsule_matrix() {
     )
     .unwrap();
 
-    let inventory = compute_runtime::Compute::new().inventory().await;
+    let inventory = compute_runtime::Compute::new().inventory().await.unwrap();
     let mut exercised = 0;
     for fixture in [PYTHON, NODE] {
         let entry = inventory

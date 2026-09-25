@@ -68,14 +68,34 @@ impl Compute {
         items
     }
 
-    pub async fn inventory(&self) -> compute_core::RuntimeInventory {
+    pub async fn inventory(&self) -> Result<compute_core::RuntimeInventory> {
+        let distribution = self.installed_distribution_identity()?;
+        let runtime_artifacts = self.runtime_artifact_identities()?;
         let mut runtimes = Vec::with_capacity(self.adapters.len());
         for adapter in &self.adapters {
             let descriptor = adapter.descriptor();
             let availability = adapter.availability(None).await;
+            let executable_identity = availability
+                .executable
+                .as_deref()
+                .filter(|path| path.is_file())
+                .map(compute_core::sha256_file_identity_cached)
+                .transpose()?
+                .or_else(|| {
+                    (availability.source == compute_core::RuntimeSource::Embedded)
+                        .then(|| compute_core::compute_executable_identity().map(str::to_owned))
+                        .flatten()
+                });
             runtimes.push(compute_core::RuntimeInventoryEntry {
                 id: descriptor.id,
                 version: descriptor.version,
+                platform: distribution.platform.clone(),
+                distribution_id: distribution.id.clone(),
+                distribution_runtime_id: runtime_artifacts
+                    .get(&descriptor.id)
+                    .cloned()
+                    .expect("every known runtime has a distribution identity"),
+                executable_identity,
                 executable: descriptor.executable,
                 available: availability.available,
                 compatible: availability.compatible,
@@ -86,11 +106,11 @@ impl Compute {
                 remediation: availability.remediation,
             });
         }
-        compute_core::RuntimeInventory {
+        Ok(compute_core::RuntimeInventory {
             compute_version: env!("CARGO_PKG_VERSION").into(),
-            platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            platform: distribution.platform,
             runtimes,
-        }
+        })
     }
 
     /// Identity of the installed Compute distribution, independent of any

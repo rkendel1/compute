@@ -40,6 +40,12 @@ the following:
 If no provider satisfies the contract, the result is `placement_failed`, and
 nothing executes.
 
+Use `compute run APP --provider auto` to select by compatibility and the
+pool's deterministic priority ordering. Use `--provider ID` to require one
+configured provider; explicit selection never falls back. The established
+read-only forms are `compute placement APP` (an alias for
+`compute placement inspect APP`) and `compute placement explain APP`.
+
 ## Requirements
 
 Placement requirements are derived from the canonical workload bundle. They

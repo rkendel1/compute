@@ -51,6 +51,17 @@ fn installed_but_unavailable_runtime_is_distinct_from_unsupported() {
 }
 
 #[test]
+fn shell_does_not_claim_network_none_support() {
+    let provider = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Shell]).descriptor("shell");
+    let mut required = requirements(RuntimeKind::Shell);
+    required.network = NetworkPolicy::None;
+    let matched = match_provider(&required, &provider);
+    assert!(!matched.compatible);
+    assert_eq!(matched.codes(), [ReasonCode::NetworkUnsupported]);
+    assert_eq!(matched.reasons[0].required, serde_json::json!("none"));
+}
+
+#[test]
 fn wrong_runtime_version_is_never_substituted() {
     let mut requirements = requirements(RuntimeKind::Python);
     requirements.runtime.version = Some("3.12".into());

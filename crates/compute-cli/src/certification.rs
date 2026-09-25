@@ -109,6 +109,8 @@ struct ManifestRuntime {
     artifact_sha256: String,
     payload_sha256: String,
     reported_version: String,
+    #[serde(default)]
+    capabilities: Option<compute_core::RuntimeCapabilities>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,7 +256,13 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
         Err(error) => fail_check(&mut report, "security_and_negative_cases", error),
     }
 
-    let inventory = compute.inventory().await;
+    let inventory = match compute.inventory().await {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            fail_check(&mut report, "runtime_inventory", error.to_string());
+            return report;
+        }
+    };
     let remote_listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
         Ok(listener) => listener,
         Err(error) => {

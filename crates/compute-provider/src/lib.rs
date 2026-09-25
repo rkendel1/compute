@@ -835,7 +835,11 @@ impl ComputeProvider for LocalProvider {
             .compute
             .installed_distribution_identity()
             .map_err(classify_compute_error)?;
-        let mut inventory = self.compute.inventory().await;
+        let mut inventory = self
+            .compute
+            .inventory()
+            .await
+            .map_err(classify_compute_error)?;
         inventory
             .runtimes
             .retain(|runtime| self.policy.allows_runtime(runtime.id));

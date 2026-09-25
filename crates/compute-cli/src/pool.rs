@@ -790,21 +790,63 @@ pub async fn pool(command: PoolCommand) -> compute_core::Result<()> {
                 std::process::exit(PLACEMENT_FAILED_EXIT);
             }
             let selected = report.selected.as_ref().expect("placed");
-            eprintln!(
-                "placement {}: selected provider {} ({})",
-                report.placement_id, selected.provider_id, report.selection_mode
-            );
-            let response = match dispatch::execute(&pool, &report, request).await {
-                Ok(response) => response,
-                Err(error) => return dispatch_failure(&error, artifact.json),
+            if !artifact.json {
+                eprintln!("Providers:");
+                for provider in &report.providers {
+                    eprintln!(
+                        "  {:<12} {}",
+                        provider.provider_id,
+                        provider.status.as_str()
+                    );
+                }
+                eprintln!("Selected: {}", selected.provider_id);
+                eprintln!(
+                    "Runtime: {}{}",
+                    report.requirements.runtime.kind,
+                    report
+                        .requirements
+                        .runtime
+                        .version
+                        .as_deref()
+                        .map(|version| format!(" {version}"))
+                        .unwrap_or_default()
+                );
+                eprintln!("Isolation: {}", report.requirements.isolation);
+                eprintln!("Network: {}", report.requirements.network);
+            }
+            let remote_jobs = pool
+                .member(&selected.provider_id)
+                .and_then(|member| member.jobs.clone());
+            let (result, job_id) = if let Some(jobs) = remote_jobs {
+                let submission = match dispatch::submit(&pool, &report, request, None).await {
+                    Ok(submission) => submission,
+                    Err(error) => return dispatch_failure(&error, artifact.json),
+                };
+                let job_id = submission.job.job_id;
+                let result = wait_for_result(&jobs, &job_id.0).await?;
+                let receipt = result.result.receipt.as_ref().ok_or_else(|| {
+                    ComputeError::InvalidReceipt("the provider returned no receipt".into())
+                })?;
+                report
+                    .verify_receipt(receipt)
+                    .map_err(ComputeError::InvalidReceipt)?;
+                (result.result, Some(job_id))
+            } else {
+                let response = match dispatch::execute(&pool, &report, request).await {
+                    Ok(response) => response,
+                    Err(error) => return dispatch_failure(&error, artifact.json),
+                };
+                (response.result, None)
             };
-            let result = response.result;
             if let Some(path) = &artifact.receipt {
                 let receipt = result.receipt.as_ref().expect("verified by dispatch");
                 std::fs::write(path, receipt.encoded_bytes()?)?;
             }
             if artifact.json {
                 let mut value = serde_json::to_value(&result)?;
+                if let Some(job_id) = &job_id {
+                    value["job_id"] = serde_json::to_value(job_id)?;
+                }
                 value["placement"] = serde_json::to_value(&report)?;
                 print_json(&value);
                 if !matches!(result.status, compute_core::ExecutionStatus::Completed)
@@ -813,7 +855,11 @@ pub async fn pool(command: PoolCommand) -> compute_core::Result<()> {
                     std::process::exit(result.exit_code.filter(|code| *code != 0).unwrap_or(1));
                 }
             } else {
-                crate::print_execution_result(result, false, None)?;
+                if let Some(job_id) = &job_id {
+                    crate::print_remote_execution_result(job_id, result, false, None)?;
+                } else {
+                    crate::print_execution_result(result, false, None)?;
+                }
             }
         }
         PoolCommands::Submit(artifact) => {
@@ -864,6 +910,27 @@ pub async fn pool(command: PoolCommand) -> compute_core::Result<()> {
     Ok(())
 }
 
+async fn wait_for_result(
+    provider: &RemoteProvider,
+    job_id: &str,
+) -> compute_core::Result<compute_core::JobResult> {
+    let mut delay = Duration::from_millis(100);
+    loop {
+        let status = provider
+            .job_status(job_id)
+            .await
+            .map_err(crate::provider_error)?;
+        if status.status.is_terminal() {
+            return provider
+                .job_result(job_id)
+                .await
+                .map_err(crate::provider_error);
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_secs(2));
+    }
+}
+
 /// Report a failed placement. Returns whether a provider was selected.
 fn placed(report: &PlacementReport, json: bool) -> bool {
     if report.outcome == PlacementOutcome::Placed {
@@ -878,6 +945,26 @@ fn placed(report: &PlacementReport, json: bool) -> bool {
         failure.map_or("", |failure| failure.code.as_str()),
         failure.map_or("", |failure| failure.message.as_str())
     );
+    for provider in &report.providers {
+        eprintln!(
+            "provider {}: {}",
+            provider.provider_id,
+            provider.status.as_str()
+        );
+        for reason in &provider.reasons {
+            eprintln!(
+                "  {}: required {}, available {}{}",
+                reason.code.as_str(),
+                reason.required,
+                reason.available,
+                reason
+                    .detail
+                    .as_deref()
+                    .map(|detail| format!(" ({detail})"))
+                    .unwrap_or_default()
+            );
+        }
+    }
     false
 }
 
