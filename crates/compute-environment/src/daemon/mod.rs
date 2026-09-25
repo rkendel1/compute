@@ -891,6 +891,9 @@ impl Daemon {
             Value::Null,
         );
         let _ = self.apply(change).await;
+        // Nothing runs under this controller any more: the node is free
+        // for the next one, whoever still holds a reference to this one.
+        self.release_node();
         let _ = self.stopped.send(true);
     }
 

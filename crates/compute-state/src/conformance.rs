@@ -447,8 +447,8 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             admission_id: Some("sha256:a".into()),
             placement_id: Some("sha256:l".into()),
             provider: Some("local".into()),
-            error: None,
-            failure: None,
+            error: Some("exited with status 1".into()),
+            failure: Some("workload_failed".into()),
         },
     )
     .await;
@@ -626,6 +626,43 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             priority: 0,
             registered_by: "daemon_conf".into(),
             observed_at: now,
+        },
+    )
+    .await;
+    round_trip(
+        state,
+        &ids::credential(&format!("cred_conf{run}")),
+        OperatorCredentialRecord {
+            credential_id: format!("cred_conf{run}"),
+            operator_id: "alice".into(),
+            scopes: vec!["compute.read".into(), "compute.deploy".into()],
+            verifier: "sha256:v".into(),
+            description: Some("conformance".into()),
+            created_at: now,
+            expires_at: Some(now),
+            revoked_at: Some(now),
+            rotated_from: Some("cred_old".into()),
+            created_by: Some("admin".into()),
+        },
+    )
+    .await;
+    let mut detail = serde_json::Map::new();
+    detail.insert("environment".into(), json!("production"));
+    round_trip(
+        state,
+        &ids::audit(&format!("req_conf{run}")),
+        AuditRecord {
+            request_id: format!("req_conf{run}"),
+            operator_id: "alice".into(),
+            credential_id: Some(format!("cred_conf{run}")),
+            operation: "environment.create".into(),
+            resource: "environment".into(),
+            resource_id: Some("env_conf".into()),
+            result: "failed".into(),
+            status: 409,
+            error_kind: Some("conflict".into()),
+            detail,
+            at: now,
         },
     )
     .await;

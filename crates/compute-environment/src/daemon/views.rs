@@ -576,9 +576,30 @@ impl Daemon {
     }
 
     pub async fn execution(&self, execution_id: &str) -> Result<ExecutionView, EnvironmentError> {
-        let record = self
+        // Durable state first; then evidence this controller holds but has
+        // not written yet (control state was down when it ended).
+        let record = match self
             .get_required::<ExecutionRecord>(&ids::execution(execution_id))
-            .await?;
+            .await
+        {
+            Ok(record) => record.value,
+            Err(failure) => {
+                let inner = self.inner.lock().await;
+                inner
+                    .terminal
+                    .get(execution_id)
+                    .cloned()
+                    .or_else(|| {
+                        inner
+                            .pending_evidence
+                            .iter()
+                            .filter_map(|pending| pending.record.as_ref())
+                            .find(|record| record.execution_id == execution_id)
+                            .cloned()
+                    })
+                    .ok_or(failure)?
+            }
+        };
         let (stdout, stderr) = self
             .inner
             .lock()
@@ -588,7 +609,7 @@ impl Daemon {
             .cloned()
             .unwrap_or_default();
         Ok(ExecutionView {
-            record: record.value,
+            record,
             stdout,
             stderr,
         })

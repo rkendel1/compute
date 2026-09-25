@@ -1,0 +1,202 @@
+{
+ "format": "compute.hardening-audit@1",
+ "audited_at": "2026-09-25",
+ "commit": "f68ce7f",
+ "host": {
+  "cpus": 4,
+  "memory_gb": 16,
+  "kernel": "6.18",
+  "cgroups": "v1",
+  "landlock_abi": 7,
+  "user": "root"
+ },
+ "production_readiness_claimed": false,
+ "results": {
+  "concurrent_execution": {
+   "status": "verified",
+   "before": "1/80 succeeded",
+   "now": {
+    "8x10": "80/80 records and receipts",
+    "1000": "1000/1000"
+   }
+  },
+  "restart_availability": {
+   "status": "verified",
+   "sigkill_under_load": {
+    "requests": 398,
+    "failed": 0,
+    "same_process": true,
+    "controller_back_s": 2.58,
+    "build": "debug"
+   },
+   "drill_controller_back_ms": 1050.8
+  },
+  "feltdb_outage": {
+   "status": "verified",
+   "service_answered": true,
+   "mutation": "503 state_unavailable",
+   "reads": "stale snapshot with freshness headers"
+  },
+  "feltdb_recovery": {
+   "status": "verified",
+   "feltdb_restart_ms": 83.8,
+   "mutations_recovered": true
+  },
+  "start_without_feltdb": {
+   "status": "verified",
+   "mode": "degraded_control_plane",
+   "start_ms": 168.5,
+   "require_state_at_start": "refused, exit 1"
+  },
+  "upgrade": {
+   "status": "verified",
+   "seconds": 5.36,
+   "requests": 849,
+   "failed": 0,
+   "build": "debug"
+  },
+  "rollback": {
+   "status": "verified",
+   "seconds": 3.4,
+   "automatic_on": [
+    "exit",
+    "hang",
+    "refusal",
+    "digest mismatch"
+   ]
+  },
+  "reconciliation_300": {
+   "status": "measured",
+   "environment_view_ms": {
+    "p50": 29.62,
+    "p95": 37.6,
+    "target_p95": 50
+   },
+   "add_end_to_end_ms": {
+    "p50": 475.9,
+    "p95": 568.53,
+    "target": 100,
+    "meets": false
+   },
+   "add_in_process_debug_ms": {
+    "p50": 194.8,
+    "p95": 237.8
+   },
+   "full_reconcile_release_ms": 66.4,
+   "shutdown_s": 0.32,
+   "controller_rss_mib": 92.1,
+   "idle_cpu_percent": 12.8,
+   "before": {
+    "environment_view_p95_ms": 103,
+    "add_s": 0.9,
+    "shutdown_s": ">30"
+   }
+  },
+  "wasm_latency": {
+   "status": "measured",
+   "p50_ms": 8.24,
+   "p95_ms": 9.09,
+   "target_p50_ms": 20,
+   "before_p50_ms": 81.6
+  },
+  "api_authentication": {
+   "status": "verified",
+   "unauthenticated_read_production": 401,
+   "scopes": [
+    "compute.read",
+    "compute.execute",
+    "compute.deploy",
+    "compute.operate",
+    "compute.admin"
+   ]
+  },
+  "tls": {
+   "status": "verified",
+   "reload_without_restart": true,
+   "production_without_tls": "refused"
+  },
+  "credential_rotation": {
+   "status": "verified",
+   "expiry": true,
+   "revocation": true,
+   "rotation_with_grace": true,
+   "audited": true
+  }
+ },
+ "feltdb_latency_ms": {
+  "reads_p95": {
+   "environments list": 0.81,
+   "project status": 0.47,
+   "projects list": 16.04,
+   "events": 21.19,
+   "uncached": 91.2
+  },
+  "mutations_p95": {
+   "environment create": 258.37,
+   "environment stop": 388.48,
+   "environment start": 616.32,
+   "project restart": 2160.85
+  },
+  "project_restart_meets_1s": false
+ },
+ "isolation": {
+  "trusted": {
+   "filesystem": "unrestricted",
+   "network": "unrestricted"
+  },
+  "restricted": {
+   "filesystem": "restricted",
+   "network": "enforced",
+   "status": "verified"
+  },
+  "isolated": {
+   "filesystem": "enforced",
+   "network": "enforced",
+   "memory": "enforced",
+   "cpu": "enforced",
+   "process": "enforced",
+   "status": "verified"
+  },
+  "cgroup_v2": "supported",
+  "non_linux": "unsupported",
+  "non_root": "unknown"
+ },
+ "gaps": [
+  {
+   "item": "ingress (80/443) pauses during controller restart",
+   "status": "unsupported"
+  },
+  {
+   "item": "compute serve without operator credentials/TLS",
+   "status": "unsupported"
+  },
+  {
+   "item": "project restart on FeltDB p95 2.2 s vs 1 s",
+   "status": "measured"
+  },
+  {
+   "item": "add at 300 services 476 ms vs 100 ms",
+   "status": "measured"
+  },
+  {
+   "item": "compute node upgrade under systemd",
+   "status": "unsupported"
+  },
+  {
+   "item": "artifact signature verification",
+   "status": "unsupported"
+  },
+  {
+   "item": "supervisor upgrade without workload restart",
+   "status": "unsupported"
+  },
+  {
+   "item": "Managed FeltDB over a network",
+   "status": "unknown"
+  },
+  {
+   "item": "half-open network partitions",
+   "status": "unknown"
+  }
+ ]
+}

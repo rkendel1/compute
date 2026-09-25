@@ -219,6 +219,7 @@ impl Daemon {
             json!({ "workloads": "kept" }),
         );
         let _ = self.apply(change).await;
+        self.release_node();
         let _ = self.stopped.send(true);
         Ok(())
     }
