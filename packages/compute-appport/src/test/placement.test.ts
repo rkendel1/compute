@@ -36,7 +36,7 @@ function envelope(capability: string, input: unknown) {
 }
 
 function output<T>(response: AppResponse): T {
-  assert.equal(response.ok, true, response.ok ? undefined : response.error.message);
+  assert.equal(response.ok, true, response.ok ? undefined : `${response.error.message} ${JSON.stringify(response.error.details ?? {}).slice(0, 1500)}`);
   return response.output as T;
 }
 

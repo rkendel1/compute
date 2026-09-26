@@ -850,7 +850,36 @@ async fn finish(
     deployment: &ApplicationDeploymentView,
     json: bool,
 ) -> compute_core::Result<()> {
-    let view = application(host, name).await?;
+    let failure = (!deployment.active).then(|| {
+        format!(
+            "{name} v{} did not become active: {}",
+            deployment.version,
+            deployment
+                .failure
+                .clone()
+                .unwrap_or_else(|| deployment.state.as_str().into())
+        )
+    });
+    let view = match application(host, name).await {
+        Ok(view) => view,
+        // A first version that never served leaves no application to
+        // describe: report the version and why.
+        Err(_) if failure.is_some() => {
+            if json {
+                print_json(&serde_json::json!({
+                    "application": name,
+                    "provider": host.provider_id,
+                    "deployment_id": deployment.deployment_id,
+                    "version": deployment.version,
+                    "status": deployment.state.as_str(),
+                    "failure": deployment.failure,
+                    "deployment": deployment,
+                }));
+            }
+            return Err(ComputeError::Runtime(failure.expect("checked")));
+        }
+        Err(error) => return Err(error),
+    };
     if json {
         // This release, whatever is active now: identity, where, what,
         // and its evidence.
@@ -867,17 +896,10 @@ async fn finish(
     } else {
         print_release(host, &view, deployment);
     }
-    if !deployment.active {
-        return Err(ComputeError::Runtime(format!(
-            "{name} v{} did not become active: {}",
-            deployment.version,
-            deployment
-                .failure
-                .clone()
-                .unwrap_or_else(|| deployment.state.as_str().into())
-        )));
+    match failure {
+        Some(failure) => Err(ComputeError::Runtime(failure)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 async fn wait_for_release(

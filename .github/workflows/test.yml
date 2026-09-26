@@ -3,8 +3,12 @@ name: test
 # The whole workspace, including the provider-neutral product acceptance
 # (crates/compute-cli/tests/product.rs): an application is deployed,
 # replaced, rolled back, stopped, and its receipts verified, on ordinary
-# Compute providers on this runner. Managed runtimes in tests come from a
-# host-backed fixture catalog, so no test downloads one.
+# Compute providers on this runner, and every provider type is crossed
+# with every execution mode. Then the AppPort contract
+# (packages/compute-appport), whose tests drive the compute binary,
+# including an agent deploying an application through AppPort. Managed
+# runtimes in tests come from a host-backed fixture catalog, so no test
+# downloads one.
 
 on:
   workflow_dispatch:
@@ -26,3 +30,11 @@ jobs:
         run: cargo test --workspace --locked
       - name: Product acceptance
         run: cargo test --locked -p compute-cli --test product -- --nocapture
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: AppPort contract
+        working-directory: packages/compute-appport
+        run: |
+          npm ci
+          npm test
