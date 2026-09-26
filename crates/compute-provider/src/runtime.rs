@@ -220,6 +220,17 @@ impl RuntimeManager {
         &self.root
     }
 
+    /// Another manager over the same store and catalog. The store's file
+    /// lock, not this process's mutex, keeps the two coherent.
+    pub(crate) fn sharing(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            lock: self.lock.clone(),
+            catalog: self.catalog.clone(),
+            mutation: Mutex::new(()),
+        }
+    }
+
     pub(crate) fn resolve(
         &self,
         requirement: ProviderRuntimeRequirement,
@@ -299,10 +310,23 @@ impl RuntimeManager {
         }
     }
 
+    /// A coherent view of the store until the guard drops: a preparation
+    /// in another thread or process never swaps a payload or rewrites the
+    /// manifest while it is held. Reads never wait for an acquisition or
+    /// unpacking, only for the swap that publishes one. `None` when there
+    /// is no store yet.
+    pub(crate) fn read_snapshot(&self) -> Option<StoreLock> {
+        self.root
+            .is_dir()
+            .then(|| StoreLock::shared(&self.root.join(".store.lock")).ok())
+            .flatten()
+    }
+
     fn status_inner(
         &self,
         distribution: &RuntimeDistribution,
     ) -> (RuntimeLifecycleStatus, Option<String>) {
+        let _snapshot = self.read_snapshot();
         let failure = self.failure_path(&distribution.id);
         let manifest = self.read_manifest();
         let Some(prepared) = manifest
@@ -468,10 +492,20 @@ impl RuntimeManager {
             .root
             .join("runtimes")
             .join(distribution.runtime.as_str());
-        if target.exists() {
-            fs::remove_dir_all(&target).map_err(io_error)?;
+        // Publish: readers see the store before or after this, never
+        // during. A payload that is already the verified one is left in
+        // place, so preparing a ready runtime never disturbs a workload
+        // that is using it.
+        let publish = StoreLock::exclusive(&self.root.join(".store.lock"))?;
+        let unchanged = target.is_dir()
+            && hash_tree(&target)
+                .is_ok_and(|actual| actual.trim_start_matches("sha256:") == payload_sha256);
+        if !unchanged {
+            if target.exists() {
+                fs::remove_dir_all(&target).map_err(io_error)?;
+            }
+            fs::rename(&staged_runtime, &target).map_err(io_error)?;
         }
-        fs::rename(&staged_runtime, &target).map_err(io_error)?;
 
         let mut manifest = self
             .read_manifest()
@@ -496,6 +530,7 @@ impl RuntimeManager {
         )?;
         fs::write(self.root.join("runtime-lock.json"), &self.catalog.bytes).map_err(io_error)?;
         let _ = fs::remove_file(self.failure_path(&distribution.id));
+        drop(publish);
         let final_status = self.status(distribution);
         if final_status.status != RuntimeLifecycleStatus::Ready {
             return Err(unavailable(
@@ -578,14 +613,23 @@ impl RuntimeManager {
     }
 }
 
-/// An exclusive, advisory lock on a runtime store, held across processes
-/// until dropped.
-struct StoreLock {
+/// An advisory lock on a runtime store, held across processes until
+/// dropped.
+pub(crate) struct StoreLock {
     _file: File,
 }
 
 impl StoreLock {
     fn exclusive(path: &Path) -> Result<Self, ProviderError> {
+        Self::flock(path, true)
+    }
+
+    fn shared(path: &Path) -> Result<Self, ProviderError> {
+        Self::flock(path, false)
+    }
+
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    fn flock(path: &Path, exclusive: bool) -> Result<Self, ProviderError> {
         let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -596,7 +640,12 @@ impl StoreLock {
         {
             use std::os::fd::AsRawFd;
             // Released when the file is closed.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            let operation = if exclusive {
+                libc::LOCK_EX
+            } else {
+                libc::LOCK_SH
+            };
+            if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
                 return Err(io_error(std::io::Error::last_os_error()));
             }
         }
@@ -975,6 +1024,78 @@ mod tests {
         );
         assert_eq!(resolution.status, RuntimeLifecycleStatus::Available);
         (directory, manager, resolution.distribution.unwrap())
+    }
+
+    /// Another process is publishing a preparation: it holds the store
+    /// and has swapped out the payload the manifest names. A read waits
+    /// for the publish and sees the store after it, never the half-swapped
+    /// store (which would read as a failed runtime).
+    #[test]
+    fn a_read_during_a_publish_sees_the_store_before_or_after_it() {
+        let (_directory, manager, distribution) = fixture();
+        manager.prepare(&distribution).unwrap();
+        let payload = manager.root.join("runtimes/node");
+        let aside = manager.root.join("runtimes/.node-publishing");
+        let publish = StoreLock::exclusive(&manager.root.join(".store.lock")).unwrap();
+        fs::rename(&payload, &aside).unwrap();
+        let reader = {
+            let other = manager.sharing();
+            let distribution = distribution.clone();
+            std::thread::spawn(move || other.status(&distribution))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!reader.is_finished(), "a read waits for the publish");
+        fs::rename(&aside, &payload).unwrap();
+        drop(publish);
+        let read = reader.join().unwrap();
+        assert_eq!(read.status, RuntimeLifecycleStatus::Ready, "{read:?}");
+    }
+
+    /// Capabilities are one snapshot of the store: they are not assembled
+    /// from reads on either side of a publish.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capabilities_are_one_snapshot_of_the_runtime_store() {
+        use crate::ComputeProvider;
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = crate::testing::host_fixture_catalog(directory.path()).unwrap();
+        let provider =
+            std::sync::Arc::new(crate::LocalProvider::new().with_runtime_catalog(fixture.catalog));
+        let shell = provider
+            .resolve_runtime(ProviderRuntimeRequirement {
+                runtime: RuntimeKind::Shell,
+                version: None,
+                platform: None,
+            })
+            .await
+            .unwrap()
+            .distribution
+            .unwrap();
+        provider.prepare_runtime(shell).await.unwrap();
+        // Mid-publish: the payload the manifest names is swapped out.
+        let root = provider.runtimes.root().to_path_buf();
+        let publish = StoreLock::exclusive(&root.join(".store.lock")).unwrap();
+        let payload = root.join("runtimes/shell");
+        let aside = root.join("runtimes/.shell-publishing");
+        fs::rename(&payload, &aside).unwrap();
+        let mut reading = tokio::spawn({
+            let provider = provider.clone();
+            async move { provider.capabilities().await }
+        });
+        let early = tokio::time::timeout(std::time::Duration::from_secs(3), &mut reading).await;
+        assert!(
+            early.is_err(),
+            "capabilities read the store mid-publish: {early:?}"
+        );
+        fs::rename(&aside, &payload).unwrap();
+        drop(publish);
+        let capabilities = reading.await.unwrap().unwrap();
+        let entry = capabilities
+            .inventory
+            .runtimes
+            .iter()
+            .find(|entry| entry.id == RuntimeKind::Shell)
+            .unwrap();
+        assert_eq!(entry.lifecycle, Some(RuntimeLifecycleStatus::Ready));
     }
 
     #[test]

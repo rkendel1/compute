@@ -126,6 +126,12 @@ const providerIdentity = s.union([
   s.object({ kind: s.literal("remote"), id: s.string(), endpoint: s.string() }),
 ] as const);
 const selectionMode = s.enum(["explicit", "pool"] as const);
+const resourceVector = s.object({
+  cpu_count: s.integer({ minimum: 0 }),
+  memory_bytes: s.integer({ minimum: 0 }),
+  disk_bytes: s.integer({ minimum: 0 }),
+});
+
 const receiptPlacement = s.object({
   placement_id: digest,
   provider_id: s.string({ pattern: "^[A-Za-z0-9_-]{1,64}$" }),
@@ -137,7 +143,21 @@ const receiptPlacement = s.object({
     ordering: s.string(),
     compatible_candidates: s.integer({ minimum: 1 }),
   }),
+  policy: s.optional(s.object({ mode: s.string(), provider: s.optional(s.string()) })),
+  candidates: s.optional(s.array(s.object({}, { additionalProperties: true }))),
+  requested_resources: s.optional(resourceVector),
+  provider_resources: s.optional(s.object({ capacity: resourceVector, available: resourceVector })),
+  allocated_resources: s.optional(resourceVector),
+  execution_platform: s.optional(s.object({}, { additionalProperties: true })),
+  reservation: s.optional(s.object({}, { additionalProperties: true })),
 });
+/** `compute.application@1`: an application's stable identity. */
+export const applicationIdentity = s.object({
+  id: digest,
+  name: s.string(),
+  port: s.optional(s.integer({ minimum: 1, maximum: 65535 })),
+});
+
 const receipt = s.object({
   receipt_version: s.literal("compute.receipt@1"),
   execution_id: s.string(),
@@ -145,7 +165,10 @@ const receipt = s.object({
   bundle: s.nullable(digest),
   provider: s.optional(providerIdentity),
   provider_protocol: s.optional(s.string()),
+  application: s.optional(applicationIdentity),
   placement: s.optional(receiptPlacement),
+  reservation: s.optional(s.object({}, { additionalProperties: true })),
+  scope: s.optional(s.object({}, { additionalProperties: true })),
   policy_id: s.optional(digest),
   admission_id: s.optional(digest),
   admission_status: s.optional(s.literal("admitted")),
@@ -153,6 +176,7 @@ const receipt = s.object({
   runtime: s.object({
     declared: runtime, selected: runtime, observed: runtime, version: s.string(),
     distribution_runtime_id: digest, executable_identity: digest,
+    distribution_id: s.optional(digest), distribution_digest: s.optional(digest),
   }),
   request: s.object({
     entrypoint: s.string(), argument_count: s.integer({ minimum: 0 }),
@@ -242,6 +266,7 @@ export const workloadPlanSchema = s.object({
       memory_limit: capability(),
       cpu_limit: capability(),
       process_limit: capability(),
+      host_profiles: s.optional(s.array(s.string())),
       network: s.object({ none: capability(), localhost: capability(), network: capability() }),
       isolation: s.object({
         process_boundary: s.boolean(), filesystem_boundary: s.boolean(),
@@ -318,6 +343,9 @@ export const providerCapabilitiesSchema = s.object({
   max_timeout_ms: s.optional(s.integer({ minimum: 1 })),
   max_memory_bytes: s.optional(s.integer({ minimum: 1 })),
   policy: s.optional(s.object({}, { additionalProperties: true })),
+  resources: s.optional(s.object({ capacity: resourceVector, available: resourceVector })),
+  /** The execution modes the provider accepts. */
+  execution: s.optional(s.object({ run: s.boolean(), jobs: s.boolean(), deployments: s.boolean() })),
   inventory: s.unknown(),
 });
 
@@ -373,6 +401,7 @@ export const placementReportSchema = s.object({
   placement_id: digest,
   outcome: s.enum(["placed", "placement_failed"] as const),
   selection_mode: selectionMode,
+  placement_policy: s.unknown(),
   requested_provider: s.optional(providerId),
   requirements: s.object({}, { additionalProperties: true }),
   selection_policy: s.object({
@@ -384,6 +413,8 @@ export const placementReportSchema = s.object({
   admission: s.object({}, { additionalProperties: true }),
   providers: s.array(s.object({}, { additionalProperties: true })),
   compatible_providers: s.array(providerId),
+  capacity_available_providers: s.optional(s.array(providerId)),
+  capacity_unavailable_providers: s.optional(s.array(providerId)),
   incompatible_providers: s.array(providerId),
   excluded_providers: s.array(providerId),
   selected: s.optional(s.object({}, { additionalProperties: true })),
@@ -569,6 +600,7 @@ const deploymentStatus = s.enum([
 const deploymentId = s.string({ pattern: "^dep_[0-9a-f]+$" });
 const deploymentSummary = s.object({
   deployment_id: deploymentId,
+  version: s.optional(s.integer({ minimum: 1 })),
   status: deploymentStatus,
   revision: s.string(),
   created_at: timestamp,
@@ -715,10 +747,30 @@ const revisionView = s.object({
   created_at: timestamp,
 });
 
+/** The caller's pool placement that chose the node for a deployment. */
+export const poolPlacement = s.object({
+  placement_id: s.string(),
+  provider_id: s.string(),
+  selection_mode: s.string(),
+});
+
+/** The portable application artifact a deployment released. */
+export const applicationArtifactEvidence = s.object({
+  artifact_id: digest,
+  url: s.optional(s.string()),
+  version: s.optional(s.string()),
+  capabilities: s.optional(s.array(s.string())),
+});
+
 const deploymentWorkload = s.object({
   name,
   kind: workloadKind,
   bundle_id: digest,
+  artifact: s.optional(s.string()),
+  runtime: s.optional(s.string()),
+  runtime_version: s.optional(s.string()),
+  resolved_runtime_version: s.optional(s.string()),
+  distribution: s.optional(s.string()),
   admitted: s.boolean(),
   policy_id: s.optional(digest),
   admission_id: s.optional(digest),
@@ -726,6 +778,8 @@ const deploymentWorkload = s.object({
   provider: s.optional(s.string()),
   reasons: s.optional(s.array(s.string())),
   endpoints: s.optional(s.array(portBinding)),
+  pool_placement: s.optional(poolPlacement),
+  application_artifact: s.optional(applicationArtifactEvidence),
 });
 
 const instanceView = s.object({
@@ -759,6 +813,7 @@ export const deploymentViewSchema = s.object({
   environment: name,
   project_id: s.string({ pattern: "^prj_[0-9a-f]+$" }),
   project: name,
+  version: s.optional(s.integer({ minimum: 1 })),
   revision_id: s.string({ pattern: "^rev_[0-9a-f]+$" }),
   revision: s.string(),
   revision_digest: digest,

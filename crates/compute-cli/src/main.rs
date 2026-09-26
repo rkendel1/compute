@@ -42,6 +42,8 @@ struct Cli {
 enum Commands {
     /// Create the smallest useful Compute application.
     Init(application::InitCommand),
+    /// Describe, pack, deploy, and operate applications.
+    Application(Box<application::ApplicationCommand>),
     Run(Box<RunCommand>),
     Bundle(BundleCommand),
     /// Create and verify portable dependency capsules.
@@ -142,6 +144,11 @@ struct ServeCommand {
     job_retention: Duration,
     #[arg(long, default_value_t = 4)]
     max_concurrent_jobs: usize,
+    /// Execution modes this server offers: `run`, `jobs` (comma-separated
+    /// or repeated). A server does not host deployments; `compute start`
+    /// does. Modes not offered are neither advertised nor accepted.
+    #[arg(long, value_delimiter = ',', default_values = ["run", "jobs"])]
+    offer: Vec<String>,
     /// Offer only these runtimes (repeatable). Withheld runtimes are neither
     /// advertised nor executed.
     #[arg(long = "allow-runtime")]
@@ -670,6 +677,7 @@ fn parse_cli() -> Cli {
 async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
     match cli.command {
         Commands::Init(command) => application::init(command)?,
+        Commands::Application(command) => application::command(*command).await?,
         Commands::Run(command) => {
             let command = *command;
             let explicit_placement = command.provider.is_some()
@@ -1442,6 +1450,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
             config.job_store = command.job_store;
             config.job_retention = command.job_retention;
             config.max_concurrent_jobs = command.max_concurrent_jobs;
+            config.execution = environment_cmd::execution_modes(&command.offer, false)?;
             compute_provider::serve(command.listen, config)
                 .await
                 .map_err(provider_error)?;
@@ -1457,7 +1466,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Stop(command) => {
             if let Some(path) = command.application.clone() {
                 application::stop(
-                    path,
+                    path.display().to_string(),
                     command.daemon.clone(),
                     command.pool.clone(),
                     command.json,
@@ -1470,7 +1479,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Status(command) => {
             if let Some(path) = command.application.clone() {
                 application::status(
-                    path,
+                    path.display().to_string(),
                     command.daemon.clone(),
                     command.pool.clone(),
                     command.json,
@@ -1488,11 +1497,11 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Workload(command) => environment_cmd::workload(command).await?,
         Commands::Execution(command) => environment_cmd::execution(command).await?,
         Commands::Deploy(command) => {
-            let path = PathBuf::from(&command.project);
-            if application::is_application(&path) {
+            if application::is_deployable(&command.project) {
                 application::deploy(
-                    path,
+                    command.project.clone(),
                     command.provider.clone(),
+                    command.env.clone(),
                     command.daemon.clone(),
                     command.pool.clone(),
                     command.json,

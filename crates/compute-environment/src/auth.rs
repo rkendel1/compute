@@ -87,6 +87,9 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
         ("GET", ["audit", ..]) | ("GET", ["auth", "credentials", ..]) => Scope::Admin,
         ("GET", _) => Scope::Read,
         ("POST", ["environments", _, "projects", _, "workloads", _, "run"]) => Scope::Execute,
+        // Runs, jobs, admission, and runtime preparation on this node as a
+        // provider.
+        ("POST", ["compute", ..]) => Scope::Execute,
         ("POST", ["projects", _, "revisions"])
         | ("POST", ["applications", _, "deployments"])
         | ("POST", ["applications", _, "rollback"])

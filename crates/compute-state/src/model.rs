@@ -380,6 +380,29 @@ pub struct DeploymentWorkload {
     /// admission are the fields above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_placement: Option<PoolPlacement>,
+    /// The portable application artifact the deployment released, when it
+    /// came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_artifact: Option<ApplicationArtifactEvidence>,
+}
+
+/// The portable application artifact (`compute.application-artifact@1`)
+/// a deployment released: its content identity, where the provider
+/// fetched it, and what it declared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationArtifactEvidence {
+    /// `sha256:` of the artifact's canonical bytes.
+    pub artifact_id: String,
+    /// The `file://` or `http(s)://` reference the provider fetched, when
+    /// the artifact was not sent inline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The developer's label for the build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 /// A caller's placement decision that sent a deployment to this node:

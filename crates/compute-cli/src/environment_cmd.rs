@@ -64,7 +64,7 @@ fn label(value: &impl serde::Serialize) -> String {
     crate::pool::enum_label(value)
 }
 
-fn parse_pair(value: &str) -> Result<(String, String), String> {
+pub(crate) fn parse_pair(value: &str) -> Result<(String, String), String> {
     value
         .split_once('=')
         .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -153,6 +153,12 @@ pub struct StartCommand {
     /// endpoint address, or the public URL's host when that is unspecified.
     #[arg(long)]
     pub application_host: Option<String>,
+    /// Execution modes this node offers to callers' pools: `run`, `jobs`,
+    /// `deployments` (comma-separated or repeated). Modes not offered are
+    /// neither advertised nor accepted, so placement never selects this
+    /// node for them.
+    #[arg(long, value_delimiter = ',', default_values = ["run", "jobs", "deployments"])]
+    pub offer: Vec<String>,
     /// Run in the background and return once the API answers.
     #[arg(long)]
     pub detach: bool,
@@ -532,6 +538,7 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
         )
     }));
     config.application_host = command.application_host.clone();
+    config.execution = execution_modes(&command.offer, true)?;
     if command.data_plane == "supervisor" {
         config.data_plane =
             Some(ensure_supervisor(&command.state_dir, config.network.endpoint_address).await?);
@@ -631,6 +638,46 @@ async fn terminated() {
 
 /// Start the daemon as a background process of this executable and wait
 /// until its API answers. No service manager is required.
+/// The execution modes named by `--offer`. Only a daemon can host
+/// deployments, and a node must offer something.
+pub fn execution_modes(
+    offer: &[String],
+    hosts_deployments: bool,
+) -> compute_core::Result<compute_provider::ExecutionModes> {
+    let mut modes = compute_provider::ExecutionModes {
+        run: false,
+        jobs: false,
+        deployments: false,
+    };
+    for mode in offer.iter().map(|mode| mode.trim()) {
+        match mode {
+            "run" => modes.run = true,
+            "jobs" => modes.jobs = true,
+            "deployments" if hosts_deployments => modes.deployments = true,
+            "deployments" => return Err(ComputeError::InvalidWorkload(
+                "a Compute server does not host deployments; start a daemon with `compute start`"
+                    .into(),
+            )),
+            other => {
+                return Err(ComputeError::InvalidWorkload(format!(
+                    "unknown execution mode `{other}`: expected run, jobs{}",
+                    if hosts_deployments {
+                        ", or deployments"
+                    } else {
+                        ""
+                    }
+                )));
+            }
+        }
+    }
+    if !(modes.run || modes.jobs || modes.deployments) {
+        return Err(ComputeError::InvalidWorkload(
+            "--offer must name at least one execution mode".into(),
+        ));
+    }
+    Ok(modes)
+}
+
 fn detach(command: &StartCommand) -> compute_core::Result<()> {
     std::fs::create_dir_all(&command.state_dir)?;
     let log = std::fs::File::create(command.state_dir.join("daemon.log"))?;
@@ -693,6 +740,7 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
     if let Some(host) = &command.application_host {
         child.arg("--application-host").arg(host);
     }
+    child.arg("--offer").arg(command.offer.join(","));
     child
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone()?)
@@ -1798,6 +1846,7 @@ pub async fn deploy(command: DeployCommand) -> compute_core::Result<()> {
         config,
         desired_state: None,
         placement: None,
+        ..DeployRequest::default()
     };
     let deployment: DeploymentView = client
         .post("/deployments", Some(&request))

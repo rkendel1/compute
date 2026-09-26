@@ -5,6 +5,18 @@ import { join, resolve } from "node:path";
 import type { Authorizer } from "@appport/authorization";
 import { createApplication, defineCapability, type AppPortApplication } from "@appport/core";
 import {
+  applicationDeployInputSchema,
+  applicationError,
+  applicationHistorySchema,
+  applicationLogsSchema,
+  applicationReleaseSchema,
+  applicationRollbackInputSchema,
+  applicationSelectorSchema,
+  applicationStatusSchema,
+  ComputeApplications,
+  type ApplicationApi,
+} from "./application.js";
+import {
   inspectInputSchema,
   inspectResultSchema,
   runInputSchema,
@@ -95,6 +107,13 @@ export interface LocalComputeProviderOptions {
   daemon?: string;
   /** Bearer token for a daemon that requires one for changes. */
   daemonToken?: string;
+  /** Application operations. Defaults to the Compute CLI over the pool. */
+  applications?: ApplicationApi;
+  /**
+   * Variables the application operations pass to Compute, such as the
+   * pool's `token_env` credentials.
+   */
+  applicationEnvironment?: Record<string, string>;
 }
 
 /** Transport-neutral provider selected by the AppPort application boundary. */
@@ -1018,6 +1037,75 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
     attributes: networkAttributes,
     handler: ({ domain }) => api(() => environments.renewCertificate(domain)),
   });
+  const applications = options.applications ?? new ComputeApplications({
+    ...(options.computeBinary ? { computeBinary: options.computeBinary } : {}),
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    ...(options.poolConfig ? { poolConfig: options.poolConfig } : {}),
+    ...(options.capabilityCache ? { capabilityCache: options.capabilityCache } : {}),
+    ...(options.applicationEnvironment ? { environment: options.applicationEnvironment } : {}),
+  });
+  const application = async (operation: () => Promise<unknown>): Promise<never> => {
+    try {
+      return (await operation()) as never;
+    } catch (error) {
+      throw applicationError(error);
+    }
+  };
+  const applicationAttributes = { "compute.contract": "1", "compute.application": "compute.application@1" };
+  const applicationDeploy = defineCapability({
+    name: "compute.application.deploy", version: 1,
+    description: "Deploy an application directory or portable artifact: placement chooses a provider that can host it, which releases a new immutable version with zero downtime and returns its identity, endpoint, and evidence.",
+    input: applicationDeployInputSchema, output: applicationReleaseSchema, effect: "consequential",
+    authorization: ["compute.application.deploy"],
+    authorizationContract: { required: true, scopes: ["compute.application.deploy"] },
+    attributes: { ...applicationAttributes, "compute.executes": true },
+    handler: (input) => application(() => applications.deploy(input)),
+  });
+  const applicationStatus = defineCapability({
+    name: "compute.application.status", version: 1,
+    description: "An application's status, the provider that hosts it, its endpoint, and the version it serves.",
+    input: applicationSelectorSchema, output: applicationStatusSchema, effect: "observation",
+    authorization: ["compute.application.read"],
+    authorizationContract: { required: true, scopes: ["compute.application.read"] },
+    attributes: { ...applicationAttributes, "compute.executes": false },
+    handler: ({ application: name }) => application(() => applications.status(name)),
+  });
+  const applicationLogs = defineCapability({
+    name: "compute.application.logs", version: 1,
+    description: "The active version's standard output and error.",
+    input: applicationSelectorSchema, output: applicationLogsSchema, effect: "observation",
+    authorization: ["compute.application.read"],
+    authorizationContract: { required: true, scopes: ["compute.application.read"] },
+    attributes: { ...applicationAttributes, "compute.executes": false },
+    handler: ({ application: name }) => application(() => applications.logs(name)),
+  });
+  const applicationHistory = defineCapability({
+    name: "compute.application.history", version: 1,
+    description: "Every version of an application, newest first, with its state and evidence.",
+    input: applicationSelectorSchema, output: applicationHistorySchema, effect: "observation",
+    authorization: ["compute.application.read"],
+    authorizationContract: { required: true, scopes: ["compute.application.read"] },
+    attributes: { ...applicationAttributes, "compute.executes": false },
+    handler: ({ application: name }) => application(() => applications.history(name)),
+  });
+  const applicationRollback = defineCapability({
+    name: "compute.application.rollback", version: 1,
+    description: "Deploy an earlier version's code and configuration again, as the next version. History is never edited.",
+    input: applicationRollbackInputSchema, output: applicationReleaseSchema, effect: "consequential",
+    authorization: ["compute.application.deploy"],
+    authorizationContract: { required: true, scopes: ["compute.application.deploy"] },
+    attributes: { ...applicationAttributes, "compute.executes": true },
+    handler: ({ application: name, version }) => application(() => applications.rollback(name, version)),
+  });
+  const applicationStop = defineCapability({
+    name: "compute.application.stop", version: 1,
+    description: "Stop serving an application. Its versions, endpoint, and evidence remain.",
+    input: applicationSelectorSchema, output: applicationStatusSchema, effect: "consequential",
+    authorization: ["compute.application.stop"],
+    authorizationContract: { required: true, scopes: ["compute.application.stop"] },
+    attributes: { ...applicationAttributes, "compute.executes": false },
+    handler: ({ application: name }) => application(() => applications.stop(name)),
+  });
   return createApplication({
     application: {
       id: "dev.compute.provider.local",
@@ -1036,6 +1124,8 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
       deploymentInspect, deploymentCreate, deploymentPromote, deploymentRollback,
       domainList, domainInspect, domainCreate, domainRemove,
       dnsInspect, dnsReconcile, certificateInspect, certificateRenew,
+      applicationDeploy, applicationStatus, applicationLogs, applicationHistory,
+      applicationRollback, applicationStop,
     ],
     ...(options.authorizer ? { authorizer: options.authorizer } : {}),
     mode: options.mode ?? "development",

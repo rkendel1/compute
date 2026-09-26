@@ -121,6 +121,9 @@ pub struct DaemonConfig {
     /// endpoint address, or, when that is unspecified (`0.0.0.0`), the
     /// public URL's host.
     pub application_host: Option<String>,
+    /// What this node offers callers: on-request runs, durable jobs, and
+    /// application deployments. All three by default.
+    pub execution: compute_provider::ExecutionModes,
 }
 
 impl DaemonConfig {
@@ -150,6 +153,11 @@ impl DaemonConfig {
             require_state_at_start: false,
             public_url: None,
             application_host: None,
+            execution: compute_provider::ExecutionModes {
+                run: true,
+                jobs: true,
+                deployments: true,
+            },
         }
     }
 }
@@ -621,6 +629,9 @@ impl TerminalLog {
 
 pub struct Daemon {
     config: DaemonConfig,
+    /// This node as a `compute.remote@1` provider, on the same runtime
+    /// substrate its deployments use. Present when it has a public URL.
+    remote: Option<Arc<compute_provider::RemoteService>>,
     control: ControlState,
     instance_id: String,
     started_at: DateTime<Utc>,
@@ -865,8 +876,31 @@ impl Daemon {
         let (shutdown, _) = tokio::sync::watch::channel(false);
         let (stopped, _) = tokio::sync::watch::channel(false);
         let (events, _) = broadcast::channel(1024);
+        let remote = match &config.public_url {
+            Some(url) => {
+                let mut server = compute_provider::ServerConfig::local(url.clone());
+                server.provider = Arc::new(config.provider.sharing_runtimes(
+                    compute_core::ProviderIdentity::Remote {
+                        id: url.clone(),
+                        endpoint: url.clone(),
+                    },
+                ));
+                // The daemon authenticates and authorizes every request
+                // before it reaches the service.
+                server.authorizer = Arc::new(compute_provider::AllowAllAuthorizer);
+                server.job_store = config.state_dir.join("jobs");
+                server.execution = config.execution;
+                Some(Arc::new(
+                    compute_provider::RemoteService::new(server)
+                        .await
+                        .map_err(|error| EnvironmentError::RuntimeUnavailable(error.to_string()))?,
+                ))
+            }
+            None => None,
+        };
         let daemon = Arc::new(Self {
             config,
+            remote,
             control,
             instance_id,
             started_at,

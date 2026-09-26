@@ -128,6 +128,7 @@ async fn three_hundred_projects() {
                 config: Some(BTreeMap::new()),
                 desired_state: Some(DesiredState::Running),
                 placement: None,
+                ..DeployRequest::default()
             })
             .await
             .unwrap();

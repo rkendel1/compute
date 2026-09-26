@@ -239,6 +239,20 @@ impl Daemon {
             .clone()
             .or_else(|| membership.as_ref().map(|m| m.value.config.clone()))
             .unwrap_or_default();
+        let missing = request
+            .required_config
+            .iter()
+            .filter(|name| {
+                !config.contains_key(*name) && !environment.value.config.contains_key(*name)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(EnvironmentError::Invalid(format!(
+                "{project} requires configuration it was not given: {}",
+                missing.join(", ")
+            )));
+        }
         let previous = membership
             .as_ref()
             .and_then(|membership| membership.value.deployment_id.clone());
@@ -280,37 +294,37 @@ impl Daemon {
             status: DeploymentStatus::Pending,
             promoted_from: promoted_from.clone(),
             previous: previous.clone(),
-            // The caller's pool placement is evidence from the start; the
-            // release adds this node's own admission and placement to it.
-            workloads: request
-                .placement
-                .as_ref()
-                .map(|placement| {
-                    revision
-                        .value
-                        .workloads
-                        .iter()
-                        .map(|workload| DeploymentWorkload {
-                            name: workload.name.clone(),
-                            kind: workload.kind,
-                            bundle_id: workload.bundle_id.clone(),
-                            artifact: workload.artifact.clone(),
-                            runtime: workload.runtime.clone(),
-                            runtime_version: workload.runtime_version.clone(),
-                            resolved_runtime_version: None,
-                            distribution: workload.distribution.clone(),
-                            admitted: false,
-                            policy_id: None,
-                            admission_id: None,
-                            placement_id: None,
-                            provider: None,
-                            reasons: vec![],
-                            endpoints: vec![],
-                            pool_placement: Some(placement.clone()),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
+            // The caller's pool placement and the artifact are evidence
+            // from the start; the release adds this node's own admission
+            // and placement to it.
+            workloads: if request.placement.is_some() || request.artifact.is_some() {
+                revision
+                    .value
+                    .workloads
+                    .iter()
+                    .map(|workload| DeploymentWorkload {
+                        name: workload.name.clone(),
+                        kind: workload.kind,
+                        bundle_id: workload.bundle_id.clone(),
+                        artifact: workload.artifact.clone(),
+                        runtime: workload.runtime.clone(),
+                        runtime_version: workload.runtime_version.clone(),
+                        resolved_runtime_version: None,
+                        distribution: workload.distribution.clone(),
+                        admitted: false,
+                        policy_id: None,
+                        admission_id: None,
+                        placement_id: None,
+                        provider: None,
+                        reasons: vec![],
+                        endpoints: vec![],
+                        pool_placement: request.placement.clone(),
+                        application_artifact: request.artifact.clone(),
+                    })
+                    .collect()
+            } else {
+                vec![]
+            },
             failure: None,
             receipt_ids: vec![],
             old_revision: old_revision.clone(),
@@ -471,6 +485,12 @@ impl Daemon {
                             config: Some(super::execute::run_config(&previous.value, None)),
                             desired_state: None,
                             placement: None,
+                            artifact: previous
+                                .value
+                                .workloads
+                                .iter()
+                                .find_map(|workload| workload.application_artifact.clone()),
+                            required_config: Default::default(),
                         },
                         None,
                         json!({ "rollback_of": deployment_id }),
@@ -561,6 +581,7 @@ impl Daemon {
                     config: request.config.clone(),
                     desired_state: None,
                     placement: None,
+                    ..DeployRequest::default()
                 },
                 Some(source_id.clone()),
                 json!({}),
@@ -612,6 +633,7 @@ impl Daemon {
                 config: Some(definition.env.clone()),
                 desired_state: Some(definition.desired_state),
                 placement: None,
+                ..DeployRequest::default()
             })
             .await?;
         let deployment = self

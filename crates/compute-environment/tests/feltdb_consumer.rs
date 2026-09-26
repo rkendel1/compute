@@ -1050,6 +1050,7 @@ async fn benchmark() {
                             config: Some(BTreeMap::new()),
                             desired_state: Some(DesiredState::Running),
                             placement: None,
+                            ..DeployRequest::default()
                         })
                         .await
                         .unwrap();
@@ -1232,6 +1233,7 @@ async fn diagnose_a_release() {
             config: Some(BTreeMap::new()),
             desired_state: Some(DesiredState::Running),
             placement: None,
+            ..DeployRequest::default()
         })
         .await
         .unwrap();

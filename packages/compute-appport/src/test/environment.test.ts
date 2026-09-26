@@ -48,7 +48,7 @@ function envelope(capability: string, input: unknown) {
 }
 
 function output<T>(response: AppResponse): T {
-  assert.equal(response.ok, true, response.ok ? undefined : response.error.message);
+  assert.equal(response.ok, true, response.ok ? undefined : `${response.error.message} ${JSON.stringify(response.error.details ?? {}).slice(0, 1500)}`);
   return response.output as T;
 }
 
@@ -119,7 +119,7 @@ test("environment capabilities drive the daemon through the Compute API", async 
     await rm(root, { recursive: true, force: true });
   });
   const endpoint = `http://127.0.0.1:${port}`;
-  await waitFor(new ComputeDaemonClient({ endpoint }));
+  await waitFor(new ComputeDaemonClient({ endpoint, token: "secret" }));
   const app = createComputeApplication({
     computeBinary, daemon: endpoint, daemonToken: "secret", authorizer: permissionAuthorizer(),
   });
@@ -271,5 +271,5 @@ test("environment capabilities drive the daemon through the Compute API", async 
     envelope("compute.environment.create", { name: "other" }), { session: all },
   );
   assert.equal(refused.ok, false);
-  assert.match(refused.ok ? "" : refused.error.message, /bearer token/);
+  assert.match(refused.ok ? "" : refused.error.message, /requires a credential/);
 });

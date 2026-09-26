@@ -328,12 +328,40 @@ pub struct ProviderCapabilities {
     /// intersect it with theirs; the provider enforces it regardless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<Policy>,
-    /// Whether the provider hosts durable application deployments: a
-    /// Compute daemon that owns revisions, releases, endpoints, and their
-    /// evidence. A provider that only executes workloads does not.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub application_deployments: bool,
+    /// What the provider accepts: on-request runs, durable jobs, and
+    /// application deployments. Every current provider reports it; see
+    /// [`ProviderCapabilities::execution_modes`] for payloads that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionModes>,
     pub inventory: RuntimeInventory,
+}
+
+/// The submissions a provider accepts. Placement matches each submission
+/// mode against exactly one of these, so a provider is never selected for
+/// something it would then refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionModes {
+    /// Runs a workload on request and returns its result (`compute run`).
+    pub run: bool,
+    /// Accepts durable jobs (`compute pool submit`, `compute remote submit`).
+    pub jobs: bool,
+    /// Hosts application deployments: revisions, releases, a stable
+    /// endpoint, and their evidence (`compute deploy`).
+    pub deployments: bool,
+}
+
+impl ProviderCapabilities {
+    /// The execution modes this provider accepts. A payload from a provider
+    /// that predates `execution` ran workloads on request, accepted jobs
+    /// exactly when it reported job capacity, and hosted no deployments.
+    pub fn execution_modes(&self) -> ExecutionModes {
+        self.execution.unwrap_or(ExecutionModes {
+            run: true,
+            jobs: self.max_concurrent_jobs.is_some(),
+            deployments: false,
+        })
+    }
 }
 
 /// Operator-configured restriction of what a provider offers. A restricted
@@ -624,9 +652,8 @@ pub trait ComputeProvider: Send + Sync {
 pub struct LocalProvider {
     compute: Compute,
     runtimes: RuntimeManager,
-    /// Whether this node hosts durable application deployments: a Compute
-    /// daemon runs (or is started) here to own them.
-    application_deployments: bool,
+    /// What this provider accepts, as it advertises it.
+    execution: ExecutionModes,
     identity: ProviderIdentity,
     policy: ProviderPolicy,
     execution_policy: RwLock<Option<Policy>>,
@@ -661,7 +688,24 @@ impl LocalProvider {
         Self::with_identity_and_catalog(self.identity.clone(), catalog)
             .with_policy(self.policy)
             .with_execution_policy(execution_policy)
-            .with_application_deployments(self.application_deployments)
+            .with_execution_modes(self.execution)
+    }
+
+    /// This provider's configuration and runtime store under another
+    /// identity: the same node, as a remote caller addresses it. Runtimes
+    /// prepared by either are ready for both.
+    pub fn sharing_runtimes(&self, identity: ProviderIdentity) -> Self {
+        let runtimes = self.runtimes.sharing();
+        let compute = Compute::with_distribution_root(runtimes.root().to_path_buf());
+        Self {
+            compute,
+            runtimes,
+            execution: self.execution,
+            identity,
+            policy: self.policy.clone(),
+            execution_policy: RwLock::new(self.execution_policy()),
+            executions_started: AtomicU64::new(0),
+        }
     }
 
     fn with_identity_and_catalog(identity: ProviderIdentity, catalog: RuntimeCatalog) -> Self {
@@ -671,7 +715,11 @@ impl LocalProvider {
         Self {
             compute,
             runtimes,
-            application_deployments: false,
+            execution: ExecutionModes {
+                run: true,
+                jobs: false,
+                deployments: false,
+            },
             identity,
             policy: ProviderPolicy::default(),
             execution_policy: RwLock::new(None),
@@ -679,9 +727,10 @@ impl LocalProvider {
         }
     }
 
-    /// Advertise that this node hosts durable application deployments.
-    pub fn with_application_deployments(mut self, hosted: bool) -> Self {
-        self.application_deployments = hosted;
+    /// What this provider advertises it accepts. In process it runs
+    /// workloads; a node whose daemon hosts deployments also says so.
+    pub fn with_execution_modes(mut self, modes: ExecutionModes) -> Self {
+        self.execution = modes;
         self
     }
 
@@ -1161,6 +1210,11 @@ impl ComputeProvider for LocalProvider {
     }
 
     async fn capabilities(&self) -> Result<ProviderCapabilities, ProviderError> {
+        // One coherent view of the runtime store: the distribution
+        // identity, inventory, lifecycle, and artifact identities below
+        // all describe the same prepared state, even while another
+        // process prepares a runtime in it.
+        let _snapshot = self.runtimes.read_snapshot();
         let distribution = self
             .compute
             .installed_distribution_identity()
@@ -1262,7 +1316,7 @@ impl ComputeProvider for LocalProvider {
             max_memory_bytes: self.policy.max_memory_bytes,
             resources: provider_resources(&self.policy),
             policy: self.execution_policy(),
-            application_deployments: self.application_deployments,
+            execution: Some(self.execution),
             inventory,
         })
     }
@@ -1338,6 +1392,7 @@ impl ComputeProvider for LocalProvider {
     }
 }
 
+#[derive(Clone)]
 pub struct RemoteProvider {
     endpoint: String,
     authorization: Option<String>,
@@ -1701,6 +1756,9 @@ pub struct ServerConfig {
     pub job_store: std::path::PathBuf,
     pub job_retention: std::time::Duration,
     pub max_concurrent_jobs: usize,
+    /// What this endpoint accepts. `compute serve` runs workloads and
+    /// durable jobs; a daemon also hosts deployments, and may offer less.
+    pub execution: ExecutionModes,
 }
 
 impl ServerConfig {
@@ -1737,6 +1795,11 @@ impl ServerConfig {
             job_store: std::env::temp_dir().join(format!("compute-jobs-{store_id}")),
             job_retention: std::time::Duration::from_secs(7 * 24 * 60 * 60),
             max_concurrent_jobs: 4,
+            execution: ExecutionModes {
+                run: true,
+                jobs: true,
+                deployments: false,
+            },
         }
     }
 }
@@ -1755,206 +1818,276 @@ pub async fn serve_listener(
     listener: TcpListener,
     config: ServerConfig,
 ) -> Result<(), ProviderError> {
-    let advertised = config.provider.capabilities().await?;
-    let capacity = compute_core::ProviderCapacity {
-        cpu_millis: advertised
-            .resources
-            .capacity
-            .cpu_count
-            .saturating_mul(1_000),
-        memory_bytes: advertised.resources.capacity.memory_bytes,
-        disk_bytes: advertised.resources.capacity.disk_bytes,
-        max_concurrency: u32::try_from(config.max_concurrent_jobs.max(1)).unwrap_or(u32::MAX),
-    };
-    let jobs = JobManager::new(
-        config.job_store.clone(),
-        config.job_retention,
-        capacity,
-        config.provider.clone(),
-    )?;
-    let state = Arc::new(ServerState { config, jobs });
+    let limit = config.max_request_bytes;
+    let service = Arc::new(RemoteService::new(config).await?);
     loop {
         let (stream, _) = listener.accept().await.map_err(transport_error)?;
-        let state = state.clone();
+        let service = service.clone();
         tokio::spawn(async move {
-            let _ = handle_connection(stream, state).await;
+            let _ = handle_connection(stream, service, limit).await;
         });
     }
 }
 
 async fn handle_connection(
     mut stream: TcpStream,
-    state: Arc<ServerState>,
+    service: Arc<RemoteService>,
+    limit: usize,
 ) -> Result<(), ProviderError> {
-    let request = match read_http_request(&mut stream, state.config.max_request_bytes).await {
+    let request = match read_http_request(&mut stream, limit).await {
         Ok(request) => request,
         Err(error) => {
             let status = error_status(error.kind);
             return write_error(&mut stream, status, error).await;
         }
     };
-    let route = match parse_route(&request.method, &request.path) {
-        Ok(route) => route,
-        Err(error) => return write_error(&mut stream, error_status(error.kind), error).await,
-    };
-    let Some((operation, job_id)) = route else {
-        return write_error(
-            &mut stream,
-            404,
-            ProviderError::new(
-                ProviderErrorKind::ProtocolUnsupported,
-                "unknown provider endpoint",
-            ),
+    let (status, body) = service
+        .handle(
+            &request.method,
+            &request.path,
+            &request.headers,
+            &request.body,
         )
         .await;
-    };
-    let protocol = request
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("x-compute-protocol"))
-        .map(|(_, value)| value.as_str());
-    if protocol != Some(REMOTE_PROTOCOL) {
-        return write_error(
-            &mut stream,
-            426,
-            ProviderError::new(
-                ProviderErrorKind::ProtocolUnsupported,
-                format!("expected X-Compute-Protocol: {REMOTE_PROTOCOL}"),
+    write_response(&mut stream, status, &body).await
+}
+
+/// The `compute.remote@1` service: one request in, one status and JSON body
+/// out. `compute serve` puts it behind its own listener; a Compute daemon
+/// serves it under `/compute/` beside its own API, on the same provider it
+/// deploys applications with, so a node has one execution substrate.
+pub struct RemoteService {
+    state: Arc<ServerState>,
+}
+
+impl RemoteService {
+    pub async fn new(config: ServerConfig) -> Result<Self, ProviderError> {
+        let advertised = config.provider.capabilities().await?;
+        let capacity = compute_core::ProviderCapacity {
+            cpu_millis: advertised
+                .resources
+                .capacity
+                .cpu_count
+                .saturating_mul(1_000),
+            memory_bytes: advertised.resources.capacity.memory_bytes,
+            disk_bytes: advertised.resources.capacity.disk_bytes,
+            max_concurrency: u32::try_from(config.max_concurrent_jobs.max(1)).unwrap_or(u32::MAX),
+        };
+        let jobs = JobManager::new(
+            config.job_store.clone(),
+            config.job_retention,
+            capacity,
+            config.provider.clone(),
+        )?;
+        Ok(Self {
+            state: Arc::new(ServerState { config, jobs }),
+        })
+    }
+
+    /// Whether `path` belongs to this protocol.
+    pub fn serves(path: &str) -> bool {
+        path == "/compute" || path.starts_with("/compute/")
+    }
+
+    /// Handle one request.
+    pub async fn handle(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> (u16, Vec<u8>) {
+        match self.respond(method, path, headers, body).await {
+            Ok(body) => (200, body),
+            Err((status, error)) => (
+                status,
+                serde_json::to_vec(&error).unwrap_or_else(|_| b"{}".to_vec()),
             ),
-        )
-        .await;
-    }
-    let authorization = request
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
-        .map(|(_, value)| value.as_str());
-    if let Err(error) = state
-        .config
-        .authorizer
-        .authorize(operation, authorization)
-        .await
-    {
-        return write_error(&mut stream, 401, error).await;
-    }
-    let owner = match state.config.authorizer.owner(authorization).await {
-        Ok(owner) => owner,
-        Err(error) => return write_error(&mut stream, 401, error).await,
-    };
-    let result = match operation {
-        ProviderOperation::EnvironmentRead | ProviderOperation::EnvironmentMutate => {
-            Err(ProviderError::new(
-                ProviderErrorKind::ProtocolUnsupported,
-                "environment operations are served by the Compute daemon",
-            ))
         }
-        ProviderOperation::Health => encode_result(state.config.provider.health().await),
-        ProviderOperation::Capabilities => match state.config.provider.capabilities().await {
-            Ok(mut value) => match state.jobs.capacity_snapshot().await {
-                Ok(snapshot) => {
-                    value.max_concurrent_jobs = Some(u64::from(snapshot.capacity.max_concurrency));
-                    value.available_concurrent_jobs =
-                        Some(u64::from(snapshot.available.concurrency));
-                    value.job_retention_seconds = Some(state.config.job_retention.as_secs());
-                    value.resources.available = ResourceVector {
-                        cpu_count: snapshot.available.cpu_millis / 1_000,
-                        memory_bytes: snapshot.available.memory_bytes,
-                        disk_bytes: snapshot.available.disk_bytes,
-                    };
-                    value.reserved_resources = Some(ResourceVector {
-                        cpu_count: snapshot.reserved.cpu_millis / 1_000,
-                        memory_bytes: snapshot.reserved.memory_bytes,
-                        disk_bytes: snapshot.reserved.disk_bytes,
-                    });
-                    encode_result(Ok(value))
+    }
+
+    async fn respond(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Vec<u8>, (u16, ProviderError)> {
+        let failed = |error: ProviderError| (error_status(error.kind), error);
+        let Some((operation, job_id)) = parse_route(method, path).map_err(failed)? else {
+            return Err((
+                404,
+                ProviderError::new(
+                    ProviderErrorKind::ProtocolUnsupported,
+                    "unknown provider endpoint",
+                ),
+            ));
+        };
+        if header_value(headers, "x-compute-protocol") != Some(REMOTE_PROTOCOL) {
+            return Err((
+                426,
+                ProviderError::new(
+                    ProviderErrorKind::ProtocolUnsupported,
+                    format!("expected X-Compute-Protocol: {REMOTE_PROTOCOL}"),
+                ),
+            ));
+        }
+        // An endpoint accepts exactly the submissions it advertises.
+        let modes = self.state.config.execution;
+        let (offered, submission) = match operation {
+            ProviderOperation::Execute => (modes.run, "on-request execution"),
+            ProviderOperation::Submit
+            | ProviderOperation::Jobs
+            | ProviderOperation::Status
+            | ProviderOperation::Result
+            | ProviderOperation::Receipt
+            | ProviderOperation::Artifacts
+            | ProviderOperation::Cancel
+            | ProviderOperation::Events
+            | ProviderOperation::Logs => (modes.jobs, "durable jobs"),
+            _ => (true, ""),
+        };
+        if !offered {
+            return Err(failed(ProviderError::new(
+                ProviderErrorKind::CapabilityMismatch,
+                format!("this provider does not accept {submission}"),
+            )));
+        }
+        let authorization = header_value(headers, "authorization");
+        self.state
+            .config
+            .authorizer
+            .authorize(operation, authorization)
+            .await
+            .map_err(|error| (401, error))?;
+        let owner = self
+            .state
+            .config
+            .authorizer
+            .owner(authorization)
+            .await
+            .map_err(|error| (401, error))?;
+        let result = match operation {
+            ProviderOperation::EnvironmentRead | ProviderOperation::EnvironmentMutate => {
+                Err(ProviderError::new(
+                    ProviderErrorKind::ProtocolUnsupported,
+                    "environment operations are served by the Compute daemon",
+                ))
+            }
+            ProviderOperation::Health => encode_result(self.state.config.provider.health().await),
+            ProviderOperation::Capabilities => {
+                match self.state.config.provider.capabilities().await {
+                    Ok(mut value) => match self.state.jobs.capacity_snapshot().await {
+                        Ok(snapshot) => {
+                            value.max_concurrent_jobs =
+                                Some(u64::from(snapshot.capacity.max_concurrency));
+                            value.available_concurrent_jobs =
+                                Some(u64::from(snapshot.available.concurrency));
+                            value.job_retention_seconds =
+                                Some(self.state.config.job_retention.as_secs());
+                            value.execution = Some(self.state.config.execution);
+                            value.resources.available = ResourceVector {
+                                cpu_count: snapshot.available.cpu_millis / 1_000,
+                                memory_bytes: snapshot.available.memory_bytes,
+                                disk_bytes: snapshot.available.disk_bytes,
+                            };
+                            value.reserved_resources = Some(ResourceVector {
+                                cpu_count: snapshot.reserved.cpu_millis / 1_000,
+                                memory_bytes: snapshot.reserved.memory_bytes,
+                                disk_bytes: snapshot.reserved.disk_bytes,
+                            });
+                            encode_result(Ok(value))
+                        }
+                        Err(error) => Err(error),
+                    },
+                    Err(error) => Err(error),
+                }
+            }
+            ProviderOperation::Capacity => encode_result(self.state.jobs.capacity_snapshot().await),
+            ProviderOperation::RuntimeResolve => match decode(body) {
+                Ok(value) => encode_result(self.state.config.provider.resolve_runtime(value).await),
+                Err(error) => Err(error),
+            },
+            ProviderOperation::RuntimePrepare => match decode(body) {
+                Ok(value) => encode_result(self.state.config.provider.prepare_runtime(value).await),
+                Err(error) => Err(error),
+            },
+            ProviderOperation::RuntimeStatus => match decode(body) {
+                Ok(value) => encode_result(self.state.config.provider.runtime_status(value).await),
+                Err(error) => Err(error),
+            },
+            ProviderOperation::Inspect => match decode_provider_request(body) {
+                Ok(value) => encode_result(self.state.config.provider.inspect(value).await),
+                Err(error) => Err(error),
+            },
+            ProviderOperation::Admission => match decode_provider_request(body) {
+                Ok(value) => encode_result(self.state.config.provider.admit(value).await),
+                Err(error) => Err(error),
+            },
+            ProviderOperation::Execute => match decode_provider_request(body) {
+                Ok(value) => encode_result(self.state.config.provider.execute(value).await),
+                Err(error) => Err(error),
+            },
+            ProviderOperation::Submit => match decode_provider_request(body) {
+                Ok(value) => {
+                    let key = header_value(headers, "idempotency-key");
+                    encode_result(self.state.jobs.submit(value, owner, key).await)
                 }
                 Err(error) => Err(error),
             },
-            Err(error) => Err(error),
-        },
-        ProviderOperation::Capacity => encode_result(state.jobs.capacity_snapshot().await),
-        ProviderOperation::RuntimeResolve => match decode(&request.body) {
-            Ok(value) => encode_result(state.config.provider.resolve_runtime(value).await),
-            Err(error) => Err(error),
-        },
-        ProviderOperation::RuntimePrepare => match decode(&request.body) {
-            Ok(value) => encode_result(state.config.provider.prepare_runtime(value).await),
-            Err(error) => Err(error),
-        },
-        ProviderOperation::RuntimeStatus => match decode(&request.body) {
-            Ok(value) => encode_result(state.config.provider.runtime_status(value).await),
-            Err(error) => Err(error),
-        },
-        ProviderOperation::Inspect => match decode_provider_request(&request.body) {
-            Ok(value) => encode_result(state.config.provider.inspect(value).await),
-            Err(error) => Err(error),
-        },
-        ProviderOperation::Admission => match decode_provider_request(&request.body) {
-            Ok(value) => encode_result(state.config.provider.admit(value).await),
-            Err(error) => Err(error),
-        },
-        ProviderOperation::Execute => match decode_provider_request(&request.body) {
-            Ok(value) => encode_result(state.config.provider.execute(value).await),
-            Err(error) => Err(error),
-        },
-        ProviderOperation::Submit => match decode_provider_request(&request.body) {
-            Ok(value) => {
-                let key = header(&request, "idempotency-key");
-                encode_result(state.jobs.submit(value, owner, key).await)
-            }
-            Err(error) => Err(error),
-        },
-        ProviderOperation::Jobs => encode_result(state.jobs.list(&owner).await),
-        ProviderOperation::Status => encode_result(
-            state
-                .jobs
-                .status(job_id.as_ref().expect("job route"), &owner)
-                .await,
-        ),
-        ProviderOperation::Result => encode_result(
-            state
-                .jobs
-                .result(job_id.as_ref().expect("job route"), &owner)
-                .await,
-        ),
-        ProviderOperation::Receipt => encode_result(
-            state
-                .jobs
-                .receipt(job_id.as_ref().expect("job route"), &owner)
-                .await,
-        ),
-        ProviderOperation::Artifacts => encode_result(
-            state
-                .jobs
-                .artifacts(job_id.as_ref().expect("job route"), &owner)
-                .await,
-        ),
-        ProviderOperation::Cancel => encode_result(
-            state
-                .jobs
-                .cancel(job_id.as_ref().expect("job route"), &owner)
-                .await,
-        ),
-        ProviderOperation::Events => encode_result(
-            state
-                .jobs
-                .events(job_id.as_ref().expect("job route"), &owner)
-                .await,
-        ),
-        ProviderOperation::Logs => encode_result(
-            state
-                .jobs
-                .logs(job_id.as_ref().expect("job route"), &owner)
-                .await,
-        ),
-    };
-    match result {
-        Ok(body) => write_response(&mut stream, 200, &body).await,
-        Err(error) => {
-            let status = error_status(error.kind);
-            write_error(&mut stream, status, error).await
-        }
+            ProviderOperation::Jobs => encode_result(self.state.jobs.list(&owner).await),
+            ProviderOperation::Status => encode_result(
+                self.state
+                    .jobs
+                    .status(job_id.as_ref().expect("job route"), &owner)
+                    .await,
+            ),
+            ProviderOperation::Result => encode_result(
+                self.state
+                    .jobs
+                    .result(job_id.as_ref().expect("job route"), &owner)
+                    .await,
+            ),
+            ProviderOperation::Receipt => encode_result(
+                self.state
+                    .jobs
+                    .receipt(job_id.as_ref().expect("job route"), &owner)
+                    .await,
+            ),
+            ProviderOperation::Artifacts => encode_result(
+                self.state
+                    .jobs
+                    .artifacts(job_id.as_ref().expect("job route"), &owner)
+                    .await,
+            ),
+            ProviderOperation::Cancel => encode_result(
+                self.state
+                    .jobs
+                    .cancel(job_id.as_ref().expect("job route"), &owner)
+                    .await,
+            ),
+            ProviderOperation::Events => encode_result(
+                self.state
+                    .jobs
+                    .events(job_id.as_ref().expect("job route"), &owner)
+                    .await,
+            ),
+            ProviderOperation::Logs => encode_result(
+                self.state
+                    .jobs
+                    .logs(job_id.as_ref().expect("job route"), &owner)
+                    .await,
+            ),
+        };
+        result.map_err(failed)
     }
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
 }
 
 fn parse_route(
@@ -2003,14 +2136,6 @@ fn parse_route(
         _ => return Ok(None),
     };
     Ok(Some((operation, Some(job_id))))
-}
-
-fn header<'a>(request: &'a HttpRequest, name: &str) -> Option<&'a str> {
-    request
-        .headers
-        .iter()
-        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
 }
 
 fn encode_result<T: Serialize>(result: Result<T, ProviderError>) -> Result<Vec<u8>, ProviderError> {

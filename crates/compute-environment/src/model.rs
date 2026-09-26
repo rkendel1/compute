@@ -7,7 +7,7 @@
 //! Durable records live in `compute-state`; this module defines what
 //! clients submit and the live states the daemon observes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use compute_policy::Policy;
 use serde::{Deserialize, Serialize};
@@ -160,6 +160,14 @@ pub struct DeployRequest {
     /// evidence with the release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<compute_state::PoolPlacement>,
+    /// The application artifact the release comes from, recorded as
+    /// evidence with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<compute_state::ApplicationArtifactEvidence>,
+    /// Configuration the release needs. It is refused, before anything is
+    /// recorded, when the resolved configuration lacks one of these names.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub required_config: BTreeSet<String>,
 }
 
 /// Deploy the exact revision current in one environment to another.
@@ -288,17 +296,45 @@ pub fn validate_revision_label(revision: &str) -> Result<(), EnvironmentError> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplicationDeployRequest {
-    /// The canonical `.compute` bundle of the application.
-    #[serde(with = "compute_core::bytes_json")]
+    /// The application as a portable artifact
+    /// (`compute.application-artifact@1`), inline or by reference. Its
+    /// manifest supplies the port and the environment contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ApplicationArtifactSource>,
+    /// Or: the canonical `.compute` bundle of the application, with `port`.
+    #[serde(
+        default,
+        with = "compute_core::bytes_json",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub bundle: Vec<u8>,
     /// The port the application listens on (it is also given `PORT`).
-    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// The application's configuration (its environment), replacing the
+    /// current one. Omitted, the current configuration is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
     /// Where the source came from, for people reading history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// The caller's pool placement that chose this node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<compute_state::PoolPlacement>,
+}
+
+/// Where a provider gets an application artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ApplicationArtifactSource {
+    /// The artifact's bytes, sent with the request.
+    Inline {
+        #[serde(with = "compute_core::bytes_json")]
+        data: Vec<u8>,
+    },
+    /// A `file://` path on the provider or an `http(s)://` URL, and the
+    /// digest the fetched bytes must have.
+    Reference(compute_core::ArtifactReference),
 }
 
 /// Deploy an earlier version again, as the next version: `POST

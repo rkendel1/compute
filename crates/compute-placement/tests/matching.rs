@@ -407,7 +407,7 @@ fn deployment_requires_a_provider_that_hosts_deployments() {
         codes(&requirements, &jobs_only),
         [ReasonCode::DeploymentUnsupported]
     );
-    assert_eq!(ReasonCode::DeploymentUnsupported.dimension(), "deployment");
+    assert_eq!(ReasonCode::DeploymentUnsupported.dimension(), "execution");
     assert!(match_provider(&requirements, &hosting).compatible);
     // Hosting deployments changes nothing for other submissions.
     requirements.artifact.submission = SubmissionMode::Synchronous;
@@ -422,6 +422,52 @@ fn job_submission_requires_a_job_capable_provider() {
     assert!(match_provider(&requirements, &local).compatible);
     requirements.artifact.submission = SubmissionMode::Job;
     assert_eq!(codes(&requirements, &local), [ReasonCode::JobsUnsupported]);
+}
+
+#[test]
+fn every_submission_mode_is_matched_against_the_offered_execution_modes() {
+    // A deployment-only provider (a daemon that offers only deployments)
+    // is rejected for run and job submissions, and the reason names the
+    // required mode and every mode the provider offers.
+    let mut deployment_only = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Python]);
+    deployment_only.run = false;
+    deployment_only.jobs = false;
+    deployment_only.deployments = true;
+    let deployment_only = deployment_only.descriptor("deployment-only");
+    let mut requirements = requirements(RuntimeKind::Python);
+    for (mode, code, required) in [
+        (
+            SubmissionMode::Synchronous,
+            ReasonCode::RunUnsupported,
+            "run",
+        ),
+        (SubmissionMode::Job, ReasonCode::JobsUnsupported, "jobs"),
+    ] {
+        requirements.artifact.submission = mode;
+        let matched = match_provider(&requirements, &deployment_only);
+        assert!(!matched.compatible);
+        assert_eq!(matched.reasons.len(), 1, "{:?}", matched.reasons);
+        let reason = &matched.reasons[0];
+        assert_eq!(reason.code, code);
+        assert_eq!(reason.dimension, "execution");
+        assert_eq!(reason.required, serde_json::json!(required));
+        assert_eq!(reason.available, serde_json::json!(["deployments"]));
+    }
+    requirements.artifact.submission = SubmissionMode::Deployment;
+    assert!(match_provider(&requirements, &deployment_only).compatible);
+
+    // Offering all three modes satisfies every submission.
+    let mut all = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Python]);
+    all.deployments = true;
+    let all = all.descriptor("all");
+    for mode in [
+        SubmissionMode::Synchronous,
+        SubmissionMode::Job,
+        SubmissionMode::Deployment,
+    ] {
+        requirements.artifact.submission = mode;
+        assert!(match_provider(&requirements, &all).compatible, "{mode:?}");
+    }
 }
 
 #[test]

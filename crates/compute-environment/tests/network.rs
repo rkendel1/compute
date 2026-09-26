@@ -140,6 +140,7 @@ async fn released(daemon: &Arc<Daemon>, environment: &str, revision: &str) {
             config: None,
             desired_state: None,
             placement: None,
+            ..DeployRequest::default()
         })
         .await
         .unwrap();

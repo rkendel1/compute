@@ -41,6 +41,15 @@ compute history my-app
 compute stop my-app
 ```
 
+An application also travels as one portable artifact, which a provider
+fetches and verifies itself; agents do the same through AppPort
+(`compute.application.*`):
+
+```sh
+compute application pack my-app --output my-app.capp
+compute application deploy https://artifacts.example/my-app.capp --json
+```
+
 See [docs/applications.md](docs/applications.md) and the
 [HTTP demo](examples/compute-demo/).
 

@@ -126,7 +126,8 @@ value, and the available value:
 | isolation | `isolation_unsupported` (with the failing boundary, such as `filesystem_isolation_unavailable`) |
 | network | `network_unsupported` |
 | resources | `cpu_unavailable`, `memory_unavailable`, `disk_unavailable`, `timeout_unenforceable`, `timeout_exceeds_limit`, `memory_unenforceable`, `memory_exceeds_limit`, `cpu_limit_unenforceable`, `process_limit_unenforceable`, `output_limit_unenforceable` |
-| artifact | `artifact_mode_unsupported`, `artifact_too_large`, `output_exceeds_limit`, `jobs_unsupported` |
+| artifact | `artifact_mode_unsupported`, `artifact_too_large`, `output_exceeds_limit` |
+| execution | `run_unsupported`, `jobs_unsupported`, `deployment_unsupported`: the provider does not offer the submission's mode (its `execution` capability); `required` names the mode and `available` lists what it offers |
 
 Runtime isolation is resolved by the same function execution uses, so
 placement never admits a request that execution would reject.
@@ -266,8 +267,11 @@ prefer_provider = "remote-dev"
 
 CLI placement flags override these defaults.
 
-`pool submit` requires a job-capable provider. The local provider has no
-durable jobs, so it is `incompatible` with `jobs_unsupported`. The output
+Every submission requires a provider that offers its mode: `pool run` a
+provider that offers `run`, `pool submit` one that offers `jobs`, and
+`compute deploy` one that offers `deployments`. The local provider has no
+durable jobs, so for `pool submit` it is `incompatible` with
+`jobs_unsupported`. The output
 names the provider and endpoint that own the job, for example:
 
 ```sh

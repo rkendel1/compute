@@ -15,7 +15,6 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use compute_core::{ApplicationIdentity, WorkloadBundle};
-use compute_provider::{ComputeProvider, ProviderCapabilities, ProviderHealth};
 
 use super::Daemon;
 use crate::EnvironmentError;
@@ -111,15 +110,24 @@ impl Daemon {
             .map(|deployment| deployment.deployment_id.clone());
         let stopped = project.desired_state == DesiredState::Stopped
             || project.actual_state == ActualState::Stopped;
+        // Newest first: a version newer than the one that serves has not
+        // been replaced by anything; it is still being released, even once
+        // its record moved ahead of the membership.
+        let serving = records
+            .iter()
+            .position(|deployment| current.as_deref() == Some(deployment.deployment_id.as_str()));
         let mut views = vec![];
         for (index, deployment) in records.iter().enumerate() {
             let record = &deployment.record;
-            let active = current.as_deref() == Some(deployment.deployment_id.as_str());
+            let active = serving == Some(index);
             let state = match record.status {
                 DeploymentStatus::Failed => ApplicationDeploymentState::Failed,
                 DeploymentStatus::RolledBack => ApplicationDeploymentState::RolledBack,
                 _ if active && stopped => ApplicationDeploymentState::Stopped,
                 _ if active => ApplicationDeploymentState::Active,
+                _ if serving.is_none_or(|serving| index < serving) => {
+                    ApplicationDeploymentState::Deploying
+                }
                 status if !status.is_terminal() && !status.serves() => {
                     ApplicationDeploymentState::Deploying
                 }
@@ -163,6 +171,7 @@ impl Daemon {
                         .or_else(|| workload.runtime_version.clone())
                 }),
                 placement: workload.and_then(|workload| workload.pool_placement.clone()),
+                artifact: workload.and_then(|workload| workload.application_artifact.clone()),
                 failure: record.failure.clone().or(record.rollback_reason.clone()),
                 receipt: record.receipt.clone(),
                 execution_receipts: record.receipt_ids.clone(),
@@ -193,13 +202,13 @@ impl Daemon {
         name: &str,
         request: ApplicationDeployRequest,
     ) -> Result<ApplicationDeploymentView, EnvironmentError> {
-        ApplicationIdentity::new(name, Some(request.port))?;
-        if request.port == 0 {
+        if !self.config.execution.deployments {
             return Err(EnvironmentError::Invalid(
-                "an application needs the port it listens on".into(),
+                "this node does not host application deployments".into(),
             ));
         }
-        let bundle = WorkloadBundle::from_bytes(&request.bundle)?;
+        let resolved = resolve_application(name, &request).await?;
+        let bundle = WorkloadBundle::from_bytes(&resolved.bundle)?;
         let bundle_id = bundle.bundle_id()?;
         self.ensure_applications_environment().await?;
         let definition = RevisionDefinition {
@@ -208,10 +217,10 @@ impl Daemon {
             workloads: vec![WorkloadDefinition {
                 name: APPLICATION_WORKLOAD.into(),
                 kind: WorkloadKind::Service,
-                bundle: request.bundle,
+                bundle: resolved.bundle,
                 ports: vec![PortSpec {
                     name: "http".into(),
-                    port: request.port,
+                    port: resolved.port,
                 }],
                 restart: RestartPolicy::OnFailure,
                 desired_state: DesiredState::Running,
@@ -234,9 +243,11 @@ impl Daemon {
             project: name.into(),
             environment: APPLICATIONS_ENVIRONMENT.into(),
             revision: Some(revision.revision_id),
-            config: None,
+            config: request.env,
             desired_state: Some(DesiredState::Running),
             placement: request.placement,
+            artifact: resolved.evidence,
+            required_config: resolved.required_env,
         })
         .await
     }
@@ -293,6 +304,14 @@ impl Daemon {
             config: Some(target.record.config.clone()),
             desired_state: Some(DesiredState::Running),
             placement: request.placement,
+            // The same artifact as the version rolled back to.
+            artifact: target
+                .record
+                .workloads
+                .iter()
+                .find(|workload| workload.name == APPLICATION_WORKLOAD)
+                .and_then(|workload| workload.application_artifact.clone()),
+            required_config: Default::default(),
         })
         .await
     }
@@ -346,47 +365,10 @@ impl Daemon {
         }
     }
 
-    /// This node as a provider in a caller's pool: what it can run, and
-    /// that it hosts application deployments. `compute.remote@1`
-    /// capabilities, so a caller discovers it like any provider.
-    pub async fn provider_capabilities(&self) -> Result<ProviderCapabilities, EnvironmentError> {
-        let url = self.public_url()?;
-        let mut capabilities = self
-            .config
-            .provider
-            .capabilities()
-            .await
-            .map_err(|error| EnvironmentError::RuntimeUnavailable(error.to_string()))?;
-        capabilities.protocol = "compute.remote@1".into();
-        capabilities.provider = compute_core::ProviderIdentity::Remote {
-            id: url.clone(),
-            endpoint: url,
-        };
-        capabilities.application_deployments = true;
-        Ok(capabilities)
-    }
-
-    pub async fn provider_health(&self) -> Result<ProviderHealth, EnvironmentError> {
-        let url = self.public_url()?;
-        let status = self.status().await;
-        Ok(ProviderHealth {
-            protocol: "compute.remote@1".into(),
-            provider: compute_core::ProviderIdentity::Remote {
-                id: url.clone(),
-                endpoint: url,
-            },
-            healthy: status.state_available,
-            executions_started: Some(self.config.provider.executions_started()),
-        })
-    }
-
-    fn public_url(&self) -> Result<String, EnvironmentError> {
-        self.config.public_url.clone().ok_or_else(|| {
-            EnvironmentError::Invalid(
-                "this node has no public URL; start it with --public-url to serve as a provider"
-                    .into(),
-            )
-        })
+    /// This node as a `compute.remote@1` provider: capabilities, health,
+    /// runs, and jobs, on the provider its deployments use.
+    pub fn remote_service(&self) -> Option<Arc<compute_provider::RemoteService>> {
+        self.remote.clone()
     }
 
     fn node_url(&self) -> String {
@@ -458,6 +440,85 @@ fn url_host(url: &str) -> Option<String> {
             .to_owned()
     };
     (!host.is_empty()).then_some(host)
+}
+
+/// What a deploy request releases: the bundle, its port, and, from an
+/// artifact, the artifact's evidence and environment contract.
+struct ResolvedApplication {
+    bundle: Vec<u8>,
+    port: u16,
+    evidence: Option<compute_state::ApplicationArtifactEvidence>,
+    required_env: std::collections::BTreeSet<String>,
+}
+
+/// Resolve a deploy request to the application it releases. An artifact
+/// by reference is fetched here, on the provider, and must have the digest
+/// the caller pinned; a manifest must name the application being deployed.
+async fn resolve_application(
+    name: &str,
+    request: &ApplicationDeployRequest,
+) -> Result<ResolvedApplication, EnvironmentError> {
+    let Some(source) = &request.artifact else {
+        let port = request.port.filter(|port| *port > 0).ok_or_else(|| {
+            EnvironmentError::Invalid("an application needs the port it listens on".into())
+        })?;
+        if request.bundle.is_empty() {
+            return Err(EnvironmentError::Invalid(
+                "a deployment needs an application artifact or a bundle".into(),
+            ));
+        }
+        ApplicationIdentity::new(name, Some(port))?;
+        return Ok(ResolvedApplication {
+            bundle: request.bundle.clone(),
+            port,
+            evidence: None,
+            required_env: Default::default(),
+        });
+    };
+    if !request.bundle.is_empty() || request.port.is_some() {
+        return Err(EnvironmentError::Invalid(
+            "an application artifact carries its bundle and port; send one or the other".into(),
+        ));
+    }
+    let (bytes, url) = match source {
+        ApplicationArtifactSource::Inline { data } => (data.clone(), None),
+        ApplicationArtifactSource::Reference(reference) => {
+            let fetching = reference.clone();
+            let bytes = tokio::task::spawn_blocking(move || fetching.fetch())
+                .await
+                .map_err(|error| EnvironmentError::Invalid(error.to_string()))??;
+            (bytes, Some(reference.url.clone()))
+        }
+    };
+    let artifact = compute_core::ApplicationArtifact::from_bytes(&bytes)?;
+    let manifest = &artifact.manifest;
+    if manifest.application.name != name {
+        return Err(EnvironmentError::Invalid(format!(
+            "the artifact is application {}, not {name}",
+            manifest.application.name
+        )));
+    }
+    Ok(ResolvedApplication {
+        bundle: artifact.bundle_bytes().to_vec(),
+        port: manifest
+            .application
+            .port
+            .expect("a verified artifact has a port"),
+        evidence: Some(compute_state::ApplicationArtifactEvidence {
+            artifact_id: artifact.artifact_id()?,
+            url,
+            version: manifest.version.clone(),
+            capabilities: manifest.capabilities.iter().cloned().collect(),
+        }),
+        // Defaults built into the artifact satisfy a requirement too.
+        required_env: manifest
+            .env
+            .required
+            .iter()
+            .filter(|name| !manifest.env.defaults.contains_key(*name))
+            .cloned()
+            .collect(),
+    })
 }
 
 #[cfg(test)]
