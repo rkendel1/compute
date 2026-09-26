@@ -110,15 +110,24 @@ impl Daemon {
             .map(|deployment| deployment.deployment_id.clone());
         let stopped = project.desired_state == DesiredState::Stopped
             || project.actual_state == ActualState::Stopped;
+        // Newest first: a version newer than the one that serves has not
+        // been replaced by anything; it is still being released, even once
+        // its record moved ahead of the membership.
+        let serving = records
+            .iter()
+            .position(|deployment| current.as_deref() == Some(deployment.deployment_id.as_str()));
         let mut views = vec![];
         for (index, deployment) in records.iter().enumerate() {
             let record = &deployment.record;
-            let active = current.as_deref() == Some(deployment.deployment_id.as_str());
+            let active = serving == Some(index);
             let state = match record.status {
                 DeploymentStatus::Failed => ApplicationDeploymentState::Failed,
                 DeploymentStatus::RolledBack => ApplicationDeploymentState::RolledBack,
                 _ if active && stopped => ApplicationDeploymentState::Stopped,
                 _ if active => ApplicationDeploymentState::Active,
+                _ if serving.is_none_or(|serving| index < serving) => {
+                    ApplicationDeploymentState::Deploying
+                }
                 status if !status.is_terminal() && !status.serves() => {
                     ApplicationDeploymentState::Deploying
                 }
@@ -433,27 +442,6 @@ fn url_host(url: &str) -> Option<String> {
     (!host.is_empty()).then_some(host)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn versions_and_hosts_parse() {
-        assert_eq!(parse_version("v3"), Some(3));
-        assert_eq!(parse_version("3"), Some(3));
-        assert_eq!(parse_version("dep_abc"), None);
-        assert_eq!(
-            url_host("http://10.0.0.20:8787").as_deref(),
-            Some("10.0.0.20")
-        );
-        assert_eq!(url_host("https://[::1]:8787/").as_deref(), Some("[::1]"));
-        assert_eq!(
-            url_host("http://node.example").as_deref(),
-            Some("node.example")
-        );
-    }
-}
-
 /// What a deploy request releases: the bundle, its port, and, from an
 /// artifact, the artifact's evidence and environment contract.
 struct ResolvedApplication {
@@ -531,4 +519,25 @@ async fn resolve_application(
             .cloned()
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versions_and_hosts_parse() {
+        assert_eq!(parse_version("v3"), Some(3));
+        assert_eq!(parse_version("3"), Some(3));
+        assert_eq!(parse_version("dep_abc"), None);
+        assert_eq!(
+            url_host("http://10.0.0.20:8787").as_deref(),
+            Some("10.0.0.20")
+        );
+        assert_eq!(url_host("https://[::1]:8787/").as_deref(), Some("[::1]"));
+        assert_eq!(
+            url_host("http://node.example").as_deref(),
+            Some("node.example")
+        );
+    }
 }

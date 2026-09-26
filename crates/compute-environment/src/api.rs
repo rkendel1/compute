@@ -1130,7 +1130,7 @@ async fn route(
         (_, ["compute", ..]) => match daemon.remote_service() {
             Some(service) => {
                 let (status, body) = Box::pin(service.handle(
-                    &method,
+                    method,
                     &request.path,
                     &request.headers,
                     &request.body,

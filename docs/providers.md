@@ -37,8 +37,8 @@ remotely, `LocalProvider::capabilities` locally). The response describes:
 | `resources.capacity`, `resources.available` | Configured/detected CPU, memory, and disk ceiling, and the allocatable snapshot used by placement |
 | `dependency_capsule_formats`, `dependency_capsules` | Accepted capsule formats and capsules already resident |
 | `artifact_modes`, `max_request_bytes`, `max_output_bytes` | Artifact transport limits |
-| `max_concurrent_jobs`, `job_retention_seconds` | Present when durable jobs are accepted |
-| `application_deployments` | Present (`true`) when the provider hosts durable application deployments: it is a Compute daemon |
+| `max_concurrent_jobs`, `job_retention_seconds` | Durable job limits, when jobs are accepted |
+| `execution` | The execution modes the provider accepts: `run` (synchronous workloads), `jobs` (durable asynchronous jobs), `deployments` (durable applications) |
 
 Placement turns this response into a canonical, validated **provider
 descriptor** with a `capability_version` digest. See
@@ -69,31 +69,51 @@ compute runtimes --provider production --json
 A configured pool ID yields its descriptor. `local` or an `http(s)://`
 endpoint outside the pool yields the raw capability response.
 
-## Providers that host applications
+## Execution modes
 
-Two kinds of Compute process can sit behind a remote provider:
+Every provider says which submissions it accepts, explicitly, in
+`execution`. Placement matches each submission mode against it, and a
+provider that does not offer the mode is rejected before anything
+executes, with a reason naming what was required and what is offered:
 
-| Provider | Started with | Runs | Hosts deployments |
+| Submission | Mode | Rejected with |
+| --- | --- | --- |
+| `compute run`, `compute pool run` | `run` | `run_unsupported` |
+| `compute submit`, `compute pool submit` | `jobs` | `jobs_unsupported` |
+| `compute deploy`, `compute application deploy` | `deployments` | `deployment_unsupported` |
+
+```text
+provider deployment-only: incompatible
+  run_unsupported: required "run", available ["deployments"] (the provider does not run workloads on request)
+```
+
+What each kind of provider offers by default, and how to narrow it:
+
+| Provider | Started with | Offers | Narrow with |
 | --- | --- | --- | --- |
-| Compute server | `compute serve` | workloads and durable jobs | no |
-| Compute daemon | `compute start` | workloads it releases as applications | yes |
+| `local` pool member | (this machine) | run, deployments (through this machine's daemon) | - |
+| Compute server | `compute serve` | run, jobs | `--offer run` or `--offer jobs` |
+| Compute daemon | `compute start` | run, jobs, deployments | `--offer deployments`, `--offer run,jobs`, ... |
 
-A daemon answers `GET /compute/capabilities` and `GET /compute/health` with
-`compute.remote@1` documents, identified by its `--public-url`, and adds
-`application_deployments: true`. `compute deploy` places an application
-with `SubmissionMode::Deployment`: a provider without that capability is
-rejected with `deployment_unsupported`, whatever else it offers. The
-application is then deployed through the daemon's authenticated
-`/applications` API (see [applications.md](applications.md)). The `local`
-pool member hosts deployments through this machine's daemon.
+A mode that is not offered is neither advertised nor accepted: a
+`compute serve --offer jobs` endpoint refuses `POST /compute/execute` as
+well as not advertising it. A server cannot offer deployments; a daemon
+hosts them.
 
-A daemon endpoint is a deployment target, not a `compute run` target: it
-does not accept `POST /compute/execute` or jobs. Placement does not yet tell
-the two apart for synchronous runs, so a run placed on a daemon fails at
-dispatch (nothing executes); name the provider, or keep run providers in
-their own pool. Nothing here is specific to
-where the daemon runs: a laptop, a Linux host, a VM, or an Apple Container
-VM are all the same provider to Compute.
+A daemon serves `compute.remote@1` (`/compute/execute`,
+`/compute/jobs`, runtime resolution and preparation) on the same
+provider and runtime store its deployments use: a run, a job, and an
+application's service are the same execution on the same substrate, with
+the same admission, runtime preparation, and receipts. A daemon in a run
+pool therefore runs workloads. Its `compute.remote@1` routes need the
+daemon's credential (`execute` scope for changes, `read` for discovery),
+like the rest of its API.
+
+A deployment is placed with `SubmissionMode::Deployment` and then released
+through the selected daemon's authenticated `/applications` API (see
+[applications.md](applications.md)). Nothing here is specific to where the
+daemon runs: a laptop, a Linux host, a VM, or an Apple Container VM are all
+the same provider to Compute.
 
 ## Restricting what a provider offers
 
@@ -177,6 +197,14 @@ unchanged and additionally exposes:
 | `compute.placement.inspect@1` | observation | public |
 | `compute.pool.run@1` | consequential | `compute.run` |
 | `compute.pool.submit@1` | consequential | `compute.submit` |
+| `compute.application.deploy@1` | consequential | `compute.application.deploy` |
+| `compute.application.rollback@1` | consequential | `compute.application.deploy` |
+| `compute.application.stop@1` | consequential | `compute.application.stop` |
+| `compute.application.status@1`, `.logs@1`, `.history@1` | observation | `compute.application.read` |
 
 AppPort exposes placement as a capability; the placement logic stays in
-Compute. These capabilities do not require AppBoundry.
+Compute. The application capabilities speak of applications (identity,
+version, provider, runtime, endpoint, status, evidence); which daemon hosts
+one and how it is reached stay in Compute, which places and operates it
+over the caller's pool exactly as `compute deploy` does. These
+capabilities do not require AppBoundry.

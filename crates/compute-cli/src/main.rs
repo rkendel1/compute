@@ -43,7 +43,7 @@ enum Commands {
     /// Create the smallest useful Compute application.
     Init(application::InitCommand),
     /// Describe, pack, deploy, and operate applications.
-    Application(application::ApplicationCommand),
+    Application(Box<application::ApplicationCommand>),
     Run(Box<RunCommand>),
     Bundle(BundleCommand),
     /// Create and verify portable dependency capsules.
@@ -677,7 +677,7 @@ fn parse_cli() -> Cli {
 async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
     match cli.command {
         Commands::Init(command) => application::init(command)?,
-        Commands::Application(command) => application::command(command).await?,
+        Commands::Application(command) => application::command(*command).await?,
         Commands::Run(command) => {
             let command = *command;
             let explicit_placement = command.provider.is_some()

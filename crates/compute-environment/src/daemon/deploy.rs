@@ -297,34 +297,34 @@ impl Daemon {
             // The caller's pool placement and the artifact are evidence
             // from the start; the release adds this node's own admission
             // and placement to it.
-            workloads: (request.placement.is_some() || request.artifact.is_some())
-                .then(|| {
-                    revision
-                        .value
-                        .workloads
-                        .iter()
-                        .map(|workload| DeploymentWorkload {
-                            name: workload.name.clone(),
-                            kind: workload.kind,
-                            bundle_id: workload.bundle_id.clone(),
-                            artifact: workload.artifact.clone(),
-                            runtime: workload.runtime.clone(),
-                            runtime_version: workload.runtime_version.clone(),
-                            resolved_runtime_version: None,
-                            distribution: workload.distribution.clone(),
-                            admitted: false,
-                            policy_id: None,
-                            admission_id: None,
-                            placement_id: None,
-                            provider: None,
-                            reasons: vec![],
-                            endpoints: vec![],
-                            pool_placement: request.placement.clone(),
-                            application_artifact: request.artifact.clone(),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
+            workloads: if request.placement.is_some() || request.artifact.is_some() {
+                revision
+                    .value
+                    .workloads
+                    .iter()
+                    .map(|workload| DeploymentWorkload {
+                        name: workload.name.clone(),
+                        kind: workload.kind,
+                        bundle_id: workload.bundle_id.clone(),
+                        artifact: workload.artifact.clone(),
+                        runtime: workload.runtime.clone(),
+                        runtime_version: workload.runtime_version.clone(),
+                        resolved_runtime_version: None,
+                        distribution: workload.distribution.clone(),
+                        admitted: false,
+                        policy_id: None,
+                        admission_id: None,
+                        placement_id: None,
+                        provider: None,
+                        reasons: vec![],
+                        endpoints: vec![],
+                        pool_placement: request.placement.clone(),
+                        application_artifact: request.artifact.clone(),
+                    })
+                    .collect()
+            } else {
+                vec![]
+            },
             failure: None,
             receipt_ids: vec![],
             old_revision: old_revision.clone(),

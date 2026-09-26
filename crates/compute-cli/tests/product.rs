@@ -550,6 +550,23 @@ fn an_application_moves_from_source_to_a_placed_versioned_verifiable_deployment(
         "nothing was deployed"
     );
 
+    // The provider restarts: its daemon stops and starts again as the
+    // same node. Reconciliation brings the application back at the same
+    // endpoint, with the same identity and version.
+    pool.restart_daemon(0);
+    wait_until("the application serves after the provider restarts", || {
+        fetch(&endpoint).as_deref() == Some("Hello from Compute")
+    });
+    let after = pool.json(&["application", "status", "hello-api", "--json"]);
+    assert_eq!(after["application_id"], v1["application_id"]);
+    assert_eq!(after["version"], 3);
+    assert_eq!(after["status"], "running");
+    assert_eq!(after["endpoint"], endpoint.as_str());
+    assert_eq!(after["provider"], "provider-a");
+    // Operations take the application's name, as an agent has it.
+    let by_name = pool.json(&["application", "history", "hello-api", "--json"]);
+    assert_eq!(by_name.as_array().unwrap().len(), 3);
+
     // Stop: the application stops serving; its history remains.
     let stopped = pool.json(&["stop", app, "--json"]);
     assert_eq!(stopped["status"], "stopped");
@@ -629,6 +646,153 @@ fn an_application_moves_from_source_to_a_placed_versioned_verifiable_deployment(
     // Remote deployment needs the provider's credential.
     let (status, _) = http_get(&pool.daemons[0].url, "/applications", None).unwrap();
     assert_eq!(status, 401);
+
+    // The application restarts: deploying after a stop serves again, as
+    // the next version, at the same endpoint.
+    let restarted = pool.json(&["application", "deploy", app, "--json"]);
+    assert_eq!(restarted["version"], 4);
+    assert_eq!(restarted["status"], "running");
+    assert_eq!(restarted["endpoint"], endpoint.as_str());
+    wait_until("the restarted application answers", || {
+        fetch(&endpoint).as_deref() == Some("Hello v2")
+    });
+}
+
+/// A portable application artifact: packed once, described without a
+/// provider, served over HTTP, and deployed by URL. The selected provider
+/// fetches it and verifies it is the artifact placement evaluated, and a
+/// deployment that lacks the configuration the artifact requires is
+/// refused before anything runs.
+#[test]
+fn a_portable_artifact_is_deployed_by_url_and_fetched_by_its_provider() {
+    let pool = Pool::start();
+    let application = pool.root.path().join("hello-http");
+    let app = application.to_str().unwrap();
+    pool.json(&["init", app, "--runtime", "python", "--json"]);
+    let manifest = application.join("compute.toml");
+    std::fs::write(
+        &manifest,
+        std::fs::read_to_string(&manifest).unwrap().replace(
+            "port = 3000\n",
+            "port = 3000\nversion = \"1.2.0\"\nrequired_env = [\"GREETING\"]\ncapabilities = [\"http.hello\"]\n",
+        ),
+    )
+    .unwrap();
+    let file = pool.root.path().join("hello-http.capp");
+    let packed = pool.json(&[
+        "application",
+        "pack",
+        app,
+        "--output",
+        file.to_str().unwrap(),
+        "--json",
+    ]);
+    let artifact_id = packed["artifact_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        packed["manifest"]["format"],
+        "compute.application-artifact@1"
+    );
+    assert_eq!(packed["manifest"]["version"], "1.2.0");
+    assert_eq!(packed["manifest"]["env"]["required"][0], "GREETING");
+
+    // Packing is deterministic: the same source is the same artifact.
+    let again = pool.root.path().join("again.capp");
+    pool.json(&[
+        "application",
+        "pack",
+        app,
+        "--output",
+        again.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        std::fs::read(&again).unwrap()
+    );
+
+    let url = serve_file(std::fs::read(&file).unwrap(), "/artifacts/hello-http.capp");
+    let info = pool.json(&["application", "info", &url, "--json"]);
+    assert_eq!(info["artifact_id"], artifact_id.as_str());
+    assert_eq!(info["manifest"]["application"]["name"], "hello-http");
+    assert_eq!(info["manifest"]["runtime"]["name"], "python");
+
+    // Its environment contract: without GREETING, nothing is deployed.
+    let refusal = pool.refused(&["deploy", &url, "--provider", "provider-b"]);
+    assert!(
+        refusal.contains("requires configuration it was not given: GREETING"),
+        "{refusal}"
+    );
+    let (status, _) = http_get(
+        &pool.daemons[1].url,
+        "/applications/hello-http",
+        Some(TOKEN_B),
+    )
+    .unwrap();
+    assert_eq!(status, 404, "nothing was deployed");
+
+    let deployed = pool.json(&[
+        "application",
+        "deploy",
+        &url,
+        "--provider",
+        "provider-b",
+        "--set",
+        "GREETING=hello",
+        "--json",
+    ]);
+    assert_eq!(deployed["provider"], "provider-b");
+    assert_eq!(deployed["version"], 1);
+    assert_eq!(deployed["status"], "running");
+    // The provider fetched the artifact from the URL, and it is the one
+    // that was packed.
+    assert_eq!(deployed["artifact"]["artifact_id"], artifact_id.as_str());
+    assert_eq!(deployed["artifact"]["url"], url.as_str());
+    assert_eq!(deployed["artifact"]["version"], "1.2.0");
+    assert_eq!(deployed["artifact"]["capabilities"][0], "http.hello");
+    let endpoint = deployed["endpoint"].as_str().unwrap().to_owned();
+    wait_until("the artifact's application answers", || {
+        fetch(&endpoint).as_deref() == Some("Hello from Compute")
+    });
+    let receipt: Value = serde_json::from_slice(&pool.api(
+        1,
+        &format!(
+            "/deployments/{}/receipt",
+            deployed["deployment_id"].as_str().unwrap()
+        ),
+    ))
+    .unwrap();
+    assert_eq!(
+        receipt["workloads"][0]["application_artifact"]["artifact_id"],
+        artifact_id.as_str()
+    );
+}
+
+/// Serve `bytes` at `path` over HTTP on a free port, for as long as the
+/// test runs: its URL.
+fn serve_file(bytes: Vec<u8>, path: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}{path}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).unwrap_or(0);
+            let head = String::from_utf8_lossy(&request[..read]);
+            let found = head.starts_with(&format!("GET {path} "));
+            let (status, body): (&str, &[u8]) = if found {
+                ("200 OK", &bytes)
+            } else {
+                ("404 Not Found", b"")
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(body);
+        }
+    });
+    url
 }
 
 /// Every provider type crossed with every submission mode. A provider
@@ -733,9 +897,19 @@ fn every_provider_accepts_exactly_the_execution_modes_it_offers() {
             assert_eq!(deployed["provider"], provider, "{deployed:#}");
             assert_eq!(deployed["status"], "running");
             assert_eq!(deployed["version"], 1);
-            for field in ["application_id", "deployment_id", "runtime", "receipt"] {
+            for field in ["application_id", "deployment_id", "runtime"] {
                 assert!(deployed[field].is_string(), "{field}: {deployed:#}");
             }
+            // The deployment receipt is issued once the release completes.
+            wait_until("the deployment receipt is issued", || {
+                let history = pool.json(&[
+                    "application",
+                    "history",
+                    &format!("app-{provider}"),
+                    "--json",
+                ]);
+                version(&history, 1)["receipt"].is_string()
+            });
             assert!(deployed["artifact"]["artifact_id"].is_string());
             let endpoint = deployed["endpoint"].as_str().unwrap().to_owned();
             wait_until("the deployment answers", || {
