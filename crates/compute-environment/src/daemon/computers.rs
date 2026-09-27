@@ -752,6 +752,29 @@ impl Daemon {
         event: Option<(&'static str, serde_json::Value)>,
         change: impl Fn(&mut EnvironmentRecord) -> Result<(), EnvironmentError>,
     ) -> Result<ComputerView, EnvironmentError> {
+        self.change_environment_with(
+            environment,
+            operator,
+            description,
+            event,
+            change,
+            |batch, _, _| Ok(batch),
+        )
+        .await
+    }
+
+    /// [`Self::change_environment`], with more writes (a rollout's record)
+    /// committed in the same transaction, given the environment and the
+    /// contents generation the change produces.
+    pub(crate) async fn change_environment_with(
+        self: &Arc<Self>,
+        environment: &str,
+        operator: &str,
+        description: String,
+        event: Option<(&'static str, serde_json::Value)>,
+        change: impl Fn(&mut EnvironmentRecord) -> Result<(), EnvironmentError>,
+        extra: impl Fn(Change, &Stored<EnvironmentRecord>, u64) -> Result<Change, EnvironmentError>,
+    ) -> Result<ComputerView, EnvironmentError> {
         // A computer's controller writes its own record, never this one;
         // a lost race with another operator is retried on fresh state.
         for attempt in 0.. {
@@ -796,6 +819,7 @@ impl Daemon {
                 ),
                 None => batch_change,
             };
+            let batch_change = extra(batch_change, &record, contents.generation)?;
             match self.apply(batch_change).await {
                 Ok(()) => break,
                 Err(EnvironmentError::Conflict(_)) if attempt < 4 => continue,
@@ -1447,7 +1471,7 @@ impl Daemon {
 
     /// The host a target's endpoint names: where its computers' endpoints
     /// listen.
-    fn target_host(&self, target: &str) -> Option<String> {
+    pub(crate) fn target_host(&self, target: &str) -> Option<String> {
         let endpoint = self.pool.configs().get(target)?.endpoint.clone()?;
         let rest = endpoint
             .split_once("://")
@@ -1460,7 +1484,10 @@ impl Daemon {
         (!host.is_empty()).then(|| host.to_owned())
     }
 
-    fn target_client(&self, target: &str) -> Result<Arc<RemoteProvider>, EnvironmentError> {
+    pub(crate) fn target_client(
+        &self,
+        target: &str,
+    ) -> Result<Arc<RemoteProvider>, EnvironmentError> {
         self.pool
             .member(target)
             .and_then(|member| member.jobs.clone())
@@ -2338,7 +2365,7 @@ impl Daemon {
 
     /// Run one controller command in the computer as a durable job and wait
     /// for it. The evidence names the job whatever happened.
-    async fn run_in_computer_command(
+    pub(crate) async fn run_in_computer_command(
         &self,
         client: &RemoteProvider,
         session_id: &str,
@@ -2978,6 +3005,7 @@ mod tests {
                 name: "app".into(),
                 url: "/srv/app.git".into(),
                 revision: "main".into(),
+                sync: 0,
             }],
             packages: vec![],
             processes: vec![ProcessSpec {
@@ -2988,6 +3016,7 @@ mod tests {
                 env: BTreeMap::new(),
                 desired: ProcessDesired::Running,
                 port: None,
+                restart: 0,
             }],
             projects: vec![],
             generation: 1,
@@ -3100,6 +3129,7 @@ mod tests {
             build: vec!["make".into()],
             test: vec![],
             commands: BTreeMap::new(),
+            checks: vec![],
         });
         let config = BTreeMap::new();
         let mut observed = ObservedContents::default();

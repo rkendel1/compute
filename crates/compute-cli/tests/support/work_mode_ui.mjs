@@ -49,7 +49,10 @@ await revision.fill('v1');
 await revision.press('Tab');
 await page.waitForFunction(() => document.body.innerText.includes('Change repository app'));
 assert.equal((await api('POST', `/environments/${environment}/config`, { OTHER: 'change' })).status, 200);
-await page.click('[data-go]');
+// The page may learn of the change first (and say so, with GO disabled),
+// or when GO is refused: either way the draft is not applied.
+const noticed = await page.waitForSelector('[data-conflict]', { timeout: 1500 }).then(() => true, () => false);
+if (!noticed) await page.click('[data-go]');
 await page.waitForSelector('[data-conflict]');
 assert.match(await page.innerText('[data-conflict]'), /Environment changed since you loaded it/);
 assert.equal((await api('GET', `/environments/${environment}/computer`)).body.desired.repositories[0].revision, 'v2', 'not overwritten');

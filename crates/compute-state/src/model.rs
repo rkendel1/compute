@@ -44,7 +44,12 @@ pub const STATE_VERSION: &str = "compute.state@1";
 ///   which environment, and whether the session owns an ephemeral one).
 ///   `Computer.provider_resource`; `Environment.contents` gains projects
 ///   and endpoints, and `Computer.observed` builds (inside their JSON).
-pub const MODEL_GENERATION: u32 = 5;
+/// - 6: versions and rollouts: the `Version` collection (a published,
+///   immutable version of a project: its commit, package digest, assembly,
+///   and the evidence of its build, tests, and checks) and the `Rollout`
+///   collection (a version deployed, promoted, or rolled back to an
+///   environment, with the steps that made it real).
+pub const MODEL_GENERATION: u32 = 6;
 
 /// A typed document of one collection.
 pub trait Document: Serialize + DeserializeOwned + Clone + Send + Sync {
@@ -369,6 +374,128 @@ pub struct WorkSessionRecord {
     pub close_reason: Option<String>,
 }
 document!(WorkSessionRecord, WorkSession);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VersionStatus {
+    Publishing,
+    Published,
+    Failed,
+}
+
+impl VersionStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Publishing => "publishing",
+            Self::Published => "published",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// A published version of a project: an exact commit, the digest of its
+/// source package, the assembly it runs with, and the evidence of the build,
+/// tests, and checks that passed in the computer that published it.
+/// Immutable once published.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionRecord {
+    pub version_id: String,
+    pub project: String,
+    /// The label: `1.8.4`.
+    pub version: String,
+    /// Where it was built and checked.
+    pub environment_id: String,
+    pub environment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// `sha256:` over the source package (`git archive` of the commit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_digest: Option<String>,
+    pub assembly: compute_core::ProjectAssembly,
+    /// The configuration keys it was checked with (never values).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_keys: Vec<String>,
+    pub status: VersionStatus,
+    pub steps: Vec<compute_core::OperationStep>,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+document!(VersionRecord, Version);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RolloutKind {
+    Deploy,
+    Promote,
+    Rollback,
+}
+
+impl RolloutKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deploy => "deploy",
+            Self::Promote => "promote",
+            Self::Rollback => "rollback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RolloutStatus {
+    Applying,
+    Active,
+    Failed,
+    Superseded,
+}
+
+impl RolloutStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applying => "applying",
+            Self::Active => "active",
+            Self::Failed => "failed",
+            Self::Superseded => "superseded",
+        }
+    }
+}
+
+/// A version made real in an environment: deployed, promoted from another
+/// environment, or rolled back to. It is a change of the environment's
+/// desired state, reconciled in place by its computer; its steps say how far
+/// that got.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RolloutRecord {
+    pub rollout_id: String,
+    pub kind: RolloutKind,
+    pub project: String,
+    pub environment_id: String,
+    pub environment: String,
+    pub version_id: String,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_version_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_version: Option<String>,
+    /// A promotion: the environment the version came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_environment: Option<String>,
+    pub status: RolloutStatus,
+    pub steps: Vec<compute_core::OperationStep>,
+    /// The environment's contents generation the change produced.
+    pub contents_generation: u64,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+document!(RolloutRecord, Rollout);
 
 /// A project's membership in an environment: its desired state there, its
 /// configuration there, and which deployment is current.
@@ -1146,6 +1273,12 @@ pub mod events {
     pub const COMPUTER_LIFECYCLE_CHANGED: &str = "computer.lifecycle_changed";
     pub const WORK_SESSION_OPENED: &str = "work_session.opened";
     pub const WORK_SESSION_CLOSED: &str = "work_session.closed";
+    pub const VERSION_PUBLISHING: &str = "version.publishing";
+    pub const VERSION_PUBLISHED: &str = "version.published";
+    pub const VERSION_FAILED: &str = "version.failed";
+    pub const ROLLOUT_STARTED: &str = "rollout.started";
+    pub const ROLLOUT_ACTIVE: &str = "rollout.active";
+    pub const ROLLOUT_FAILED: &str = "rollout.failed";
 }
 
 /// A 24-hex-digit digest of length-prefixed parts.
@@ -1202,6 +1335,16 @@ pub mod ids {
     /// An environment has at most one computer record.
     pub fn computer(environment_id: &str) -> String {
         format!("cmp_{}", short_digest(&[environment_id]))
+    }
+
+    /// A version of a project: one per label.
+    pub fn version(project: &str, version: &str) -> String {
+        format!("ver_{}", short_digest(&[project, version]))
+    }
+
+    /// A rollout: unique per request.
+    pub fn rollout(environment_id: &str, project: &str, nonce: &str) -> String {
+        format!("rol_{}", short_digest(&[environment_id, project, nonce]))
     }
 
     /// A work session: unique per opening.
@@ -1299,5 +1442,7 @@ pub fn decode_document(
         C::Audit => decode::<AuditRecord>(value),
         C::Computer => decode::<ComputerRecord>(value),
         C::WorkSession => decode::<WorkSessionRecord>(value),
+        C::Version => decode::<VersionRecord>(value),
+        C::Rollout => decode::<RolloutRecord>(value),
     }
 }

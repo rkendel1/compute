@@ -86,6 +86,11 @@ compute session info ses_...
 compute session destroy ses_...
 ```
 
+`compute` alone launches the control plane on this machine and opens it:
+run a project, build and test it, publish a version, deploy it, promote it
+to production, operate it, and roll it back — all from its UI
+([every screen](docs/product-surface/README.md)).
+
 An environment can be a durable computer: placed on a target by what it
 needs, then changed in place — repositories, packages, applications,
 services, and agents are desired state, reconciled by durable jobs, with

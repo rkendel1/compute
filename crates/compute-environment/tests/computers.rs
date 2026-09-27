@@ -264,6 +264,7 @@ fn contents(url: &Path, revision: &str) -> EnvironmentContents {
             name: "app".into(),
             url: url.display().to_string(),
             revision: revision.into(),
+            sync: 0,
         }],
         packages: vec![],
         processes: vec![ProcessSpec {
@@ -274,6 +275,7 @@ fn contents(url: &Path, revision: &str) -> EnvironmentContents {
             env: BTreeMap::new(),
             desired: ProcessDesired::Running,
             port: None,
+            restart: 0,
         }],
         projects: vec![],
         generation: 0,
@@ -439,6 +441,7 @@ async fn a_persistent_environment_is_changed_in_place_and_outlives_its_controlle
                 name: "app".into(),
                 url: source.display().to_string(),
                 revision: "v2".into(),
+                sync: 0,
             },
         )
         .await
@@ -657,6 +660,7 @@ async fn only_the_owner_changes_or_uses_a_computer() {
                     env: BTreeMap::new(),
                     desired: ProcessDesired::Running,
                     port: None,
+                    restart: 0,
                 },
             )
             .await
@@ -841,7 +845,9 @@ async fn an_ephemeral_environment_expires_and_keeps_its_evidence() {
         requirements(),
         EnvironmentContents::default(),
     );
-    ephemeral.computer.ttl_seconds = Some(2);
+    // Long enough to be seen running on a busy machine, short enough to
+    // expire within the test.
+    ephemeral.computer.ttl_seconds = Some(8);
     daemon
         .create_computer_environment(ephemeral, "alice")
         .await
@@ -1191,6 +1197,7 @@ async fn drift_is_reconciled_and_processes_follow_their_desired_state() {
                 env: BTreeMap::new(),
                 desired: ProcessDesired::Running,
                 port: None,
+                restart: 0,
             },
         )
         .await
@@ -1284,6 +1291,7 @@ fn project_contents(url: &Path, revision: &str) -> EnvironmentContents {
             name: "app".into(),
             url: url.display().to_string(),
             revision: revision.into(),
+            sync: 0,
         }],
         packages: vec![],
         projects: vec![compute_core::ProjectSpec {
@@ -1292,6 +1300,7 @@ fn project_contents(url: &Path, revision: &str) -> EnvironmentContents {
             build: shell("cat VERSION > BUILT"),
             test: shell("grep -q '^v' BUILT"),
             commands: BTreeMap::from([("where".into(), shell("pwd"))]),
+            checks: vec![],
         }],
         processes: vec![ProcessSpec {
             name: "api".into(),
@@ -1304,6 +1313,7 @@ fn project_contents(url: &Path, revision: &str) -> EnvironmentContents {
             env: BTreeMap::new(),
             desired: ProcessDesired::Running,
             port: Some(18_555),
+            restart: 0,
         }],
         generation: 0,
     }
@@ -1880,5 +1890,402 @@ async fn go_changes_lifetime_and_configuration_in_place_and_refuses_stale_views(
         expired.observed.repositories["app"].revision, "v2",
         "evidence kept"
     );
+    daemon.shutdown().await;
+}
+
+// ---- Versions: publish, deploy, promote, roll back --------------------------
+
+async fn version_where(
+    daemon: &Arc<Daemon>,
+    project: &str,
+    label: &str,
+    wanted: impl Fn(&compute_state::VersionRecord) -> bool,
+) -> compute_state::VersionRecord {
+    eventually(&format!("{project} {label}"), async || {
+        daemon
+            .version(project, label)
+            .await
+            .ok()
+            .filter(|version| wanted(version))
+    })
+    .await
+}
+
+async fn rollout_where(
+    daemon: &Arc<Daemon>,
+    rollout_id: &str,
+    wanted: impl Fn(&compute_state::RolloutRecord) -> bool,
+) -> compute_state::RolloutRecord {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let rollout = daemon.rollout(rollout_id).await.unwrap();
+        if wanted(&rollout) {
+            return rollout;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for rollout {rollout_id}: {rollout:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn versions_are_published_deployed_promoted_and_rolled_back_in_place() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store.clone(), pool(&[("target-a", &target)])).await;
+    let mut dev = project_contents(&source, "v1");
+    dev.projects[0]
+        .commands
+        .insert("lint".into(), vec!["true".into()]);
+    dev.projects[0].checks = vec!["lint".into()];
+    dev.processes[0].port = None;
+    for (name, contents) in [
+        ("dev", dev),
+        ("test", EnvironmentContents::default()),
+        ("production", EnvironmentContents::default()),
+    ] {
+        daemon
+            .create_computer_environment(
+                definition(
+                    name,
+                    ComputerLifecycle::Persistent,
+                    requirements(),
+                    contents,
+                ),
+                "alice",
+            )
+            .await
+            .unwrap();
+    }
+    computer_where(&daemon, "dev", "dev", |view| view.converged).await;
+    computer_where(&daemon, "production", "production", |view| view.converged).await;
+    let production = daemon
+        .computer("production")
+        .await
+        .unwrap()
+        .machine
+        .unwrap();
+
+    // Publish: build, tests, checks, and the package, in dev's computer.
+    let publishing = daemon
+        .publish_version(
+            "app",
+            "alice",
+            PublishRequest {
+                environment: "dev".into(),
+                version: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(publishing.version, "0.1.0");
+    let first = version_where(&daemon, "app", "0.1.0", |version| {
+        version.status != compute_state::VersionStatus::Publishing
+    })
+    .await;
+    assert_eq!(
+        first.status,
+        compute_state::VersionStatus::Published,
+        "{first:#?}"
+    );
+    assert!(
+        first
+            .package_digest
+            .as_deref()
+            .is_some_and(|digest| digest.starts_with("sha256:"))
+    );
+    let steps = first
+        .steps
+        .iter()
+        .map(|step| (step.name.as_str(), step.status))
+        .collect::<Vec<_>>();
+    assert!(
+        steps.iter().all(|(_, status)| status.is_done()),
+        "{steps:?}"
+    );
+    assert!(
+        first
+            .steps
+            .iter()
+            .find(|step| step.name == "Tests")
+            .unwrap()
+            .job_id
+            .is_some()
+    );
+    assert!(first.assembly.repository.as_ref().unwrap().revision == first.commit.clone().unwrap());
+    // A version is immutable.
+    assert!(matches!(
+        daemon
+            .publish_version(
+                "app",
+                "alice",
+                PublishRequest {
+                    environment: "dev".into(),
+                    version: Some("0.1.0".into())
+                }
+            )
+            .await,
+        Err(EnvironmentError::Conflict(_))
+    ));
+
+    // Deploy to test: an empty computer gets the repository, the project,
+    // and its application.
+    let rollout = daemon
+        .deploy_version(
+            "app",
+            "alice",
+            DeployVersionRequest {
+                environment: "test".into(),
+                version: "0.1.0".into(),
+                expected_generation: None,
+            },
+        )
+        .await
+        .unwrap();
+    let active = rollout_where(&daemon, &rollout.rollout_id, |rollout| {
+        rollout.status != compute_state::RolloutStatus::Applying
+    })
+    .await;
+    assert_eq!(
+        active.status,
+        compute_state::RolloutStatus::Active,
+        "{active:#?}"
+    );
+    assert_eq!(
+        run(&daemon, "test", "alice", &["cat", "running-build"])
+            .await
+            .0,
+        "v1"
+    );
+
+    // Promote test → production, after reviewing what it would do.
+    let plan = daemon
+        .promotion_plan("app", "alice", "test", "production")
+        .await
+        .unwrap();
+    assert_eq!(plan.version, "0.1.0");
+    assert!(plan.to_current.is_none());
+    assert!(plan.from_healthy);
+    assert!(
+        plan.changes
+            .iter()
+            .any(|change| change.contains("add repository"))
+    );
+    let promoted = daemon
+        .promote_version(
+            "app",
+            "alice",
+            PromoteVersionRequest {
+                from: "test".into(),
+                to: "production".into(),
+                expected_generation: Some(plan.expected_generation),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(promoted.kind, compute_state::RolloutKind::Promote);
+    rollout_where(&daemon, &promoted.rollout_id, |rollout| {
+        rollout.status == compute_state::RolloutStatus::Active
+    })
+    .await;
+    assert_eq!(
+        run(&daemon, "production", "alice", &["cat", "running-build"])
+            .await
+            .0,
+        "v1"
+    );
+
+    // A new version from dev: v2 of the source.
+    let released = daemon
+        .release_project(
+            "dev",
+            "alice",
+            ReleaseRequest {
+                project: "app".into(),
+                revision: "v2".into(),
+                expected_generation: None,
+            },
+        )
+        .await
+        .unwrap();
+    let generation = released.desired.generation;
+    computer_where(&daemon, "dev", "dev at v2", |view| {
+        view.converged && view.observed.converged_generation == generation
+    })
+    .await;
+    daemon
+        .publish_version(
+            "app",
+            "alice",
+            PublishRequest {
+                environment: "dev".into(),
+                version: None,
+            },
+        )
+        .await
+        .unwrap();
+    let second = version_where(&daemon, "app", "0.1.1", |version| {
+        version.status == compute_state::VersionStatus::Published
+    })
+    .await;
+    assert_ne!(second.commit, first.commit);
+    let to_test = daemon
+        .deploy_version(
+            "app",
+            "alice",
+            DeployVersionRequest {
+                environment: "test".into(),
+                version: "0.1.1".into(),
+                expected_generation: None,
+            },
+        )
+        .await
+        .unwrap();
+    rollout_where(&daemon, &to_test.rollout_id, |rollout| {
+        rollout.status == compute_state::RolloutStatus::Active
+    })
+    .await;
+
+    // A controller restart in the middle of a promotion: it finishes.
+    let promoting = daemon
+        .promote_version(
+            "app",
+            "alice",
+            PromoteVersionRequest {
+                from: "test".into(),
+                to: "production".into(),
+                expected_generation: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(promoting.previous_version.as_deref(), Some("0.1.0"));
+    daemon.shutdown().await;
+    let (daemon, _node) = start_daemon(store.clone(), pool(&[("target-a", &target)])).await;
+    let finished = rollout_where(&daemon, &promoting.rollout_id, |rollout| {
+        rollout.status != compute_state::RolloutStatus::Applying
+    })
+    .await;
+    assert_eq!(
+        finished.status,
+        compute_state::RolloutStatus::Active,
+        "{finished:#?}"
+    );
+    assert_eq!(
+        run(&daemon, "production", "alice", &["cat", "running-build"])
+            .await
+            .0,
+        "v2"
+    );
+    let history = daemon
+        .rollouts(Some("production"), Some("app"))
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1].status, compute_state::RolloutStatus::Superseded);
+
+    // Roll back: the previous version, on the same machine.
+    let rolled = daemon
+        .rollback_version(
+            "app",
+            "alice",
+            RollbackRequest {
+                environment: "production".into(),
+                version: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rolled.version, "0.1.0");
+    rollout_where(&daemon, &rolled.rollout_id, |rollout| {
+        rollout.status == compute_state::RolloutStatus::Active
+    })
+    .await;
+    assert_eq!(
+        run(&daemon, "production", "alice", &["cat", "running-build"])
+            .await
+            .0,
+        "v1"
+    );
+    let after = daemon
+        .computer("production")
+        .await
+        .unwrap()
+        .machine
+        .unwrap();
+    assert_eq!(
+        after.resource, production.resource,
+        "no machine was replaced"
+    );
+    assert_eq!(
+        target.provider.provisions.load(Ordering::SeqCst),
+        3,
+        "one per environment"
+    );
+
+    // The overview: the project, where it runs, at which version.
+    let software = daemon.software().await.unwrap();
+    let app = software
+        .iter()
+        .find(|summary| summary.project == "app")
+        .unwrap();
+    assert_eq!(app.latest_version.as_deref(), Some("0.1.1"));
+    let running = app
+        .environments
+        .iter()
+        .find(|placement| placement.environment == "production")
+        .unwrap();
+    assert_eq!(running.version.as_deref(), Some("0.1.0"));
+
+    // Someone else cannot publish, deploy, or promote it.
+    assert!(matches!(
+        daemon
+            .deploy_version(
+                "app",
+                "mallory",
+                DeployVersionRequest {
+                    environment: "production".into(),
+                    version: "0.1.1".into(),
+                    expected_generation: None
+                }
+            )
+            .await,
+        Err(EnvironmentError::Forbidden(_))
+    ));
+    // A failing check refuses the version, with the evidence.
+    let mut failing = daemon.computer("dev").await.unwrap().desired.projects[0].clone();
+    failing.commands.insert("lint".into(), vec!["false".into()]);
+    daemon
+        .upsert_project("dev", "alice", failing)
+        .await
+        .unwrap();
+    computer_where(&daemon, "dev", "the new check", |view| view.converged).await;
+    daemon
+        .publish_version(
+            "app",
+            "alice",
+            PublishRequest {
+                environment: "dev".into(),
+                version: None,
+            },
+        )
+        .await
+        .unwrap();
+    let refused = version_where(&daemon, "app", "0.1.2", |version| {
+        version.status != compute_state::VersionStatus::Publishing
+    })
+    .await;
+    assert_eq!(refused.status, compute_state::VersionStatus::Failed);
+    let checks = refused
+        .steps
+        .iter()
+        .find(|step| step.name == "Checks")
+        .unwrap();
+    assert_eq!(checks.status, compute_core::StepStatus::Failed);
+    assert!(checks.job_id.is_some());
     daemon.shutdown().await;
 }

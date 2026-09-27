@@ -133,7 +133,24 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/environments/{environment}/release"),
     ("POST", "/environments/{environment}/config"),
     ("POST", "/environments/{environment}/lifecycle"),
+    ("POST", "/environments/{environment}/propose"),
+    (
+        "POST",
+        "/environments/{environment}/processes/{process}/restart",
+    ),
     ("GET", "/targets"),
+    // Software: projects, their versions, and where they run.
+    ("GET", "/software"),
+    ("GET", "/software/{project}"),
+    ("GET", "/software/{project}/versions"),
+    ("POST", "/software/{project}/versions"),
+    ("GET", "/software/{project}/versions/{version}"),
+    ("POST", "/software/{project}/deploy"),
+    ("GET", "/software/{project}/promotion"),
+    ("POST", "/software/{project}/promote"),
+    ("POST", "/software/{project}/rollback"),
+    ("GET", "/rollouts"),
+    ("GET", "/rollouts/{rollout}"),
     // Work sessions: ways into an environment.
     ("GET", "/sessions"),
     ("POST", "/sessions"),
@@ -1061,6 +1078,50 @@ async fn route(
         ("POST", ["environments", id, "lifecycle"]) => ok(to_value(
             Box::pin(daemon.set_lifecycle(id, &principal.operator_id, parse(body)?)).await?,
         )?),
+        ("POST", ["environments", id, "propose"]) => ok(to_value(
+            Box::pin(daemon.propose_project(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "processes", name, "restart"]) => ok(to_value(
+            Box::pin(daemon.restart_process(id, &principal.operator_id, name)).await?,
+        )?),
+        ("GET", ["software"]) => ok(to_value(Box::pin(daemon.software()).await?)?),
+        ("GET", ["software", project]) => {
+            ok(to_value(Box::pin(daemon.software_view(project)).await?)?)
+        }
+        ("GET", ["software", project, "versions"]) => {
+            ok(to_value(Box::pin(daemon.versions(project)).await?)?)
+        }
+        ("POST", ["software", project, "versions"]) => created(to_value(
+            Box::pin(daemon.publish_version(project, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("GET", ["software", project, "versions", version]) => {
+            ok(to_value(Box::pin(daemon.version(project, version)).await?)?)
+        }
+        ("POST", ["software", project, "deploy"]) => created(to_value(
+            Box::pin(daemon.deploy_version(project, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("GET", ["software", project, "promotion"]) => {
+            let from = query.get("from").map(String::as_str).unwrap_or_default();
+            let to = query.get("to").map(String::as_str).unwrap_or_default();
+            ok(to_value(
+                Box::pin(daemon.promotion_plan(project, &principal.operator_id, from, to)).await?,
+            )?)
+        }
+        ("POST", ["software", project, "promote"]) => created(to_value(
+            Box::pin(daemon.promote_version(project, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["software", project, "rollback"]) => created(to_value(
+            Box::pin(daemon.rollback_version(project, &principal.operator_id, parse(body)?))
+                .await?,
+        )?),
+        ("GET", ["rollouts"]) => ok(to_value(
+            Box::pin(daemon.rollouts(
+                query.get("environment").map(String::as_str),
+                query.get("project").map(String::as_str),
+            ))
+            .await?,
+        )?),
+        ("GET", ["rollouts", rollout]) => ok(to_value(Box::pin(daemon.rollout(rollout)).await?)?),
         ("GET", ["targets"]) => ok(to_value(Box::pin(daemon.targets()).await)?),
         ("GET", ["sessions"]) => ok(to_value(
             Box::pin(daemon.work_sessions(

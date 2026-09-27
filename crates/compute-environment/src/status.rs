@@ -769,3 +769,75 @@ pub struct ApplicationView {
     /// Newest first.
     pub deployments: Vec<ApplicationDeploymentView>,
 }
+
+/// A project, as the software it is: where it runs and at which version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SoftwareSummary {
+    pub project: String,
+    pub environments: Vec<SoftwarePlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_status: Option<compute_state::VersionStatus>,
+}
+
+/// A project in one environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SoftwarePlacement {
+    pub environment: String,
+    pub environment_id: String,
+    pub computer: compute_core::ComputerStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The repository revision it asks for, and the commit it runs.
+    pub revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// The version it runs, when one was deployed there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout: Option<compute_state::RolloutStatus>,
+    pub converged: bool,
+    /// Its applications, services, and agents, and whether each runs.
+    pub processes: Vec<(String, String)>,
+}
+
+/// A project's page: where it runs, its versions, and what happened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SoftwareView {
+    #[serde(flatten)]
+    pub summary: SoftwareSummary,
+    pub versions: Vec<compute_state::VersionRecord>,
+    pub rollouts: Vec<compute_state::RolloutRecord>,
+    /// The next version label a publish would use.
+    pub next_version: String,
+}
+
+/// What promoting a version would do, shown before GO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromotionPlan {
+    pub project: String,
+    pub from: String,
+    pub to: String,
+    pub version: String,
+    pub version_id: String,
+    /// Whether the version is healthy where it runs now.
+    pub from_healthy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_current: Option<String>,
+    /// The changes to the target's desired state.
+    pub changes: Vec<String>,
+    /// Configuration keys set in only one of the two, or set differently
+    /// (names only; values never leave the environments).
+    pub config_only_in_from: Vec<String>,
+    pub config_only_in_to: Vec<String>,
+    pub config_different: Vec<String>,
+    /// Who may do it.
+    pub authority: String,
+    /// Approvals the target requires before GO. None today: the owner's
+    /// `deploy` authority is the approval.
+    pub approvals: Vec<String>,
+    /// The target's contents generation the promotion is based on.
+    pub expected_generation: u64,
+}

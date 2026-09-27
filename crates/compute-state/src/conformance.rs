@@ -528,6 +528,7 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             name: "app".into(),
             url: "https://example.invalid/app.git".into(),
             revision: "main".into(),
+            sync: 0,
         }],
         packages: vec![],
         processes: vec![compute_core::ProcessSpec {
@@ -538,6 +539,7 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             env: BTreeMap::new(),
             desired: compute_core::ProcessDesired::Running,
             port: Some(8080),
+            restart: 0,
         }],
         projects: vec![compute_core::ProjectSpec {
             name: "app".into(),
@@ -545,6 +547,7 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             build: vec!["make".into()],
             test: vec!["make".into(), "test".into()],
             commands: BTreeMap::from([("migrate".into(), vec!["./migrate".into()])]),
+            checks: vec![],
         }],
         generation: 3,
     };
@@ -567,7 +570,7 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
                 generation: 1,
                 destroy_requested_at: None,
             }),
-            contents: Some(contents),
+            contents: Some(contents.clone()),
             ..environment(&format!("computer{run}"))
         },
     )
@@ -656,6 +659,65 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             closed_at: Some(now),
             expires_at: Some(now),
             close_reason: Some("closed by operator-1".into()),
+        },
+    )
+    .await;
+    let step = compute_core::OperationStep {
+        name: "Build".into(),
+        status: compute_core::StepStatus::Succeeded,
+        detail: Some("make".into()),
+        job_id: Some("job_1".into()),
+        execution_id: Some("exec_1".into()),
+        at: Some(now),
+    };
+    round_trip(
+        state,
+        &ids::version(&format!("app{run}"), "1.0.0"),
+        VersionRecord {
+            version_id: ids::version(&format!("app{run}"), "1.0.0"),
+            project: format!("app{run}"),
+            version: "1.0.0".into(),
+            environment_id: format!("env_computer{run}"),
+            environment: format!("computer{run}"),
+            commit: Some("abc123".into()),
+            package_digest: Some("sha256:pkg".into()),
+            assembly: compute_core::ProjectAssembly {
+                repository: Some(contents.repositories[0].clone()),
+                project: Some(contents.projects[0].clone()),
+                packages: vec![],
+                processes: contents.processes.clone(),
+            },
+            config_keys: vec!["MODE".into()],
+            status: VersionStatus::Published,
+            steps: vec![step.clone()],
+            created_by: "operator-1".into(),
+            created_at: now,
+            completed_at: Some(now),
+            failure: None,
+        },
+    )
+    .await;
+    round_trip(
+        state,
+        &ids::rollout(&format!("env_computer{run}"), "app", "1"),
+        RolloutRecord {
+            rollout_id: ids::rollout(&format!("env_computer{run}"), "app", "1"),
+            kind: RolloutKind::Promote,
+            project: format!("app{run}"),
+            environment_id: format!("env_computer{run}"),
+            environment: format!("computer{run}"),
+            version_id: ids::version(&format!("app{run}"), "1.0.0"),
+            version: "1.0.0".into(),
+            previous_version_id: None,
+            previous_version: None,
+            from_environment: Some("test".into()),
+            status: RolloutStatus::Active,
+            steps: vec![step],
+            contents_generation: 4,
+            created_by: "operator-1".into(),
+            created_at: now,
+            completed_at: Some(now),
+            failure: None,
         },
     )
     .await;

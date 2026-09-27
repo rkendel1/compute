@@ -394,8 +394,9 @@ async function environmentsView() {
 
 function createEnvironment() {
   const name = h('input', { id: 'environment-name', placeholder: 'my-app', autocomplete: 'off' });
-  const cpu = h('input', { id: 'environment-cpu', type: 'number', min: '1', value: '2' });
-  const memory = h('input', { id: 'environment-memory', type: 'number', min: '1', value: '4' });
+  // Modest defaults: a computer that fits on a laptop. Ask for more.
+  const cpu = h('input', { id: 'environment-cpu', type: 'number', min: '1', value: '1' });
+  const memory = h('input', { id: 'environment-memory', type: 'number', min: '1', value: '1' });
   const storage = h('input', { id: 'environment-storage', type: 'checkbox' });
   const endpoint = h('input', { id: 'environment-public', type: 'checkbox' });
   const features = h('input', { id: 'environment-features', placeholder: 'containers, kvm, gpu', autocomplete: 'off' });
@@ -462,32 +463,47 @@ async function environmentView(name) {
     // repositories, built and run there. Deployment is a release of one,
     // reconciled in place.
     const observed = computer.observed || {};
+    const rollouts = await api('GET', `/rollouts?environment=${enc(name)}`).catch(() => []);
+    const running = computer.status === 'running';
     const rows = (computer.desired.projects || []).map((project) => {
       const repository = (computer.desired.repositories || []).find((item) => item.name === project.repository) || {};
       const seen = observed.repositories && observed.repositories[project.repository];
       const built = observed.builds && observed.builds[project.name];
-      return h('tr', { class: 'link', 'data-project': project.name, onclick: () => { location.hash = `#/work/${enc(name)}`; } },
+      const current = rollouts.find((rollout) => rollout.project === project.name && rollout.status !== 'superseded');
+      return h('tr', { class: 'link', 'data-project': project.name, onclick: () => { location.hash = `#/software/${enc(project.name)}`; } },
         h('td', {}, h('strong', {}, project.name)),
-        h('td', { class: 'mono' }, repository.revision || '—'),
-        h('td', { class: 'mono' }, seen ? short(seen.commit) : '—'),
+        h('td', {}, current ? [current.version, ' ', state(current.status === 'applying' ? 'deploying' : current.status)] : h('span', { class: 'meta' }, 'unversioned')),
+        h('td', { class: 'mono' }, revisionText(repository.revision, seen && seen.commit)),
         h('td', {}, built ? state(built.evidence.outcome === 'succeeded' ? 'complete' : 'failed', built.evidence.outcome) : '—'));
     });
+    const endpointOf = (process) => (computer.endpoints || []).find((endpoint) => endpoint.process === process);
     const processes = (computer.desired.processes || []).map((process) => {
       const seen = observed.processes && observed.processes[process.name];
+      const endpoint = endpointOf(process.name);
       return h('tr', { 'data-process': process.name },
         h('td', {}, h('strong', {}, process.name)),
         h('td', {}, process.kind || 'application'),
-        h('td', {}, process.desired || 'running'),
-        h('td', {}, seen ? state(seen.state) : '—'));
+        h('td', {}, seen ? state(seen.state) : '—'),
+        h('td', { class: 'mono' }, endpoint && endpoint.url ? h('a', { href: endpoint.url, target: '_blank', rel: 'noopener' }, endpoint.url) : '—'),
+        h('td', {},
+          h('button', { disabled: !running, onclick: () => act(`Restarting ${process.name}`, () => api('POST', `/environments/${enc(name)}/processes/${enc(process.name)}/restart`)) }, 'Restart'), ' ',
+          h('button', { disabled: !running, onclick: async () => {
+            const logs = await api('GET', `/environments/${enc(name)}/logs?process=${enc(process.name)}&limit=200`).catch((error) => ({ log: error.message }));
+            showOutput(`${process.name} log`, logs.log || '', '');
+          } }, 'Logs')));
     });
     return [
       header,
       h('div', { class: 'subtitle' }, `${(computer.desired.projects || []).length} projects · ${(computer.desired.processes || []).length} processes · desired ${environment.desired_state} · policy ${short(environment.policy_id)}`),
       machineSection(name, environment),
-      h('h2', {}, 'Projects'),
-      table(['Project', 'Revision', 'Commit', 'Build'], rows, 'No projects. Add one in Work.'),
+      h('h2', {}, 'Software'),
+      table(['Project', 'Version', 'Revision', 'Build'], rows, 'No projects. Run one.'),
       h('h2', {}, 'Applications, services, and agents'),
-      table(['Name', 'Kind', 'Desired', 'Observed'], processes, 'Nothing runs yet. Add it in Work.'),
+      table(['Name', 'Kind', 'Health', 'Endpoint', ''], processes, 'Nothing runs yet. Add it in Work.'),
+      h('h2', {}, 'Deployments'),
+      table(['Kind', 'Project', 'Version', 'Status', 'By', 'When'], rollouts.map((rollout) => h('tr', { class: 'link', onclick: () => { location.hash = `#/operations/rollout/${enc(rollout.rollout_id)}`; } },
+        h('td', {}, rollout.kind), h('td', {}, rollout.project), h('td', {}, rollout.version),
+        h('td', {}, state(rollout.status === 'applying' ? 'deploying' : rollout.status)), h('td', {}, rollout.created_by), h('td', {}, ago(rollout.created_at)))), 'Nothing deployed here yet.'),
     ];
   }
   const rows = environment.projects.map((project) => h('tr', {
@@ -634,7 +650,7 @@ function machineSection(name, environment) {
   const computer = environment.computer;
   if (!computer) {
     return [
-      h('h2', {}, 'Machine'),
+      h('h2', {}, 'Computer'),
       h('div', { class: 'panel note', 'data-machine': 'node' },
         'This environment has no computer of its own: its projects run on this control-plane node (',
         h('span', { class: 'mono' }, environment.machine ? environment.machine.target : 'local'),
@@ -643,7 +659,7 @@ function machineSection(name, environment) {
   }
   const live = !['destroying', 'destroyed', 'expired'].includes(computer.status);
   return [
-    h('h2', {}, 'Machine'),
+    h('h2', {}, 'Computer'),
     h('div', { class: 'grid', 'data-machine': 'computer' }, machineFacts(computer),
       fact('Placement', short(computer.placement_id), true),
       fact('Contents', computer.converged ? state('running', `Converged · generation ${computer.desired.generation || 0}`)
@@ -706,8 +722,8 @@ async function workHomeView() {
 }
 
 function temporaryDialog() {
-  const cpu = h('input', { id: 'temporary-cpu', type: 'number', min: '1', value: '2' });
-  const memory = h('input', { id: 'temporary-memory', type: 'number', min: '1', value: '4' });
+  const cpu = h('input', { id: 'temporary-cpu', type: 'number', min: '1', value: '1' });
+  const memory = h('input', { id: 'temporary-memory', type: 'number', min: '1', value: '1' });
   const hours = h('input', { id: 'temporary-hours', type: 'number', min: '1', value: '1' });
   modal('Temporary environment', h('div', {},
     h('p', {}, 'A computer for this piece of work. It expires, and its record and evidence remain; close the session to end it sooner.'),
@@ -760,7 +776,10 @@ async function workView(name) {
     h('td', { class: 'mono' }, observed.repositories && observed.repositories[repository.name]
       ? `${observed.repositories[repository.name].revision} ${short(observed.repositories[repository.name].commit)}` : '—'),
     h('td', {}, evidence(observed.repositories && observed.repositories[repository.name])),
-    h('td', {}, remove('repositories', repository.name))));
+    h('td', {},
+      h('button', { disabled: !live, 'data-pull': repository.name, title: 'Fetch the revision again: a branch that moved',
+        onclick: () => edit(name, draft, () => { repository.sync = (repository.sync || 0) + 1; }) }, 'Pull'), ' ',
+      remove('repositories', repository.name))));
 
   const projects = contents.projects.map((project) => {
     const commands = [project.build && project.build.length ? 'build' : null, project.test && project.test.length ? 'test' : null, ...Object.keys(project.commands || {})].filter(Boolean);
@@ -784,7 +803,10 @@ async function workView(name) {
       h('td', {}, h('select', { disabled: !live, 'aria-label': `${process.name} desired`, onchange: (event) => edit(name, draft, () => { process.desired = event.target.value; }) },
         ['running', 'stopped'].map((value) => h('option', { value, selected: (process.desired || 'running') === value }, value)))),
       h('td', {}, seen ? state(seen.state, `${STATES[seen.state] ? STATES[seen.state][2] : seen.state}${seen.pid ? ` · pid ${seen.pid}` : ''}`) : '—'),
-      h('td', {}, h('button', { disabled: !running, onclick: () => showLog(name, process.name) }, 'Log'), ' ', remove('processes', process.name)));
+      h('td', {},
+        h('button', { disabled: !running, onclick: () => showLog(name, process.name) }, 'Log'), ' ',
+        h('button', { disabled: !running, 'data-restart': process.name, onclick: () => act(`Restarting ${process.name}`, () => api('POST', `/environments/${enc(name)}/processes/${enc(process.name)}/restart`)) }, 'Restart'), ' ',
+        remove('processes', process.name)));
   });
   const processHeaders = ['Name', 'Command', 'Repository', 'Port', 'Desired', 'Observed', ''];
 
@@ -822,6 +844,12 @@ async function workView(name) {
         h('a', { class: 'button', href: `#/environments/${enc(name)}` }, 'Manage'),
         h('button', { disabled: !live, onclick: () => act(`Reconciling ${name}`, () => api('POST', `/environments/${enc(name)}/reconcile`)) }, 'Reconcile'))),
     h('div', { class: 'subtitle' }, 'What do you want to do?'),
+    h('div', { class: 'actions row' },
+      h('a', { class: 'button', href: '#/run?add=1' }, 'Add another project'),
+      contents.projects.map((project) => h('a', { class: 'button', href: `#/software/${enc(project.name)}` }, `${project.name}: versions`))),
+    !computer.converged && live ? h('div', { class: 'panel progress-strip', 'data-reconciling': 'true' },
+      h('div', { class: 'meta' }, `Compute is making ${name} hold generation ${computer.desired.generation || 0}:`),
+      stepList(reconcileProgress(computer))) : null,
     computer.failure ? h('div', { class: 'panel error' }, `${computer.failure.phase}: ${computer.failure.code} — ${computer.failure.message}`) : null,
 
     h('h3', {}, 'Repositories'),
@@ -855,6 +883,12 @@ async function workView(name) {
       });
     })) : null,
 
+    live ? h('div', { class: 'actions row' },
+      h('span', { class: 'meta' }, 'Add from a template: '),
+      Object.entries(TEMPLATES).map(([key, template]) => h('button', { 'data-template': key, onclick: () => edit(name, draft, (next) => {
+        if (next.contents.processes.some((process) => process.name === template.name)) return;
+        next.contents.processes.push({ ...structuredClone(template), desired: 'running' });
+      }) }, { database: 'Database (PostgreSQL)', redis: 'Redis', agent: 'Agent' }[key]))) : null,
     h('h3', {}, 'Packages'),
     table(['Package', 'Install', 'Repository', 'Installed', ''], packages, 'No packages.'),
     live ? addRow(['name', 'install', 'repository'], 'Add package', (value) => edit(name, draft, (next) => {
@@ -874,6 +908,14 @@ async function workView(name) {
       output ? h('div', { 'data-output': output.status },
         h('div', { class: 'meta' }, `${output.title} · ${output.status}${output.job ? ` · job ${output.job}` : ''}`),
         h('pre', { class: 'mono' }, output.text || '')) : h('div', { class: 'meta' }, 'Commands run inside the computer as durable jobs, with receipts.')),
+
+    h('h3', {}, 'Files'),
+    h('div', { class: 'panel terminal' },
+      h('div', { class: 'add-row' },
+        h('input', { id: 'work-path', placeholder: 'repos', value: '', autocomplete: 'off', disabled: !running, 'aria-label': 'Path in the computer' }),
+        h('button', { disabled: !running, 'data-files': 'list', onclick: () => listFiles(name, document.getElementById('work-path').value.trim()) }, 'List'),
+        h('button', { disabled: !running, 'data-files': 'view', onclick: () => viewFile(name, document.getElementById('work-path').value.trim()) }, 'View')),
+      h('div', { class: 'meta' }, 'Paths are relative to the computer\'s workspace; checkouts are under repos/.')),
 
     h('h3', {}, 'Sessions'),
     table(['Session', 'Kind', 'Status', 'Opened', ''], sessions.map((session) => h('tr', { 'data-session': session.session_id },
@@ -968,6 +1010,652 @@ function addRow(fields, label, add) {
     add(value);
   } }, label));
 }
+
+// ---- Home: what do you want to do? -----------------------------------------------
+//
+// The control plane opens on the software and the things people do with it,
+// not on infrastructure. Every action below leads to a surface that shows
+// what will change, then GO, then what Compute is doing.
+
+const ACTIONS = [
+  ['run', 'Run a project', 'From a Git repository or a folder: Compute proposes how, you press GO.', '#/run'],
+  ['work', 'Work on a project', 'Repositories, files, terminals, processes, and logs, in its computer.', '#/work'],
+  ['add', 'Add another project', 'Put more software on a computer you already have.', '#/run?add=1'],
+  ['build', 'Build and test', 'Run a project\'s build, tests, and checks in its computer.', '#/software'],
+  ['publish', 'Publish a new version', 'Build, test, check, and record an immutable version.', '#/software'],
+  ['deploy', 'Deploy', 'Put a version on a computer, in place.', '#/software'],
+  ['promote', 'Move test → production', 'Review what changes, then promote the exact version.', '#/software'],
+  ['rollback', 'Roll back', 'Choose an earlier version, review, GO.', '#/software'],
+  ['agent', 'Run an agent', 'Start an agent in a computer, beside your software.', '#/work'],
+  ['try', 'Try software', 'A temporary computer that expires and keeps its evidence.', '#/run?try=1'],
+  ['operate', 'Operate production', 'Health, logs, restarts, configuration, versions.', '#/environments'],
+  ['computer', 'Create a computer', 'Say what it needs; Compute places it.', null],
+];
+
+async function homeView() {
+  const [software, environments] = await Promise.all([
+    api('GET', '/software').catch(() => []),
+    api('GET', '/environments').catch(() => []),
+  ]);
+  const computers = environments.filter((environment) => environment.computer);
+  const production = computers.find((environment) => /prod/.test(environment.name));
+  return [
+    h('div', { class: 'title' }, h('h1', {}, 'What do you want to do?')),
+    h('div', { class: 'subtitle' }, 'Put software here. Make it run. Change it. Test it. Publish it. Deploy it. Promote it. Operate it.'),
+    h('div', { class: 'actions-grid' }, ACTIONS.map(([key, title, text, href]) =>
+      h('button', { class: 'action-tile', 'data-action': key, onclick: () => {
+        if (key === 'computer') return createEnvironment();
+        location.hash = key === 'operate' && production ? `#/environments/${enc(production.name)}` : href;
+      } }, h('strong', {}, title), h('span', {}, text)))),
+    h('h2', {}, 'Your software'),
+    software.length ? h('div', { class: 'cards' }, software.map((item) =>
+      h('div', { class: 'panel card', role: 'link', tabindex: '0', 'data-software': item.project,
+        onclick: () => { location.hash = `#/software/${enc(item.project)}`; } },
+      h('div', { class: 'name' }, item.project),
+      h('div', { class: 'meta' }, item.latest_version ? `latest ${item.latest_version}` : 'not published yet'),
+      item.environments.map((placement) => h('div', { class: 'placement' },
+        state(placement.processes.every(([, process]) => process === 'running') && placement.converged ? 'running' : 'pending',
+          `${placement.environment}${placement.version ? ` · ${placement.version}` : ''}`))))))
+      : h('div', { class: 'panel empty' }, 'Nothing here yet. Run a project to start.'),
+    h('h2', {}, 'Computers'),
+    computers.length ? h('div', { class: 'cards' }, computers.map((environment) =>
+      h('div', { class: 'panel card', role: 'link', tabindex: '0', 'data-computer-card': environment.name,
+        onclick: () => { location.hash = `#/work/${enc(environment.name)}`; } },
+      h('div', { class: 'name' }, environment.name),
+      h('div', { class: 'meta' }, environment.target ? `on ${environment.target}` : 'placing…'),
+      state(environment.computer))))
+      : h('div', { class: 'panel empty' }, 'No computers yet.'),
+  ];
+}
+
+// ---- Run a project ------------------------------------------------------------------
+//
+// Source → computer → Compute inspects the source inside the computer and
+// proposes an assembly → the user adjusts it → what will happen → GO.
+
+const RUN = { step: 'source', source: {}, computer: {}, proposal: null, environment: null, status: null };
+
+function resetRun(preset) {
+  Object.assign(RUN, { step: 'source', source: { url: '', revision: '', name: '' }, computer: preset, proposal: null, environment: null, status: null, services: {} });
+}
+
+async function runView() {
+  const query = new URLSearchParams(location.hash.split('?')[1] || '');
+  const mode = query.has('try') ? 'try' : (query.has('add') ? 'add' : 'run');
+  if (RUN.mode !== mode) {
+    RUN.mode = mode;
+    resetRun(mode === 'try'
+      ? { kind: 'new', name: `try-${Math.random().toString(16).slice(2, 8)}`, cpu: 1, memory: 1, lifetime: 'ephemeral' }
+      : { kind: 'existing', name: '' });
+  }
+  const environments = (await api('GET', '/environments')).filter((environment) => environment.computer
+    && !['destroyed', 'expired', 'destroying'].includes(environment.computer));
+  if (RUN.computer.kind === 'existing' && !RUN.computer.name) {
+    if (environments.length) RUN.computer.name = environments[0].name;
+    else Object.assign(RUN.computer, { kind: 'new', name: 'my-computer', cpu: 1, memory: 1, lifetime: 'persistent' });
+  }
+  const software = await api('GET', '/software').catch(() => []);
+  const field = (object, key, attributes) => h('input', { value: object[key] === undefined ? '' : String(object[key]), autocomplete: 'off',
+    oninput: (event) => { object[key] = event.target.value; }, ...attributes });
+  const title = mode === 'try' ? 'Try software' : (mode === 'add' ? 'Add another project' : 'Run a project');
+  const sourceStep = h('div', { class: 'panel wizard-step draft', 'data-step': 'source' },
+    h('h3', {}, '1 · What do you want to run?'),
+    h('label', { for: 'run-url' }, 'Git repository or local folder'),
+    field(RUN.source, 'url', { id: 'run-url', placeholder: 'https://github.com/you/app.git or /home/you/app' }),
+    h('div', { class: 'row' },
+      h('div', {}, h('label', { for: 'run-revision' }, 'Branch, tag, or commit (optional)'), field(RUN.source, 'revision', { id: 'run-revision', placeholder: 'default branch' })),
+      h('div', {}, h('label', { for: 'run-name' }, 'Name (optional)'), field(RUN.source, 'name', { id: 'run-name', placeholder: 'from the repository' }))),
+    software.some((item) => item.latest_version) ? h('div', { class: 'meta' },
+      'Or run a published version: ',
+      software.filter((item) => item.latest_version).map((item) =>
+        h('a', { href: `#/software/${enc(item.project)}`, class: 'chip' }, `${item.project} ${item.latest_version}`))) : null);
+  const computerStep = h('div', { class: 'panel wizard-step draft', 'data-step': 'computer' },
+    h('h3', {}, '2 · On which computer?'),
+    environments.length ? h('label', { class: 'check' },
+      h('input', { type: 'radio', name: 'run-computer', checked: RUN.computer.kind === 'existing', 'data-choice': 'existing',
+        onchange: () => { RUN.computer.kind = 'existing'; RUN.computer.name = environments[0].name; render(); } }),
+      ' A computer I have: ',
+      h('select', { id: 'run-existing', disabled: RUN.computer.kind !== 'existing', onchange: (event) => { RUN.computer.name = event.target.value; } },
+        environments.map((environment) => h('option', { value: environment.name, selected: RUN.computer.name === environment.name }, `${environment.name} (${environment.computer})`)))) : null,
+    h('label', { class: 'check' },
+      h('input', { type: 'radio', name: 'run-computer', checked: RUN.computer.kind === 'new', 'data-choice': 'new',
+        onchange: () => { Object.assign(RUN.computer, { kind: 'new', name: 'my-computer', cpu: 1, memory: 1, lifetime: mode === 'try' ? 'ephemeral' : 'persistent' }); render(); } }),
+      ' A new computer'),
+    RUN.computer.kind === 'new' ? h('div', { class: 'row' },
+      h('div', {}, h('label', { for: 'run-computer-name' }, 'Name'), field(RUN.computer, 'name', { id: 'run-computer-name' })),
+      h('div', {}, h('label', { for: 'run-cpu' }, 'CPUs'), field(RUN.computer, 'cpu', { id: 'run-cpu', type: 'number', min: '1' })),
+      h('div', {}, h('label', { for: 'run-memory' }, 'Memory (GiB)'), field(RUN.computer, 'memory', { id: 'run-memory', type: 'number', min: '1' })),
+      h('div', {}, h('label', { for: 'run-lifetime' }, 'Lifetime'),
+        h('select', { id: 'run-lifetime', onchange: (event) => { RUN.computer.lifetime = event.target.value; } },
+          h('option', { value: 'persistent', selected: RUN.computer.lifetime === 'persistent' }, 'Keep running'),
+          h('option', { value: 'ephemeral', selected: RUN.computer.lifetime === 'ephemeral' }, 'Temporary (1 hour)')))) : null,
+    h('div', { class: 'actions row' },
+      h('button', { class: 'primary', 'data-inspect': 'true', disabled: RUN.step === 'inspecting', onclick: inspectSource }, RUN.step === 'inspecting' ? 'Inspecting…' : 'Inspect'),
+      RUN.status ? h('span', { class: 'meta', 'data-run-status': 'true' }, RUN.status) : null));
+  return [
+    h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Home'), ' / ', title),
+    h('div', { class: 'title' }, h('h1', {}, title)),
+    h('div', { class: 'subtitle' }, 'Compute looks at the source inside the computer and proposes how to run it. Nothing changes until GO.'),
+    sourceStep,
+    computerStep,
+    RUN.proposal ? proposalStep() : null,
+  ];
+}
+
+async function waitForComputer(name, until) {
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    const computer = await api('GET', `/environments/${enc(name)}/computer`).catch(() => null);
+    if (computer) {
+      RUN.status = `Computer ${name}: ${computer.status}${computer.target ? ` on ${computer.target}` : ''}`;
+      const box = document.querySelector('[data-run-status]');
+      if (box) box.textContent = RUN.status;
+      if (until(computer)) return computer;
+      if (computer.failure && !computer.failure.retryable) throw new Error(`${computer.failure.code}: ${computer.failure.message}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`computer ${name} did not start`);
+}
+
+async function inspectSource() {
+  if (!RUN.source.url.trim()) { toast('Choose a repository or folder first', true); return; }
+  RUN.step = 'inspecting';
+  RUN.proposal = null;
+  await render();
+  try {
+    let name = RUN.computer.name;
+    if (RUN.computer.kind === 'new') {
+      name = RUN.computer.name.trim();
+      const existing = await api('GET', `/environments/${enc(name)}`).catch(() => null);
+      if (!existing) {
+        RUN.status = `Creating computer ${name}…`;
+        await render();
+        const computer = { lifecycle: RUN.computer.lifetime, requirements: {
+          cpu_count: Number(RUN.computer.cpu) || undefined,
+          memory_bytes: Number(RUN.computer.memory) ? Math.round(Number(RUN.computer.memory) * 2 ** 30) : undefined,
+        } };
+        if (RUN.computer.lifetime === 'ephemeral') computer.ttl_seconds = 3600;
+        await api('POST', '/environments', { name, computer });
+      }
+      RUN.computer = { kind: 'existing', name };
+    }
+    await waitForComputer(name, (computer) => computer.status === 'running');
+    RUN.status = 'Inspecting the source in the computer…';
+    await render();
+    const body = { url: RUN.source.url.trim() };
+    if (RUN.source.revision.trim()) body.revision = RUN.source.revision.trim();
+    if (RUN.source.name.trim()) body.name = RUN.source.name.trim();
+    RUN.proposal = await api('POST', `/environments/${enc(name)}/propose`, body);
+    RUN.environment = name;
+    RUN.services = Object.fromEntries((RUN.proposal.services || []).map((service) => [service.name, false]));
+    RUN.status = null;
+  } catch (error) {
+    RUN.status = `Could not inspect: ${error.message}`;
+  }
+  RUN.step = 'source';
+  await render();
+}
+
+function commandText(argv) {
+  if (!argv || !argv.length) return '';
+  return argv[0] === 'sh' && argv[1] === '-c' ? argv.slice(2).join(' ') : argv.join(' ');
+}
+
+function asCommand(text) {
+  return text.trim() ? ['sh', '-c', text.trim()] : [];
+}
+
+function proposalStep() {
+  const proposal = RUN.proposal;
+  const assembly = proposal.assembly;
+  const project = assembly.project;
+  const edit = (object, key, command) => h('input', {
+    value: command ? commandText(object[key]) : (object[key] === undefined ? '' : String(object[key])),
+    autocomplete: 'off',
+    oninput: (event) => { object[key] = command ? asCommand(event.target.value) : event.target.value; },
+    onchange: () => render(),
+  });
+  const processes = assembly.processes || [];
+  const happen = [
+    `Check out ${assembly.repository.name} at ${assembly.repository.revision}`,
+    ...(assembly.packages || []).map((item) => `Install ${commandText(item.install)}`),
+    project.build && project.build.length ? `Build: ${commandText(project.build)}` : null,
+    ...processes.map((process) => `Start ${process.kind || 'application'} ${process.name}${process.port ? ` on port ${process.port}` : ''}`),
+    ...(proposal.services || []).filter((service) => RUN.services[service.name]).map((service) => `Start service ${service.name}`),
+    Object.keys(proposal.config || {}).length ? `Set configuration: ${Object.keys(proposal.config).join(', ')}` : null,
+  ].filter(Boolean);
+  return h('div', { class: 'panel wizard-step draft', 'data-step': 'proposal' },
+    h('h3', {}, `3 · Compute proposes${proposal.runtime ? ` (${proposal.runtime})` : ''}`),
+    (proposal.notes || []).map((note) => h('div', { class: 'meta' }, note)),
+    h('div', { class: 'row' },
+      h('div', {}, h('label', {}, 'Dependencies'), (assembly.packages || []).length
+        ? assembly.packages.map((item) => edit(item, 'install', true)) : h('div', { class: 'meta' }, 'none')),
+      h('div', {}, h('label', {}, 'Build'), edit(project, 'build', true)),
+      h('div', {}, h('label', {}, 'Tests'), edit(project, 'test', true))),
+    processes.map((process) => h('div', { class: 'row', 'data-proposed-process': process.name },
+      h('div', {}, h('label', {}, `Start ${process.name}`), edit(process, 'command', true)),
+      h('div', { class: 'narrow' }, h('label', {}, 'Port'), h('input', { type: 'number', value: process.port || '', oninput: (event) => { process.port = Number(event.target.value) || undefined; }, onchange: () => render() })))),
+    (proposal.services || []).length ? h('div', {}, h('label', {}, 'Services it appears to need'),
+      proposal.services.map((service) => h('label', { class: 'check' },
+        h('input', { type: 'checkbox', checked: RUN.services[service.name], onchange: (event) => { RUN.services[service.name] = event.target.checked; render(); } }),
+        ` ${service.name}: ${commandText(service.command)}`))) : null,
+    Object.keys(proposal.config || {}).length ? h('div', {}, h('label', {}, 'Configuration'),
+      Object.keys(proposal.config).map((key) => h('div', { class: 'row' },
+        h('div', { class: 'mono narrow' }, key),
+        h('div', {}, h('input', { value: proposal.config[key], 'aria-label': `${key} value`, oninput: (event) => { proposal.config[key] = event.target.value; } }))))) : null,
+    h('h3', {}, '4 · What will happen'),
+    h('ul', { 'data-happen': 'true' }, happen.map((item) => h('li', {}, item))),
+    h('div', { class: 'meta' }, `On computer ${RUN.environment}. The computer is changed in place; nothing is redeployed.`),
+    h('div', { class: 'actions row' },
+      h('button', { onclick: () => { RUN.proposal = null; render(); } }, 'Start over'),
+      h('button', { class: 'primary go', 'data-go': 'true', onclick: runGo }, 'GO')));
+}
+
+async function runGo() {
+  const name = RUN.environment;
+  const proposal = RUN.proposal;
+  try {
+    const computer = await api('GET', `/environments/${enc(name)}/computer`);
+    const contents = structuredClone(computer.desired);
+    for (const field of LIST_FIELDS) contents[field] = contents[field] || [];
+    const assembly = proposal.assembly;
+    const upsert = (list, item) => { const index = list.findIndex((entry) => entry.name === item.name); if (index >= 0) list[index] = item; else list.push(item); };
+    upsert(contents.repositories, assembly.repository);
+    for (const item of assembly.packages || []) upsert(contents.packages, item);
+    const project = { ...assembly.project };
+    for (const key of ['build', 'test']) if (!project[key] || !project[key].length) delete project[key];
+    upsert(contents.projects, project);
+    for (const process of assembly.processes || []) upsert(contents.processes, process);
+    for (const service of proposal.services || []) if (RUN.services[service.name]) upsert(contents.processes, service);
+    const body = { contents, expected_generation: computer.desired.generation || 0 };
+    if (Object.keys(proposal.config || {}).length) body.config = { ...(computer.config || {}), ...proposal.config };
+    await api('POST', `/environments/${enc(name)}/contents`, body);
+    toast(`GO: ${proposal.name} is being assembled on ${name}`);
+    RUN.mode = null;
+    location.hash = `#/work/${enc(name)}`;
+  } catch (error) {
+    toast(`GO failed: ${error.message}`, true);
+  }
+}
+
+// ---- Software: projects, versions, rollouts --------------------------------------------
+
+function glyphOf(status) {
+  return { succeeded: ['ok', '✓'], skipped: ['idle', '–'], running: ['warn', '●'], failed: ['bad', '×'], pending: ['idle', '○'] }[status] || ['idle', '○'];
+}
+
+function stepList(steps) {
+  return h('ol', { class: 'steps-list' }, steps.map((item) => {
+    const [tone, glyph] = glyphOf(item.status);
+    return h('li', { class: `step ${tone}`, 'data-step-name': item.name, 'data-step-status': item.status },
+      h('span', { class: 'glyph' }, glyph), h('strong', {}, item.name),
+      item.detail ? h('span', { class: 'meta' }, ` ${item.detail}`) : null,
+      item.job_id ? h('span', { class: 'chip mono', title: item.execution_id || '' }, short(item.job_id)) : null);
+  }));
+}
+
+async function softwareListView() {
+  const software = await api('GET', '/software');
+  return [
+    h('div', { class: 'title' }, h('h1', {}, 'Software'),
+      h('div', { class: 'actions' }, h('a', { class: 'button primary', href: '#/run' }, 'Run a project'))),
+    h('div', { class: 'subtitle' }, 'Your projects, where they run, and at which version.'),
+    table(['Project', 'Latest version', 'Runs in'], software.map((item) => h('tr', { class: 'link', 'data-software': item.project,
+      onclick: () => { location.hash = `#/software/${enc(item.project)}`; } },
+    h('td', {}, h('strong', {}, item.project)),
+    h('td', {}, item.latest_version || '—'),
+    h('td', {}, item.environments.map((placement) => h('span', { class: 'chip' }, `${placement.environment}${placement.version ? ` ${placement.version}` : ''}`))))),
+    'No software yet. Run a project.'),
+  ];
+}
+
+async function softwareView(project) {
+  const view = await api('GET', `/software/${enc(project)}`);
+  const published = view.versions.filter((version) => version.status === 'published');
+  const current = (environment) => view.rollouts.find((rollout) => rollout.environment === environment && rollout.status === 'active');
+  const rows = view.environments.map((placement) => h('tr', { 'data-placement': placement.environment },
+    h('td', {}, h('a', { href: `#/environments/${enc(placement.environment)}` }, h('strong', {}, placement.environment))),
+    h('td', {}, placement.version || h('span', { class: 'meta' }, 'unversioned')),
+    h('td', { class: 'mono' }, revisionText(placement.revision, placement.commit)),
+    h('td', {}, placement.processes.map(([name, process]) => state(process, `${name} ${process}`))),
+    h('td', {},
+      h('button', { 'data-run': `${placement.environment}/build`, onclick: () => runProjectOperation(placement.environment, project, 'build') }, 'Build'),
+      h('button', { 'data-run': `${placement.environment}/test`, onclick: () => runProjectOperation(placement.environment, project, 'test') }, 'Test'),
+      h('a', { class: 'button', href: `#/work/${enc(placement.environment)}` }, 'Work'))));
+  const versions = view.versions.map((version) => h('tr', { class: 'link', 'data-version': version.version,
+    onclick: () => { location.hash = `#/software/${enc(project)}/versions/${enc(version.version)}`; } },
+  h('td', {}, h('strong', {}, version.version)),
+  h('td', {}, state(version.status === 'published' ? 'complete' : (version.status === 'failed' ? 'failed' : 'pending'), version.status)),
+  h('td', { class: 'mono' }, short(version.commit)),
+  h('td', {}, view.rollouts.filter((rollout) => rollout.version === version.version && rollout.status === 'active').map((rollout) => h('span', { class: 'chip' }, `● ${rollout.environment}`))),
+  h('td', {}, version.created_by),
+  h('td', {}, ago(version.created_at))));
+  const rollouts = view.rollouts.map((rollout) => h('tr', { class: 'link', 'data-rollout': rollout.rollout_id,
+    onclick: () => { location.hash = `#/operations/rollout/${enc(rollout.rollout_id)}`; } },
+  h('td', {}, rollout.kind), h('td', {}, rollout.version), h('td', {}, rollout.environment),
+  h('td', {}, state(rollout.status === 'applying' ? 'deploying' : (rollout.status === 'superseded' ? 'superseded' : rollout.status))),
+  h('td', {}, rollout.created_by), h('td', {}, ago(rollout.created_at))));
+  return [
+    h('div', { class: 'crumbs' }, h('a', { href: '#/software' }, 'Software'), ' / ', project),
+    h('div', { class: 'title', 'data-software-view': project }, h('h1', {}, project),
+      view.latest_version ? h('span', { class: 'chip' }, `latest ${view.latest_version}`) : null,
+      h('div', { class: 'actions' },
+        h('button', { class: 'primary', 'data-publish': 'true', onclick: () => publishDialog(project, view) }, 'Publish new version'),
+        h('button', { 'data-deploy': 'true', disabled: !published.length, onclick: () => deployDialog(project, view) }, 'Deploy'),
+        h('button', { 'data-promote': 'true', disabled: view.rollouts.every((rollout) => rollout.status !== 'active'), onclick: () => promoteVersionDialog(project, view) }, 'Promote'),
+        h('button', { 'data-rollback': 'true', disabled: published.length < 2, onclick: () => rollbackDialog(project, view, current) }, 'Roll back'))),
+    h('div', { class: 'subtitle' }, `Next version: ${view.next_version}`),
+    h('h2', {}, 'Where it runs'),
+    table(['Environment', 'Version', 'Revision', 'Running', ''], rows, 'It does not run anywhere yet.'),
+    OUTPUT.get(`software:${project}`) ? outputPanel(OUTPUT.get(`software:${project}`)) : null,
+    h('h2', {}, 'Versions'),
+    table(['Version', 'Status', 'Commit', 'Running in', 'By', 'When'], versions, 'No versions yet. Publish one.'),
+    h('h2', {}, 'Deployments'),
+    table(['Kind', 'Version', 'Environment', 'Status', 'By', 'When'], rollouts, 'Nothing deployed yet.'),
+  ];
+}
+
+/// A revision and the commit it resolved to, once when they are the same.
+function revisionText(revision, commit) {
+  if (!revision) return commit ? short(commit) : '—';
+  if (commit && commit.startsWith(revision)) return short(commit);
+  return `${revision.length > 16 ? short(revision) : revision}${commit ? ` · ${short(commit)}` : ''}`;
+}
+
+function outputPanel(output) {
+  return h('div', { class: 'panel terminal', 'data-output': output.status },
+    h('div', { class: 'meta' }, `${output.title} · ${output.status}${output.job ? ` · job ${output.job}` : ''}`),
+    h('pre', { class: 'mono' }, output.text || ''));
+}
+
+async function runProjectOperation(environment, project, command) {
+  try {
+    const submitted = await api('POST', `/environments/${enc(environment)}/run`, { project, command });
+    const key = `software:${project}`;
+    OUTPUT.set(key, { title: `${project} ${command} in ${environment}`, status: 'running', job: submitted.job_id, text: '' });
+    render();
+    for (let delay = 100; ; delay = Math.min(delay * 2, 1000)) {
+      const job = await api('GET', `/environments/${enc(environment)}/jobs/${enc(submitted.job_id)}`);
+      if (job.result || ['succeeded', 'failed', 'cancelled', 'timed_out', 'rejected'].includes(job.job.status)) {
+        const result = job.result && job.result.result;
+        OUTPUT.set(key, { title: `${project} ${command} in ${environment}`, status: job.job.status, job: submitted.job_id, text: result ? `${result.stdout.text}${result.stderr.text}` : (job.job.failure || '') });
+        render();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  } catch (error) {
+    toast(`${project} ${command} failed: ${error.message}`, true);
+  }
+}
+
+function reviewDialog(title, body, go) {
+  modal(title, body, [
+    h('button', { onclick: close }, 'Cancel'),
+    h('button', { class: 'primary go', 'data-go': 'true', onclick: async () => { close(); await go(); } }, 'GO'),
+  ]);
+}
+
+async function publishDialog(project, view) {
+  const environments = view.environments.map((placement) => placement.environment);
+  if (!environments.length) { toast(`${project} runs nowhere to publish from`, true); return; }
+  const source = h('select', { id: 'publish-environment' }, environments.map((name) => h('option', { value: name }, name)));
+  const label = h('input', { id: 'publish-version', value: view.next_version, autocomplete: 'off' });
+  const computer = await api('GET', `/environments/${enc(environments[0])}/computer`);
+  const spec = (computer.desired.projects || []).find((item) => item.name === project) || {};
+  reviewDialog(`Publish ${project}`, h('div', {},
+    h('label', { for: 'publish-environment' }, 'From'), source,
+    h('label', { for: 'publish-version' }, 'Version'), label,
+    h('p', {}, 'Compute will, in that environment\'s computer:'),
+    h('ul', {},
+      h('li', {}, 'Record the exact commit'),
+      h('li', {}, spec.build && spec.build.length ? `Build: ${commandText(spec.build)}` : 'Build: none'),
+      h('li', {}, spec.test && spec.test.length ? `Tests: ${commandText(spec.test)}` : 'Tests: none'),
+      h('li', {}, (spec.checks || []).length ? `Checks: ${spec.checks.join(', ')}` : 'Checks: none'),
+      h('li', {}, 'Package the source and record its digest'),
+      h('li', {}, 'Publish the version: immutable, with its evidence'))), async () => {
+    const version = await act(`Publishing ${project} ${label.value}`, () => api('POST', `/software/${enc(project)}/versions`, { environment: source.value, version: label.value }));
+    if (version) location.hash = `#/operations/version/${enc(project)}/${enc(version.version)}`;
+  });
+}
+
+async function deployDialog(project, view, preset) {
+  const environments = (await api('GET', '/environments')).filter((environment) => environment.computer && !['destroyed', 'expired'].includes(environment.computer));
+  const published = view.versions.filter((version) => version.status === 'published');
+  const version = h('select', { id: 'deploy-version' }, published.map((item) => h('option', { value: item.version, selected: preset && preset.version === item.version }, item.version)));
+  const target = h('select', { id: 'deploy-environment' }, environments.map((environment) => h('option', { value: environment.name, selected: preset && preset.environment === environment.name }, environment.name)));
+  const review = h('div', { 'data-review': 'true' });
+  const refresh = async () => {
+    const computer = await api('GET', `/environments/${enc(target.value)}/computer`);
+    const chosen = published.find((item) => item.version === version.value);
+    const running = view.rollouts.find((rollout) => rollout.environment === target.value && rollout.status === 'active');
+    const has = (computer.desired.repositories || []).find((item) => item.name === (chosen.assembly.repository || {}).name);
+    review.replaceChildren(h('ul', {},
+      h('li', {}, `Now in ${target.value}: ${running ? running.version : 'no version'}`),
+      h('li', {}, has ? `Move ${has.name} ${has.revision.length > 16 ? short(has.revision) : has.revision} → ${short(chosen.commit)}` : `Add ${project} at ${short(chosen.commit)}`),
+      (chosen.assembly.processes || []).map((process) => h('li', {}, `${(computer.desired.processes || []).some((item) => item.name === process.name) ? 'Restart' : 'Start'} ${process.name}`)),
+      h('li', {}, `On ${target.value}'s computer, in place: no new machine`)));
+  };
+  version.onchange = refresh;
+  target.onchange = refresh;
+  reviewDialog(`Deploy ${project}`, h('div', {},
+    h('label', { for: 'deploy-version' }, 'Version'), version,
+    h('label', { for: 'deploy-environment' }, 'To'), target, review), async () => {
+    const rollout = await act(`Deploying ${project} ${version.value} to ${target.value}`, () => api('POST', `/software/${enc(project)}/deploy`, { environment: target.value, version: version.value }));
+    if (rollout) location.hash = `#/operations/rollout/${enc(rollout.rollout_id)}`;
+  });
+  await refresh();
+}
+
+async function promoteVersionDialog(project, view) {
+  const environments = (await api('GET', '/environments')).filter((environment) => environment.computer && !['destroyed', 'expired'].includes(environment.computer));
+  const sources = [...new Set(view.rollouts.filter((rollout) => rollout.status === 'active').map((rollout) => rollout.environment))];
+  const from = h('select', { id: 'promote-from' }, sources.map((name) => h('option', { value: name, selected: /test|stag/.test(name) }, name)));
+  const to = h('select', { id: 'promote-to' }, environments.map((environment) => h('option', { value: environment.name, selected: /prod/.test(environment.name) }, environment.name)));
+  const review = h('div', { 'data-review': 'true' });
+  let plan = null;
+  const refresh = async () => {
+    try {
+      plan = await api('GET', `/software/${enc(project)}/promotion?from=${enc(from.value)}&to=${enc(to.value)}`);
+      review.replaceChildren(
+        h('div', { class: 'promotion' },
+          h('div', { class: 'panel fact' }, h('div', { class: 'label' }, from.value), h('div', { class: 'value' }, `Version ${plan.version}`), state(plan.from_healthy ? 'healthy' : 'unhealthy')),
+          h('div', { class: 'arrow' }, '→'),
+          h('div', { class: 'panel fact' }, h('div', { class: 'label' }, to.value), h('div', { class: 'value' }, plan.to_current ? `Version ${plan.to_current}` : 'Nothing yet'))),
+        h('div', {}, 'What will change:'), h('ul', {}, plan.changes.map((change) => h('li', {}, change))),
+        h('div', {}, 'Configuration:'), h('ul', {},
+          plan.config_different.length ? h('li', {}, `Set differently: ${plan.config_different.join(', ')}`) : null,
+          plan.config_only_in_from.length ? h('li', {}, `Only in ${from.value}: ${plan.config_only_in_from.join(', ')}`) : null,
+          plan.config_only_in_to.length ? h('li', {}, `Only in ${to.value}: ${plan.config_only_in_to.join(', ')}`) : null,
+          !plan.config_different.length && !plan.config_only_in_from.length && !plan.config_only_in_to.length ? h('li', {}, 'The same keys, set the same way') : null),
+        h('div', { class: 'meta' }, `Authority: ${plan.authority}. Approvals required: ${plan.approvals.length ? plan.approvals.join(', ') : 'none'}.`));
+    } catch (error) {
+      plan = null;
+      review.replaceChildren(h('div', { class: 'error' }, error.message));
+    }
+  };
+  from.onchange = refresh;
+  to.onchange = refresh;
+  reviewDialog(`Promote ${project}`, h('div', {},
+    h('label', { for: 'promote-from' }, 'From'), from,
+    h('label', { for: 'promote-to' }, 'To'), to, review), async () => {
+    if (!plan) return;
+    const rollout = await act(`Promoting ${project} ${plan.version} to ${to.value}`, () => api('POST', `/software/${enc(project)}/promote`, { from: from.value, to: to.value, expected_generation: plan.expected_generation }));
+    if (rollout) location.hash = `#/operations/rollout/${enc(rollout.rollout_id)}`;
+  });
+  await refresh();
+}
+
+async function rollbackDialog(project, view, current) {
+  const places = [...new Set(view.rollouts.filter((rollout) => rollout.status === 'active').map((rollout) => rollout.environment))];
+  const environment = h('select', { id: 'rollback-environment' }, places.map((name) => h('option', { value: name, selected: /prod/.test(name) }, name)));
+  const version = h('select', { id: 'rollback-to' });
+  const review = h('div', { 'data-review': 'true' });
+  const refresh = () => {
+    const active = current(environment.value);
+    const choices = view.versions.filter((item) => item.status === 'published' && (!active || item.version !== active.version));
+    version.replaceChildren(...choices.map((item) => h('option', { value: item.version, selected: active && item.version === active.previous_version }, item.version)));
+    review.replaceChildren(h('ul', {},
+      h('li', {}, `${environment.value} runs ${active ? active.version : 'no version'} now`),
+      h('li', {}, `It will run ${version.value || '—'}: checked out, built, and restarted in place`),
+      h('li', {}, 'The current version stays in the history')));
+  };
+  environment.onchange = refresh;
+  version.onchange = refresh;
+  refresh();
+  reviewDialog(`Roll back ${project}`, h('div', {},
+    h('label', { for: 'rollback-environment' }, 'Environment'), environment,
+    h('label', { for: 'rollback-to' }, 'Version'), version, review), async () => {
+    const rollout = await act(`Rolling ${project} back to ${version.value}`, () => api('POST', `/software/${enc(project)}/rollback`, { environment: environment.value, version: version.value }));
+    if (rollout) location.hash = `#/operations/rollout/${enc(rollout.rollout_id)}`;
+  });
+}
+
+async function versionView(project, label) {
+  const version = await api('GET', `/software/${enc(project)}/versions/${enc(label)}`);
+  const rollouts = await api('GET', `/rollouts?project=${enc(project)}`);
+  const assembly = version.assembly || {};
+  return [
+    h('div', { class: 'crumbs' }, h('a', { href: '#/software' }, 'Software'), ' / ', h('a', { href: `#/software/${enc(project)}` }, project), ' / ', label),
+    h('div', { class: 'title', 'data-version-view': label }, h('h1', {}, `${project} ${label}`), state(version.status === 'published' ? 'complete' : (version.status === 'failed' ? 'failed' : 'pending'), version.status),
+      h('div', { class: 'actions' }, version.status === 'published'
+        ? h('button', { class: 'primary', onclick: async () => deployDialog(project, await api('GET', `/software/${enc(project)}`), { version: label }) }, 'Deploy this version') : null)),
+    h('div', { class: 'grid' },
+      fact('Source', `${(assembly.repository || {}).url || '—'}`, true),
+      fact('Commit', version.commit || '—', true),
+      fact('Package', version.package_digest || '—', true),
+      fact('Published from', `${version.environment} by ${version.created_by}`),
+      fact('When', new Date(version.created_at).toLocaleString()),
+      fact('Configuration keys', (version.config_keys || []).join(', ') || 'none')),
+    h('h2', {}, 'Evidence'),
+    stepList(version.steps),
+    version.failure ? h('div', { class: 'panel error' }, version.failure) : null,
+    h('h2', {}, 'Environments'),
+    table(['Kind', 'Environment', 'Status', 'By', 'When'], rollouts.filter((rollout) => rollout.version === label).map((rollout) => h('tr', { class: 'link', onclick: () => { location.hash = `#/operations/rollout/${enc(rollout.rollout_id)}`; } },
+      h('td', {}, rollout.kind), h('td', {}, rollout.environment), h('td', {}, state(rollout.status === 'applying' ? 'deploying' : rollout.status)), h('td', {}, rollout.created_by), h('td', {}, ago(rollout.created_at)))), 'Not deployed anywhere.'),
+  ];
+}
+
+let operationTimer = null;
+function pollWhile(inFlight) {
+  clearTimeout(operationTimer);
+  if (inFlight) operationTimer = setTimeout(() => { if (!dialog.open) render(); }, 700);
+}
+
+async function jobOutput(environment, job) {
+  try {
+    const result = await api('GET', `/environments/${enc(environment)}/jobs/${enc(job)}`);
+    const output = result.result && result.result.result;
+    showOutput(`Job ${job}`, output ? output.stdout.text : '', output ? output.stderr.text : (result.job.failure || ''));
+  } catch (error) {
+    toast(`Could not read job ${job}: ${error.message}`, true);
+  }
+}
+
+async function operationView(kind, first, second) {
+  if (kind === 'version') {
+    const version = await api('GET', `/software/${enc(first)}/versions/${enc(second)}`);
+    const failed = version.steps.find((item) => item.status === 'failed');
+    pollWhile(version.status === 'publishing');
+    return [
+      h('div', { class: 'crumbs' }, h('a', { href: `#/software/${enc(first)}` }, first), ' / publish'),
+      h('div', { class: 'title', 'data-operation': version.status }, h('h1', {}, `Publishing ${first} ${second}`),
+        state(version.status === 'published' ? 'complete' : (version.status === 'failed' ? 'failed' : 'deploying'), version.status)),
+      h('div', { class: 'subtitle' }, `In ${version.environment}'s computer`),
+      stepList(version.steps),
+      version.failure ? h('div', { class: 'panel error' }, version.failure) : null,
+      h('div', { class: 'actions row' },
+        failed && failed.job_id ? h('button', { onclick: () => jobOutput(version.environment, failed.job_id) }, 'Inspect failure') : null,
+        version.status === 'failed' ? h('a', { class: 'button', href: `#/work/${enc(version.environment)}` }, 'Fix it in Work') : null,
+        version.status === 'published' ? h('a', { class: 'button primary', href: `#/software/${enc(first)}` }, 'Deploy it') : null),
+    ];
+  }
+  const rollout = await api('GET', `/rollouts/${enc(first)}`);
+  const failed = rollout.steps.find((item) => item.status === 'failed');
+  pollWhile(rollout.status === 'applying');
+  const verb = { deploy: 'Deploying', promote: 'Promoting', rollback: 'Rolling back' }[rollout.kind];
+  const computer = await api('GET', `/environments/${enc(rollout.environment)}/computer`).catch(() => null);
+  return [
+    h('div', { class: 'crumbs' }, h('a', { href: `#/software/${enc(rollout.project)}` }, rollout.project), ` / ${rollout.kind}`),
+    h('div', { class: 'title', 'data-operation': rollout.status }, h('h1', {}, `${verb} ${rollout.project} ${rollout.version}`),
+      state(rollout.status === 'active' ? 'running' : (rollout.status === 'failed' ? 'failed' : 'deploying'), rollout.status)),
+    h('div', { class: 'subtitle' }, `${rollout.from_environment ? `${rollout.from_environment} → ` : ''}${rollout.environment}${rollout.previous_version ? ` · replacing ${rollout.previous_version}` : ''} · by ${rollout.created_by}`),
+    stepList(rollout.steps),
+    rollout.failure ? h('div', { class: 'panel error' }, rollout.failure) : null,
+    computer && rollout.status === 'active' ? [h('h2', {}, 'Running now'), h('div', { class: 'grid' },
+      Object.entries(computer.observed.processes || {}).map(([name, process]) => {
+        const endpoint = (computer.endpoints || []).find((item) => item.process === name);
+        return fact(name, [state(process.state), endpoint && endpoint.url ? [' · ', h('a', { href: endpoint.url, target: '_blank', rel: 'noopener' }, endpoint.url)] : null]);
+      }))] : null,
+    h('div', { class: 'actions row' },
+      failed && failed.job_id ? h('button', { onclick: () => jobOutput(rollout.environment, failed.job_id) }, 'Inspect failure') : null,
+      rollout.status === 'failed' ? h('button', { onclick: async () => {
+        const again = await act('Retrying', () => api('POST', `/software/${enc(rollout.project)}/deploy`, { environment: rollout.environment, version: rollout.version }));
+        if (again) location.hash = `#/operations/rollout/${enc(again.rollout_id)}`;
+      } }, 'Retry') : null,
+      h('a', { class: 'button', href: `#/environments/${enc(rollout.environment)}` }, `Operate ${rollout.environment}`),
+      h('a', { class: 'button', href: `#/work/${enc(rollout.environment)}` }, 'Open in Work')),
+  ];
+}
+
+// ---- Work additions: progress, files, templates -------------------------------------
+
+/// What Compute is doing to make the computer match the environment, item by
+/// item: done, in progress, waiting.
+function reconcileProgress(computer) {
+  const desired = computer.desired || {};
+  const observed = computer.observed || {};
+  const items = [];
+  for (const repository of desired.repositories || []) {
+    const seen = (observed.repositories || {})[repository.name];
+    items.push([`Check out ${repository.name}`, seen && seen.revision === repository.revision ? seen.evidence.outcome : null]);
+  }
+  for (const item of desired.packages || []) {
+    const seen = (observed.packages || {})[item.name];
+    items.push([`Install ${item.name}`, seen ? seen.evidence.outcome : null]);
+  }
+  for (const project of desired.projects || []) {
+    if (!project.build || !project.build.length) continue;
+    const seen = (observed.builds || {})[project.name];
+    const repository = (observed.repositories || {})[project.repository];
+    items.push([`Build ${project.name}`, seen && repository && seen.commit === repository.commit ? seen.evidence.outcome : null]);
+  }
+  for (const process of desired.processes || []) {
+    if ((process.desired || 'running') !== 'running') continue;
+    const seen = (observed.processes || {})[process.name];
+    items.push([`Start ${process.name}`, seen ? (seen.state === 'running' ? 'succeeded' : (seen.state === 'failed' ? 'failed' : null)) : null]);
+  }
+  let current = false;
+  return items.map(([label, outcome]) => {
+    let status = outcome === 'succeeded' ? 'succeeded' : (outcome === 'failed' ? 'failed' : 'pending');
+    if (status === 'pending' && !current && !computer.converged) { status = 'running'; current = true; }
+    return { name: label, status };
+  });
+}
+
+async function listFiles(name, path) {
+  try {
+    const submitted = await api('POST', `/environments/${enc(name)}/exec`, { command: ['ls', '-la', '--', path || '.'] });
+    await followJob(name, `Files: ${path || '.'}`, submitted);
+  } catch (error) {
+    toast(`Files failed: ${error.message}`, true);
+  }
+}
+
+async function viewFile(name, path) {
+  try {
+    const submitted = await api('POST', `/environments/${enc(name)}/exec`, { command: ['head', '-c', '65536', '--', path] });
+    await followJob(name, `File: ${path}`, submitted);
+  } catch (error) {
+    toast(`File failed: ${error.message}`, true);
+  }
+}
+
+const TEMPLATES = {
+  database: { name: 'database', kind: 'service', command: ['sh', '-c', 'mkdir -p .compute/postgres && (test -f .compute/postgres/PG_VERSION || initdb -D .compute/postgres) && exec postgres -D .compute/postgres -p $PORT'], port: 5432 },
+  redis: { name: 'redis', kind: 'service', command: ['sh', '-c', 'exec redis-server --port $PORT'], port: 6379 },
+  agent: { name: 'agent', kind: 'agent', command: ['sh', '-c', 'exec ./agent'] },
+};
 
 const TABS = ['Overview', 'Workloads', 'Deployments', 'Logs', 'Resources', 'Configuration', 'Receipts', 'Events'];
 
@@ -1444,8 +2132,22 @@ async function domainView(name) {
 
 // ---- Router and live updates --------------------------------------------------------------
 
+/// The mode the operator was last in, for pages that belong to both.
+function lastMode() {
+  try { return sessionStorage.getItem('compute.mode') || 'work'; } catch { return 'work'; }
+}
+
 function route() {
-  const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  const path = location.hash.split('?')[0];
+  const parts = path.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  if (!parts.length) return { mode: lastMode(), nav: 'home', render: homeView };
+  if (parts[0] === 'run') return { mode: lastMode(), nav: 'home', render: runView };
+  if (parts[0] === 'software' && parts[2] === 'versions' && parts[3]) return { mode: 'manage', nav: 'software', render: () => versionView(parts[1], parts[3]) };
+  if (parts[0] === 'software' && parts[1]) return { mode: lastMode(), nav: 'software', render: () => softwareView(parts[1]) };
+  if (parts[0] === 'software') return { mode: lastMode(), nav: 'software', render: softwareListView };
+  if (parts[0] === 'operations' && parts[1] === 'version') return { mode: 'manage', nav: 'software', render: () => operationView('version', parts[2], parts[3]) };
+  if (parts[0] === 'operations' && parts[1] === 'rollout') return { mode: 'manage', nav: 'software', render: () => operationView('rollout', parts[2]) };
+  if (parts[0] === 'environments' && !parts[1]) return { mode: 'manage', nav: 'environments', render: environmentsView };
   if (parts[0] === 'work' && parts[1]) return { mode: 'work', environment: parts[1], nav: 'work', render: () => workView(parts[1]) };
   if (parts[0] === 'work') return { mode: 'work', nav: 'work', render: workHomeView };
   if (parts[0] === 'environments' && parts[1] && !parts[2]) return { mode: 'manage', environment: parts[1], nav: 'environments', render: () => environmentView(parts[1]) };
@@ -1460,13 +2162,15 @@ function route() {
   if (parts[0] === 'deployments' && parts[1]) return { nav: 'environments', render: () => deploymentView(parts[1]) };
   if (parts[0] === 'domains' && parts[1]) return { nav: 'domains', render: () => domainView(parts[1]) };
   if (parts[0] === 'domains') return { nav: 'domains', render: domainsView };
-  if (parts[0] === 'events') return { nav: 'events', render: eventsView };
-  return { nav: 'environments', render: environmentsView };
+  if (parts[0] === 'events') return { mode: 'manage', nav: 'events', render: eventsView };
+  return { mode: lastMode(), nav: 'home', render: homeView };
 }
 
 let rendering = null;
 async function render() {
   const { nav, render: renderView, mode = 'manage', environment } = route();
+  try { sessionStorage.setItem('compute.mode', mode); } catch { /* storage unavailable */ }
+  clearTimeout(operationTimer);
   for (const link of document.querySelectorAll('[data-nav]')) link.classList.toggle('active', link.dataset.nav === nav);
   // One control plane, two modes of the same environment: switching keeps it.
   document.body.dataset.mode = mode;
@@ -1476,7 +2180,7 @@ async function render() {
     link.setAttribute('aria-selected', String(target === mode));
     link.setAttribute('href', target === 'work'
       ? (environment ? `#/work/${enc(environment)}` : '#/work')
-      : (environment ? `#/environments/${enc(environment)}` : '#/'));
+      : (environment ? `#/environments/${enc(environment)}` : '#/environments'));
   }
   const current = rendering = Symbol('render');
   try {
