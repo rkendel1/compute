@@ -1,0 +1,1154 @@
+[
+ {
+  "method": "GET",
+  "path": "/health",
+  "scope": "Read",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/info",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/status",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/auth/whoami",
+  "scope": "Read",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/auth/credentials",
+  "scope": "Admin",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "POST",
+  "path": "/auth/credentials",
+  "scope": "Admin",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "POST",
+  "path": "/auth/credentials/{credential}/revoke",
+  "scope": "Admin",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "POST",
+  "path": "/auth/credentials/{credential}/rotate",
+  "scope": "Admin",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/audit",
+  "scope": "Admin",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/metrics",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/node/reconcile",
+  "scope": "Operate",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/node/upgrade",
+  "scope": "Read",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/node/upgrade",
+  "scope": "Admin",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/node/rollback",
+  "scope": "Admin",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/shutdown",
+  "scope": "Admin",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/environments",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "POST",
+  "path": "/environments",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/environments/{environment}",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "DELETE",
+  "path": "/environments/{environment}",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/environments/{environment}/status",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/start",
+  "scope": "Operate",
+  "ui": true,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/stop",
+  "scope": "Operate",
+  "ui": true,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/restart",
+  "scope": "Operate",
+  "ui": true,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/environments/{environment}/projects",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/projects",
+  "scope": "Deploy",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/environments/{environment}/projects/{project}",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "DELETE",
+  "path": "/environments/{environment}/projects/{project}",
+  "scope": "Deploy",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/environments/{environment}/projects/{project}/status",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/projects/{project}/start",
+  "scope": "Operate",
+  "ui": true,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/projects/{project}/stop",
+  "scope": "Operate",
+  "ui": true,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/projects/{project}/restart",
+  "scope": "Operate",
+  "ui": true,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/environments/{environment}/projects/{project}/executions",
+  "scope": "Read",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/environments/{environment}/projects/{project}/receipts",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/environments/{environment}/projects/{project}/workloads/{workload}",
+  "scope": "Read",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/projects/{project}/workloads/{workload}/start",
+  "scope": "Operate",
+  "ui": true,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/projects/{project}/workloads/{workload}/stop",
+  "scope": "Operate",
+  "ui": true,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/projects/{project}/workloads/{workload}/restart",
+  "scope": "Operate",
+  "ui": true,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/projects/{project}/workloads/{workload}/run",
+  "scope": "Execute",
+  "ui": true,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/environments/{environment}/projects/{project}/workloads/{workload}/logs",
+  "scope": "Read",
+  "ui": true,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/environments/{environment}/computer",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/contents",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/repositories",
+  "scope": "Operate",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "DELETE",
+  "path": "/environments/{environment}/repositories/{repository}",
+  "scope": "Operate",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/packages",
+  "scope": "Operate",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "DELETE",
+  "path": "/environments/{environment}/packages/{package}",
+  "scope": "Operate",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/processes",
+  "scope": "Operate",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "DELETE",
+  "path": "/environments/{environment}/processes/{process}",
+  "scope": "Operate",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/processes/{process}/start",
+  "scope": "Operate",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/processes/{process}/stop",
+  "scope": "Operate",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/reconcile",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/replace",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/exec",
+  "scope": "Execute",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/connect",
+  "scope": "Execute",
+  "ui": false,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/environments/{environment}/jobs/{job}",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/environments/{environment}/logs",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/run",
+  "scope": "Execute",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/release",
+  "scope": "Deploy",
+  "ui": false,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/config",
+  "scope": "Operate",
+  "ui": false,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/lifecycle",
+  "scope": "Operate",
+  "ui": false,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/propose",
+  "scope": "Execute",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/environments/{environment}/processes/{process}/restart",
+  "scope": "Operate",
+  "ui": true,
+  "cli": false,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/targets",
+  "scope": "Read",
+  "ui": false,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/software",
+  "scope": "Read",
+  "ui": true,
+  "cli": false,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/software/{project}",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/software/{project}/versions",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/software/{project}/versions",
+  "scope": "Deploy",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/software/{project}/versions/{version}",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/software/{project}/deploy",
+  "scope": "Deploy",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/software/{project}/promotion",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/software/{project}/promote",
+  "scope": "Deploy",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/software/{project}/rollback",
+  "scope": "Deploy",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/rollouts",
+  "scope": "Read",
+  "ui": true,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/rollouts/{rollout}",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/sessions",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/sessions",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/sessions/{session}",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "DELETE",
+  "path": "/sessions/{session}",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/projects",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/projects/{project}",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/projects/{project}/status",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/projects/{project}/revisions",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/projects/{project}/revisions",
+  "scope": "Deploy",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/deployments",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "POST",
+  "path": "/deployments",
+  "scope": "Deploy",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "POST",
+  "path": "/deployments/promote",
+  "scope": "Deploy",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/deployments/{deployment}",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/deployments/{deployment}/receipt",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "POST",
+  "path": "/deployments/{deployment}/rollback",
+  "scope": "Deploy",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/domains",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "POST",
+  "path": "/domains",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/domains/{domain}",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "DELETE",
+  "path": "/domains/{domain}",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/dns",
+  "scope": "Read",
+  "ui": false,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/dns/reconcile",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/certificates",
+  "scope": "Read",
+  "ui": false,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/certificates/{domain}/renew",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": true,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/network",
+  "scope": "Read",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/executions/{execution}",
+  "scope": "Read",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/receipts/{receipt}",
+  "scope": "Read",
+  "ui": true,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/events",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/events/stream",
+  "scope": "Read",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/providers",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/services",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/applications",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
+  "method": "GET",
+  "path": "/applications/{application}",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/applications/{application}/deployments",
+  "scope": "Read",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/applications/{application}/deployments",
+  "scope": "Deploy",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/applications/{application}/deployments/{deployment}",
+  "scope": "Read",
+  "ui": false,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/applications/{application}/rollback",
+  "scope": "Deploy",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/applications/{application}/stop",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/applications/{application}/logs",
+  "scope": "Read",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/compute/capabilities",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/compute/health",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/compute/capacity",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/compute/execute",
+  "scope": "Execute",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/compute/admission",
+  "scope": "Execute",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/compute/runtimes/resolve",
+  "scope": "Execute",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/compute/runtimes/prepare",
+  "scope": "Execute",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/compute/runtimes/status",
+  "scope": "Execute",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/compute/jobs",
+  "scope": "Execute",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/compute/jobs",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/compute/jobs/{job}",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/compute/jobs/{job}/result",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/compute/jobs/{job}/receipt",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "GET",
+  "path": "/compute/jobs/{job}/logs",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/compute/jobs/{job}/cancel",
+  "scope": "Execute",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "POST",
+  "path": "/services",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ },
+ {
+  "method": "DELETE",
+  "path": "/services/{service}",
+  "scope": "Operate",
+  "ui": true,
+  "cli": true,
+  "appport": false,
+  "http_path_in_tests": false
+ }
+]

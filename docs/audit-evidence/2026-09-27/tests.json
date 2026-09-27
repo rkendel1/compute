@@ -1,0 +1,458 @@
+[
+ {
+  "path": "crates/compute-cli/src/certification.rs",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-cli/src/environment_cmd.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-cli/src/policy_certification.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-cli/src/pool.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-cli/src/session_cmd.rs",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-cli/tests/cli.rs",
+  "tests": 38,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-cli/tests/computers.rs",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-cli/tests/daemon.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-cli/tests/isolation.rs",
+  "tests": 4,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-cli/tests/product.rs",
+  "tests": 3,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-cli/tests/product_journey.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "browser"
+ },
+ {
+  "path": "crates/compute-cli/tests/recovery.rs",
+  "tests": 7,
+  "ignored_without_feltdb": 1,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-cli/tests/remote_pool.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-cli/tests/runtime_store.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-cli/tests/sessions.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-cli/tests/upgrade.rs",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-cli/tests/work_mode_ui.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "browser"
+ },
+ {
+  "path": "crates/compute-core/src/application_artifact.rs",
+  "tests": 3,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-core/src/computers.rs",
+  "tests": 4,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-core/src/dependencies.rs",
+  "tests": 3,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-core/src/host.rs",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-core/src/lib.rs",
+  "tests": 27,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-core/src/receipt.rs",
+  "tests": 3,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-core/src/sessions.rs",
+  "tests": 4,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-environment/src/api.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-environment/src/auth.rs",
+  "tests": 4,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-environment/src/daemon/applications.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-environment/src/daemon/computers.rs",
+  "tests": 3,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-environment/src/daemon/execute.rs",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-environment/src/daemon/software.rs",
+  "tests": 4,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-environment/tests/availability.rs",
+  "tests": 3,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-environment/tests/computers.rs",
+  "tests": 12,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-environment/tests/control_plane.rs",
+  "tests": 6,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-environment/tests/environments.rs",
+  "tests": 10,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-environment/tests/executions.rs",
+  "tests": 3,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-environment/tests/feltdb_consumer.rs",
+  "tests": 4,
+  "ignored_without_feltdb": 4,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-environment/tests/network.rs",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-environment/tests/parity.rs",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-environment/tests/releases.rs",
+  "tests": 7,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-environment/tests/scale.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-environment/tests/security.rs",
+  "tests": 5,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-network/src/dns.rs",
+  "tests": 3,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-network/src/endpoints.rs",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-network/src/secrets.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-network/tests/ingress.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-network/tests/providers.rs",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-placement/tests/dependencies.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-placement/tests/matching.rs",
+  "tests": 33,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-placement/tests/pool.rs",
+  "tests": 7,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-placement/tests/selection.rs",
+  "tests": 21,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-policy/tests/evaluator.rs",
+  "tests": 19,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-provider/src/runtime.rs",
+  "tests": 9,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-provider/tests/admission.rs",
+  "tests": 4,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-provider/tests/controlled.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-provider/tests/remote.rs",
+  "tests": 10,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-provider/tests/sessions.rs",
+  "tests": 15,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-runtime-process/src/lib.rs",
+  "tests": 3,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-runtime-wasm/src/lib.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-runtime-wasm/tests/conformance.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-runtime/src/lib.rs",
+  "tests": 3,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-runtime/tests/conformance.rs",
+  "tests": 10,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-state-feltdb/tests/consumer.rs",
+  "tests": 8,
+  "ignored_without_feltdb": 8,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-state-feltdb/tests/feltdb.rs",
+  "tests": 4,
+  "ignored_without_feltdb": 4,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-state-feltdb/tests/model.rs",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-state-file/src/lib.rs",
+  "tests": 3,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-state-memory/src/lib.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "crates/compute-state/src/time.rs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
+  "path": "packages/compute-appport/src/test/application.test.ts",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "typescript"
+ },
+ {
+  "path": "packages/compute-appport/src/test/computers.test.ts",
+  "tests": 3,
+  "ignored_without_feltdb": 0,
+  "kind": "typescript"
+ },
+ {
+  "path": "packages/compute-appport/src/test/conformance.test.ts",
+  "tests": 12,
+  "ignored_without_feltdb": 0,
+  "kind": "typescript"
+ },
+ {
+  "path": "packages/compute-appport/src/test/environment.test.ts",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "typescript"
+ },
+ {
+  "path": "packages/compute-appport/src/test/placement.test.ts",
+  "tests": 5,
+  "ignored_without_feltdb": 0,
+  "kind": "typescript"
+ },
+ {
+  "path": "packages/compute-appport/src/test/policy.test.ts",
+  "tests": 3,
+  "ignored_without_feltdb": 0,
+  "kind": "typescript"
+ },
+ {
+  "path": "packages/compute-appport/src/test/sessions.test.ts",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "typescript"
+ },
+ {
+  "path": "packages/compute-state-model/src/model.test.mjs",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "typescript"
+ },
+ {
+  "path": "packages/compute-ui-e2e/src/control-plane.test.mjs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "browser"
+ }
+]

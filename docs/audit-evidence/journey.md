@@ -173,4 +173,4 @@ were introduced by this PR:
   exact cause was not isolated. Both fail identically on the base commit.
 
 All other test binaries passed. None of these tests runs in CI (see
-[../audit.md#test-evidence](../audit.md#test-evidence)).
+[../audit-2026-09-25.md#test-evidence](../audit.md#test-evidence)).

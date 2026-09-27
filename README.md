@@ -171,6 +171,8 @@ needs TLS and scoped operator credentials in production (`compute auth`),
 and `compute doctor` diagnoses the whole node. See
 [docs/architecture.md](docs/architecture.md) for the invariants, and
 [docs/hardening-audit.md](docs/hardening-audit.md) for what was measured.
+[docs/audit.md](docs/audit.md) is the current product and capability audit:
+what Compute does today, with evidence, and what it does not.
 
 ```sh
 compute start --detach

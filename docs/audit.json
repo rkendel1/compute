@@ -1,0 +1,6386 @@
+{
+ "audit": {
+  "date": "2026-09-27",
+  "commit": "69b70d9",
+  "branch": "claude/great-galileo-z1xed0",
+  "supersedes": "docs/audit-2026-09-25.md (the audit of 2026-09-25 at 7a3a160)",
+  "environment": {
+   "host": "Linux x86_64, 4 CPU, 16 GiB, kernel 6.18 (Firecracker VM)",
+   "kvm": false,
+   "gpu": false,
+   "docker": "client 29.3.1 only; no engine (/var/run/docker.sock absent)",
+   "podman": false,
+   "firecracker": false,
+   "build": "debug",
+   "state_backend": "file (the launcher default)"
+  },
+  "status_vocabulary": [
+   "IMPLEMENTED",
+   "IMPLEMENTED + VERIFIED",
+   "PARTIAL",
+   "DOCUMENTED ONLY",
+   "STUB",
+   "UNUSED",
+   "BROKEN",
+   "MISSING",
+   "UNKNOWN"
+  ],
+  "journey_vocabulary": [
+   "PASS",
+   "PARTIAL",
+   "FAIL",
+   "NOT IMPLEMENTED"
+  ]
+ },
+ "capabilities": [
+  {
+   "id": "launch",
+   "area": "launch",
+   "name": "`compute` launches the control plane and a local computer host",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-cli/src/launch_cmd.rs"
+    ],
+    "tests": [
+     "crates/compute-cli/tests/product_journey.rs"
+    ],
+    "journey": "first-launch"
+   },
+   "notes": "Starts `compute serve` (127.0.0.1:8788) and `compute start` (127.0.0.1:8787) with a generated pool; 3.7 s cold, 0.01 s when running. Opens a browser with xdg-open/open."
+  },
+  {
+   "id": "ui-modes",
+   "area": "ui",
+   "name": "Work / Manage modes of one control plane",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-environment/ui/app.js",
+     "crates/compute-environment/ui/index.html"
+    ],
+    "tests": [
+     "crates/compute-cli/tests/work_mode_ui.rs",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": "Browser tests skip where Playwright/Chromium are absent, which includes CI."
+  },
+  {
+   "id": "ui-home",
+   "area": "ui",
+   "name": "Action-first home (\"What do you want to do?\")",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-environment/ui/app.js#homeView"
+    ],
+    "tests": [
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": "Shows software and computers; environments without a computer are not on the home page."
+  },
+  {
+   "id": "ui-certification-package",
+   "area": "ui",
+   "name": "packages/compute-ui-e2e browser certification",
+   "status": "BROKEN",
+   "user_can_use": "n/a",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "packages/compute-ui-e2e/src/control-plane.test.mjs"
+    ],
+    "journey": "experiments.json#ui_certification_package"
+   },
+   "notes": "Fails since 69b70d9 changed the `#/` route; not run in CI."
+  },
+  {
+   "id": "computer-environments",
+   "area": "computer",
+   "name": "Environments backed by a durable computer",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-environment/src/daemon/computers.rs",
+     "crates/compute-core/src/computers.rs"
+    ],
+    "tests": [
+     "crates/compute-environment/tests/computers.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "persistent",
+   "area": "computer",
+   "name": "Persistent computers (no TTL, claimed)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "ephemeral",
+   "area": "computer",
+   "name": "Ephemeral computers that expire and keep evidence",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs#an_ephemeral_environment_expires_and_keeps_its_evidence",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "lifetime-change",
+   "area": "computer",
+   "name": "Change lifetime in place (claim on the target)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs#go_changes_lifetime_and_configuration_in_place_and_refuses_stale_views"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "in-place-change",
+   "area": "computer",
+   "name": "Contents changed in place, no redeployment",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs#deployment_is_reconciliation_of_the_same_computer",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": "Same provider resource across releases, configuration changes, and controller restarts."
+  },
+  {
+   "id": "replacement",
+   "area": "computer",
+   "name": "Explicit replacement provisions a new machine and retires the old",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs#provider_failures_and_replacements_are_explicit",
+     "crates/compute-environment/tests/computers.rs#deployment_is_reconciliation_of_the_same_computer"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "stop-resume",
+   "area": "computer",
+   "name": "Stop and resume the same machine",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "orphan-sweep",
+   "area": "computer",
+   "name": "Sessions no computer record claims are torn down",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "no (automatic)",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs#provisioning_survives_a_controller_restart_and_orphans_are_torn_down"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "machine-loss",
+   "area": "computer",
+   "name": "A machine the target lost is reported (environment_lost)",
+   "status": "PARTIAL",
+   "user_can_use": "partial",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-environment/src/daemon/computers.rs#target_unreachable"
+    ],
+    "tests": [
+     "crates/compute-environment/tests/computers.rs#provider_failures_and_replacements_are_explicit"
+    ],
+    "journey": "experiments.json#after_the_target_forgot_the_machine"
+   },
+   "notes": "Only noticed by the process probe or a lifecycle step. A computer with no processes stays \"running\" with no failure indefinitely, through reconcile and a control-plane restart."
+  },
+  {
+   "id": "target-down-visibility",
+   "area": "computer",
+   "name": "A computer whose target is unreachable says so",
+   "status": "MISSING",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {
+    "journey": "experiments.json#computer_while_target_down"
+   },
+   "notes": "The view keeps \"running\", failure null; exec fails with runtime_unavailable."
+  },
+  {
+   "id": "contents",
+   "area": "computer",
+   "name": "Repositories, packages, processes, projects, configuration as desired state",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "endpoints",
+   "area": "computer",
+   "name": "Process ports published as endpoints (target host:port)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": "No port publishing for the container provider; no ingress/TLS/domains for computer endpoints."
+  },
+  {
+   "id": "go-fencing",
+   "area": "computer",
+   "name": "GO: one generation-fenced change; stale views refused",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs",
+     "crates/compute-cli/tests/work_mode_ui.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "work-sessions",
+   "area": "computer",
+   "name": "Work sessions (attached / ephemeral) in FeltDB",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs#work_sessions_enter_environments_and_temporary_ones_end_with_them"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "files",
+   "area": "computer",
+   "name": "Files in the computer",
+   "status": "PARTIAL",
+   "user_can_use": "partial",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-environment/ui/app.js#listFiles"
+    ],
+    "tests": [
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": "List and read (head -c 64 KiB) through exec jobs; no upload, edit, or download."
+  },
+  {
+   "id": "terminal",
+   "area": "computer",
+   "name": "Terminal",
+   "status": "PARTIAL",
+   "user_can_use": "partial",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": "Each line is a durable job; no interactive PTY. The `terminal` session capability is offered by no provider."
+  },
+  {
+   "id": "target-inventory",
+   "area": "targets",
+   "name": "Targets listed with health, platform, resources, capabilities, features",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "CLI/API only",
+   "in_complete_model": true,
+   "evidence": {
+    "api": [
+     "GET /targets"
+    ],
+    "cli": [
+     "compute target list"
+    ],
+    "tests": [
+     "crates/compute-cli/tests/computers.rs"
+    ]
+   },
+   "notes": "Not shown in the UI."
+  },
+  {
+   "id": "discovery-resources",
+   "area": "discovery",
+   "name": "CPU count, memory, disk, OS/architecture discovered",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "indirect",
+   "in_complete_model": true,
+   "evidence": {
+    "journey": "GET /compute/capabilities on this host: 4 CPU, 16.9 GB, 270 GB, linux-x86_64"
+   },
+   "notes": ""
+  },
+  {
+   "id": "discovery-runtimes",
+   "area": "discovery",
+   "name": "Language runtimes discovered (installed/available/ready)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "CLI",
+   "in_complete_model": true,
+   "evidence": {
+    "cli": [
+     "compute runtimes",
+     "compute doctor"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "discovery-isolation",
+   "area": "discovery",
+   "name": "Isolation facilities discovered (landlock ABI, network namespaces, cgroups)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "CLI",
+   "in_complete_model": true,
+   "evidence": {
+    "cli": [
+     "compute isolation"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "discovery-features",
+   "area": "discovery",
+   "name": "Target features: kvm, virtualization, firecracker, containers, gpu",
+   "status": "PARTIAL",
+   "user_can_use": "indirect",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-provider/src/lib.rs#detect_target_features"
+    ],
+    "journey": "experiments.json#placement_refusals"
+   },
+   "notes": "`containers` is inferred from a docker/podman binary on PATH: advertised on this host with no engine running. gpu = /dev/nvidia0 exists. kvm = /dev/kvm openable. No nested-virtualization, GPU model, or engine liveness check."
+  },
+  {
+   "id": "discovery-network",
+   "area": "discovery",
+   "name": "Network interfaces, reachability, exposed ports",
+   "status": "MISSING",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {},
+   "notes": "Not discovered. Endpoint hosts come from the pool endpoint URL."
+  },
+  {
+   "id": "discovery-automatic-targets",
+   "area": "discovery",
+   "name": "Targets discovered automatically (no configuration)",
+   "status": "MISSING",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {},
+   "notes": "Targets come from a pool file. The launcher writes one naming the local host; no LAN/cloud discovery."
+  },
+  {
+   "id": "placement",
+   "area": "placement",
+   "name": "Capability-matched placement with reasons",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-placement/src/matching.rs"
+    ],
+    "tests": [
+     "crates/compute-placement/tests/matching.rs",
+     "crates/compute-placement/tests/selection.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "placement-override",
+   "area": "placement",
+   "name": "Constrain placement to a target",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes (dialog field)",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs#placement_chooses_a_target_by_what_the_computer_needs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "placement-dead-options",
+   "area": "placement",
+   "name": "UI offers persistent storage / public endpoint",
+   "status": "BROKEN",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {
+    "journey": "experiments.json#placement_refusals",
+    "source": [
+     "crates/compute-provider/src/sessions.rs#capabilities",
+     "crates/compute-provider/src/containers.rs#capabilities"
+    ]
+   },
+   "notes": "No provider offers either; any computer requesting them is refused (with reasons)."
+  },
+  {
+   "id": "runtime-wasm",
+   "area": "runtime",
+   "name": "WASM workloads (wasmtime, WASI p1)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "CLI (compute run)",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-runtime-wasm/src/lib.rs"
+    ],
+    "tests": [
+     "crates/compute-runtime-wasm/tests/conformance.rs",
+     "crates/compute-runtime/tests/conformance.rs"
+    ]
+   },
+   "notes": "Workload engine only: a computer cannot be a WASM sandbox."
+  },
+  {
+   "id": "runtime-process",
+   "area": "runtime",
+   "name": "Process runtimes: node, bun, deno, python, ruby, php, jvm, dotnet, native, shell",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "CLI (compute run), daemon workloads",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-runtime-process/src/lib.rs"
+    ],
+    "tests": [
+     "crates/compute-runtime/tests/conformance.rs"
+    ],
+    "journey": "experiments.json#runtimes"
+   },
+   "notes": "Pinned distributions download on demand (python verified here). `compute run script.py` fails by default: network \"none\" is unenforceable for process runtimes."
+  },
+  {
+   "id": "substrate-workspace",
+   "area": "runtime",
+   "name": "Computers as private workspaces on the target host (native processes)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-provider/src/sessions.rs#WorkspaceSessionProvider"
+    ],
+    "tests": [
+     "crates/compute-provider/tests/sessions.rs",
+     "crates/compute-environment/tests/computers.rs",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": "A directory with a shell: not an isolation boundary."
+  },
+  {
+   "id": "substrate-container",
+   "area": "runtime",
+   "name": "Computers as containers (docker/podman)",
+   "status": "IMPLEMENTED",
+   "user_can_use": "CLI flag only",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-provider/src/containers.rs"
+    ],
+    "tests": [
+     "crates/compute-provider/tests/sessions.rs#the_container_adapter_translates_the_session_contract"
+    ]
+   },
+   "notes": "Tested against a fake docker script only; never run against a real engine in this audit (none available) or in CI. `compute up --containers` / `compute serve --session-provider container`."
+  },
+  {
+   "id": "substrate-firecracker",
+   "area": "runtime",
+   "name": "Firecracker microVM computers",
+   "status": "MISSING",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {},
+   "notes": "Only a feature label for placement."
+  },
+  {
+   "id": "substrate-kvm",
+   "area": "runtime",
+   "name": "KVM virtual machine computers",
+   "status": "MISSING",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {},
+   "notes": "Only a feature label for placement."
+  },
+  {
+   "id": "substrate-wasm",
+   "area": "runtime",
+   "name": "WASM computers",
+   "status": "MISSING",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {},
+   "notes": ""
+  },
+  {
+   "id": "provider-local",
+   "area": "provider",
+   "name": "Local provider (in-process engine)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-provider/src/lib.rs#LocalProvider"
+    ],
+    "tests": [
+     "crates/compute-cli/tests/cli.rs"
+    ]
+   },
+   "notes": "Runs workloads; does not host computers (sessions_unsupported)."
+  },
+  {
+   "id": "provider-remote",
+   "area": "provider",
+   "name": "Remote provider (`compute serve`, compute.remote@1)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-provider/src/lib.rs#RemoteProvider"
+    ],
+    "tests": [
+     "crates/compute-provider/tests/remote.rs",
+     "crates/compute-cli/tests/remote_pool.rs"
+    ]
+   },
+   "notes": "The only kind of target that hosts computers."
+  },
+  {
+   "id": "provider-daemon-node",
+   "area": "provider",
+   "name": "A daemon node as a provider (deployments, /compute/*)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-cli/tests/product.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "provider-fly",
+   "area": "provider",
+   "name": "Fly Machines",
+   "status": "MISSING",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {},
+   "notes": ""
+  },
+  {
+   "id": "provider-railway",
+   "area": "provider",
+   "name": "Railway",
+   "status": "MISSING",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {},
+   "notes": ""
+  },
+  {
+   "id": "provider-render",
+   "area": "provider",
+   "name": "Render",
+   "status": "MISSING",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {},
+   "notes": ""
+  },
+  {
+   "id": "provider-cloud-vm",
+   "area": "provider",
+   "name": "Cloud VMs / bare metal provisioning",
+   "status": "MISSING",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {},
+   "notes": ""
+  },
+  {
+   "id": "provider-dns",
+   "area": "provider",
+   "name": "DNS providers (for domains)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-network/src/dns.rs"
+    ],
+    "tests": [
+     "crates/compute-network/tests/providers.rs",
+     "crates/compute-environment/tests/network.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "run-a-project",
+   "area": "projects",
+   "name": "Inspect a source in the computer and propose an assembly",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-environment/src/daemon/software.rs#propose"
+    ],
+    "tests": [
+     "crates/compute-environment/src/daemon/software.rs",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": "Recognises package.json, Python, Go, Rust, Makefile, Procfile, .env.example, compose/postgres/redis hints. A local folder must be a Git repository."
+  },
+  {
+   "id": "multi-project",
+   "area": "projects",
+   "name": "Several projects on one computer",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "build-test",
+   "area": "projects",
+   "name": "Build, test, checks, named commands in the computer",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "publish",
+   "area": "release",
+   "name": "Publish an immutable version (source, build, tests, checks, package digest)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-environment/src/daemon/software.rs"
+    ],
+    "tests": [
+     "crates/compute-environment/tests/computers.rs#versions_are_published_deployed_promoted_and_rolled_back_in_place",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": "The version is a commit + digest + assembly; no artifact is stored (the package digest is computed, not kept)."
+  },
+  {
+   "id": "deploy",
+   "area": "release",
+   "name": "Deploy a version to an environment (rollout with steps)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "promote",
+   "area": "release",
+   "name": "Promote test \u2192 production with a reviewed plan",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": "No approval workflow (approvals list is always empty)."
+  },
+  {
+   "id": "rollback",
+   "area": "release",
+   "name": "Roll back to an earlier version",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "zero-downtime",
+   "area": "release",
+   "name": "Zero-downtime release inside a computer",
+   "status": "MISSING",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {},
+   "notes": "A release restarts processes. Zero-downtime traffic switching exists only for bundle projects on the daemon node."
+  },
+  {
+   "id": "approvals",
+   "area": "release",
+   "name": "Promotion approvals",
+   "status": "MISSING",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-environment/src/status.rs#PromotionPlan"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "artifact-store",
+   "area": "release",
+   "name": "Stored build artifacts for versions",
+   "status": "MISSING",
+   "user_can_use": "no",
+   "in_complete_model": true,
+   "evidence": {},
+   "notes": "Bundle revisions store artifacts; computer versions store only the commit and digest."
+  },
+  {
+   "id": "bundle-projects",
+   "area": "legacy",
+   "name": "Bundle projects, revisions, zero-downtime releases on the daemon node",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": "reconcile",
+   "evidence": {
+    "source": [
+     "crates/compute-environment/src/daemon/release.rs",
+     "crates/compute-environment/src/daemon/deploy.rs"
+    ],
+    "tests": [
+     "crates/compute-environment/tests/releases.rs"
+    ]
+   },
+   "notes": "Executes on the daemon host (supervisor). Refused for environments with a computer."
+  },
+  {
+   "id": "applications",
+   "area": "legacy",
+   "name": "`compute init/deploy` applications on a provider node",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": "reconcile",
+   "evidence": {
+    "source": [
+     "crates/compute-environment/src/daemon/applications.rs"
+    ],
+    "tests": [
+     "crates/compute-cli/tests/product.rs"
+    ],
+    "journey": "experiments.json#application_journey"
+   },
+   "notes": "`compute deploy <dir>` auto-starts a daemon with state in ./.compute/daemon; the app runs on that daemon node."
+  },
+  {
+   "id": "domains-tls",
+   "area": "operations",
+   "name": "Domains, DNS, ACME certificates, ingress",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes (bundle projects)",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/network.rs",
+     "crates/compute-network/tests/ingress.rs"
+    ]
+   },
+   "notes": "Routes to bundle-project services only; not to computer endpoints."
+  },
+  {
+   "id": "logs",
+   "area": "operations",
+   "name": "Process logs and job output",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": "Read on demand (tail); no streaming for computer processes."
+  },
+  {
+   "id": "restart",
+   "area": "operations",
+   "name": "Restart a process in place",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/src/daemon/software.rs",
+     "crates/compute-cli/tests/product_journey.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "health",
+   "area": "operations",
+   "name": "Process health (probe) and endpoint reachability (rollouts)",
+   "status": "PARTIAL",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs"
+    ]
+   },
+   "notes": "Process liveness is probed every 15 s; endpoints are TCP-checked only during a rollout; no HTTP health checks for computer processes."
+  },
+  {
+   "id": "metrics",
+   "area": "observability",
+   "name": "Metrics endpoint",
+   "status": "IMPLEMENTED",
+   "user_can_use": "API only",
+   "in_complete_model": true,
+   "evidence": {
+    "api": [
+     "GET /metrics"
+    ]
+   },
+   "notes": "Not surfaced in the UI or CLI."
+  },
+  {
+   "id": "events",
+   "area": "observability",
+   "name": "Durable lifecycle events and a live stream",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/control_plane.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "receipts",
+   "area": "observability",
+   "name": "Verifiable execution receipts",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-core/src/receipt.rs",
+     "crates/compute-cli/tests/product.rs"
+    ]
+   },
+   "notes": ""
+  },
+  {
+   "id": "state-feltdb",
+   "area": "state",
+   "name": "FeltDB as the durable authority (model generation 6)",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "configuration",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-state-feltdb/tests/consumer.rs",
+     "crates/compute-environment/tests/feltdb_consumer.rs"
+    ]
+   },
+   "notes": "Opt-in: `--state feltdb` or compute.toml."
+  },
+  {
+   "id": "state-default-file",
+   "area": "state",
+   "name": "Default control state is a local file (control-state.json)",
+   "status": "IMPLEMENTED",
+   "user_can_use": "yes",
+   "in_complete_model": "reconcile",
+   "evidence": {
+    "source": [
+     "crates/compute-cli/src/control_state.rs"
+    ],
+    "journey": "experiments.json#environment"
+   },
+   "notes": "The launcher and `compute start` default to the file backend, contrary to \"FeltDB owns durable state\"."
+  },
+  {
+   "id": "restart-recovery",
+   "area": "state",
+   "name": "Control-plane restart keeps and resumes everything",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "tests": [
+     "crates/compute-environment/tests/computers.rs",
+     "crates/compute-cli/tests/recovery.rs"
+    ],
+    "journey": "experiments.json#after_control_plane_restart"
+   },
+   "notes": ""
+  },
+  {
+   "id": "daemon-auth",
+   "area": "security",
+   "name": "Daemon: operator credentials, scopes, audit; owner checks for computers",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-environment/src/auth.rs"
+    ],
+    "tests": [
+     "crates/compute-environment/tests/security.rs",
+     "crates/compute-environment/tests/computers.rs"
+    ]
+   },
+   "notes": "Loopback without TLS admits requests with no credential (development mode); unknown bearer tokens get 401."
+  },
+  {
+   "id": "target-auth",
+   "area": "security",
+   "name": "Target (`compute serve`) authentication",
+   "status": "MISSING",
+   "user_can_use": "n/a",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-provider/src/lib.rs#AllowAllAuthorizer"
+    ],
+    "journey": "experiments.json#target_exec_without_credential"
+   },
+   "notes": "Any caller that reaches a target can list sessions and exec in any computer; the daemon authenticates to no one, so its computers are owned by \"anonymous\"."
+  },
+  {
+   "id": "isolation-computers",
+   "area": "security",
+   "name": "Isolation between computers on one host",
+   "status": "MISSING",
+   "user_can_use": "n/a",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-provider/src/sessions.rs"
+    ]
+   },
+   "notes": "Workspace computers are directories under one user; processes share the host network and filesystem permissions."
+  },
+  {
+   "id": "appport",
+   "area": "agents",
+   "name": "AppPort client for every UI operation",
+   "status": "IMPLEMENTED + VERIFIED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "packages/compute-appport/src/computers.ts"
+    ],
+    "tests": [
+     "packages/compute-appport/src/test/computers.test.ts"
+    ]
+   },
+   "notes": "Tested against a stub daemon, not a real one."
+  },
+  {
+   "id": "agent-identity",
+   "area": "agents",
+   "name": "Agents act under operator credentials with scopes",
+   "status": "IMPLEMENTED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-environment/src/auth.rs"
+    ]
+   },
+   "notes": "No agent-specific identity or delegation; an agent is an operator."
+  }
+ ],
+ "journeys": [
+  {
+   "id": "first-launch",
+   "journey": "compute \u2192 UI \u2192 first-run experience",
+   "status": "PASS",
+   "evidence": [
+    "crates/compute-cli/tests/product_journey.rs",
+    "experiments.json#launch_seconds"
+   ],
+   "notes": "The home page offers actions; there is no guided first-run flow, and a machine with no free memory for the 1 GiB default gets an admission error in the wizard."
+  },
+  {
+   "id": "run-a-project",
+   "journey": "choose \u2192 inspect \u2192 configure \u2192 GO \u2192 running",
+   "status": "PASS",
+   "evidence": [
+    "crates/compute-cli/tests/product_journey.rs"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "multi-project",
+   "journey": "project A \u2192 GO \u2192 project B \u2192 GO \u2192 same computer",
+   "status": "PASS",
+   "evidence": [
+    "crates/compute-cli/tests/product_journey.rs"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "change-in-place",
+   "journey": "change desired state \u2192 GO \u2192 same computer changes",
+   "status": "PASS",
+   "evidence": [
+    "crates/compute-cli/tests/product_journey.rs",
+    "crates/compute-environment/tests/computers.rs"
+   ],
+   "notes": "Provider resource identical before and after."
+  },
+  {
+   "id": "build",
+   "journey": "project \u2192 build \u2192 result",
+   "status": "PASS",
+   "evidence": [
+    "crates/compute-cli/tests/product_journey.rs"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "test",
+   "journey": "project \u2192 test \u2192 result",
+   "status": "PASS",
+   "evidence": [
+    "crates/compute-cli/tests/product_journey.rs"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "publish",
+   "journey": "project \u2192 version \u2192 publish",
+   "status": "PASS",
+   "evidence": [
+    "crates/compute-cli/tests/product_journey.rs",
+    "crates/compute-environment/tests/computers.rs"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "deploy",
+   "journey": "version \u2192 environment \u2192 deploy",
+   "status": "PASS",
+   "evidence": [
+    "crates/compute-cli/tests/product_journey.rs",
+    "crates/compute-environment/tests/computers.rs"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "promote",
+   "journey": "test \u2192 production",
+   "status": "PASS",
+   "evidence": [
+    "crates/compute-cli/tests/product_journey.rs",
+    "crates/compute-environment/tests/computers.rs"
+   ],
+   "notes": "No approvals."
+  },
+  {
+   "id": "rollback",
+   "journey": "production \u2192 previous version",
+   "status": "PASS",
+   "evidence": [
+    "crates/compute-cli/tests/product_journey.rs",
+    "crates/compute-environment/tests/computers.rs"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "operate",
+   "journey": "logs, processes, health, restart, configuration, commands",
+   "status": "PARTIAL",
+   "evidence": [
+    "crates/compute-cli/tests/product_journey.rs",
+    "crates/compute-environment/tests/computers.rs"
+   ],
+   "notes": "No streaming logs, no HTTP health, no metrics in the UI, no resource scaling short of replacement."
+  },
+  {
+   "id": "session",
+   "journey": "create \u2192 connect \u2192 exec \u2192 logs \u2192 stop \u2192 resume \u2192 destroy",
+   "status": "PASS",
+   "evidence": [
+    "crates/compute-cli/tests/sessions.rs",
+    "crates/compute-provider/tests/sessions.rs"
+   ],
+   "notes": "Target sessions (not through the daemon). Work sessions through the daemon: open/close only."
+  },
+  {
+   "id": "ephemeral",
+   "journey": "create \u2192 use \u2192 expire \u2192 evidence retained",
+   "status": "PASS",
+   "evidence": [
+    "crates/compute-environment/tests/computers.rs",
+    "crates/compute-cli/tests/product_journey.rs"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "replacement",
+   "journey": "environment \u2192 replace \u2192 new computer \u2192 old retired",
+   "status": "PASS",
+   "evidence": [
+    "crates/compute-environment/tests/computers.rs"
+   ],
+   "notes": "CLI/API and the Manage dialog."
+  },
+  {
+   "id": "container-computer",
+   "journey": "a computer in a real container",
+   "status": "NOT IMPLEMENTED",
+   "evidence": [
+    "experiments.json#environment"
+   ],
+   "notes": "Adapter exists; no engine available to verify; not in CI."
+  },
+  {
+   "id": "machine-loss",
+   "journey": "the target loses the machine \u2192 Compute reports it",
+   "status": "FAIL",
+   "evidence": [
+    "experiments.json#after_the_target_forgot_the_machine"
+   ],
+   "notes": "Undetected for computers without processes."
+  },
+  {
+   "id": "ui-certification",
+   "journey": "packages/compute-ui-e2e",
+   "status": "FAIL",
+   "evidence": [
+    "experiments.json#ui_certification_package"
+   ],
+   "notes": "Broken by the home-route change."
+  },
+  {
+   "id": "readme-run",
+   "journey": "`compute run script.py` from the README",
+   "status": "FAIL",
+   "evidence": [
+    "experiments.json#runtimes"
+   ],
+   "notes": "network \"none\" is unenforceable for python; needs --network."
+  },
+  {
+   "id": "readme-application",
+   "journey": "`compute init my-app; compute deploy my-app`",
+   "status": "PASS",
+   "evidence": [
+    "experiments.json#application_journey"
+   ],
+   "notes": "Auto-starts a second control plane in ./.compute/daemon."
+  }
+ ],
+ "runtimes": [
+  {
+   "runtime": "native (process)",
+   "implemented": true,
+   "discoverable": true,
+   "placeable": true,
+   "executable": true,
+   "ui": "computers (workspace)",
+   "cli": true,
+   "tests": true,
+   "production_ready": "no (no isolation boundary)"
+  },
+  {
+   "runtime": "language runtimes (node, bun, deno, python, ruby, php, jvm, dotnet, shell)",
+   "implemented": true,
+   "discoverable": true,
+   "placeable": true,
+   "executable": true,
+   "ui": "no (workload engine)",
+   "cli": true,
+   "tests": true,
+   "production_ready": "partial (process isolation only; landlock/netns where available)"
+  },
+  {
+   "runtime": "wasm (wasmtime, WASI p1)",
+   "implemented": true,
+   "discoverable": true,
+   "placeable": true,
+   "executable": true,
+   "ui": "no",
+   "cli": true,
+   "tests": true,
+   "production_ready": "workload engine only"
+  },
+  {
+   "runtime": "containers (docker/podman)",
+   "implemented": true,
+   "discoverable": "inferred from a binary on PATH",
+   "placeable": "as a feature label, not as a substrate",
+   "executable": "unverified (fake docker only)",
+   "ui": "no",
+   "cli": "--containers / --session-provider container",
+   "tests": "fake docker",
+   "production_ready": false
+  },
+  {
+   "runtime": "kvm",
+   "implemented": false,
+   "discoverable": true,
+   "placeable": "label only",
+   "executable": false,
+   "ui": "feature field",
+   "cli": false,
+   "tests": "matching only",
+   "production_ready": false
+  },
+  {
+   "runtime": "firecracker",
+   "implemented": false,
+   "discoverable": "binary + /dev/kvm",
+   "placeable": "label only",
+   "executable": false,
+   "ui": "feature field",
+   "cli": false,
+   "tests": "matching only",
+   "production_ready": false
+  },
+  {
+   "runtime": "gpu",
+   "implemented": false,
+   "discoverable": "/dev/nvidia0 exists",
+   "placeable": "label only",
+   "executable": false,
+   "ui": "feature field",
+   "cli": false,
+   "tests": "matching only",
+   "production_ready": false
+  }
+ ],
+ "cli": [
+  {
+   "command": "compute up",
+   "about": "Launch the Compute control plane on this machine and open it: what `compute` alone does. Starts this machine's computer host and the daemon when they are not running",
+   "help_defect": null,
+   "interface": "launcher: spawns compute serve + compute start",
+   "state": "local processes, pool.toml",
+   "authority": "n/a (local)",
+   "ui": "the UI itself",
+   "tests": [
+    "crates/compute-cli/tests/product_journey.rs"
+   ]
+  },
+  {
+   "command": "compute down",
+   "about": "Stop the control plane `compute` launched, and this machine's computer host. Durable state is kept",
+   "help_defect": null,
+   "interface": "launcher",
+   "state": "stops processes",
+   "authority": "n/a (local)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/product_journey.rs"
+   ]
+  },
+  {
+   "command": "compute versions publish",
+   "about": "Publish a version: build, tests, checks, and a source package, run in the environment the project is developed in",
+   "help_defect": null,
+   "interface": "daemon API /software, /rollouts",
+   "state": "durable (Version, Rollout)",
+   "authority": "daemon scopes + owner",
+   "ui": "Software pages: publish/deploy/promote/rollback, version and operation pages",
+   "tests": []
+  },
+  {
+   "command": "compute versions list",
+   "about": "A project's versions, newest first, and where they run",
+   "help_defect": null,
+   "interface": "daemon API /software, /rollouts",
+   "state": "durable (Version, Rollout)",
+   "authority": "daemon scopes + owner",
+   "ui": "Software pages: publish/deploy/promote/rollback, version and operation pages",
+   "tests": []
+  },
+  {
+   "command": "compute versions show",
+   "about": "One version: its source, package, evidence, and rollouts",
+   "help_defect": null,
+   "interface": "daemon API /software, /rollouts",
+   "state": "durable (Version, Rollout)",
+   "authority": "daemon scopes + owner",
+   "ui": "Software pages: publish/deploy/promote/rollback, version and operation pages",
+   "tests": []
+  },
+  {
+   "command": "compute versions deploy",
+   "about": "Deploy a version to an environment, in place",
+   "help_defect": null,
+   "interface": "daemon API /software, /rollouts",
+   "state": "durable (Version, Rollout)",
+   "authority": "daemon scopes + owner",
+   "ui": "Software pages: publish/deploy/promote/rollback, version and operation pages",
+   "tests": []
+  },
+  {
+   "command": "compute versions promote",
+   "about": "Promote the version running in one environment to another, after showing what it would change",
+   "help_defect": null,
+   "interface": "daemon API /software, /rollouts",
+   "state": "durable (Version, Rollout)",
+   "authority": "daemon scopes + owner",
+   "ui": "Software pages: publish/deploy/promote/rollback, version and operation pages",
+   "tests": []
+  },
+  {
+   "command": "compute versions rollback",
+   "about": "Roll an environment back to the version before the current one (or the one named)",
+   "help_defect": null,
+   "interface": "daemon API /software, /rollouts",
+   "state": "durable (Version, Rollout)",
+   "authority": "daemon scopes + owner",
+   "ui": "Software pages: publish/deploy/promote/rollback, version and operation pages",
+   "tests": []
+  },
+  {
+   "command": "compute init",
+   "about": "Create the smallest useful Compute application",
+   "help_defect": null,
+   "interface": "local files",
+   "state": "writes a directory",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "crates/compute-cli/tests/computers.rs",
+    "crates/compute-cli/tests/product.rs",
+    "crates/compute-cli/tests/product_journey.rs"
+   ]
+  },
+  {
+   "command": "compute application info",
+   "about": "Describe an application directory or artifact: identity, runtime, requirements, environment contract. Contacts no provider",
+   "help_defect": null,
+   "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+   "state": "durable (applications environment)",
+   "authority": "daemon scopes (no owner)",
+   "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+   "tests": [
+    "crates/compute-cli/tests/product.rs"
+   ]
+  },
+  {
+   "command": "compute application pack",
+   "about": "Package an application directory as a portable artifact",
+   "help_defect": null,
+   "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+   "state": "durable (applications environment)",
+   "authority": "daemon scopes (no owner)",
+   "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+   "tests": [
+    "crates/compute-cli/tests/product.rs",
+    "packages/compute-appport/src/test/application.test.ts"
+   ]
+  },
+  {
+   "command": "compute application deploy",
+   "about": "Place the application on a provider that can host it and release a new version there",
+   "help_defect": null,
+   "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+   "state": "durable (applications environment)",
+   "authority": "daemon scopes (no owner)",
+   "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+   "tests": [
+    "crates/compute-cli/tests/product.rs",
+    "packages/compute-appport/src/application.ts"
+   ]
+  },
+  {
+   "command": "compute application status",
+   "about": "The application's state on the provider that hosts it",
+   "help_defect": null,
+   "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+   "state": "durable (applications environment)",
+   "authority": "daemon scopes (no owner)",
+   "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+   "tests": [
+    "crates/compute-cli/tests/product.rs",
+    "packages/compute-appport/src/application.ts"
+   ]
+  },
+  {
+   "command": "compute application logs",
+   "about": "The active version's output",
+   "help_defect": null,
+   "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+   "state": "durable (applications environment)",
+   "authority": "daemon scopes (no owner)",
+   "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+   "tests": [
+    "packages/compute-appport/src/application.ts"
+   ]
+  },
+  {
+   "command": "compute application history",
+   "about": "Every version, newest first",
+   "help_defect": null,
+   "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+   "state": "durable (applications environment)",
+   "authority": "daemon scopes (no owner)",
+   "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+   "tests": [
+    "crates/compute-cli/tests/product.rs",
+    "packages/compute-appport/src/application.ts"
+   ]
+  },
+  {
+   "command": "compute application rollback",
+   "about": "Deploy an earlier version again, as the next version",
+   "help_defect": null,
+   "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+   "state": "durable (applications environment)",
+   "authority": "daemon scopes (no owner)",
+   "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+   "tests": [
+    "packages/compute-appport/src/application.ts"
+   ]
+  },
+  {
+   "command": "compute application stop",
+   "about": "Stop serving. Versions and evidence remain",
+   "help_defect": null,
+   "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+   "state": "durable (applications environment)",
+   "authority": "daemon scopes (no owner)",
+   "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+   "tests": [
+    "packages/compute-appport/src/application.ts"
+   ]
+  },
+  {
+   "command": "compute run",
+   "about": "",
+   "help_defect": "describes itself as the pool location (a flattened doc comment)",
+   "interface": "local engine, or a provider chosen by pool placement",
+   "state": "none (execution record + receipt)",
+   "authority": "local user; providers are AllowAll",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "crates/compute-cli/tests/isolation.rs",
+    "crates/compute-cli/tests/remote_pool.rs",
+    "packages/compute-appport/src/provider.ts"
+   ]
+  },
+  {
+   "command": "compute bundle create",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "writes files",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "packages/compute-appport/src/provider.ts",
+    "packages/compute-appport/src/test/conformance.test.ts",
+    "packages/compute-appport/src/test/environment.test.ts"
+   ]
+  },
+  {
+   "command": "compute bundle inspect",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "writes files",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs"
+   ]
+  },
+  {
+   "command": "compute bundle verify",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "writes files",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs"
+   ]
+  },
+  {
+   "command": "compute deps create",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "writes files",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs"
+   ]
+  },
+  {
+   "command": "compute deps inspect",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "writes files",
+   "authority": "none",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute deps verify",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "writes files",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs"
+   ]
+  },
+  {
+   "command": "compute inspect",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "crates/compute-cli/tests/remote_pool.rs",
+    "packages/compute-appport/src/schemas.ts",
+    "packages/compute-appport/src/test/conformance.test.ts"
+   ]
+  },
+  {
+   "command": "compute runtimes",
+   "about": "",
+   "help_defect": "describes itself as the pool location (a flattened doc comment)",
+   "interface": "local / pool",
+   "state": "runtime store",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "crates/compute-cli/tests/remote_pool.rs",
+    "crates/compute-placement/tests/selection.rs"
+   ]
+  },
+  {
+   "command": "compute runtime",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "crates/compute-cli/tests/product.rs",
+    "packages/compute-appport/src/test/conformance.test.ts"
+   ]
+  },
+  {
+   "command": "compute capabilities",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "crates/compute-cli/tests/product.rs",
+    "crates/compute-cli/tests/remote_pool.rs",
+    "crates/compute-cli/tests/sessions.rs"
+   ]
+  },
+  {
+   "command": "compute isolation",
+   "about": "Show the versioned isolation profiles and runtime support matrix",
+   "help_defect": null,
+   "interface": "local",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "crates/compute-cli/tests/isolation.rs",
+    "crates/compute-policy/tests/evaluator.rs",
+    "crates/compute-provider/tests/remote.rs"
+   ]
+  },
+  {
+   "command": "compute exec",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local engine (issue-description convenience)",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "crates/compute-cli/tests/sessions.rs",
+    "crates/compute-placement/tests/matching.rs",
+    "packages/compute-appport/src/test/sessions.test.ts"
+   ]
+  },
+  {
+   "command": "compute doctor",
+   "about": "Diagnose this host's runtimes and, when one runs, its controller",
+   "help_defect": null,
+   "interface": "local + daemon /status",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs"
+   ]
+  },
+  {
+   "command": "compute certify",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/src/certification.rs",
+    "crates/compute-cli/tests/cli.rs"
+   ]
+  },
+  {
+   "command": "compute distribution build",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "writes files",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs"
+   ]
+  },
+  {
+   "command": "compute distribution inspect",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "writes files",
+   "authority": "none",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute distribution verify",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "writes files",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs"
+   ]
+  },
+  {
+   "command": "compute receipt inspect",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "none",
+   "authority": "none",
+   "ui": "Receipt dialog (project pages)",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs"
+   ]
+  },
+  {
+   "command": "compute receipt verify",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "none",
+   "authority": "none",
+   "ui": "Receipt dialog (project pages)",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "crates/compute-cli/tests/product.rs",
+    "crates/compute-cli/tests/sessions.rs"
+   ]
+  },
+  {
+   "command": "compute version",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "local",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "crates/compute-cli/tests/product.rs",
+    "crates/compute-cli/tests/upgrade.rs"
+   ]
+  },
+  {
+   "command": "compute remote run",
+   "about": "",
+   "help_defect": "describes itself as the pool location (a flattened doc comment)",
+   "interface": "provider compute.remote@1 directly",
+   "state": "provider job store",
+   "authority": "provider: AllowAllAuthorizer on compute serve",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/sessions.rs"
+   ]
+  },
+  {
+   "command": "compute remote inspect",
+   "about": "",
+   "help_defect": "describes itself as the pool location (a flattened doc comment)",
+   "interface": "provider compute.remote@1 directly",
+   "state": "provider job store",
+   "authority": "provider: AllowAllAuthorizer on compute serve",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute remote submit",
+   "about": "",
+   "help_defect": "describes itself as the pool location (a flattened doc comment)",
+   "interface": "provider compute.remote@1 directly",
+   "state": "provider job store",
+   "authority": "provider: AllowAllAuthorizer on compute serve",
+   "ui": "none",
+   "tests": [
+    "packages/compute-appport/src/provider.ts"
+   ]
+  },
+  {
+   "command": "compute remote status",
+   "about": "",
+   "help_defect": "describes itself as the pool location (a flattened doc comment)",
+   "interface": "provider compute.remote@1 directly",
+   "state": "provider job store",
+   "authority": "provider: AllowAllAuthorizer on compute serve",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/sessions.rs"
+   ]
+  },
+  {
+   "command": "compute remote result",
+   "about": "",
+   "help_defect": "describes itself as the pool location (a flattened doc comment)",
+   "interface": "provider compute.remote@1 directly",
+   "state": "provider job store",
+   "authority": "provider: AllowAllAuthorizer on compute serve",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute remote wait",
+   "about": "",
+   "help_defect": "describes itself as the pool location (a flattened doc comment)",
+   "interface": "provider compute.remote@1 directly",
+   "state": "provider job store",
+   "authority": "provider: AllowAllAuthorizer on compute serve",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute remote receipt",
+   "about": "",
+   "help_defect": "describes itself as the pool location (a flattened doc comment)",
+   "interface": "provider compute.remote@1 directly",
+   "state": "provider job store",
+   "authority": "provider: AllowAllAuthorizer on compute serve",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute remote artifacts",
+   "about": "",
+   "help_defect": "describes itself as the pool location (a flattened doc comment)",
+   "interface": "provider compute.remote@1 directly",
+   "state": "provider job store",
+   "authority": "provider: AllowAllAuthorizer on compute serve",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute remote cancel",
+   "about": "",
+   "help_defect": "describes itself as the pool location (a flattened doc comment)",
+   "interface": "provider compute.remote@1 directly",
+   "state": "provider job store",
+   "authority": "provider: AllowAllAuthorizer on compute serve",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute remote capabilities",
+   "about": "",
+   "help_defect": "describes itself as the pool location (a flattened doc comment)",
+   "interface": "provider compute.remote@1 directly",
+   "state": "provider job store",
+   "authority": "provider: AllowAllAuthorizer on compute serve",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/remote_pool.rs"
+   ]
+  },
+  {
+   "command": "compute remote health",
+   "about": "",
+   "help_defect": "describes itself as the pool location (a flattened doc comment)",
+   "interface": "provider compute.remote@1 directly",
+   "state": "provider job store",
+   "authority": "provider: AllowAllAuthorizer on compute serve",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/remote_pool.rs",
+    "packages/compute-appport/src/test/placement.test.ts"
+   ]
+  },
+  {
+   "command": "compute provider list",
+   "about": "List configured providers with their discovery status and health",
+   "help_defect": null,
+   "interface": "pool config + providers",
+   "state": "capability cache",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "packages/compute-appport/src/provider.ts"
+   ]
+  },
+  {
+   "command": "compute provider inspect",
+   "about": "Show a provider's validated descriptor. A pool ID yields the canonical descriptor; `local` or an endpoint URL outside the pool yields the raw capability response",
+   "help_defect": null,
+   "interface": "pool config + providers",
+   "state": "capability cache",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "packages/compute-appport/src/provider.ts"
+   ]
+  },
+  {
+   "command": "compute provider capabilities",
+   "about": "Show a provider's raw capability response",
+   "help_defect": null,
+   "interface": "pool config + providers",
+   "state": "capability cache",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "packages/compute-appport/src/provider.ts"
+   ]
+  },
+  {
+   "command": "compute provider pool",
+   "about": "Show the configured pool and its selection policy",
+   "help_defect": null,
+   "interface": "pool config + providers",
+   "state": "capability cache",
+   "authority": "none",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute provider refresh",
+   "about": "Rediscover capabilities and rewrite the capability cache",
+   "help_defect": null,
+   "interface": "pool config + providers",
+   "state": "capability cache",
+   "authority": "none",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute capacity",
+   "about": "Show configured, reserved, and currently available provider capacity",
+   "help_defect": null,
+   "interface": "pool",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute jobs",
+   "about": "List durable jobs and their reservation state",
+   "help_defect": null,
+   "interface": "pool",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute placement inspect",
+   "about": "Evaluate the pool for a workload. No execution occurs",
+   "help_defect": null,
+   "interface": "pool (evaluation only)",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "packages/compute-appport/src/provider.ts"
+   ]
+  },
+  {
+   "command": "compute placement explain",
+   "about": "Explain what the workload requires and why each provider is or is not compatible. No execution occurs",
+   "help_defect": null,
+   "interface": "pool (evaluation only)",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute pool run",
+   "about": "Place and execute synchronously on the selected provider",
+   "help_defect": null,
+   "interface": "pool placement then provider",
+   "state": "provider job store",
+   "authority": "provider: AllowAll",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/product.rs",
+    "packages/compute-appport/src/provider.ts"
+   ]
+  },
+  {
+   "command": "compute pool submit",
+   "about": "Place and submit a durable job to the selected provider",
+   "help_defect": null,
+   "interface": "pool placement then provider",
+   "state": "provider job store",
+   "authority": "provider: AllowAll",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/product.rs",
+    "packages/compute-appport/src/provider.ts"
+   ]
+  },
+  {
+   "command": "compute target list",
+   "about": "The computers and infrastructure the daemon can place environments on",
+   "help_defect": null,
+   "interface": "daemon API /targets",
+   "state": "none",
+   "authority": "daemon read scope",
+   "ui": "none (targets are not shown in the UI)",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute session create",
+   "about": "Create a session on a provider chosen by placement",
+   "help_defect": null,
+   "interface": "pool placement then target sessions directly",
+   "state": "target session store (not FeltDB)",
+   "authority": "target: AllowAll; owner = hash of the Authorization header",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/sessions.rs",
+    "packages/compute-appport/src/sessions.ts",
+    "packages/compute-appport/src/test/sessions.test.ts"
+   ]
+  },
+  {
+   "command": "compute session list",
+   "about": "List your sessions on every provider in the pool",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "none",
+   "authority": "target: AllowAll",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/sessions.rs",
+    "packages/compute-appport/src/sessions.ts"
+   ]
+  },
+  {
+   "command": "compute session info",
+   "about": "Show a session's complete, authoritative state",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "none",
+   "authority": "target: AllowAll",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/sessions.rs",
+    "packages/compute-appport/src/sessions.ts"
+   ]
+  },
+  {
+   "command": "compute session connect",
+   "about": "Get connection details for a session",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target session store",
+   "authority": "target: AllowAll",
+   "ui": "none",
+   "tests": [
+    "packages/compute-appport/src/sessions.ts"
+   ]
+  },
+  {
+   "command": "compute session exec",
+   "about": "Run a command in a session as a durable job",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target job store",
+   "authority": "target: AllowAll",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/sessions.rs",
+    "packages/compute-appport/src/sessions.ts",
+    "packages/compute-appport/src/test/sessions.test.ts"
+   ]
+  },
+  {
+   "command": "compute session logs",
+   "about": "Show the output of every execution in a session",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "none",
+   "authority": "target: AllowAll",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/sessions.rs",
+    "packages/compute-appport/src/sessions.ts"
+   ]
+  },
+  {
+   "command": "compute session stop",
+   "about": "Stop active executions, keeping the environment and the record",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target session store",
+   "authority": "target: AllowAll",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute session resume",
+   "about": "Resume a stopped session's environment. Never creates a new one",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target session store",
+   "authority": "target: AllowAll",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute session claim",
+   "about": "Keep an ephemeral session until it is destroyed",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target session store",
+   "authority": "target: AllowAll",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute session destroy",
+   "about": "Tear the environment down. The record remains as evidence",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target session store",
+   "authority": "target: AllowAll",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/sessions.rs"
+   ]
+  },
+  {
+   "command": "compute session open",
+   "about": "Start working, through the Compute daemon: enter an environment you have (it keeps running when you close), or with no environment, get a temporary one of your own (destroyed when you close or it expires)",
+   "help_defect": null,
+   "interface": "daemon API /sessions",
+   "state": "durable (WorkSession)",
+   "authority": "daemon scopes + owner",
+   "ui": "Work: Open session; Home: Try software / Temporary environment",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute session close",
+   "about": "Stop working. Only a session's own temporary environment goes with it",
+   "help_defect": null,
+   "interface": "daemon API /sessions",
+   "state": "durable",
+   "authority": "daemon scopes + owner",
+   "ui": "Work: Close",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute session opened",
+   "about": "Your work sessions, through the Compute daemon",
+   "help_defect": null,
+   "interface": "daemon API /sessions",
+   "state": "none",
+   "authority": "daemon scopes + owner",
+   "ui": "Work: Sessions table",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute policy inspect",
+   "about": "Show the effective policy: the baseline intersected with local configuration and --policy",
+   "help_defect": null,
+   "interface": "local",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "packages/compute-appport/src/provider.ts"
+   ]
+  },
+  {
+   "command": "compute policy validate",
+   "about": "Statically validate a compute.policy@1 document",
+   "help_defect": null,
+   "interface": "local",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs"
+   ]
+  },
+  {
+   "command": "compute policy check",
+   "about": "Decide admission for a workload without executing it. Exits 0 when admitted and 2 when denied",
+   "help_defect": null,
+   "interface": "local",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs"
+   ]
+  },
+  {
+   "command": "compute policy explain",
+   "about": "Explain every policy dimension of an admission decision",
+   "help_defect": null,
+   "interface": "local",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs"
+   ]
+  },
+  {
+   "command": "compute explain",
+   "about": "Show the full decision chain for a workload: requirements, capabilities, policy, admission, and placement. Never executes",
+   "help_defect": null,
+   "interface": "local / pool",
+   "state": "none",
+   "authority": "none",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute start",
+   "about": "Run the persistent Compute daemon (environments and services)",
+   "help_defect": null,
+   "interface": "starts the daemon",
+   "state": "process",
+   "authority": "n/a",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs",
+    "crates/compute-cli/tests/daemon.rs",
+    "crates/compute-cli/tests/product.rs",
+    "crates/compute-cli/tests/recovery.rs"
+   ]
+  },
+  {
+   "command": "compute stop",
+   "about": "Stop the Compute daemon. Desired state is kept",
+   "help_defect": null,
+   "interface": "daemon API /shutdown, or an application",
+   "state": "stops the daemon",
+   "authority": "admin scope",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs",
+    "crates/compute-cli/tests/daemon.rs",
+    "crates/compute-cli/tests/product.rs",
+    "crates/compute-cli/tests/recovery.rs"
+   ]
+  },
+  {
+   "command": "compute status",
+   "about": "Show the Compute daemon's status",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "none",
+   "authority": "read",
+   "ui": "status chip in the header",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "crates/compute-cli/tests/computers.rs",
+    "crates/compute-cli/tests/daemon.rs",
+    "crates/compute-cli/tests/isolation.rs"
+   ]
+  },
+  {
+   "command": "compute logs",
+   "about": "Read an application's live stdout and stderr",
+   "help_defect": null,
+   "interface": "daemon API /applications",
+   "state": "none",
+   "authority": "read",
+   "ui": "application logs tab",
+   "tests": [
+    "crates/compute-cli/tests/product.rs"
+   ]
+  },
+  {
+   "command": "compute history",
+   "about": "List an application's durable execution history",
+   "help_defect": null,
+   "interface": "daemon API /applications",
+   "state": "none",
+   "authority": "read",
+   "ui": "application versions tab",
+   "tests": [
+    "crates/compute-cli/tests/product.rs"
+   ]
+  },
+  {
+   "command": "compute rollback",
+   "about": "Activate a previous immutable application deployment as a new version",
+   "help_defect": null,
+   "interface": "daemon API /applications",
+   "state": "durable",
+   "authority": "deploy",
+   "ui": "application Rollback",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs",
+    "crates/compute-cli/tests/product.rs"
+   ]
+  },
+  {
+   "command": "compute environment list",
+   "about": "List environments",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/daemon.rs"
+   ]
+  },
+  {
+   "command": "compute environment create",
+   "about": "Create an environment",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs",
+    "crates/compute-cli/tests/daemon.rs",
+    "crates/compute-cli/tests/recovery.rs",
+    "crates/compute-cli/tests/upgrade.rs"
+   ]
+  },
+  {
+   "command": "compute environment apply",
+   "about": "Create or update an environment and its projects from a manifest",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment inspect",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/daemon.rs"
+   ]
+  },
+  {
+   "command": "compute environment status",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment start",
+   "about": "Start an environment, or `PROJECT/ENVIRONMENT`",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment stop",
+   "about": "Stop an environment, or `PROJECT/ENVIRONMENT`",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment restart",
+   "about": "Restart an environment, or `PROJECT/ENVIRONMENT`",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment destroy",
+   "about": "Stop and delete an environment and all of its state. An environment on a computer has its computer destroyed; its record stays as evidence",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute environment computer",
+   "about": "Show an environment's computer: desired against observed contents",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute environment exec",
+   "about": "Run a command in the environment's computer as a durable job",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute environment connect",
+   "about": "Get connection details for the environment's computer",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment logs",
+   "about": "Every job the computer ran, or one process's log",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment reconcile",
+   "about": "Check every process now, and retry what failed",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment replace",
+   "about": "Replace the computer with one that meets new requirements. The only change that provisions a new machine",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment repo add",
+   "about": "Add a repository, checked out at a revision",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs",
+    "crates/compute-cli/tests/work_mode_ui.rs"
+   ]
+  },
+  {
+   "command": "compute environment repo update",
+   "about": "Move a repository to another revision (or URL)",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute environment repo pull",
+   "about": "Fetch a repository's revision again: a branch that moved",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment repo remove",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment package install",
+   "about": "Install a package by running a command (again whenever it changes)",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment package remove",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment process add",
+   "about": "Add (or change) a process and start it",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute environment process start",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment process stop",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute environment process restart",
+   "about": "Restart it in place",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment process remove",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment service add",
+   "about": "Add (or change) it and start it",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs",
+    "crates/compute-cli/tests/work_mode_ui.rs"
+   ]
+  },
+  {
+   "command": "compute environment agent add",
+   "about": "Add (or change) it and start it",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment contents show",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment contents apply",
+   "about": "Replace the contents with a JSON document. With `--expected-generation`, only if nobody changed them since",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment project add",
+   "about": "Add (or change) a project in one of the environment's repositories",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs",
+    "crates/compute-cli/tests/work_mode_ui.rs"
+   ]
+  },
+  {
+   "command": "compute environment project remove",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment build",
+   "about": "Build a project inside the environment's computer",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute environment test",
+   "about": "Test a project inside the environment's computer",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute environment run",
+   "about": "Run one of a project's named commands inside the environment's computer",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute environment release",
+   "about": "Release a revision of a project: the computer checks it out, builds it, and restarts what runs from it, in place. No redeployment",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment config",
+   "about": "Show or change the configuration every process, build, and command sees. What depends on it restarts in place",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment propose",
+   "about": "Inspect a project's source in the computer and propose how to run it: runtime, dependencies, build, tests, start command, ports, services, configuration. Nothing changes",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": []
+  },
+  {
+   "command": "compute environment lifetime",
+   "about": "Change how long the environment lives, in place: kept until destroyed, or temporary",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": "Manage and Work",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
+   "command": "compute project list",
+   "about": "List projects: every project across environments, or the projects in one environment",
+   "help_defect": null,
+   "interface": "daemon API (bundle projects on node environments)",
+   "state": "durable",
+   "authority": "daemon scopes (no owner)",
+   "ui": "Manage: project pages (bundle)",
+   "tests": []
+  },
+  {
+   "command": "compute project add",
+   "about": "Register a revision from compute.project.toml and deploy it to an environment",
+   "help_defect": null,
+   "interface": "daemon API (bundle projects on node environments)",
+   "state": "durable",
+   "authority": "daemon scopes (no owner)",
+   "ui": "Manage: project pages (bundle)",
+   "tests": [
+    "crates/compute-cli/tests/daemon.rs"
+   ]
+  },
+  {
+   "command": "compute project push",
+   "about": "Register an immutable revision without deploying it",
+   "help_defect": null,
+   "interface": "daemon API (bundle projects on node environments)",
+   "state": "durable",
+   "authority": "daemon scopes (no owner)",
+   "ui": "Manage: project pages (bundle)",
+   "tests": []
+  },
+  {
+   "command": "compute project revisions",
+   "about": "A project's registered revisions, newest first",
+   "help_defect": null,
+   "interface": "daemon API (bundle projects on node environments)",
+   "state": "durable",
+   "authority": "daemon scopes (no owner)",
+   "ui": "Manage: project pages (bundle)",
+   "tests": []
+  },
+  {
+   "command": "compute project remove",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API (bundle projects on node environments)",
+   "state": "durable",
+   "authority": "daemon scopes (no owner)",
+   "ui": "Manage: project pages (bundle)",
+   "tests": []
+  },
+  {
+   "command": "compute project inspect",
+   "about": "Inspect a project in one environment, or across all of them",
+   "help_defect": null,
+   "interface": "daemon API (bundle projects on node environments)",
+   "state": "durable",
+   "authority": "daemon scopes (no owner)",
+   "ui": "Manage: project pages (bundle)",
+   "tests": []
+  },
+  {
+   "command": "compute project status",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API (bundle projects on node environments)",
+   "state": "durable",
+   "authority": "daemon scopes (no owner)",
+   "ui": "Manage: project pages (bundle)",
+   "tests": [
+    "crates/compute-cli/tests/recovery.rs",
+    "crates/compute-cli/tests/upgrade.rs"
+   ]
+  },
+  {
+   "command": "compute project start",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API (bundle projects on node environments)",
+   "state": "durable",
+   "authority": "daemon scopes (no owner)",
+   "ui": "Manage: project pages (bundle)",
+   "tests": []
+  },
+  {
+   "command": "compute project stop",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API (bundle projects on node environments)",
+   "state": "durable",
+   "authority": "daemon scopes (no owner)",
+   "ui": "Manage: project pages (bundle)",
+   "tests": []
+  },
+  {
+   "command": "compute project restart",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API (bundle projects on node environments)",
+   "state": "durable",
+   "authority": "daemon scopes (no owner)",
+   "ui": "Manage: project pages (bundle)",
+   "tests": []
+  },
+  {
+   "command": "compute project executions",
+   "about": "Recent executions of a project in an environment",
+   "help_defect": null,
+   "interface": "daemon API (bundle projects on node environments)",
+   "state": "durable",
+   "authority": "daemon scopes (no owner)",
+   "ui": "Manage: project pages (bundle)",
+   "tests": [
+    "crates/compute-cli/tests/recovery.rs"
+   ]
+  },
+  {
+   "command": "compute project receipts",
+   "about": "Receipt references of a project in an environment",
+   "help_defect": null,
+   "interface": "daemon API (bundle projects on node environments)",
+   "state": "durable",
+   "authority": "daemon scopes (no owner)",
+   "ui": "Manage: project pages (bundle)",
+   "tests": []
+  },
+  {
+   "command": "compute workload inspect",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API (bundle workloads on the daemon node)",
+   "state": "durable / executes on the node",
+   "authority": "daemon scopes (no owner)",
+   "ui": "project Workloads tab",
+   "tests": []
+  },
+  {
+   "command": "compute workload start",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API (bundle workloads on the daemon node)",
+   "state": "durable / executes on the node",
+   "authority": "daemon scopes (no owner)",
+   "ui": "project Workloads tab",
+   "tests": []
+  },
+  {
+   "command": "compute workload stop",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API (bundle workloads on the daemon node)",
+   "state": "durable / executes on the node",
+   "authority": "daemon scopes (no owner)",
+   "ui": "project Workloads tab",
+   "tests": []
+  },
+  {
+   "command": "compute workload restart",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API (bundle workloads on the daemon node)",
+   "state": "durable / executes on the node",
+   "authority": "daemon scopes (no owner)",
+   "ui": "project Workloads tab",
+   "tests": []
+  },
+  {
+   "command": "compute workload run",
+   "about": "Run a task to completion",
+   "help_defect": null,
+   "interface": "daemon API (bundle workloads on the daemon node)",
+   "state": "durable / executes on the node",
+   "authority": "daemon scopes (no owner)",
+   "ui": "project Workloads tab",
+   "tests": [
+    "crates/compute-cli/tests/daemon.rs"
+   ]
+  },
+  {
+   "command": "compute workload logs",
+   "about": "Show the most recent output of a workload",
+   "help_defect": null,
+   "interface": "daemon API (bundle workloads on the daemon node)",
+   "state": "durable / executes on the node",
+   "authority": "daemon scopes (no owner)",
+   "ui": "project Workloads tab",
+   "tests": []
+  },
+  {
+   "command": "compute execution",
+   "about": "Inspect one execution recorded by the daemon",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "none",
+   "authority": "read",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/daemon.rs",
+    "crates/compute-cli/tests/remote_pool.rs",
+    "crates/compute-provider/tests/remote.rs"
+   ]
+  },
+  {
+   "command": "compute deploy",
+   "about": "Release a project revision to an environment, with zero downtime",
+   "help_defect": null,
+   "interface": "daemon API: application, bundle release, or computer release/version, chosen by argument shape",
+   "state": "durable",
+   "authority": "deploy scope",
+   "ui": "Deploy (software pages; bundle deploy wizard)",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs",
+    "crates/compute-cli/tests/product.rs",
+    "crates/compute-cli/tests/recovery.rs",
+    "crates/compute-cli/tests/upgrade.rs"
+   ]
+  },
+  {
+   "command": "compute promote",
+   "about": "Deploy the exact revision current in one environment to another",
+   "help_defect": null,
+   "interface": "daemon API: bundle promotion, or computer version promotion",
+   "state": "durable",
+   "authority": "deploy scope",
+   "ui": "Promote",
+   "tests": [
+    "crates/compute-cli/tests/recovery.rs"
+   ]
+  },
+  {
+   "command": "compute deployment list",
+   "about": "Deployments, newest first",
+   "help_defect": null,
+   "interface": "daemon API (bundle releases)",
+   "state": "durable",
+   "authority": "deploy/read",
+   "ui": "deployment page (bundle)",
+   "tests": [
+    "crates/compute-cli/tests/recovery.rs"
+   ]
+  },
+  {
+   "command": "compute deployment inspect",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API (bundle releases)",
+   "state": "durable",
+   "authority": "deploy/read",
+   "ui": "deployment page (bundle)",
+   "tests": [
+    "crates/compute-cli/tests/recovery.rs"
+   ]
+  },
+  {
+   "command": "compute deployment status",
+   "about": "Where a release is in its lifecycle",
+   "help_defect": null,
+   "interface": "daemon API (bundle releases)",
+   "state": "durable",
+   "authority": "deploy/read",
+   "ui": "deployment page (bundle)",
+   "tests": []
+  },
+  {
+   "command": "compute deployment rollback",
+   "about": "Roll a release back: before traffic moved it is abandoned; after, traffic returns to the revision it replaced",
+   "help_defect": null,
+   "interface": "daemon API (bundle releases)",
+   "state": "durable",
+   "authority": "deploy/read",
+   "ui": "deployment page (bundle)",
+   "tests": []
+  },
+  {
+   "command": "compute deployment receipt",
+   "about": "The deployment receipt (always JSON)",
+   "help_defect": null,
+   "interface": "daemon API (bundle releases)",
+   "state": "durable",
+   "authority": "deploy/read",
+   "ui": "deployment page (bundle)",
+   "tests": [
+    "crates/compute-cli/tests/recovery.rs"
+   ]
+  },
+  {
+   "command": "compute domain add",
+   "about": "Route a domain to a project's service in one environment",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable",
+   "authority": "operate",
+   "ui": "Domains pages",
+   "tests": []
+  },
+  {
+   "command": "compute domain list",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API",
+   "state": "durable",
+   "authority": "operate",
+   "ui": "Domains pages",
+   "tests": []
+  },
+  {
+   "command": "compute domain inspect",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API",
+   "state": "durable",
+   "authority": "operate",
+   "ui": "Domains pages",
+   "tests": []
+  },
+  {
+   "command": "compute domain status",
+   "about": "DNS, TLS, and routing state of each domain",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable",
+   "authority": "operate",
+   "ui": "Domains pages",
+   "tests": []
+  },
+  {
+   "command": "compute domain remove",
+   "about": "Stop routing a domain and remove its DNS records and certificate",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable",
+   "authority": "operate",
+   "ui": "Domains pages",
+   "tests": []
+  },
+  {
+   "command": "compute dns status",
+   "about": "Every DNS record Compute manages: desired, actual, and status",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable",
+   "authority": "operate",
+   "ui": "Reconcile DNS",
+   "tests": []
+  },
+  {
+   "command": "compute dns reconcile",
+   "about": "Read every record back from its provider now and repair drift",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable",
+   "authority": "operate",
+   "ui": "Reconcile DNS",
+   "tests": []
+  },
+  {
+   "command": "compute certificate status",
+   "about": "Every certificate: status, expiry, renewal. Keys are never shown",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable",
+   "authority": "operate",
+   "ui": "Renew certificate",
+   "tests": []
+  },
+  {
+   "command": "compute certificate renew",
+   "about": "Renew a domain's certificate now",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable",
+   "authority": "operate",
+   "ui": "Renew certificate",
+   "tests": []
+  },
+  {
+   "command": "compute network status",
+   "about": "Endpoints, ingress, and DNS providers on this node",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "none",
+   "authority": "read",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute events",
+   "about": "Show lifecycle events, or follow them",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "none",
+   "authority": "read",
+   "ui": "Events page",
+   "tests": [
+    "crates/compute-cli/tests/recovery.rs",
+    "crates/compute-cli/tests/upgrade.rs"
+   ]
+  },
+  {
+   "command": "compute service list",
+   "about": "Shared services registered with this control plane",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable",
+   "authority": "operate",
+   "ui": "Services page",
+   "tests": []
+  },
+  {
+   "command": "compute service register",
+   "about": "Register a shared service and the capabilities it provides",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable",
+   "authority": "operate",
+   "ui": "Services page",
+   "tests": []
+  },
+  {
+   "command": "compute service remove",
+   "about": "",
+   "help_defect": "no description",
+   "interface": "daemon API",
+   "state": "durable",
+   "authority": "operate",
+   "ui": "Services page",
+   "tests": []
+  },
+  {
+   "command": "compute service providers",
+   "about": "The daemon's provider pool as recorded in control state",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable",
+   "authority": "operate",
+   "ui": "Services page",
+   "tests": []
+  },
+  {
+   "command": "compute control-plane provision",
+   "about": "Install the Compute control model in Managed FeltDB. Idempotent: an existing tenant and Compute application are reused",
+   "help_defect": null,
+   "interface": "FeltDB directly",
+   "state": "FeltDB model",
+   "authority": "FeltDB API key",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/recovery.rs"
+   ]
+  },
+  {
+   "command": "compute control-plane upgrade",
+   "about": "Upgrade the configured Compute application to this build's model, before a controller that needs it runs: inspect the active model, refuse a downgrade, take and verify a FeltDB backup, apply the model, verify it, and smoke-test it",
+   "help_defect": null,
+   "interface": "FeltDB directly",
+   "state": "FeltDB model",
+   "authority": "FeltDB API key",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute control-plane inspect",
+   "about": "Compare the active Compute model with this build's. Read-only",
+   "help_defect": null,
+   "interface": "FeltDB directly",
+   "state": "FeltDB model",
+   "authority": "FeltDB API key",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute serve",
+   "about": "Serve compute.remote@1 with durable filesystem-backed jobs",
+   "help_defect": null,
+   "interface": "runs a target (compute.remote@1)",
+   "state": "job and session stores on disk",
+   "authority": "AllowAllAuthorizer: no authentication",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/computers.rs",
+    "crates/compute-cli/tests/product.rs",
+    "crates/compute-cli/tests/remote_pool.rs",
+    "crates/compute-cli/tests/runtime_store.rs"
+   ]
+  },
+  {
+   "command": "compute auth create",
+   "about": "Issue a credential. Its token is printed once and never again",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable credentials",
+   "authority": "admin",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute auth list",
+   "about": "List credentials: never their tokens",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable credentials",
+   "authority": "admin",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute auth revoke",
+   "about": "Revoke a credential now",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable credentials",
+   "authority": "admin",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute auth rotate",
+   "about": "Replace a credential with a new token for the same operator and scopes. The old one stops working now, or after --grace",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable credentials",
+   "authority": "admin",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute auth whoami",
+   "about": "Who the configured credential is, and what it may do",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable credentials",
+   "authority": "admin",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute auth audit",
+   "about": "The audit trail of remote operations, newest first",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "durable credentials",
+   "authority": "admin",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute node info",
+   "about": "Which controller runs: version, commit, build, security, runtimes",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "node binary",
+   "authority": "admin/operate",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/recovery.rs",
+    "crates/compute-cli/tests/upgrade.rs"
+   ]
+  },
+  {
+   "command": "compute node health",
+   "about": "Whether the controller answers, and whether its control plane is degraded. Needs no credential",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "node binary",
+   "authority": "admin/operate",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute node reconcile",
+   "about": "Reconcile now, fully, and show what the cycle examined and changed",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "node binary",
+   "authority": "admin/operate",
+   "ui": "none",
+   "tests": []
+  },
+  {
+   "command": "compute node upgrade",
+   "about": "Replace the controller with another Compute build, without restarting or redeploying a workload. The previous controller is restored if the new one does not become ready",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "node binary",
+   "authority": "admin/operate",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/upgrade.rs"
+   ]
+  },
+  {
+   "command": "compute node rollback",
+   "about": "Return to the build that ran before the last upgrade",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "node binary",
+   "authority": "admin/operate",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/upgrade.rs"
+   ]
+  },
+  {
+   "command": "compute node upgrade-status",
+   "about": "The last upgrade or rollback on this node",
+   "help_defect": null,
+   "interface": "daemon API",
+   "state": "node binary",
+   "authority": "admin/operate",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/upgrade.rs"
+   ]
+  },
+  {
+   "command": "compute supervisor",
+   "about": "The node's supervisor: service processes and endpoints that outlive the controller. `compute start` runs it",
+   "help_defect": null,
+   "interface": "internal: started by compute start",
+   "state": "n/a",
+   "authority": "n/a",
+   "ui": "none",
+   "tests": []
+  }
+ ],
+ "api": [
+  {
+   "method": "GET",
+   "path": "/health",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/info",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/status",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/auth/whoami",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/auth/credentials",
+   "scope": "Admin",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/auth/credentials",
+   "scope": "Admin",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/auth/credentials/{credential}/revoke",
+   "scope": "Admin",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/auth/credentials/{credential}/rotate",
+   "scope": "Admin",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/audit",
+   "scope": "Admin",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/metrics",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/node/reconcile",
+   "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/node/upgrade",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/node/upgrade",
+   "scope": "Admin",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/node/rollback",
+   "scope": "Admin",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/shutdown",
+   "scope": "Admin",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/environments",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/environments",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "DELETE",
+   "path": "/environments/{environment}",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/status",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/start",
+   "scope": "Operate",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/stop",
+   "scope": "Operate",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/restart",
+   "scope": "Operate",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/projects",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/projects",
+   "scope": "Deploy",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/projects/{project}",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "DELETE",
+   "path": "/environments/{environment}/projects/{project}",
+   "scope": "Deploy",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/projects/{project}/status",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/projects/{project}/start",
+   "scope": "Operate",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/projects/{project}/stop",
+   "scope": "Operate",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/projects/{project}/restart",
+   "scope": "Operate",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/projects/{project}/executions",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/projects/{project}/receipts",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/projects/{project}/workloads/{workload}",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/projects/{project}/workloads/{workload}/start",
+   "scope": "Operate",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/projects/{project}/workloads/{workload}/stop",
+   "scope": "Operate",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/projects/{project}/workloads/{workload}/restart",
+   "scope": "Operate",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/projects/{project}/workloads/{workload}/run",
+   "scope": "Execute",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/projects/{project}/workloads/{workload}/logs",
+   "scope": "Read",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/computer",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/contents",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/repositories",
+   "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "DELETE",
+   "path": "/environments/{environment}/repositories/{repository}",
+   "scope": "Operate",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/packages",
+   "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "DELETE",
+   "path": "/environments/{environment}/packages/{package}",
+   "scope": "Operate",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/processes",
+   "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "DELETE",
+   "path": "/environments/{environment}/processes/{process}",
+   "scope": "Operate",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/processes/{process}/start",
+   "scope": "Operate",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/processes/{process}/stop",
+   "scope": "Operate",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/reconcile",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/replace",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/exec",
+   "scope": "Execute",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/connect",
+   "scope": "Execute",
+   "ui": false,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/jobs/{job}",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/logs",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/run",
+   "scope": "Execute",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/release",
+   "scope": "Deploy",
+   "ui": false,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/config",
+   "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/lifecycle",
+   "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/propose",
+   "scope": "Execute",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/processes/{process}/restart",
+   "scope": "Operate",
+   "ui": true,
+   "cli": false,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/targets",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/software",
+   "scope": "Read",
+   "ui": true,
+   "cli": false,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/software/{project}",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/software/{project}/versions",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/software/{project}/versions",
+   "scope": "Deploy",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/software/{project}/versions/{version}",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/software/{project}/deploy",
+   "scope": "Deploy",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/software/{project}/promotion",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/software/{project}/promote",
+   "scope": "Deploy",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/software/{project}/rollback",
+   "scope": "Deploy",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/rollouts",
+   "scope": "Read",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/rollouts/{rollout}",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/sessions",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/sessions",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/sessions/{session}",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "DELETE",
+   "path": "/sessions/{session}",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/projects",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/projects/{project}",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/projects/{project}/status",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/projects/{project}/revisions",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/projects/{project}/revisions",
+   "scope": "Deploy",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/deployments",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/deployments",
+   "scope": "Deploy",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/deployments/promote",
+   "scope": "Deploy",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/deployments/{deployment}",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/deployments/{deployment}/receipt",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/deployments/{deployment}/rollback",
+   "scope": "Deploy",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/domains",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/domains",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/domains/{domain}",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "DELETE",
+   "path": "/domains/{domain}",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/dns",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/dns/reconcile",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/certificates",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/certificates/{domain}/renew",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/network",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/executions/{execution}",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/receipts/{receipt}",
+   "scope": "Read",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/events",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/events/stream",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/providers",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/services",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/applications",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/applications/{application}",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/applications/{application}/deployments",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/applications/{application}/deployments",
+   "scope": "Deploy",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/applications/{application}/deployments/{deployment}",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/applications/{application}/rollback",
+   "scope": "Deploy",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/applications/{application}/stop",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/applications/{application}/logs",
+   "scope": "Read",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/compute/capabilities",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/compute/health",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/compute/capacity",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/compute/execute",
+   "scope": "Execute",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/compute/admission",
+   "scope": "Execute",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/compute/runtimes/resolve",
+   "scope": "Execute",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/compute/runtimes/prepare",
+   "scope": "Execute",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/compute/runtimes/status",
+   "scope": "Execute",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/compute/jobs",
+   "scope": "Execute",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/compute/jobs",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/compute/jobs/{job}",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/compute/jobs/{job}/result",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/compute/jobs/{job}/receipt",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/compute/jobs/{job}/logs",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/compute/jobs/{job}/cancel",
+   "scope": "Execute",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/services",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "DELETE",
+   "path": "/services/{service}",
+   "scope": "Operate",
+   "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  }
+ ],
+ "ui": {
+  "routes": [
+   [
+    "#/",
+    "homeView",
+    "both"
+   ],
+   [
+    "#/run",
+    "runView",
+    "both"
+   ],
+   [
+    "#/software",
+    "softwareListView",
+    "both"
+   ],
+   [
+    "#/software/{project}",
+    "softwareView",
+    "both"
+   ],
+   [
+    "#/software/{project}/versions/{v}",
+    "versionView",
+    "manage"
+   ],
+   [
+    "#/operations/version/{project}/{v}",
+    "operationView",
+    "manage"
+   ],
+   [
+    "#/operations/rollout/{id}",
+    "operationView",
+    "manage"
+   ],
+   [
+    "#/environments",
+    "environmentsView",
+    "manage"
+   ],
+   [
+    "#/environments/{e}",
+    "environmentView",
+    "manage"
+   ],
+   [
+    "#/environments/{e}/projects/{p}/{tab}",
+    "projectView (bundle projects, 8 tabs)",
+    "manage"
+   ],
+   [
+    "#/work",
+    "workHomeView",
+    "work"
+   ],
+   [
+    "#/work/{e}",
+    "workView",
+    "work"
+   ],
+   [
+    "#/projects",
+    "projectsView (bundle)",
+    "manage"
+   ],
+   [
+    "#/projects/{p}",
+    "projectDetailView (bundle)",
+    "manage"
+   ],
+   [
+    "#/services",
+    "servicesView",
+    "manage"
+   ],
+   [
+    "#/deployments/{id}",
+    "deploymentView (bundle)",
+    "manage"
+   ],
+   [
+    "#/domains",
+    "domainsView",
+    "manage"
+   ],
+   [
+    "#/domains/{d}",
+    "domainView",
+    "manage"
+   ],
+   [
+    "#/events",
+    "eventsView",
+    "manage"
+   ]
+  ],
+  "not_in_ui": [
+   "targets and their features",
+   "operator credentials and the audit trail",
+   "node upgrade/rollback",
+   "runtimes, doctor, isolation, capabilities",
+   "placement explanation",
+   "policy",
+   "target sessions (compute session create\u2026)",
+   "metrics",
+   "network status",
+   "certificate/dns status tables",
+   "application deploy/pack",
+   "connect grant (credentials)",
+   "bundle revision registration (compute project push)",
+   "FeltDB provisioning/upgrade"
+  ]
+ },
+ "tests": {
+  "files": [
+   {
+    "path": "crates/compute-cli/src/certification.rs",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-cli/src/environment_cmd.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-cli/src/policy_certification.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-cli/src/pool.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-cli/src/session_cmd.rs",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-cli/tests/cli.rs",
+    "tests": 38,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-cli/tests/computers.rs",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-cli/tests/daemon.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-cli/tests/isolation.rs",
+    "tests": 4,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-cli/tests/product.rs",
+    "tests": 3,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-cli/tests/product_journey.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "browser"
+   },
+   {
+    "path": "crates/compute-cli/tests/recovery.rs",
+    "tests": 7,
+    "ignored_without_feltdb": 1,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-cli/tests/remote_pool.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-cli/tests/runtime_store.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-cli/tests/sessions.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-cli/tests/upgrade.rs",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-cli/tests/work_mode_ui.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "browser"
+   },
+   {
+    "path": "crates/compute-core/src/application_artifact.rs",
+    "tests": 3,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-core/src/computers.rs",
+    "tests": 4,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-core/src/dependencies.rs",
+    "tests": 3,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-core/src/host.rs",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-core/src/lib.rs",
+    "tests": 27,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-core/src/receipt.rs",
+    "tests": 3,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-core/src/sessions.rs",
+    "tests": 4,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-environment/src/api.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-environment/src/auth.rs",
+    "tests": 4,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-environment/src/daemon/applications.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-environment/src/daemon/computers.rs",
+    "tests": 3,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-environment/src/daemon/execute.rs",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-environment/src/daemon/software.rs",
+    "tests": 4,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-environment/tests/availability.rs",
+    "tests": 3,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-environment/tests/computers.rs",
+    "tests": 12,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-environment/tests/control_plane.rs",
+    "tests": 6,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-environment/tests/environments.rs",
+    "tests": 10,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-environment/tests/executions.rs",
+    "tests": 3,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-environment/tests/feltdb_consumer.rs",
+    "tests": 4,
+    "ignored_without_feltdb": 4,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-environment/tests/network.rs",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-environment/tests/parity.rs",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-environment/tests/releases.rs",
+    "tests": 7,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-environment/tests/scale.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-environment/tests/security.rs",
+    "tests": 5,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-network/src/dns.rs",
+    "tests": 3,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-network/src/endpoints.rs",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-network/src/secrets.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-network/tests/ingress.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-network/tests/providers.rs",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-placement/tests/dependencies.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-placement/tests/matching.rs",
+    "tests": 33,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-placement/tests/pool.rs",
+    "tests": 7,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-placement/tests/selection.rs",
+    "tests": 21,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-policy/tests/evaluator.rs",
+    "tests": 19,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-provider/src/runtime.rs",
+    "tests": 9,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-provider/tests/admission.rs",
+    "tests": 4,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-provider/tests/controlled.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-provider/tests/remote.rs",
+    "tests": 10,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-provider/tests/sessions.rs",
+    "tests": 15,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-runtime-process/src/lib.rs",
+    "tests": 3,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-runtime-wasm/src/lib.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-runtime-wasm/tests/conformance.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-runtime/src/lib.rs",
+    "tests": 3,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-runtime/tests/conformance.rs",
+    "tests": 10,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-state-feltdb/tests/consumer.rs",
+    "tests": 8,
+    "ignored_without_feltdb": 8,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-state-feltdb/tests/feltdb.rs",
+    "tests": 4,
+    "ignored_without_feltdb": 4,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-state-feltdb/tests/model.rs",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-integration"
+   },
+   {
+    "path": "crates/compute-state-file/src/lib.rs",
+    "tests": 3,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-state-memory/src/lib.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "crates/compute-state/src/time.rs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "rust-unit"
+   },
+   {
+    "path": "packages/compute-appport/src/test/application.test.ts",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "typescript"
+   },
+   {
+    "path": "packages/compute-appport/src/test/computers.test.ts",
+    "tests": 3,
+    "ignored_without_feltdb": 0,
+    "kind": "typescript"
+   },
+   {
+    "path": "packages/compute-appport/src/test/conformance.test.ts",
+    "tests": 12,
+    "ignored_without_feltdb": 0,
+    "kind": "typescript"
+   },
+   {
+    "path": "packages/compute-appport/src/test/environment.test.ts",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "typescript"
+   },
+   {
+    "path": "packages/compute-appport/src/test/placement.test.ts",
+    "tests": 5,
+    "ignored_without_feltdb": 0,
+    "kind": "typescript"
+   },
+   {
+    "path": "packages/compute-appport/src/test/policy.test.ts",
+    "tests": 3,
+    "ignored_without_feltdb": 0,
+    "kind": "typescript"
+   },
+   {
+    "path": "packages/compute-appport/src/test/sessions.test.ts",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "typescript"
+   },
+   {
+    "path": "packages/compute-state-model/src/model.test.mjs",
+    "tests": 2,
+    "ignored_without_feltdb": 0,
+    "kind": "typescript"
+   },
+   {
+    "path": "packages/compute-ui-e2e/src/control-plane.test.mjs",
+    "tests": 1,
+    "ignored_without_feltdb": 0,
+    "kind": "browser"
+   }
+  ],
+  "ci": {
+   ".github/workflows/test.yml": [
+    "cargo fmt --check",
+    "cargo test --workspace --locked",
+    "compute-cli product acceptance",
+    "AppPort contract (npm test)"
+   ],
+   ".github/workflows/feltdb-consumer.yml": [
+    "state backends conform",
+    "FeltDB backend against feltdb-server (ignored tests)",
+    "controller against feltdb-server"
+   ],
+   ".github/workflows/distribution-certification.yml": [
+    "release build",
+    "distribution build/verify/certify"
+   ],
+   "not_in_ci": [
+    "browser tests (skip without Playwright/Chromium)",
+    "packages/compute-ui-e2e",
+    "container provider against a real engine"
+   ]
+  }
+ },
+ "experiments": {
+  "launch_seconds": 3.68,
+  "launch_output": [
+   "Compute is running: http://127.0.0.1:18787/",
+   "  computers run on this machine's computer host (127.0.0.1:18788)",
+   "  state: /tmp/claude-0/aud/home",
+   "  stop it with `compute down`"
+  ],
+  "relaunch_seconds": 0.01,
+  "ui_html_ms": 4.8,
+  "status_ms": 1.5,
+  "targets": [
+   {
+    "target_id": "local",
+    "kind": "local",
+    "health": "healthy",
+    "hosts_computers": false,
+    "features": null
+   },
+   {
+    "target_id": "this-machine",
+    "kind": "remote",
+    "health": "healthy",
+    "hosts_computers": true,
+    "features": [
+     "containers"
+    ]
+   }
+  ],
+  "create_http": [
+   201,
+   267.2
+  ],
+  "computer_running_seconds": 0.61,
+  "exec_submit_ms": 16.2,
+  "exec_roundtrip_seconds": 0.13,
+  "target_sessions_listed_without_credential": {
+   "http": 200,
+   "sessions": [
+    "ses_d72405242004ffe0b93c2e4d6fbaae2aef52e0a9492a121f49c88a889cd5a0e3"
+   ]
+  },
+  "target_exec_without_credential": {
+   "http": 200,
+   "body": "accepted"
+  },
+  "bypass_file_seen_through_the_daemon": "written-by-an-unauthenticated-caller",
+  "daemon_loopback_any_bearer_token_http": 401,
+  "propose": {
+   "http": 200,
+   "seconds": 0.19,
+   "runtime": "node",
+   "start": [
+    [
+     "sh",
+     "-c",
+     "npm start"
+    ]
+   ]
+  },
+  "exec_while_target_down": {
+   "http": 503,
+   "body": {
+    "kind": "runtime_unavailable",
+    "message": "TransportFailure: Connection refused (os error 111)",
+    "request_id": "req_cebf94cb5b2f0df7"
+   }
+  },
+  "computer_while_target_down": {
+   "status": "running",
+   "failure": null
+  },
+  "recovery_after_target_restart": {
+   "seconds": 0.0,
+   "same_session": true
+  },
+  "after_the_target_forgot_the_machine": {
+   "observed": "the computer stayed \"running\" with no failure for 90 s, after an explicit reconcile, and after a control-plane restart; exec answered not_found \"unknown session\"",
+   "detected": false
+  },
+  "after_control_plane_restart": {
+   "seconds": 2.46,
+   "state_kept": true,
+   "status": "running (still unaware the machine is gone)"
+  },
+  "ui": {
+   "home_ready_ms": 83,
+   "home_api_calls": 4,
+   "work_ready_ms": 68,
+   "work_api_calls": 5,
+   "computers": 3
+  },
+  "placement_refusals": {
+   "persistent_storage": "invalid: no target can host this computer: local: sessions_unsupported; this-machine: session_capability_unsupported",
+   "public_endpoint": "same, session_capability_unsupported",
+   "terminal": "same, session_capability_unsupported",
+   "gpu": "same, target_feature_unsupported",
+   "containers": "accepted and placed as a workspace computer (provider_kind workspace): the host advertises containers because a docker binary is on PATH, with no engine running"
+  },
+  "runtimes": {
+   "python_default_network": "placement_failed: network_unsupported (python cannot enforce network none); `compute run main.py` fails as documented in README/getting-started",
+   "python_with_network": "downloaded the pinned distribution (available \u2192 ready) and ran: \"hello from python\""
+  },
+  "application_journey": {
+   "compute init my-app; compute deploy my-app": "running at http://127.0.0.1:20002 on provider local; the deploy auto-started a second control plane (compute start, state in ./.compute/daemon, port 8787) and a supervisor: the application runs on that daemon node"
+  },
+  "ui_certification_package": {
+   "packages/compute-ui-e2e": "FAIL: waits for [data-environment=\"preprod\"] on #/ \u2014 the home route became the action home in 69b70d9; not run in CI; it also left two supervisor processes running"
+  },
+  "environment": {
+   "host": "Linux x86_64, 4 CPU, 16 GiB, kernel 6.18 (Firecracker VM)",
+   "kvm": false,
+   "gpu": false,
+   "docker": "client 29.3.1 only; no engine (/var/run/docker.sock absent)",
+   "podman": false,
+   "firecracker": false,
+   "build": "debug",
+   "state_backend": "file (the launcher default)"
+  }
+ },
+ "models": [
+  {
+   "term": "Environment",
+   "is": "A durable record (Environment in control state) with a name, desired state (running/stopped), configuration, policy, and optionally an owner, a ComputerSpec, and EnvironmentContents.",
+   "source": "crates/compute-state/src/model.rs#EnvironmentRecord",
+   "collision": "Two kinds share the name: an environment with a computer, and a \"node environment\" whose bundle projects run on the daemon host. `applications` is a reserved node environment for `compute deploy <dir>`."
+  },
+  {
+   "term": "Computer",
+   "is": "The machine behind an environment with a ComputerSpec: a Computer record (status, generation, target, session, provider_resource, observed contents) driven by the daemon.",
+   "source": "crates/compute-state/src/model.rs#ComputerRecord",
+   "collision": "The UI says \"Computer\" and \"Machine\"; the CLI says `environment computer`; the target calls it a session."
+  },
+  {
+   "term": "Session (target)",
+   "is": "A durable record on a `compute serve` target: a workspace or container, commands run as durable jobs. A computer IS a persistent, referenced target session.",
+   "source": "crates/compute-core/src/sessions.rs#ComputeSession",
+   "collision": "Stored in the target's session store, not FeltDB. `compute session create` makes one directly (no environment, no daemon)."
+  },
+  {
+   "term": "Work session",
+   "is": "A WorkSession record in control state: an operator entering an environment (attached) or owning a temporary one (ephemeral).",
+   "source": "crates/compute-state/src/model.rs#WorkSessionRecord",
+   "collision": "`compute session open/close/opened` beside `compute session create/.../destroy`, which are target sessions."
+  },
+  {
+   "term": "Target",
+   "is": "A pool member that hosts computers: a `compute serve` node offering sessions. Listed by GET /targets.",
+   "source": "crates/compute-placement/src/targets.rs",
+   "collision": "Pool members are also called providers."
+  },
+  {
+   "term": "Provider",
+   "is": "A pool member answering the capability API: local (in-process engine) or remote (compute.remote@1). Session providers (workspace, container) are the substrates inside a target.",
+   "source": "crates/compute-provider/src/lib.rs",
+   "collision": "\"Provider\" names three things: pool members, session substrates, and DNS providers."
+  },
+  {
+   "term": "Runtime",
+   "is": "A workload language runtime (wasm, node, python, \u2026, native, shell) resolved from a pinned catalog; used by `compute run` and daemon workloads.",
+   "source": "crates/compute-core/src/lib.rs#RuntimeKind",
+   "collision": "Not the computer substrate: computers run whatever the target host has on PATH."
+  },
+  {
+   "term": "Project",
+   "is": "Two different things: (a) a computer project \u2014 a ProjectSpec in contents: a repository plus build/test/commands/checks; (b) a bundle project \u2014 registered revisions of workload bundles, released to node environments.",
+   "source": "crates/compute-core/src/computers.rs#ProjectSpec; crates/compute-state/src/model.rs#ProjectRecord",
+   "collision": "Same word, same API prefix (/environments/{e}/projects), dispatched by whether the environment has a computer."
+  },
+  {
+   "term": "Application",
+   "is": "Three things: (a) a process of kind application in a computer; (b) an `compute init/deploy` application with versions on a provider node; (c) a project in the reserved `applications` environment.",
+   "source": "crates/compute-core/src/computers.rs#ProcessKind; crates/compute-environment/src/daemon/applications.rs",
+   "collision": "Three meanings."
+  },
+  {
+   "term": "Service",
+   "is": "Three things: (a) a process of kind service in a computer; (b) a bundle workload of kind service; (c) a registered shared service (`compute service register`).",
+   "source": "crates/compute-core/src/computers.rs; crates/compute-environment/src/model.rs#WorkloadKind",
+   "collision": "Three meanings."
+  },
+  {
+   "term": "Execution job",
+   "is": "A durable job in a provider's job store (filesystem on the target), with a result and a receipt. Computer operations reference jobs by id; FeltDB stores the references and events, not the jobs.",
+   "source": "crates/compute-provider/src/jobs.rs",
+   "collision": "Daemon node executions are Execution records in control state; target jobs are not."
+  },
+  {
+   "term": "Version / Rollout",
+   "is": "Version: a published commit + package digest + assembly + step evidence. Rollout: a version made real in an environment (deploy/promote/rollback) with steps.",
+   "source": "crates/compute-state/src/model.rs#VersionRecord,RolloutRecord",
+   "collision": "Parallel to bundle Revisions/Deployments and to application versions."
+  }
+ ],
+ "execution_paths": [
+  {
+   "path": "`compute run` (local)",
+   "where": "the caller's machine, in process",
+   "authority": "none (local user)",
+   "durable": "execution record + receipt on disk",
+   "canonical_job_path": false
+  },
+  {
+   "path": "`compute pool run/submit`, `compute remote *`",
+   "where": "the provider placement chose",
+   "authority": "provider: AllowAll on compute serve; daemon /compute/* uses scopes",
+   "durable": "provider job store",
+   "canonical_job_path": true
+  },
+  {
+   "path": "`compute session create/exec` (target sessions)",
+   "where": "the target",
+   "authority": "target AllowAll; owner = hash of Authorization",
+   "durable": "target session/job stores",
+   "canonical_job_path": true
+  },
+  {
+   "path": "Computer operations (sync, install, build, start/stop, probe, inspect, publish steps)",
+   "where": "the environment's computer",
+   "authority": "daemon controller",
+   "durable": "target jobs; evidence in FeltDB",
+   "canonical_job_path": true
+  },
+  {
+   "path": "`environment exec/run/build/test/propose`",
+   "where": "the environment's computer",
+   "authority": "daemon scope + owner",
+   "durable": "target jobs; events in FeltDB",
+   "canonical_job_path": true
+  },
+  {
+   "path": "Bundle project workloads (services, tasks) and releases",
+   "where": "THE DAEMON HOST (supervisor)",
+   "authority": "daemon scopes, no owner",
+   "durable": "Execution records in control state",
+   "canonical_job_path": false
+  },
+  {
+   "path": "Applications (`compute deploy <dir>`)",
+   "where": "a provider node offering deployments \u2014 the daemon host by default",
+   "authority": "daemon scopes",
+   "durable": "deployments in control state",
+   "canonical_job_path": false
+  },
+  {
+   "path": "Daemon /compute/* (node as provider)",
+   "where": "the daemon host",
+   "authority": "daemon execute scope",
+   "durable": "daemon job store",
+   "canonical_job_path": true
+  }
+ ],
+ "state": [
+  {
+   "what": "Environments, computers, contents, work sessions, versions, rollouts, events, deployments, executions, credentials, audit",
+   "where": "control state: file (default) or FeltDB",
+   "survives_daemon_restart": true,
+   "survives_machine_restart": "yes (file on disk / FeltDB)"
+  },
+  {
+   "what": "Target sessions and jobs (the machine, its commands, their results and receipts)",
+   "where": "the target's session and job stores on its disk",
+   "survives_daemon_restart": true,
+   "survives_machine_restart": "target records yes; workspace processes no (restarted by reconciliation)"
+  },
+  {
+   "what": "Computer workspaces (checkouts, builds, process pid/log files)",
+   "where": "the target host filesystem",
+   "survives_daemon_restart": true,
+   "survives_machine_restart": "files yes; processes no"
+  },
+  {
+   "what": "Desired snapshot, read cache, computer/operation drivers, orphan sweep schedule",
+   "where": "daemon memory (derived)",
+   "survives_daemon_restart": "rebuilt",
+   "survives_machine_restart": "rebuilt"
+  },
+  {
+   "what": "Runtime distributions",
+   "where": "runtime store on each host",
+   "survives_daemon_restart": true,
+   "survives_machine_restart": true
+  }
+ ],
+ "authorization": [
+  {
+   "operation": "Read environments/computers/software",
+   "check": "read scope; any operator reads any computer view (only mutations are owner-bound)",
+   "every_operation": true
+  },
+  {
+   "operation": "Change a computer environment (contents, config, lifetime, replace, destroy, sessions)",
+   "check": "operate/deploy scope + owner",
+   "every_operation": true
+  },
+  {
+   "operation": "Exec / run / connect / propose",
+   "check": "execute scope + owner",
+   "every_operation": true
+  },
+  {
+   "operation": "Publish / deploy / promote / rollback versions",
+   "check": "deploy scope + owner of the environment(s)",
+   "every_operation": true
+  },
+  {
+   "operation": "Node environments, bundle projects, applications, domains",
+   "check": "scopes only; no ownership",
+   "every_operation": true
+  },
+  {
+   "operation": "Loopback daemon without TLS",
+   "check": "no credential required (development mode); `--production` requires TLS and credentials",
+   "every_operation": "bypassable locally"
+  },
+  {
+   "operation": "Target (`compute serve`) jobs and sessions",
+   "check": "NONE (AllowAllAuthorizer)",
+   "every_operation": false
+  }
+ ],
+ "placement": {
+  "requirements": [
+   "cpu_count",
+   "memory_bytes",
+   "disk_bytes",
+   "architecture",
+   "network (none/localhost/network)",
+   "isolation (process/sandboxed/strict)",
+   "session capabilities (exec, terminal, filesystem, network, public_endpoint, persistent_storage, suspend, resume, claim)",
+   "target features (kvm, firecracker, containers, gpu, virtualization)",
+   "runtime/version/distribution/dependencies (workloads)",
+   "explicit target"
+  ],
+  "failure_modes": [
+   "no_compatible_provider with per-target reasons (cpu_unavailable, memory_unavailable, architecture_mismatch, network_unsupported, sessions_unsupported, session_capability_unsupported, target_feature_unsupported, \u2026)",
+   "placed, then refused by the target's admission (resource_unavailable) \u2014 shown as a computer failure; wizard shows it",
+   "feature advertised but not usable (containers without an engine) \u2014 placed anyway"
+  ],
+  "understands": {
+   "gpu": "label only",
+   "virtualization": "label only",
+   "persistence": "capability no provider offers",
+   "networking": "network policy only",
+   "storage": "disk bytes only",
+   "runtimes": "workload runtimes yes; computer substrates no"
+  }
+ },
+ "documentation": [
+  {
+   "doc": "README.md",
+   "status": "MISLEADING",
+   "notes": "Leads with `compute run script.py`, which fails for Python by default; the launcher and control plane come later."
+  },
+  {
+   "doc": "docs/getting-started.md",
+   "status": "MISLEADING",
+   "notes": "Same first example; describes the workload engine, not the product."
+  },
+  {
+   "doc": "docs/architecture.md",
+   "status": "OUTDATED \u2192 rewritten in this audit",
+   "notes": "Did not show targets, sessions, the file default, or the daemon-host execution paths."
+  },
+  {
+   "doc": "docs/audit-2026-09-25.md",
+   "status": "OUTDATED (historical; replaced by docs/audit.md)",
+   "notes": "The 2026-09-25 audit predates computers, work sessions, versions."
+  },
+  {
+   "doc": "docs/platform-audit.md",
+   "status": "OUTDATED",
+   "notes": "Historical (dated)."
+  },
+  {
+   "doc": "docs/hardening-audit.md",
+   "status": "OUTDATED",
+   "notes": "Historical (dated)."
+  },
+  {
+   "doc": "docs/computers.md",
+   "status": "MISLEADING",
+   "notes": "\"Lost machines are reported, not recreated\" is true only when a process probe or lifecycle step notices."
+  },
+  {
+   "doc": "docs/environment-control-plane.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Matches the verified journeys; its limitations list is accurate."
+  },
+  {
+   "doc": "docs/product-surface/README.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Screenshots from the passing journey."
+  },
+  {
+   "doc": "docs/sessions.md",
+   "status": "INCOMPLETE",
+   "notes": "Target sessions correct; does not explain work sessions or that targets are unauthenticated."
+  },
+  {
+   "doc": "docs/session-architecture.md",
+   "status": "INCOMPLETE",
+   "notes": "Describes an authority (ProviderAuthorizer) that `compute serve` wires as AllowAll."
+  },
+  {
+   "doc": "docs/providers.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Describes target feature detection as implemented (binary-on-PATH), which is itself the defect."
+  },
+  {
+   "doc": "docs/placement.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": ""
+  },
+  {
+   "doc": "docs/feltdb.md",
+   "status": "INCOMPLETE",
+   "notes": "The FeltDB contract is accurate; it does not say the default backend is a local file."
+  },
+  {
+   "doc": "docs/daemon.md",
+   "status": "OUTDATED",
+   "notes": "\"Environments are the first screen\" \u2014 the UI opens on the action home with Work/Manage."
+  },
+  {
+   "doc": "docs/control-plane.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Spot-checked; notes computer environments."
+  },
+  {
+   "doc": "docs/environments.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Node environments; points to computers."
+  },
+  {
+   "doc": "docs/applications.md",
+   "status": "INCOMPLETE",
+   "notes": "Does not say `compute deploy <dir>` starts a control plane in ./.compute/daemon."
+  },
+  {
+   "doc": "docs/releases.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Bundle releases (spot-checked; tests pass)."
+  },
+  {
+   "doc": "docs/networking.md",
+   "status": "INCOMPLETE",
+   "notes": "Ingress/domains apply to bundle projects only; not said."
+  },
+  {
+   "doc": "docs/jobs.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Spot-checked."
+  },
+  {
+   "doc": "docs/remote-execution.md",
+   "status": "INCOMPLETE",
+   "notes": "Does not state that `compute serve` is unauthenticated."
+  },
+  {
+   "doc": "docs/receipts.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Spot-checked."
+  },
+  {
+   "doc": "docs/policy.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Spot-checked."
+  },
+  {
+   "doc": "docs/admission.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Spot-checked."
+  },
+  {
+   "doc": "docs/isolation.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Workload isolation; says nothing about computers (which have none)."
+  },
+  {
+   "doc": "docs/dependencies.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Spot-checked."
+  },
+  {
+   "doc": "docs/capacity.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Spot-checked."
+  },
+  {
+   "doc": "docs/provider-pools.md",
+   "status": "DOCUMENTED CORRECTLY",
+   "notes": "Spot-checked."
+  }
+ ],
+ "security": [
+  {
+   "id": "SEC-1",
+   "severity": "critical",
+   "finding": "`compute serve` has no authentication (AllowAllAuthorizer). Anyone who reaches a target lists every session and runs commands in any computer.",
+   "evidence": "experiments.json#target_exec_without_credential, #bypass_file_seen_through_the_daemon"
+  },
+  {
+   "id": "SEC-2",
+   "severity": "high",
+   "finding": "The daemon presents no credential to its targets by default (pool token_env unset, including the launcher), so every computer is owned by \"anonymous\" on its target.",
+   "evidence": "crates/compute-cli/src/launch_cmd.rs; crates/compute-provider/src/lib.rs#owner"
+  },
+  {
+   "id": "SEC-3",
+   "severity": "high",
+   "finding": "Workspace computers are directories under one OS user on one host: no filesystem, process, or network isolation between computers or from the target.",
+   "evidence": "crates/compute-provider/src/sessions.rs#WorkspaceSessionProvider"
+  },
+  {
+   "id": "SEC-4",
+   "severity": "medium",
+   "finding": "A loopback daemon without TLS admits requests with no credential (development mode). The launcher runs this way.",
+   "evidence": "crates/compute-environment/src/auth.rs; docs/daemon.md"
+  },
+  {
+   "id": "SEC-5",
+   "severity": "medium",
+   "finding": "Configuration values are passed as environment variables into every process and job in the computer; there is no secret type distinct from configuration.",
+   "evidence": "crates/compute-environment/src/daemon/computers.rs#exec_in"
+  },
+  {
+   "id": "SEC-6",
+   "severity": "low",
+   "finding": "Any operator with read scope can read any computer view (desired contents, configuration keys, endpoints); only mutations are owner-bound.",
+   "evidence": "crates/compute-environment/src/daemon/computers.rs#computer"
+  }
+ ],
+ "performance": {
+  "launch_cold_seconds": 3.68,
+  "launch_warm_seconds": 0.01,
+  "control_plane_restart_seconds": 2.46,
+  "computer_create_to_running_seconds": 0.61,
+  "exec_submit_ms": 16.2,
+  "exec_roundtrip_seconds": 0.13,
+  "project_inspection_seconds": 0.19,
+  "ui_home_ready_ms": 83,
+  "ui_work_ready_ms": 68,
+  "full_product_journey_seconds": 57,
+  "notes": [
+   "Every lifecycle event re-renders the whole current page (a full refetch).",
+   "GET /software computes every computer view and queries rollouts per environment and the latest version per project on each call.",
+   "Computer drivers re-read their records by identity every step; rollout drivers poll every 250 ms.",
+   "Debug build on a 4-CPU VM; not a benchmark."
+  ]
+ },
+ "gaps": [
+  {
+   "id": "G-ARCH-1",
+   "area": "Core architecture",
+   "current": "Targets accept any caller (AllowAllAuthorizer); the daemon authenticates to targets with nothing.",
+   "desired": "Targets trust only their control plane (a credential or mTLS), and sessions belong to the daemon's identity.",
+   "impact": "Anyone who reaches a target controls every computer on it; the daemon is not actually the authority.",
+   "evidence": "SEC-1, SEC-2",
+   "next": "Give `compute serve` a required credential and the pool a token for it; the launcher generates both."
+  },
+  {
+   "id": "G-ARCH-2",
+   "area": "Core architecture",
+   "current": "Three deployment models: applications, bundle projects (node environments), computer versions/rollouts.",
+   "desired": "One: versions reconciled into an environment's computer.",
+   "impact": "Three vocabularies, three code paths, and work that still runs on the daemon host.",
+   "evidence": "models, execution_paths",
+   "next": "Decide the fate of node environments and applications: port their features (zero-downtime switch, ingress, domains) to computers, then retire or wrap them."
+  },
+  {
+   "id": "G-ARCH-3",
+   "area": "Core architecture",
+   "current": "Default control state is a local file; FeltDB is opt-in.",
+   "desired": "FeltDB as the one authority, or the file backend stated as a development convenience everywhere.",
+   "impact": "Contradicts the durability contract; the launcher never uses FeltDB.",
+   "evidence": "state-default-file",
+   "next": "Decide and document; make `compute` use FeltDB when configured and say which it uses in the UI."
+  },
+  {
+   "id": "G-ARCH-4",
+   "area": "Core architecture",
+   "current": "Machine loss and target unreachability are not detected for computers without processes; the view keeps \"running\".",
+   "desired": "Every computer is periodically confirmed with its target; unreachable/lost is visible and actionable.",
+   "impact": "The UI shows healthy computers that do not exist.",
+   "evidence": "experiments.json",
+   "next": "Add a session liveness check to the controller's running step independent of processes; surface \"unreachable\"."
+  },
+  {
+   "id": "G-RT-1",
+   "area": "Runtime support",
+   "current": "Computers are workspaces (native processes) or unverified containers.",
+   "desired": "Containers verified; microVMs (Firecracker/KVM); WASM sandboxes; GPU.",
+   "impact": "No isolation for computers; features advertised but not provided.",
+   "evidence": "runtime matrix",
+   "next": "Verify the container provider against a real engine in CI; then a Firecracker session provider."
+  },
+  {
+   "id": "G-RT-2",
+   "area": "Runtime support",
+   "current": "Target features describe the host (`containers` = docker on PATH), not the computer.",
+   "desired": "Features describe what a computer on the target can be, verified live.",
+   "impact": "Placement puts a \"containers\" computer in a workspace.",
+   "evidence": "placement_refusals.containers",
+   "next": "Split host features from substrate; check engine liveness."
+  },
+  {
+   "id": "G-PROV-1",
+   "area": "Providers",
+   "current": "No Fly/Railway/Render/cloud/bare-metal provisioning; targets must already run `compute serve`.",
+   "desired": "Provider adapters that materialize targets or computers.",
+   "impact": "\"Put software on Railway\" is impossible.",
+   "evidence": "provider matrix",
+   "next": "Define a provisioning interface (materialize a target) and one adapter."
+  },
+  {
+   "id": "G-DISC-1",
+   "area": "Placement",
+   "current": "Targets are configured in a pool file; network, GPU model, nested virtualization are not discovered.",
+   "desired": "Discovery of machines and their capabilities.",
+   "impact": "Placement only knows what a file says.",
+   "evidence": "discovery",
+   "next": "Liveness-checked feature discovery; optional registration of targets with the control plane."
+  },
+  {
+   "id": "G-PLACE-1",
+   "area": "Placement",
+   "current": "persistent_storage, public_endpoint, terminal are requestable (UI checkboxes) but offered by no provider.",
+   "desired": "Either implemented or not offered.",
+   "impact": "Dead-end options.",
+   "evidence": "placement_refusals",
+   "next": "Hide unavailable options using GET /targets; implement persistent volumes and public endpoints."
+  },
+  {
+   "id": "G-EXEC-1",
+   "area": "Execution",
+   "current": "Bundle workloads and applications execute on the daemon host.",
+   "desired": "The daemon coordinates; computers execute.",
+   "impact": "The daemon is both coordinator and executor.",
+   "evidence": "execution_paths",
+   "next": "Covered by G-ARCH-2."
+  },
+  {
+   "id": "G-EXEC-2",
+   "area": "Execution",
+   "current": "No cancellation or timeout controls in the UI; jobs have timeouts in the API.",
+   "desired": "Cancel/retry for every job from every surface.",
+   "impact": "Stuck builds need the CLI or waiting.",
+   "evidence": "api: POST /compute/jobs/{job}/cancel has no computer-level route",
+   "next": "Add cancel for computer jobs and operations."
+  },
+  {
+   "id": "G-PROJ-1",
+   "area": "Projects",
+   "current": "Local folders must be Git repositories; no upload.",
+   "desired": "Any folder.",
+   "impact": "Non-Git projects cannot run.",
+   "evidence": "run-a-project",
+   "next": "Upload a folder as an artifact into the computer."
+  },
+  {
+   "id": "G-APP-1",
+   "area": "Applications",
+   "current": "Endpoints are target-host:port; no domains, TLS, or ingress for computer applications.",
+   "desired": "Public endpoints with domains and certificates.",
+   "impact": "Production traffic cannot reach computer applications properly.",
+   "evidence": "endpoints, domains-tls",
+   "next": "Route domains to computer endpoints through the existing network layer."
+  },
+  {
+   "id": "G-SVC-1",
+   "area": "Services",
+   "current": "Database/Redis are command templates that assume binaries on the host.",
+   "desired": "Managed service images/volumes.",
+   "impact": "Templates fail where binaries are absent.",
+   "evidence": "ui TEMPLATES",
+   "next": "Depends on container computers and volumes."
+  },
+  {
+   "id": "G-DEP-1",
+   "area": "Deployment",
+   "current": "A release restarts processes (downtime); bundle releases have zero-downtime switching.",
+   "desired": "Zero-downtime rollouts for computers.",
+   "impact": "Production updates interrupt traffic.",
+   "evidence": "zero-downtime",
+   "next": "Two instances behind a switched endpoint inside the computer."
+  },
+  {
+   "id": "G-REL-1",
+   "area": "Releases",
+   "current": "A version is a commit and a digest; no artifact is kept.",
+   "desired": "Stored, verifiable artifacts (build outputs) per version.",
+   "impact": "A version cannot be redeployed if the repository changes history.",
+   "evidence": "artifact-store",
+   "next": "Store the package (and optional build outputs) in the artifact store."
+  },
+  {
+   "id": "G-PROD-1",
+   "area": "Production",
+   "current": "No approvals, no protected environments, no deploy freezes.",
+   "desired": "Promotion policy per environment.",
+   "impact": "Anyone with deploy scope who owns both environments promotes.",
+   "evidence": "approvals",
+   "next": "Environment policy for promotion (approvals, required checks)."
+  },
+  {
+   "id": "G-UI-1",
+   "area": "UI",
+   "current": "Targets, credentials, audit, node upgrades, runtimes, placement explanation are CLI-only.",
+   "desired": "Every capability visible.",
+   "impact": "Operators need the terminal for setup and diagnosis.",
+   "evidence": "ui.not_in_ui",
+   "next": "Add Manage pages for targets and access."
+  },
+  {
+   "id": "G-UI-2",
+   "area": "UI",
+   "current": "The browser certification package fails; browser tests do not run in CI.",
+   "desired": "Browser tests in CI.",
+   "impact": "UI regressions ship (one already did).",
+   "evidence": "ui-certification",
+   "next": "Install Chromium in CI; fix the certification for the new home route."
+  },
+  {
+   "id": "G-CLI-1",
+   "area": "CLI",
+   "current": "52 commands have broken or missing help; `compute session` mixes target sessions and work sessions.",
+   "desired": "Accurate help; one session concept.",
+   "impact": "Discoverability.",
+   "evidence": "cli.json help_defect",
+   "next": "Fix clap doc comments; rename target sessions (e.g. `compute target session`)."
+  },
+  {
+   "id": "G-API-1",
+   "area": "API",
+   "current": "No versioning of the Compute API; routes without any client (/info, /metrics, \u2026).",
+   "desired": "A versioned, documented API.",
+   "impact": "Clients break silently.",
+   "evidence": "api.json",
+   "next": "Publish an API description generated from ROUTES."
+  },
+  {
+   "id": "G-AGENT-1",
+   "area": "Agents",
+   "current": "Agents are operators; no delegation, budgets, or per-agent audit identity.",
+   "desired": "Agent identities with bounded authority.",
+   "impact": "An agent with deploy scope can do everything a human can.",
+   "evidence": "agent-identity",
+   "next": "Scoped, expiring agent credentials tied to an owner."
+  },
+  {
+   "id": "G-SEC-1",
+   "area": "Security",
+   "current": "See SEC-1\u2026SEC-6.",
+   "desired": "Real boundaries at the target and between computers.",
+   "impact": "Critical.",
+   "evidence": "security",
+   "next": "G-ARCH-1, then isolation via container/microVM substrates."
+  },
+  {
+   "id": "G-OBS-1",
+   "area": "Observability",
+   "current": "Process logs are read on demand; no log streaming, metrics, or traces for computers in the UI.",
+   "desired": "Live logs and metrics per application.",
+   "impact": "Operating production is blind between refreshes.",
+   "evidence": "logs, metrics",
+   "next": "Stream process logs through the daemon; surface /metrics."
+  },
+  {
+   "id": "G-DOC-1",
+   "area": "Documentation",
+   "current": "README and getting-started lead with a command that fails by default; daemon.md describes an old UI.",
+   "desired": "Docs lead with `compute` and verified journeys.",
+   "impact": "First impressions fail.",
+   "evidence": "documentation",
+   "next": "Rewrite the first pages around the verified journey."
+  },
+  {
+   "id": "G-TEST-1",
+   "area": "Testing",
+   "current": "87 CLI commands are never invoked by a test; container provider, target auth, and machine loss have no real tests.",
+   "desired": "Every product claim executable.",
+   "impact": "Regressions in untested paths.",
+   "evidence": "cli.json tests",
+   "next": "Add the missing journeys to CI."
+  },
+  {
+   "id": "G-PERF-1",
+   "area": "Performance",
+   "current": "Every event re-renders and refetches the whole page; /software fans out per environment.",
+   "desired": "Incremental updates.",
+   "impact": "Fine at 3 computers; unmeasured at scale.",
+   "evidence": "performance",
+   "next": "Measure at 100 computers; add a software index."
+  }
+ ],
+ "base_vs_complete": [
+  {
+   "capability": "Computer abstraction",
+   "base_capture": "Environments with a durable computer (workspace on a `compute serve` target)",
+   "complete_compute": "Any machine: container, microVM, VM, bare metal, cloud",
+   "gap": "Substrates beyond workspaces"
+  },
+  {
+   "capability": "Persistent environments",
+   "base_capture": "Yes, verified",
+   "complete_compute": "Yes",
+   "gap": "None"
+  },
+  {
+   "capability": "Ephemeral environments",
+   "base_capture": "Yes, verified (expire, evidence kept)",
+   "complete_compute": "Yes",
+   "gap": "None"
+  },
+  {
+   "capability": "Self-discovery",
+   "base_capture": "CPU/memory/disk/OS/arch, runtimes, isolation facilities; features by device/binary presence",
+   "complete_compute": "Machines, capabilities, networks, GPUs, virtualization \u2014 live",
+   "gap": "Liveness, networks, automatic target discovery"
+  },
+  {
+   "capability": "Native runtime",
+   "base_capture": "Yes (workspace computers; process workloads)",
+   "complete_compute": "Yes, isolated",
+   "gap": "Isolation"
+  },
+  {
+   "capability": "Containers",
+   "base_capture": "Adapter exists; unverified against a real engine",
+   "complete_compute": "Verified, default substrate",
+   "gap": "Verification, images, volumes, ports"
+  },
+  {
+   "capability": "WASM",
+   "base_capture": "Workload engine (compute run); not a computer",
+   "complete_compute": "WASM computers/sandboxes",
+   "gap": "Substrate"
+  },
+  {
+   "capability": "Firecracker",
+   "base_capture": "Feature label only",
+   "complete_compute": "MicroVM computers",
+   "gap": "Everything"
+  },
+  {
+   "capability": "KVM",
+   "base_capture": "Feature label only",
+   "complete_compute": "VM computers",
+   "gap": "Everything"
+  },
+  {
+   "capability": "Capability placement",
+   "base_capture": "Yes, with reasons; features are labels",
+   "complete_compute": "Yes, against verified capabilities",
+   "gap": "Verified features, storage, public endpoints"
+  },
+  {
+   "capability": "Multiple projects",
+   "base_capture": "Yes, verified",
+   "complete_compute": "Yes",
+   "gap": "None"
+  },
+  {
+   "capability": "Application assembly",
+   "base_capture": "Proposal from source + GO, verified",
+   "complete_compute": "Yes, plus services/images/volumes",
+   "gap": "Managed services"
+  },
+  {
+   "capability": "Build",
+   "base_capture": "Yes, in the computer",
+   "complete_compute": "Yes",
+   "gap": "None"
+  },
+  {
+   "capability": "Test",
+   "base_capture": "Yes, in the computer",
+   "complete_compute": "Yes",
+   "gap": "None"
+  },
+  {
+   "capability": "Publish",
+   "base_capture": "Versions: commit + digest + evidence",
+   "complete_compute": "Versions with stored artifacts",
+   "gap": "Artifact storage"
+  },
+  {
+   "capability": "Deploy",
+   "base_capture": "Rollouts to environments, in place, verified",
+   "complete_compute": "Zero-downtime",
+   "gap": "Traffic switching"
+  },
+  {
+   "capability": "Promote",
+   "base_capture": "Reviewed plan + rollout, verified",
+   "complete_compute": "With approvals and policy",
+   "gap": "Approvals"
+  },
+  {
+   "capability": "Production",
+   "base_capture": "An environment named production; no protection",
+   "complete_compute": "Protected environments, domains, TLS",
+   "gap": "Policy, ingress for computers"
+  },
+  {
+   "capability": "Rollback",
+   "base_capture": "Yes, verified",
+   "complete_compute": "Yes",
+   "gap": "None"
+  },
+  {
+   "capability": "Operations",
+   "base_capture": "Logs (on demand), restart, config, probe health",
+   "complete_compute": "Streaming logs, metrics, alerts, scaling",
+   "gap": "Observability, scaling"
+  },
+  {
+   "capability": "Agent execution",
+   "base_capture": "AppPort covers every UI operation; agents are operators",
+   "complete_compute": "Scoped agent identities",
+   "gap": "Delegation"
+  },
+  {
+   "capability": "Provider abstraction",
+   "base_capture": "Pool of local/remote targets; no cloud adapters",
+   "complete_compute": "Fly/Railway/Render/cloud/bare metal",
+   "gap": "Adapters"
+  },
+  {
+   "capability": "UI",
+   "base_capture": "Work/Manage, home, run, software, operations; verified in a browser",
+   "complete_compute": "Every capability",
+   "gap": "Targets, access, diagnosis pages"
+  },
+  {
+   "capability": "CLI",
+   "base_capture": "182 commands; 52 with help defects",
+   "complete_compute": "Consistent, documented",
+   "gap": "Help, naming"
+  },
+  {
+   "capability": "API",
+   "base_capture": "128 routes, scoped",
+   "complete_compute": "Versioned, documented",
+   "gap": "Description"
+  },
+  {
+   "capability": "Observability",
+   "base_capture": "Events, receipts, job evidence, /metrics (API only)",
+   "complete_compute": "Live logs, metrics, traces",
+   "gap": "Streaming, dashboards"
+  },
+  {
+   "capability": "Durable evidence",
+   "base_capture": "Events, versions, rollouts, receipts; jobs on targets",
+   "complete_compute": "Same, in one authority",
+   "gap": "Jobs outside FeltDB; file default"
+  },
+  {
+   "capability": "Security boundary",
+   "base_capture": "Daemon: real; targets: none",
+   "complete_compute": "Every hop authenticated; computers isolated",
+   "gap": "Target auth, isolation"
+  }
+ ],
+ "readiness": [
+  {
+   "area": "Install",
+   "status": "PARTIAL",
+   "evidence": "cargo build; release distribution certified in CI",
+   "blocking_gap": "No installer/package; runtimes download on demand"
+  },
+  {
+   "area": "Launch",
+   "status": "PASS",
+   "evidence": "compute \u2192 UI in 3.7 s",
+   "blocking_gap": "Browser opener only on desktops"
+  },
+  {
+   "area": "Discovery",
+   "status": "PARTIAL",
+   "evidence": "resources/runtimes/isolation real; features inferred",
+   "blocking_gap": "G-DISC-1, G-RT-2"
+  },
+  {
+   "area": "Placement",
+   "status": "PASS",
+   "evidence": "matching tests; reasons shown",
+   "blocking_gap": "G-PLACE-1"
+  },
+  {
+   "area": "Computer creation",
+   "status": "PASS",
+   "evidence": "0.6 s to running (workspace)",
+   "blocking_gap": "Substrates (G-RT-1)"
+  },
+  {
+   "area": "Project execution",
+   "status": "PASS",
+   "evidence": "journey",
+   "blocking_gap": "Git-only sources"
+  },
+  {
+   "area": "Multi-project",
+   "status": "PASS",
+   "evidence": "journey",
+   "blocking_gap": ""
+  },
+  {
+   "area": "Runtime coverage",
+   "status": "PARTIAL",
+   "evidence": "workload runtimes yes; computer substrates: workspace only verified",
+   "blocking_gap": "G-RT-1"
+  },
+  {
+   "area": "Sessions",
+   "status": "PASS",
+   "evidence": "CLI + provider tests",
+   "blocking_gap": "Two session concepts (G-CLI-1)"
+  },
+  {
+   "area": "Build",
+   "status": "PASS",
+   "evidence": "journey",
+   "blocking_gap": ""
+  },
+  {
+   "area": "Test",
+   "status": "PASS",
+   "evidence": "journey",
+   "blocking_gap": ""
+  },
+  {
+   "area": "Publish",
+   "status": "PASS",
+   "evidence": "journey",
+   "blocking_gap": "G-REL-1"
+  },
+  {
+   "area": "Deploy",
+   "status": "PASS",
+   "evidence": "journey",
+   "blocking_gap": "G-DEP-1"
+  },
+  {
+   "area": "Promote",
+   "status": "PASS",
+   "evidence": "journey",
+   "blocking_gap": "G-PROD-1"
+  },
+  {
+   "area": "Production",
+   "status": "PARTIAL",
+   "evidence": "an environment; no domains/TLS/approvals for computers",
+   "blocking_gap": "G-APP-1, G-PROD-1"
+  },
+  {
+   "area": "Rollback",
+   "status": "PASS",
+   "evidence": "journey",
+   "blocking_gap": ""
+  },
+  {
+   "area": "Operations",
+   "status": "PARTIAL",
+   "evidence": "restart/logs/config/health probe",
+   "blocking_gap": "G-OBS-1, G-ARCH-4"
+  },
+  {
+   "area": "UI",
+   "status": "PARTIAL",
+   "evidence": "journey passes; certification package fails; no CI browser",
+   "blocking_gap": "G-UI-1, G-UI-2"
+  },
+  {
+   "area": "CLI",
+   "status": "PARTIAL",
+   "evidence": "182 commands; 52 help defects; 87 untested through the CLI",
+   "blocking_gap": "G-CLI-1"
+  },
+  {
+   "area": "Agents",
+   "status": "PARTIAL",
+   "evidence": "AppPort parity (stub-tested)",
+   "blocking_gap": "G-AGENT-1"
+  },
+  {
+   "area": "Providers",
+   "status": "PARTIAL",
+   "evidence": "local + remote targets only",
+   "blocking_gap": "G-PROV-1"
+  },
+  {
+   "area": "Security",
+   "status": "FAIL",
+   "evidence": "unauthenticated targets demonstrated",
+   "blocking_gap": "G-ARCH-1, SEC-3"
+  },
+  {
+   "area": "Recovery",
+   "status": "PARTIAL",
+   "evidence": "daemon restart, target restart recover; machine loss undetected",
+   "blocking_gap": "G-ARCH-4"
+  }
+ ],
+ "backlog": [
+  {
+   "stage": "FOUNDATION",
+   "items": [
+    "Authenticate targets; the daemon holds the credential (G-ARCH-1)",
+    "Detect machine loss and unreachable targets (G-ARCH-4)",
+    "Decide the durable-state default (G-ARCH-3)",
+    "Browser tests and the UI certification in CI; fix the home-route regression (G-UI-2)"
+   ]
+  },
+  {
+   "stage": "EXECUTION",
+   "items": [
+    "One deployment model: retire or port node environments and applications (G-ARCH-2, G-EXEC-1)",
+    "Cancel/retry for computer jobs and operations (G-EXEC-2)"
+   ]
+  },
+  {
+   "stage": "RUNTIME COVERAGE",
+   "items": [
+    "Container computers verified in CI, with ports and volumes (G-RT-1)",
+    "Live, substrate-accurate target features (G-RT-2, G-DISC-1)",
+    "A microVM session provider (Firecracker)"
+   ]
+  },
+  {
+   "stage": "PROJECT/APP ASSEMBLY",
+   "items": [
+    "Non-Git sources (G-PROJ-1)",
+    "Managed services on container computers (G-SVC-1)",
+    "Persistent storage and public endpoints, or hide them (G-PLACE-1)"
+   ]
+  },
+  {
+   "stage": "DEVELOPMENT WORKFLOW",
+   "items": [
+    "Interactive terminal (PTY) and file editing",
+    "Streaming logs (G-OBS-1)"
+   ]
+  },
+  {
+   "stage": "RELEASE",
+   "items": [
+    "Stored version artifacts (G-REL-1)"
+   ]
+  },
+  {
+   "stage": "DEPLOYMENT",
+   "items": [
+    "Zero-downtime rollouts in computers (G-DEP-1)",
+    "Provider adapters that materialize targets (G-PROV-1)"
+   ]
+  },
+  {
+   "stage": "PRODUCTION",
+   "items": [
+    "Domains/TLS/ingress for computer endpoints (G-APP-1)",
+    "Protected environments and approvals (G-PROD-1)"
+   ]
+  },
+  {
+   "stage": "OPERATIONS",
+   "items": [
+    "Metrics and alerts in the UI (G-OBS-1)",
+    "Scaling short of replacement",
+    "Agent identities and delegation (G-AGENT-1)"
+   ]
+  },
+  {
+   "stage": "PRODUCT POLISH",
+   "items": [
+    "README/getting-started around `compute` (G-DOC-1)",
+    "CLI help and naming (G-CLI-1)",
+    "Targets/access/diagnosis pages (G-UI-1)",
+    "API description (G-API-1)",
+    "Performance at scale (G-PERF-1)"
+   ]
+  }
+ ]
+}

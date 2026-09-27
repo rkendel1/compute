@@ -1,0 +1,120 @@
+{
+ "launch_seconds": 3.68,
+ "launch_output": [
+  "Compute is running: http://127.0.0.1:18787/",
+  "  computers run on this machine's computer host (127.0.0.1:18788)",
+  "  state: /tmp/claude-0/aud/home",
+  "  stop it with `compute down`"
+ ],
+ "relaunch_seconds": 0.01,
+ "ui_html_ms": 4.8,
+ "status_ms": 1.5,
+ "targets": [
+  {
+   "target_id": "local",
+   "kind": "local",
+   "health": "healthy",
+   "hosts_computers": false,
+   "features": null
+  },
+  {
+   "target_id": "this-machine",
+   "kind": "remote",
+   "health": "healthy",
+   "hosts_computers": true,
+   "features": [
+    "containers"
+   ]
+  }
+ ],
+ "create_http": [
+  201,
+  267.2
+ ],
+ "computer_running_seconds": 0.61,
+ "exec_submit_ms": 16.2,
+ "exec_roundtrip_seconds": 0.13,
+ "target_sessions_listed_without_credential": {
+  "http": 200,
+  "sessions": [
+   "ses_d72405242004ffe0b93c2e4d6fbaae2aef52e0a9492a121f49c88a889cd5a0e3"
+  ]
+ },
+ "target_exec_without_credential": {
+  "http": 200,
+  "body": "accepted"
+ },
+ "bypass_file_seen_through_the_daemon": "written-by-an-unauthenticated-caller",
+ "daemon_loopback_any_bearer_token_http": 401,
+ "propose": {
+  "http": 200,
+  "seconds": 0.19,
+  "runtime": "node",
+  "start": [
+   [
+    "sh",
+    "-c",
+    "npm start"
+   ]
+  ]
+ },
+ "exec_while_target_down": {
+  "http": 503,
+  "body": {
+   "kind": "runtime_unavailable",
+   "message": "TransportFailure: Connection refused (os error 111)",
+   "request_id": "req_cebf94cb5b2f0df7"
+  }
+ },
+ "computer_while_target_down": {
+  "status": "running",
+  "failure": null
+ },
+ "recovery_after_target_restart": {
+  "seconds": 0.0,
+  "same_session": true
+ },
+ "after_the_target_forgot_the_machine": {
+  "observed": "the computer stayed \"running\" with no failure for 90 s, after an explicit reconcile, and after a control-plane restart; exec answered not_found \"unknown session\"",
+  "detected": false
+ },
+ "after_control_plane_restart": {
+  "seconds": 2.46,
+  "state_kept": true,
+  "status": "running (still unaware the machine is gone)"
+ },
+ "ui": {
+  "home_ready_ms": 83,
+  "home_api_calls": 4,
+  "work_ready_ms": 68,
+  "work_api_calls": 5,
+  "computers": 3
+ },
+ "placement_refusals": {
+  "persistent_storage": "invalid: no target can host this computer: local: sessions_unsupported; this-machine: session_capability_unsupported",
+  "public_endpoint": "same, session_capability_unsupported",
+  "terminal": "same, session_capability_unsupported",
+  "gpu": "same, target_feature_unsupported",
+  "containers": "accepted and placed as a workspace computer (provider_kind workspace): the host advertises containers because a docker binary is on PATH, with no engine running"
+ },
+ "runtimes": {
+  "python_default_network": "placement_failed: network_unsupported (python cannot enforce network none); `compute run main.py` fails as documented in README/getting-started",
+  "python_with_network": "downloaded the pinned distribution (available \u2192 ready) and ran: \"hello from python\""
+ },
+ "application_journey": {
+  "compute init my-app; compute deploy my-app": "running at http://127.0.0.1:20002 on provider local; the deploy auto-started a second control plane (compute start, state in ./.compute/daemon, port 8787) and a supervisor: the application runs on that daemon node"
+ },
+ "ui_certification_package": {
+  "packages/compute-ui-e2e": "FAIL: waits for [data-environment=\"preprod\"] on #/ \u2014 the home route became the action home in 69b70d9; not run in CI; it also left two supervisor processes running"
+ },
+ "environment": {
+  "host": "Linux x86_64, 4 CPU, 16 GiB, kernel 6.18 (Firecracker VM)",
+  "kvm": false,
+  "gpu": false,
+  "docker": "client 29.3.1 only; no engine (/var/run/docker.sock absent)",
+  "podman": false,
+  "firecracker": false,
+  "build": "debug",
+  "state_backend": "file (the launcher default)"
+ }
+}

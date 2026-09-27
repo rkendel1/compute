@@ -1,0 +1,17 @@
+import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
+const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
+const page = await browser.newPage();
+const calls = [];
+page.on('request', (r) => { if (!r.url().includes('/ui/') && r.resourceType() === 'fetch') calls.push(new URL(r.url()).pathname); });
+const t0 = Date.now();
+await page.goto('http://127.0.0.1:18787/');
+await page.waitForSelector('[data-computer-card="c"]');
+const home = Date.now() - t0;
+const homeCalls = calls.length;
+calls.length = 0;
+const t1 = Date.now();
+await page.goto('http://127.0.0.1:18787/#/work/a');
+await page.waitForSelector('[data-view="work"]');
+const work = Date.now() - t1;
+console.log(JSON.stringify({ home_ready_ms: home, home_api_calls: homeCalls, work_ready_ms: work, work_api_calls: calls.length, work_paths: calls }));
+await browser.close();
