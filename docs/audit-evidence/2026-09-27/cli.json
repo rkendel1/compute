@@ -1,0 +1,2084 @@
+[
+ {
+  "command": "compute up",
+  "about": "Launch the Compute control plane on this machine and open it: what `compute` alone does. Starts this machine's computer host and the daemon when they are not running",
+  "help_defect": null,
+  "interface": "launcher: spawns compute serve + compute start",
+  "state": "local processes, pool.toml",
+  "authority": "n/a (local)",
+  "ui": "the UI itself",
+  "tests": [
+   "crates/compute-cli/tests/product_journey.rs"
+  ]
+ },
+ {
+  "command": "compute down",
+  "about": "Stop the control plane `compute` launched, and this machine's computer host. Durable state is kept",
+  "help_defect": null,
+  "interface": "launcher",
+  "state": "stops processes",
+  "authority": "n/a (local)",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/product_journey.rs"
+  ]
+ },
+ {
+  "command": "compute versions publish",
+  "about": "Publish a version: build, tests, checks, and a source package, run in the environment the project is developed in",
+  "help_defect": null,
+  "interface": "daemon API /software, /rollouts",
+  "state": "durable (Version, Rollout)",
+  "authority": "daemon scopes + owner",
+  "ui": "Software pages: publish/deploy/promote/rollback, version and operation pages",
+  "tests": []
+ },
+ {
+  "command": "compute versions list",
+  "about": "A project's versions, newest first, and where they run",
+  "help_defect": null,
+  "interface": "daemon API /software, /rollouts",
+  "state": "durable (Version, Rollout)",
+  "authority": "daemon scopes + owner",
+  "ui": "Software pages: publish/deploy/promote/rollback, version and operation pages",
+  "tests": []
+ },
+ {
+  "command": "compute versions show",
+  "about": "One version: its source, package, evidence, and rollouts",
+  "help_defect": null,
+  "interface": "daemon API /software, /rollouts",
+  "state": "durable (Version, Rollout)",
+  "authority": "daemon scopes + owner",
+  "ui": "Software pages: publish/deploy/promote/rollback, version and operation pages",
+  "tests": []
+ },
+ {
+  "command": "compute versions deploy",
+  "about": "Deploy a version to an environment, in place",
+  "help_defect": null,
+  "interface": "daemon API /software, /rollouts",
+  "state": "durable (Version, Rollout)",
+  "authority": "daemon scopes + owner",
+  "ui": "Software pages: publish/deploy/promote/rollback, version and operation pages",
+  "tests": []
+ },
+ {
+  "command": "compute versions promote",
+  "about": "Promote the version running in one environment to another, after showing what it would change",
+  "help_defect": null,
+  "interface": "daemon API /software, /rollouts",
+  "state": "durable (Version, Rollout)",
+  "authority": "daemon scopes + owner",
+  "ui": "Software pages: publish/deploy/promote/rollback, version and operation pages",
+  "tests": []
+ },
+ {
+  "command": "compute versions rollback",
+  "about": "Roll an environment back to the version before the current one (or the one named)",
+  "help_defect": null,
+  "interface": "daemon API /software, /rollouts",
+  "state": "durable (Version, Rollout)",
+  "authority": "daemon scopes + owner",
+  "ui": "Software pages: publish/deploy/promote/rollback, version and operation pages",
+  "tests": []
+ },
+ {
+  "command": "compute init",
+  "about": "Create the smallest useful Compute application",
+  "help_defect": null,
+  "interface": "local files",
+  "state": "writes a directory",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "crates/compute-cli/tests/computers.rs",
+   "crates/compute-cli/tests/product.rs",
+   "crates/compute-cli/tests/product_journey.rs"
+  ]
+ },
+ {
+  "command": "compute application info",
+  "about": "Describe an application directory or artifact: identity, runtime, requirements, environment contract. Contacts no provider",
+  "help_defect": null,
+  "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+  "state": "durable (applications environment)",
+  "authority": "daemon scopes (no owner)",
+  "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+  "tests": [
+   "crates/compute-cli/tests/product.rs"
+  ]
+ },
+ {
+  "command": "compute application pack",
+  "about": "Package an application directory as a portable artifact",
+  "help_defect": null,
+  "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+  "state": "durable (applications environment)",
+  "authority": "daemon scopes (no owner)",
+  "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+  "tests": [
+   "crates/compute-cli/tests/product.rs",
+   "packages/compute-appport/src/test/application.test.ts"
+  ]
+ },
+ {
+  "command": "compute application deploy",
+  "about": "Place the application on a provider that can host it and release a new version there",
+  "help_defect": null,
+  "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+  "state": "durable (applications environment)",
+  "authority": "daemon scopes (no owner)",
+  "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+  "tests": [
+   "crates/compute-cli/tests/product.rs",
+   "packages/compute-appport/src/application.ts"
+  ]
+ },
+ {
+  "command": "compute application status",
+  "about": "The application's state on the provider that hosts it",
+  "help_defect": null,
+  "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+  "state": "durable (applications environment)",
+  "authority": "daemon scopes (no owner)",
+  "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+  "tests": [
+   "crates/compute-cli/tests/product.rs",
+   "packages/compute-appport/src/application.ts"
+  ]
+ },
+ {
+  "command": "compute application logs",
+  "about": "The active version's output",
+  "help_defect": null,
+  "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+  "state": "durable (applications environment)",
+  "authority": "daemon scopes (no owner)",
+  "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+  "tests": [
+   "packages/compute-appport/src/application.ts"
+  ]
+ },
+ {
+  "command": "compute application history",
+  "about": "Every version, newest first",
+  "help_defect": null,
+  "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+  "state": "durable (applications environment)",
+  "authority": "daemon scopes (no owner)",
+  "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+  "tests": [
+   "crates/compute-cli/tests/product.rs",
+   "packages/compute-appport/src/application.ts"
+  ]
+ },
+ {
+  "command": "compute application rollback",
+  "about": "Deploy an earlier version again, as the next version",
+  "help_defect": null,
+  "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+  "state": "durable (applications environment)",
+  "authority": "daemon scopes (no owner)",
+  "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+  "tests": [
+   "packages/compute-appport/src/application.ts"
+  ]
+ },
+ {
+  "command": "compute application stop",
+  "about": "Stop serving. Versions and evidence remain",
+  "help_defect": null,
+  "interface": "daemon API /applications (auto-starts a daemon in ./.compute/daemon)",
+  "state": "durable (applications environment)",
+  "authority": "daemon scopes (no owner)",
+  "ui": "partial: application project page (rollback, stop, logs); no deploy/pack",
+  "tests": [
+   "packages/compute-appport/src/application.ts"
+  ]
+ },
+ {
+  "command": "compute run",
+  "about": "",
+  "help_defect": "describes itself as the pool location (a flattened doc comment)",
+  "interface": "local engine, or a provider chosen by pool placement",
+  "state": "none (execution record + receipt)",
+  "authority": "local user; providers are AllowAll",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "crates/compute-cli/tests/isolation.rs",
+   "crates/compute-cli/tests/remote_pool.rs",
+   "packages/compute-appport/src/provider.ts"
+  ]
+ },
+ {
+  "command": "compute bundle create",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "writes files",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "packages/compute-appport/src/provider.ts",
+   "packages/compute-appport/src/test/conformance.test.ts",
+   "packages/compute-appport/src/test/environment.test.ts"
+  ]
+ },
+ {
+  "command": "compute bundle inspect",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "writes files",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs"
+  ]
+ },
+ {
+  "command": "compute bundle verify",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "writes files",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs"
+  ]
+ },
+ {
+  "command": "compute deps create",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "writes files",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs"
+  ]
+ },
+ {
+  "command": "compute deps inspect",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "writes files",
+  "authority": "none",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute deps verify",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "writes files",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs"
+  ]
+ },
+ {
+  "command": "compute inspect",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "crates/compute-cli/tests/remote_pool.rs",
+   "packages/compute-appport/src/schemas.ts",
+   "packages/compute-appport/src/test/conformance.test.ts"
+  ]
+ },
+ {
+  "command": "compute runtimes",
+  "about": "",
+  "help_defect": "describes itself as the pool location (a flattened doc comment)",
+  "interface": "local / pool",
+  "state": "runtime store",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "crates/compute-cli/tests/remote_pool.rs",
+   "crates/compute-placement/tests/selection.rs"
+  ]
+ },
+ {
+  "command": "compute runtime",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "crates/compute-cli/tests/product.rs",
+   "packages/compute-appport/src/test/conformance.test.ts"
+  ]
+ },
+ {
+  "command": "compute capabilities",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "crates/compute-cli/tests/product.rs",
+   "crates/compute-cli/tests/remote_pool.rs",
+   "crates/compute-cli/tests/sessions.rs"
+  ]
+ },
+ {
+  "command": "compute isolation",
+  "about": "Show the versioned isolation profiles and runtime support matrix",
+  "help_defect": null,
+  "interface": "local",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "crates/compute-cli/tests/isolation.rs",
+   "crates/compute-policy/tests/evaluator.rs",
+   "crates/compute-provider/tests/remote.rs"
+  ]
+ },
+ {
+  "command": "compute exec",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local engine (issue-description convenience)",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "crates/compute-cli/tests/sessions.rs",
+   "crates/compute-placement/tests/matching.rs",
+   "packages/compute-appport/src/test/sessions.test.ts"
+  ]
+ },
+ {
+  "command": "compute doctor",
+  "about": "Diagnose this host's runtimes and, when one runs, its controller",
+  "help_defect": null,
+  "interface": "local + daemon /status",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs"
+  ]
+ },
+ {
+  "command": "compute certify",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/src/certification.rs",
+   "crates/compute-cli/tests/cli.rs"
+  ]
+ },
+ {
+  "command": "compute distribution build",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "writes files",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs"
+  ]
+ },
+ {
+  "command": "compute distribution inspect",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "writes files",
+  "authority": "none",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute distribution verify",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "writes files",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs"
+  ]
+ },
+ {
+  "command": "compute receipt inspect",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "none",
+  "authority": "none",
+  "ui": "Receipt dialog (project pages)",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs"
+  ]
+ },
+ {
+  "command": "compute receipt verify",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "none",
+  "authority": "none",
+  "ui": "Receipt dialog (project pages)",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "crates/compute-cli/tests/product.rs",
+   "crates/compute-cli/tests/sessions.rs"
+  ]
+ },
+ {
+  "command": "compute version",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "local",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "crates/compute-cli/tests/product.rs",
+   "crates/compute-cli/tests/upgrade.rs"
+  ]
+ },
+ {
+  "command": "compute remote run",
+  "about": "",
+  "help_defect": "describes itself as the pool location (a flattened doc comment)",
+  "interface": "provider compute.remote@1 directly",
+  "state": "provider job store",
+  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/sessions.rs"
+  ]
+ },
+ {
+  "command": "compute remote inspect",
+  "about": "",
+  "help_defect": "describes itself as the pool location (a flattened doc comment)",
+  "interface": "provider compute.remote@1 directly",
+  "state": "provider job store",
+  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute remote submit",
+  "about": "",
+  "help_defect": "describes itself as the pool location (a flattened doc comment)",
+  "interface": "provider compute.remote@1 directly",
+  "state": "provider job store",
+  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "ui": "none",
+  "tests": [
+   "packages/compute-appport/src/provider.ts"
+  ]
+ },
+ {
+  "command": "compute remote status",
+  "about": "",
+  "help_defect": "describes itself as the pool location (a flattened doc comment)",
+  "interface": "provider compute.remote@1 directly",
+  "state": "provider job store",
+  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/sessions.rs"
+  ]
+ },
+ {
+  "command": "compute remote result",
+  "about": "",
+  "help_defect": "describes itself as the pool location (a flattened doc comment)",
+  "interface": "provider compute.remote@1 directly",
+  "state": "provider job store",
+  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute remote wait",
+  "about": "",
+  "help_defect": "describes itself as the pool location (a flattened doc comment)",
+  "interface": "provider compute.remote@1 directly",
+  "state": "provider job store",
+  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute remote receipt",
+  "about": "",
+  "help_defect": "describes itself as the pool location (a flattened doc comment)",
+  "interface": "provider compute.remote@1 directly",
+  "state": "provider job store",
+  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute remote artifacts",
+  "about": "",
+  "help_defect": "describes itself as the pool location (a flattened doc comment)",
+  "interface": "provider compute.remote@1 directly",
+  "state": "provider job store",
+  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute remote cancel",
+  "about": "",
+  "help_defect": "describes itself as the pool location (a flattened doc comment)",
+  "interface": "provider compute.remote@1 directly",
+  "state": "provider job store",
+  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute remote capabilities",
+  "about": "",
+  "help_defect": "describes itself as the pool location (a flattened doc comment)",
+  "interface": "provider compute.remote@1 directly",
+  "state": "provider job store",
+  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/remote_pool.rs"
+  ]
+ },
+ {
+  "command": "compute remote health",
+  "about": "",
+  "help_defect": "describes itself as the pool location (a flattened doc comment)",
+  "interface": "provider compute.remote@1 directly",
+  "state": "provider job store",
+  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/remote_pool.rs",
+   "packages/compute-appport/src/test/placement.test.ts"
+  ]
+ },
+ {
+  "command": "compute provider list",
+  "about": "List configured providers with their discovery status and health",
+  "help_defect": null,
+  "interface": "pool config + providers",
+  "state": "capability cache",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "packages/compute-appport/src/provider.ts"
+  ]
+ },
+ {
+  "command": "compute provider inspect",
+  "about": "Show a provider's validated descriptor. A pool ID yields the canonical descriptor; `local` or an endpoint URL outside the pool yields the raw capability response",
+  "help_defect": null,
+  "interface": "pool config + providers",
+  "state": "capability cache",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "packages/compute-appport/src/provider.ts"
+  ]
+ },
+ {
+  "command": "compute provider capabilities",
+  "about": "Show a provider's raw capability response",
+  "help_defect": null,
+  "interface": "pool config + providers",
+  "state": "capability cache",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "packages/compute-appport/src/provider.ts"
+  ]
+ },
+ {
+  "command": "compute provider pool",
+  "about": "Show the configured pool and its selection policy",
+  "help_defect": null,
+  "interface": "pool config + providers",
+  "state": "capability cache",
+  "authority": "none",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute provider refresh",
+  "about": "Rediscover capabilities and rewrite the capability cache",
+  "help_defect": null,
+  "interface": "pool config + providers",
+  "state": "capability cache",
+  "authority": "none",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute capacity",
+  "about": "Show configured, reserved, and currently available provider capacity",
+  "help_defect": null,
+  "interface": "pool",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute jobs",
+  "about": "List durable jobs and their reservation state",
+  "help_defect": null,
+  "interface": "pool",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute placement inspect",
+  "about": "Evaluate the pool for a workload. No execution occurs",
+  "help_defect": null,
+  "interface": "pool (evaluation only)",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "packages/compute-appport/src/provider.ts"
+  ]
+ },
+ {
+  "command": "compute placement explain",
+  "about": "Explain what the workload requires and why each provider is or is not compatible. No execution occurs",
+  "help_defect": null,
+  "interface": "pool (evaluation only)",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute pool run",
+  "about": "Place and execute synchronously on the selected provider",
+  "help_defect": null,
+  "interface": "pool placement then provider",
+  "state": "provider job store",
+  "authority": "provider: AllowAll",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/product.rs",
+   "packages/compute-appport/src/provider.ts"
+  ]
+ },
+ {
+  "command": "compute pool submit",
+  "about": "Place and submit a durable job to the selected provider",
+  "help_defect": null,
+  "interface": "pool placement then provider",
+  "state": "provider job store",
+  "authority": "provider: AllowAll",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/product.rs",
+   "packages/compute-appport/src/provider.ts"
+  ]
+ },
+ {
+  "command": "compute target list",
+  "about": "The computers and infrastructure the daemon can place environments on",
+  "help_defect": null,
+  "interface": "daemon API /targets",
+  "state": "none",
+  "authority": "daemon read scope",
+  "ui": "none (targets are not shown in the UI)",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute session create",
+  "about": "Create a session on a provider chosen by placement",
+  "help_defect": null,
+  "interface": "pool placement then target sessions directly",
+  "state": "target session store (not FeltDB)",
+  "authority": "target: AllowAll; owner = hash of the Authorization header",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/sessions.rs",
+   "packages/compute-appport/src/sessions.ts",
+   "packages/compute-appport/src/test/sessions.test.ts"
+  ]
+ },
+ {
+  "command": "compute session list",
+  "about": "List your sessions on every provider in the pool",
+  "help_defect": null,
+  "interface": "targets directly",
+  "state": "none",
+  "authority": "target: AllowAll",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/sessions.rs",
+   "packages/compute-appport/src/sessions.ts"
+  ]
+ },
+ {
+  "command": "compute session info",
+  "about": "Show a session's complete, authoritative state",
+  "help_defect": null,
+  "interface": "targets directly",
+  "state": "none",
+  "authority": "target: AllowAll",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/sessions.rs",
+   "packages/compute-appport/src/sessions.ts"
+  ]
+ },
+ {
+  "command": "compute session connect",
+  "about": "Get connection details for a session",
+  "help_defect": null,
+  "interface": "targets directly",
+  "state": "target session store",
+  "authority": "target: AllowAll",
+  "ui": "none",
+  "tests": [
+   "packages/compute-appport/src/sessions.ts"
+  ]
+ },
+ {
+  "command": "compute session exec",
+  "about": "Run a command in a session as a durable job",
+  "help_defect": null,
+  "interface": "targets directly",
+  "state": "target job store",
+  "authority": "target: AllowAll",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/sessions.rs",
+   "packages/compute-appport/src/sessions.ts",
+   "packages/compute-appport/src/test/sessions.test.ts"
+  ]
+ },
+ {
+  "command": "compute session logs",
+  "about": "Show the output of every execution in a session",
+  "help_defect": null,
+  "interface": "targets directly",
+  "state": "none",
+  "authority": "target: AllowAll",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/sessions.rs",
+   "packages/compute-appport/src/sessions.ts"
+  ]
+ },
+ {
+  "command": "compute session stop",
+  "about": "Stop active executions, keeping the environment and the record",
+  "help_defect": null,
+  "interface": "targets directly",
+  "state": "target session store",
+  "authority": "target: AllowAll",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute session resume",
+  "about": "Resume a stopped session's environment. Never creates a new one",
+  "help_defect": null,
+  "interface": "targets directly",
+  "state": "target session store",
+  "authority": "target: AllowAll",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute session claim",
+  "about": "Keep an ephemeral session until it is destroyed",
+  "help_defect": null,
+  "interface": "targets directly",
+  "state": "target session store",
+  "authority": "target: AllowAll",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute session destroy",
+  "about": "Tear the environment down. The record remains as evidence",
+  "help_defect": null,
+  "interface": "targets directly",
+  "state": "target session store",
+  "authority": "target: AllowAll",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/sessions.rs"
+  ]
+ },
+ {
+  "command": "compute session open",
+  "about": "Start working, through the Compute daemon: enter an environment you have (it keeps running when you close), or with no environment, get a temporary one of your own (destroyed when you close or it expires)",
+  "help_defect": null,
+  "interface": "daemon API /sessions",
+  "state": "durable (WorkSession)",
+  "authority": "daemon scopes + owner",
+  "ui": "Work: Open session; Home: Try software / Temporary environment",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute session close",
+  "about": "Stop working. Only a session's own temporary environment goes with it",
+  "help_defect": null,
+  "interface": "daemon API /sessions",
+  "state": "durable",
+  "authority": "daemon scopes + owner",
+  "ui": "Work: Close",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute session opened",
+  "about": "Your work sessions, through the Compute daemon",
+  "help_defect": null,
+  "interface": "daemon API /sessions",
+  "state": "none",
+  "authority": "daemon scopes + owner",
+  "ui": "Work: Sessions table",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute policy inspect",
+  "about": "Show the effective policy: the baseline intersected with local configuration and --policy",
+  "help_defect": null,
+  "interface": "local",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "packages/compute-appport/src/provider.ts"
+  ]
+ },
+ {
+  "command": "compute policy validate",
+  "about": "Statically validate a compute.policy@1 document",
+  "help_defect": null,
+  "interface": "local",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs"
+  ]
+ },
+ {
+  "command": "compute policy check",
+  "about": "Decide admission for a workload without executing it. Exits 0 when admitted and 2 when denied",
+  "help_defect": null,
+  "interface": "local",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs"
+  ]
+ },
+ {
+  "command": "compute policy explain",
+  "about": "Explain every policy dimension of an admission decision",
+  "help_defect": null,
+  "interface": "local",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs"
+  ]
+ },
+ {
+  "command": "compute explain",
+  "about": "Show the full decision chain for a workload: requirements, capabilities, policy, admission, and placement. Never executes",
+  "help_defect": null,
+  "interface": "local / pool",
+  "state": "none",
+  "authority": "none",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute start",
+  "about": "Run the persistent Compute daemon (environments and services)",
+  "help_defect": null,
+  "interface": "starts the daemon",
+  "state": "process",
+  "authority": "n/a",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs",
+   "crates/compute-cli/tests/daemon.rs",
+   "crates/compute-cli/tests/product.rs",
+   "crates/compute-cli/tests/recovery.rs"
+  ]
+ },
+ {
+  "command": "compute stop",
+  "about": "Stop the Compute daemon. Desired state is kept",
+  "help_defect": null,
+  "interface": "daemon API /shutdown, or an application",
+  "state": "stops the daemon",
+  "authority": "admin scope",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs",
+   "crates/compute-cli/tests/daemon.rs",
+   "crates/compute-cli/tests/product.rs",
+   "crates/compute-cli/tests/recovery.rs"
+  ]
+ },
+ {
+  "command": "compute status",
+  "about": "Show the Compute daemon's status",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "none",
+  "authority": "read",
+  "ui": "status chip in the header",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "crates/compute-cli/tests/computers.rs",
+   "crates/compute-cli/tests/daemon.rs",
+   "crates/compute-cli/tests/isolation.rs"
+  ]
+ },
+ {
+  "command": "compute logs",
+  "about": "Read an application's live stdout and stderr",
+  "help_defect": null,
+  "interface": "daemon API /applications",
+  "state": "none",
+  "authority": "read",
+  "ui": "application logs tab",
+  "tests": [
+   "crates/compute-cli/tests/product.rs"
+  ]
+ },
+ {
+  "command": "compute history",
+  "about": "List an application's durable execution history",
+  "help_defect": null,
+  "interface": "daemon API /applications",
+  "state": "none",
+  "authority": "read",
+  "ui": "application versions tab",
+  "tests": [
+   "crates/compute-cli/tests/product.rs"
+  ]
+ },
+ {
+  "command": "compute rollback",
+  "about": "Activate a previous immutable application deployment as a new version",
+  "help_defect": null,
+  "interface": "daemon API /applications",
+  "state": "durable",
+  "authority": "deploy",
+  "ui": "application Rollback",
+  "tests": [
+   "crates/compute-cli/tests/cli.rs",
+   "crates/compute-cli/tests/product.rs"
+  ]
+ },
+ {
+  "command": "compute environment list",
+  "about": "List environments",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/daemon.rs"
+  ]
+ },
+ {
+  "command": "compute environment create",
+  "about": "Create an environment",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs",
+   "crates/compute-cli/tests/daemon.rs",
+   "crates/compute-cli/tests/recovery.rs",
+   "crates/compute-cli/tests/upgrade.rs"
+  ]
+ },
+ {
+  "command": "compute environment apply",
+  "about": "Create or update an environment and its projects from a manifest",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment inspect",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/daemon.rs"
+  ]
+ },
+ {
+  "command": "compute environment status",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment start",
+  "about": "Start an environment, or `PROJECT/ENVIRONMENT`",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment stop",
+  "about": "Stop an environment, or `PROJECT/ENVIRONMENT`",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment restart",
+  "about": "Restart an environment, or `PROJECT/ENVIRONMENT`",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment destroy",
+  "about": "Stop and delete an environment and all of its state. An environment on a computer has its computer destroyed; its record stays as evidence",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute environment computer",
+  "about": "Show an environment's computer: desired against observed contents",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute environment exec",
+  "about": "Run a command in the environment's computer as a durable job",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute environment connect",
+  "about": "Get connection details for the environment's computer",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment logs",
+  "about": "Every job the computer ran, or one process's log",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment reconcile",
+  "about": "Check every process now, and retry what failed",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment replace",
+  "about": "Replace the computer with one that meets new requirements. The only change that provisions a new machine",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment repo add",
+  "about": "Add a repository, checked out at a revision",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs",
+   "crates/compute-cli/tests/work_mode_ui.rs"
+  ]
+ },
+ {
+  "command": "compute environment repo update",
+  "about": "Move a repository to another revision (or URL)",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute environment repo pull",
+  "about": "Fetch a repository's revision again: a branch that moved",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment repo remove",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment package install",
+  "about": "Install a package by running a command (again whenever it changes)",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment package remove",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment process add",
+  "about": "Add (or change) a process and start it",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute environment process start",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment process stop",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute environment process restart",
+  "about": "Restart it in place",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment process remove",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment service add",
+  "about": "Add (or change) it and start it",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs",
+   "crates/compute-cli/tests/work_mode_ui.rs"
+  ]
+ },
+ {
+  "command": "compute environment agent add",
+  "about": "Add (or change) it and start it",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment contents show",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment contents apply",
+  "about": "Replace the contents with a JSON document. With `--expected-generation`, only if nobody changed them since",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment project add",
+  "about": "Add (or change) a project in one of the environment's repositories",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs",
+   "crates/compute-cli/tests/work_mode_ui.rs"
+  ]
+ },
+ {
+  "command": "compute environment project remove",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment build",
+  "about": "Build a project inside the environment's computer",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute environment test",
+  "about": "Test a project inside the environment's computer",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute environment run",
+  "about": "Run one of a project's named commands inside the environment's computer",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute environment release",
+  "about": "Release a revision of a project: the computer checks it out, builds it, and restarts what runs from it, in place. No redeployment",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment config",
+  "about": "Show or change the configuration every process, build, and command sees. What depends on it restarts in place",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment propose",
+  "about": "Inspect a project's source in the computer and propose how to run it: runtime, dependencies, build, tests, start command, ports, services, configuration. Nothing changes",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": []
+ },
+ {
+  "command": "compute environment lifetime",
+  "about": "Change how long the environment lives, in place: kept until destroyed, or temporary",
+  "help_defect": null,
+  "interface": "daemon API /environments",
+  "state": "durable",
+  "authority": "daemon scopes; owner for computer environments",
+  "ui": "Manage and Work",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs"
+  ]
+ },
+ {
+  "command": "compute project list",
+  "about": "List projects: every project across environments, or the projects in one environment",
+  "help_defect": null,
+  "interface": "daemon API (bundle projects on node environments)",
+  "state": "durable",
+  "authority": "daemon scopes (no owner)",
+  "ui": "Manage: project pages (bundle)",
+  "tests": []
+ },
+ {
+  "command": "compute project add",
+  "about": "Register a revision from compute.project.toml and deploy it to an environment",
+  "help_defect": null,
+  "interface": "daemon API (bundle projects on node environments)",
+  "state": "durable",
+  "authority": "daemon scopes (no owner)",
+  "ui": "Manage: project pages (bundle)",
+  "tests": [
+   "crates/compute-cli/tests/daemon.rs"
+  ]
+ },
+ {
+  "command": "compute project push",
+  "about": "Register an immutable revision without deploying it",
+  "help_defect": null,
+  "interface": "daemon API (bundle projects on node environments)",
+  "state": "durable",
+  "authority": "daemon scopes (no owner)",
+  "ui": "Manage: project pages (bundle)",
+  "tests": []
+ },
+ {
+  "command": "compute project revisions",
+  "about": "A project's registered revisions, newest first",
+  "help_defect": null,
+  "interface": "daemon API (bundle projects on node environments)",
+  "state": "durable",
+  "authority": "daemon scopes (no owner)",
+  "ui": "Manage: project pages (bundle)",
+  "tests": []
+ },
+ {
+  "command": "compute project remove",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API (bundle projects on node environments)",
+  "state": "durable",
+  "authority": "daemon scopes (no owner)",
+  "ui": "Manage: project pages (bundle)",
+  "tests": []
+ },
+ {
+  "command": "compute project inspect",
+  "about": "Inspect a project in one environment, or across all of them",
+  "help_defect": null,
+  "interface": "daemon API (bundle projects on node environments)",
+  "state": "durable",
+  "authority": "daemon scopes (no owner)",
+  "ui": "Manage: project pages (bundle)",
+  "tests": []
+ },
+ {
+  "command": "compute project status",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API (bundle projects on node environments)",
+  "state": "durable",
+  "authority": "daemon scopes (no owner)",
+  "ui": "Manage: project pages (bundle)",
+  "tests": [
+   "crates/compute-cli/tests/recovery.rs",
+   "crates/compute-cli/tests/upgrade.rs"
+  ]
+ },
+ {
+  "command": "compute project start",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API (bundle projects on node environments)",
+  "state": "durable",
+  "authority": "daemon scopes (no owner)",
+  "ui": "Manage: project pages (bundle)",
+  "tests": []
+ },
+ {
+  "command": "compute project stop",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API (bundle projects on node environments)",
+  "state": "durable",
+  "authority": "daemon scopes (no owner)",
+  "ui": "Manage: project pages (bundle)",
+  "tests": []
+ },
+ {
+  "command": "compute project restart",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API (bundle projects on node environments)",
+  "state": "durable",
+  "authority": "daemon scopes (no owner)",
+  "ui": "Manage: project pages (bundle)",
+  "tests": []
+ },
+ {
+  "command": "compute project executions",
+  "about": "Recent executions of a project in an environment",
+  "help_defect": null,
+  "interface": "daemon API (bundle projects on node environments)",
+  "state": "durable",
+  "authority": "daemon scopes (no owner)",
+  "ui": "Manage: project pages (bundle)",
+  "tests": [
+   "crates/compute-cli/tests/recovery.rs"
+  ]
+ },
+ {
+  "command": "compute project receipts",
+  "about": "Receipt references of a project in an environment",
+  "help_defect": null,
+  "interface": "daemon API (bundle projects on node environments)",
+  "state": "durable",
+  "authority": "daemon scopes (no owner)",
+  "ui": "Manage: project pages (bundle)",
+  "tests": []
+ },
+ {
+  "command": "compute workload inspect",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API (bundle workloads on the daemon node)",
+  "state": "durable / executes on the node",
+  "authority": "daemon scopes (no owner)",
+  "ui": "project Workloads tab",
+  "tests": []
+ },
+ {
+  "command": "compute workload start",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API (bundle workloads on the daemon node)",
+  "state": "durable / executes on the node",
+  "authority": "daemon scopes (no owner)",
+  "ui": "project Workloads tab",
+  "tests": []
+ },
+ {
+  "command": "compute workload stop",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API (bundle workloads on the daemon node)",
+  "state": "durable / executes on the node",
+  "authority": "daemon scopes (no owner)",
+  "ui": "project Workloads tab",
+  "tests": []
+ },
+ {
+  "command": "compute workload restart",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API (bundle workloads on the daemon node)",
+  "state": "durable / executes on the node",
+  "authority": "daemon scopes (no owner)",
+  "ui": "project Workloads tab",
+  "tests": []
+ },
+ {
+  "command": "compute workload run",
+  "about": "Run a task to completion",
+  "help_defect": null,
+  "interface": "daemon API (bundle workloads on the daemon node)",
+  "state": "durable / executes on the node",
+  "authority": "daemon scopes (no owner)",
+  "ui": "project Workloads tab",
+  "tests": [
+   "crates/compute-cli/tests/daemon.rs"
+  ]
+ },
+ {
+  "command": "compute workload logs",
+  "about": "Show the most recent output of a workload",
+  "help_defect": null,
+  "interface": "daemon API (bundle workloads on the daemon node)",
+  "state": "durable / executes on the node",
+  "authority": "daemon scopes (no owner)",
+  "ui": "project Workloads tab",
+  "tests": []
+ },
+ {
+  "command": "compute execution",
+  "about": "Inspect one execution recorded by the daemon",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "none",
+  "authority": "read",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/daemon.rs",
+   "crates/compute-cli/tests/remote_pool.rs",
+   "crates/compute-provider/tests/remote.rs"
+  ]
+ },
+ {
+  "command": "compute deploy",
+  "about": "Release a project revision to an environment, with zero downtime",
+  "help_defect": null,
+  "interface": "daemon API: application, bundle release, or computer release/version, chosen by argument shape",
+  "state": "durable",
+  "authority": "deploy scope",
+  "ui": "Deploy (software pages; bundle deploy wizard)",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs",
+   "crates/compute-cli/tests/product.rs",
+   "crates/compute-cli/tests/recovery.rs",
+   "crates/compute-cli/tests/upgrade.rs"
+  ]
+ },
+ {
+  "command": "compute promote",
+  "about": "Deploy the exact revision current in one environment to another",
+  "help_defect": null,
+  "interface": "daemon API: bundle promotion, or computer version promotion",
+  "state": "durable",
+  "authority": "deploy scope",
+  "ui": "Promote",
+  "tests": [
+   "crates/compute-cli/tests/recovery.rs"
+  ]
+ },
+ {
+  "command": "compute deployment list",
+  "about": "Deployments, newest first",
+  "help_defect": null,
+  "interface": "daemon API (bundle releases)",
+  "state": "durable",
+  "authority": "deploy/read",
+  "ui": "deployment page (bundle)",
+  "tests": [
+   "crates/compute-cli/tests/recovery.rs"
+  ]
+ },
+ {
+  "command": "compute deployment inspect",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API (bundle releases)",
+  "state": "durable",
+  "authority": "deploy/read",
+  "ui": "deployment page (bundle)",
+  "tests": [
+   "crates/compute-cli/tests/recovery.rs"
+  ]
+ },
+ {
+  "command": "compute deployment status",
+  "about": "Where a release is in its lifecycle",
+  "help_defect": null,
+  "interface": "daemon API (bundle releases)",
+  "state": "durable",
+  "authority": "deploy/read",
+  "ui": "deployment page (bundle)",
+  "tests": []
+ },
+ {
+  "command": "compute deployment rollback",
+  "about": "Roll a release back: before traffic moved it is abandoned; after, traffic returns to the revision it replaced",
+  "help_defect": null,
+  "interface": "daemon API (bundle releases)",
+  "state": "durable",
+  "authority": "deploy/read",
+  "ui": "deployment page (bundle)",
+  "tests": []
+ },
+ {
+  "command": "compute deployment receipt",
+  "about": "The deployment receipt (always JSON)",
+  "help_defect": null,
+  "interface": "daemon API (bundle releases)",
+  "state": "durable",
+  "authority": "deploy/read",
+  "ui": "deployment page (bundle)",
+  "tests": [
+   "crates/compute-cli/tests/recovery.rs"
+  ]
+ },
+ {
+  "command": "compute domain add",
+  "about": "Route a domain to a project's service in one environment",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable",
+  "authority": "operate",
+  "ui": "Domains pages",
+  "tests": []
+ },
+ {
+  "command": "compute domain list",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API",
+  "state": "durable",
+  "authority": "operate",
+  "ui": "Domains pages",
+  "tests": []
+ },
+ {
+  "command": "compute domain inspect",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API",
+  "state": "durable",
+  "authority": "operate",
+  "ui": "Domains pages",
+  "tests": []
+ },
+ {
+  "command": "compute domain status",
+  "about": "DNS, TLS, and routing state of each domain",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable",
+  "authority": "operate",
+  "ui": "Domains pages",
+  "tests": []
+ },
+ {
+  "command": "compute domain remove",
+  "about": "Stop routing a domain and remove its DNS records and certificate",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable",
+  "authority": "operate",
+  "ui": "Domains pages",
+  "tests": []
+ },
+ {
+  "command": "compute dns status",
+  "about": "Every DNS record Compute manages: desired, actual, and status",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable",
+  "authority": "operate",
+  "ui": "Reconcile DNS",
+  "tests": []
+ },
+ {
+  "command": "compute dns reconcile",
+  "about": "Read every record back from its provider now and repair drift",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable",
+  "authority": "operate",
+  "ui": "Reconcile DNS",
+  "tests": []
+ },
+ {
+  "command": "compute certificate status",
+  "about": "Every certificate: status, expiry, renewal. Keys are never shown",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable",
+  "authority": "operate",
+  "ui": "Renew certificate",
+  "tests": []
+ },
+ {
+  "command": "compute certificate renew",
+  "about": "Renew a domain's certificate now",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable",
+  "authority": "operate",
+  "ui": "Renew certificate",
+  "tests": []
+ },
+ {
+  "command": "compute network status",
+  "about": "Endpoints, ingress, and DNS providers on this node",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "none",
+  "authority": "read",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute events",
+  "about": "Show lifecycle events, or follow them",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "none",
+  "authority": "read",
+  "ui": "Events page",
+  "tests": [
+   "crates/compute-cli/tests/recovery.rs",
+   "crates/compute-cli/tests/upgrade.rs"
+  ]
+ },
+ {
+  "command": "compute service list",
+  "about": "Shared services registered with this control plane",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable",
+  "authority": "operate",
+  "ui": "Services page",
+  "tests": []
+ },
+ {
+  "command": "compute service register",
+  "about": "Register a shared service and the capabilities it provides",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable",
+  "authority": "operate",
+  "ui": "Services page",
+  "tests": []
+ },
+ {
+  "command": "compute service remove",
+  "about": "",
+  "help_defect": "no description",
+  "interface": "daemon API",
+  "state": "durable",
+  "authority": "operate",
+  "ui": "Services page",
+  "tests": []
+ },
+ {
+  "command": "compute service providers",
+  "about": "The daemon's provider pool as recorded in control state",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable",
+  "authority": "operate",
+  "ui": "Services page",
+  "tests": []
+ },
+ {
+  "command": "compute control-plane provision",
+  "about": "Install the Compute control model in Managed FeltDB. Idempotent: an existing tenant and Compute application are reused",
+  "help_defect": null,
+  "interface": "FeltDB directly",
+  "state": "FeltDB model",
+  "authority": "FeltDB API key",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/recovery.rs"
+  ]
+ },
+ {
+  "command": "compute control-plane upgrade",
+  "about": "Upgrade the configured Compute application to this build's model, before a controller that needs it runs: inspect the active model, refuse a downgrade, take and verify a FeltDB backup, apply the model, verify it, and smoke-test it",
+  "help_defect": null,
+  "interface": "FeltDB directly",
+  "state": "FeltDB model",
+  "authority": "FeltDB API key",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute control-plane inspect",
+  "about": "Compare the active Compute model with this build's. Read-only",
+  "help_defect": null,
+  "interface": "FeltDB directly",
+  "state": "FeltDB model",
+  "authority": "FeltDB API key",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute serve",
+  "about": "Serve compute.remote@1 with durable filesystem-backed jobs",
+  "help_defect": null,
+  "interface": "runs a target (compute.remote@1)",
+  "state": "job and session stores on disk",
+  "authority": "AllowAllAuthorizer: no authentication",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/computers.rs",
+   "crates/compute-cli/tests/product.rs",
+   "crates/compute-cli/tests/remote_pool.rs",
+   "crates/compute-cli/tests/runtime_store.rs"
+  ]
+ },
+ {
+  "command": "compute auth create",
+  "about": "Issue a credential. Its token is printed once and never again",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable credentials",
+  "authority": "admin",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute auth list",
+  "about": "List credentials: never their tokens",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable credentials",
+  "authority": "admin",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute auth revoke",
+  "about": "Revoke a credential now",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable credentials",
+  "authority": "admin",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute auth rotate",
+  "about": "Replace a credential with a new token for the same operator and scopes. The old one stops working now, or after --grace",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable credentials",
+  "authority": "admin",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute auth whoami",
+  "about": "Who the configured credential is, and what it may do",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable credentials",
+  "authority": "admin",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute auth audit",
+  "about": "The audit trail of remote operations, newest first",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "durable credentials",
+  "authority": "admin",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute node info",
+  "about": "Which controller runs: version, commit, build, security, runtimes",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "node binary",
+  "authority": "admin/operate",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/recovery.rs",
+   "crates/compute-cli/tests/upgrade.rs"
+  ]
+ },
+ {
+  "command": "compute node health",
+  "about": "Whether the controller answers, and whether its control plane is degraded. Needs no credential",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "node binary",
+  "authority": "admin/operate",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute node reconcile",
+  "about": "Reconcile now, fully, and show what the cycle examined and changed",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "node binary",
+  "authority": "admin/operate",
+  "ui": "none",
+  "tests": []
+ },
+ {
+  "command": "compute node upgrade",
+  "about": "Replace the controller with another Compute build, without restarting or redeploying a workload. The previous controller is restored if the new one does not become ready",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "node binary",
+  "authority": "admin/operate",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/upgrade.rs"
+  ]
+ },
+ {
+  "command": "compute node rollback",
+  "about": "Return to the build that ran before the last upgrade",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "node binary",
+  "authority": "admin/operate",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/upgrade.rs"
+  ]
+ },
+ {
+  "command": "compute node upgrade-status",
+  "about": "The last upgrade or rollback on this node",
+  "help_defect": null,
+  "interface": "daemon API",
+  "state": "node binary",
+  "authority": "admin/operate",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/upgrade.rs"
+  ]
+ },
+ {
+  "command": "compute supervisor",
+  "about": "The node's supervisor: service processes and endpoints that outlive the controller. `compute start` runs it",
+  "help_defect": null,
+  "interface": "internal: started by compute start",
+  "state": "n/a",
+  "authority": "n/a",
+  "ui": "none",
+  "tests": []
+ }
+]
