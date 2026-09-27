@@ -115,6 +115,21 @@
           "required": true
         },
         {
+          "name": "owner",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "computer",
+          "type": "json",
+          "required": false
+        },
+        {
+          "name": "contents",
+          "type": "json",
+          "required": false
+        },
+        {
           "name": "record_id",
           "type": "text",
           "required": false
@@ -1401,6 +1416,142 @@
           "required": false
         }
       ]
+    },
+    {
+      "name": "Computer",
+      "fields": [
+        {
+          "name": "environment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "owner",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "lifecycle",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "persistent",
+            "ephemeral"
+          ]
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "pending",
+            "provisioning",
+            "running",
+            "stopping",
+            "stopped",
+            "resuming",
+            "failed",
+            "destroying",
+            "destroyed",
+            "expired"
+          ]
+        },
+        {
+          "name": "generation",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "spec_generation",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "target",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "placement_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "session_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "reference",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "provider_kind",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "capabilities",
+          "type": "json",
+          "required": false
+        },
+        {
+          "name": "connection",
+          "type": "json",
+          "required": false
+        },
+        {
+          "name": "retired",
+          "type": "json",
+          "required": false
+        },
+        {
+          "name": "observed",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "failure",
+          "type": "json",
+          "required": false
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "updated_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "ready_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "ended_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "expires_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
+        }
+      ]
     }
   ],
   "indexes": [
@@ -1867,6 +2018,22 @@
         "record_id"
       ],
       "unique": false
+    },
+    {
+      "name": "Computer.environment_id",
+      "collection": "Computer",
+      "fields": [
+        "environment_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Computer.record_id",
+      "collection": "Computer",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
     }
   ],
   "references": [],
@@ -2023,6 +2190,13 @@
     {
       "name": "Audit",
       "resource": "Audit",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Computer",
+      "resource": "Computer",
       "read": "authenticated",
       "write": "authenticated",
       "capabilities": []

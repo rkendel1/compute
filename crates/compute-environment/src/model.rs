@@ -140,6 +140,49 @@ pub struct EnvironmentDefinition {
     pub provider: Option<String>,
 }
 
+/// The computer an environment asks for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerRequest {
+    #[serde(default)]
+    pub lifecycle: compute_core::ComputerLifecycle,
+    #[serde(default)]
+    pub requirements: compute_core::ComputerRequirements,
+    /// Constrain placement to one target. Placement chooses when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// An ephemeral computer's lifetime. Defaults to an hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u64>,
+}
+
+/// Create an environment on a computer: an environment, the computer it
+/// asks for, and what belongs in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerEnvironmentDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub desired_state: DesiredState,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<Policy>,
+    pub computer: ComputerRequest,
+    #[serde(default)]
+    pub contents: compute_core::EnvironmentContents,
+}
+
+/// Replace an environment's desired contents, optionally only if they are
+/// still at the generation the caller last saw (what the UI's GO sends).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentsUpdate {
+    pub contents: compute_core::EnvironmentContents,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_generation: Option<u64>,
+}
+
 /// Deploy a registered revision of a project to an environment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]

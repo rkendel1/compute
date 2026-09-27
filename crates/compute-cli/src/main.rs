@@ -15,6 +15,7 @@ use compute_runtime::Compute;
 mod admission;
 mod application;
 mod certification;
+mod computer_cmd;
 mod control_state;
 mod direct;
 mod distribution;
@@ -76,6 +77,8 @@ enum Commands {
     Placement(pool::PlacementCommand),
     /// Place a workload on a compatible provider and execute or submit it.
     Pool(pool::PoolCommand),
+    /// The computers and infrastructure environments are placed on.
+    Target(computer_cmd::TargetCommand),
     /// Temporary, authorized, durable computers: create one, run commands
     /// in it, and destroy it, on whichever provider placement selects.
     Session(Box<session_cmd::SessionCommand>),
@@ -147,6 +150,21 @@ struct ServeCommand {
     /// Where session records and session workspaces are kept.
     #[arg(long, default_value = ".compute/sessions")]
     session_store: PathBuf,
+    /// A machine feature this server offers as a placement target
+    /// (repeatable): containers, kvm, firecracker, gpu, virtualization.
+    /// Detected features are always included.
+    #[arg(long = "target-feature")]
+    target_features: Vec<String>,
+    /// The environments sessions run in: `workspace` (a directory per
+    /// session) or `container` (a container per session).
+    #[arg(long, default_value = "workspace")]
+    session_provider: String,
+    /// The container runtime for `--session-provider container`.
+    #[arg(long, default_value = "docker")]
+    container_runtime: String,
+    /// The image containers start from.
+    #[arg(long, default_value = "debian:stable-slim")]
+    container_image: String,
     #[arg(long, default_value = "7d", value_parser = parse_retention)]
     job_retention: Duration,
     #[arg(long, default_value_t = 4)]
@@ -1456,6 +1474,30 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
             }
             let mut config = ServerConfig::local_with_policies(endpoint, policy, execution_policy);
             config.job_store = command.job_store;
+            let mut features = compute_provider::detect_target_features();
+            features.extend(command.target_features.iter().cloned());
+            features.sort();
+            features.dedup();
+            compute_core::validate_target_features(&features)?;
+            config.session_provider = match command.session_provider.as_str() {
+                "workspace" => None,
+                "container" => {
+                    if !features.iter().any(|feature| feature == "containers") {
+                        features.push("containers".into());
+                    }
+                    Some(Arc::new(compute_provider::ContainerSessionProvider::new(
+                        command.container_runtime.clone(),
+                        command.container_image.clone(),
+                        command.session_store.join("containers"),
+                    )))
+                }
+                other => {
+                    return Err(compute_core::ComputeError::InvalidWorkload(format!(
+                        "unknown session provider `{other}`: expected workspace or container"
+                    )));
+                }
+            };
+            config.target_features = features;
             config.session_store = command.session_store;
             config.job_retention = command.job_retention;
             config.max_concurrent_jobs = command.max_concurrent_jobs;
@@ -1470,6 +1512,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Placement(command) => pool::placement(command).await?,
         Commands::Pool(command) => pool::pool(command).await?,
         Commands::Session(command) => session_cmd::session(*command).await?,
+        Commands::Target(command) => computer_cmd::target(command).await?,
         Commands::Policy(command) => policy_cmd::policy(command).await?,
         Commands::Explain(command) => policy_cmd::explain(command).await?,
         Commands::Start(command) => environment_cmd::start(command).await?,

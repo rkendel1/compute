@@ -162,6 +162,8 @@ impl Daemon {
         lap(phases, "refresh");
         self.converge().await;
         lap(phases, "converge");
+        self.drive_computers().await;
+        lap(phases, "computers");
         self.sync_endpoints().await;
         lap(phases, "endpoints");
         // Read our own observations back, so every view reflects them.

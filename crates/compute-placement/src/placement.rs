@@ -1134,6 +1134,12 @@ fn explain(
             requirements.session_capabilities.join(", ")
         ));
     }
+    if !requirements.target_features.is_empty() {
+        requires.push(format!(
+            "target features: {}",
+            requirements.target_features.join(", ")
+        ));
+    }
 
     let considered = providers
         .iter()

@@ -51,6 +51,7 @@ impl Daemon {
                 workload_count: view.workload_count,
                 service_count: view.service_count,
                 provider: view.provider.unwrap_or_else(|| "local".into()),
+                computer: view.computer.map(|computer| computer.status),
             });
         }
         Ok(summaries)
@@ -107,6 +108,7 @@ impl Daemon {
                 &self.config.state_dir.join("logs").join(&record.value.name),
             ),
             projects: views,
+            computer: self.computer_view_of(&record).await,
         })
     }
 

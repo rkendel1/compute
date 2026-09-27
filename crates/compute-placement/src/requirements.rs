@@ -139,6 +139,9 @@ pub struct PlacementRequirements {
     /// Session capabilities the environment must offer, for a session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub session_capabilities: Vec<String>,
+    /// Machine features the target must have (`kvm`, `firecracker`, ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_features: Vec<String>,
 }
 
 /// Caller-supplied bindings that are not part of the workload itself.
@@ -174,6 +177,60 @@ impl PlacementRequirements {
         capabilities.dedup();
         requirements.session_capabilities = capabilities;
         Ok(requirements)
+    }
+
+    /// Requirements for an environment's computer: what the computer must
+    /// be, never which provider supplies it. A persistent computer also
+    /// needs targets whose sessions can be kept (`claim`).
+    pub fn for_computer(
+        requirements: &compute_core::ComputerRequirements,
+        lifecycle: compute_core::ComputerLifecycle,
+    ) -> Result<(Self, compute_provider::SessionCreateRequest), PlacementError> {
+        requirements
+            .validate()
+            .map_err(|error| PlacementError::InvalidRequirements(error.to_string()))?;
+        let create = compute_provider::SessionCreateRequest::new(
+            &compute_provider::SessionEnvironmentSpec {
+                resources: compute_core::SessionResources {
+                    cpu_count: requirements.cpu_count,
+                    memory_bytes: requirements.memory_bytes,
+                    disk_bytes: requirements.disk_bytes,
+                },
+                network: requirements.network.clone(),
+                isolation: requirements.isolation,
+                architecture: requirements.architecture.clone(),
+            },
+            compute_core::SessionSpec {
+                required_capabilities: requirements.capabilities.clone(),
+                persistent: lifecycle == compute_core::ComputerLifecycle::Persistent,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| PlacementError::InvalidRequirements(error.message))?;
+        let bundle = create
+            .environment()
+            .map_err(|error| PlacementError::InvalidRequirements(error.message))?;
+        let request_bytes = serde_json::to_vec(&create)
+            .map_err(|error| PlacementError::InvalidRequirements(error.to_string()))?
+            .len() as u64;
+        let mut capabilities = requirements.capabilities.clone();
+        if lifecycle == compute_core::ComputerLifecycle::Persistent {
+            capabilities.push("claim".into());
+        }
+        let mut placed = Self::for_session(
+            &bundle,
+            request_bytes,
+            &RequirementOptions {
+                isolation: Some(requirements.isolation),
+                ..RequirementOptions::default()
+            },
+            &capabilities,
+        )?;
+        let mut features = requirements.features.clone();
+        features.sort();
+        features.dedup();
+        placed.target_features = features;
+        Ok((placed, create))
     }
 }
 
@@ -316,6 +373,7 @@ impl PlacementRequirements {
                 submission,
             },
             session_capabilities: vec![],
+            target_features: vec![],
         })
     }
 }

@@ -45,6 +45,9 @@ fn environment(name: &str) -> EnvironmentRecord {
         policy: Some(json!({ "version": 1, "minimum_isolation": "process" })),
         provider: Some("local".into()),
         created_at: Utc::now(),
+        owner: None,
+        computer: None,
+        contents: None,
     }
 }
 
@@ -519,6 +522,109 @@ async fn round_trip<T: Document + PartialEq + std::fmt::Debug>(
 
 async fn round_trip_every_record(state: &ControlState, run: &str) {
     let now = Utc::now();
+    // An environment on a computer, and the computer's record.
+    let contents = compute_core::EnvironmentContents {
+        repositories: vec![compute_core::RepositorySpec {
+            name: "app".into(),
+            url: "https://example.invalid/app.git".into(),
+            revision: "main".into(),
+        }],
+        packages: vec![],
+        processes: vec![compute_core::ProcessSpec {
+            name: "api".into(),
+            kind: compute_core::ProcessKind::Application,
+            command: vec!["./serve".into()],
+            repository: Some("app".into()),
+            env: BTreeMap::from([("PORT".into(), "8080".into())]),
+            desired: compute_core::ProcessDesired::Running,
+        }],
+        generation: 3,
+    };
+    round_trip(
+        state,
+        &format!("env_computer{run}"),
+        EnvironmentRecord {
+            owner: Some("operator-1".into()),
+            computer: Some(compute_core::ComputerSpec {
+                lifecycle: compute_core::ComputerLifecycle::Persistent,
+                requirements: compute_core::ComputerRequirements {
+                    cpu_count: Some(4),
+                    memory_bytes: Some(8 << 30),
+                    features: vec!["kvm".into()],
+                    ..Default::default()
+                },
+                target: None,
+                ttl_seconds: None,
+                expires_at: None,
+                generation: 1,
+                destroy_requested_at: None,
+            }),
+            contents: Some(contents),
+            ..environment(&format!("computer{run}"))
+        },
+    )
+    .await;
+    let evidence = compute_core::OperationEvidence {
+        job_id: "job_1".into(),
+        execution_id: "exec_1".into(),
+        outcome: "succeeded".into(),
+        at: now,
+        error: None,
+    };
+    round_trip(
+        state,
+        &ids::computer(&format!("env_computer{run}")),
+        ComputerRecord {
+            environment_id: format!("env_computer{run}"),
+            environment: format!("computer{run}"),
+            owner: "operator-1".into(),
+            lifecycle: compute_core::ComputerLifecycle::Persistent,
+            status: compute_core::ComputerStatus::Running,
+            generation: 7,
+            spec_generation: 1,
+            target: Some("node".into()),
+            placement_id: Some("sha256:p".into()),
+            session_id: Some("ses_1".into()),
+            reference: Some("cmp_1:1".into()),
+            provider_kind: Some("workspace".into()),
+            capabilities: Some(compute_core::SessionCapabilities {
+                exec: true,
+                ..Default::default()
+            }),
+            connection: None,
+            retired: vec![],
+            observed: compute_core::ObservedContents {
+                repositories: BTreeMap::from([(
+                    "app".into(),
+                    compute_core::ObservedRepository {
+                        revision: "main".into(),
+                        commit: Some("abc123".into()),
+                        fingerprint: "sha256:r".into(),
+                        evidence: evidence.clone(),
+                    },
+                )]),
+                packages: BTreeMap::new(),
+                processes: BTreeMap::from([(
+                    "api".into(),
+                    compute_core::ObservedProcess {
+                        state: compute_core::ProcessState::Running,
+                        fingerprint: "sha256:p".into(),
+                        pid: Some(42),
+                        evidence,
+                    },
+                )]),
+                converged_generation: 3,
+                observed_at: Some(now),
+            },
+            failure: None,
+            created_at: now,
+            updated_at: now,
+            ready_at: Some(now),
+            ended_at: None,
+            expires_at: None,
+        },
+    )
+    .await;
     let workload = RevisionWorkload {
         name: "api".into(),
         kind: WorkloadKind::Service,

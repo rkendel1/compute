@@ -27,15 +27,17 @@ use tempfile::NamedTempFile;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+mod containers;
 mod jobs;
 mod runtime;
 mod sessions;
+pub use containers::{CONTAINER_WORKSPACE, ContainerSessionProvider};
 pub use runtime::RuntimeCatalog;
 pub use sessions::{
     DEFAULT_SESSION_SWEEP, DEFAULT_SESSION_TTL, EnvironmentState, ProviderConnection,
     ProvisionRequest, ProvisionedSession, SESSION_READINESS_SCRIPT, SessionCreateRequest,
     SessionEnvironment, SessionEnvironmentSpec, SessionManager, SessionProvider,
-    WorkspaceSessionProvider, command_in_directory, environment_bundle, unsupported,
+    WorkspaceSessionProvider, command_in_directory, environment_bundle, shell_request, unsupported,
 };
 #[doc(hidden)]
 pub mod testing;
@@ -350,7 +352,38 @@ pub struct ProviderCapabilities {
     /// sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sessions: Option<compute_core::SessionCapabilities>,
+    /// Features of the machine behind this provider, as a placement target
+    /// (`containers`, `kvm`, `firecracker`, `gpu`, `virtualization`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_features: Vec<String>,
     pub inventory: RuntimeInventory,
+}
+
+/// Features this machine offers as a placement target, detected from the
+/// host: `/dev/kvm` (kvm, virtualization), a `firecracker` binary with KVM,
+/// a container runtime (`docker` or `podman`), and an NVIDIA device (gpu).
+pub fn detect_target_features() -> Vec<String> {
+    let mut features = vec![];
+    let kvm = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/kvm")
+        .is_ok();
+    if kvm {
+        features.push("kvm".to_owned());
+        features.push("virtualization".to_owned());
+        if which::which("firecracker").is_ok() {
+            features.push("firecracker".to_owned());
+        }
+    }
+    if which::which("docker").is_ok() || which::which("podman").is_ok() {
+        features.push("containers".to_owned());
+    }
+    if std::path::Path::new("/dev/nvidia0").exists() {
+        features.push("gpu".to_owned());
+    }
+    features.sort();
+    features
 }
 
 /// The submissions a provider accepts. Placement matches each submission
@@ -1341,6 +1374,7 @@ impl ComputeProvider for LocalProvider {
             policy: self.execution_policy(),
             execution: Some(self.execution),
             sessions: None,
+            target_features: vec![],
             inventory,
         })
     }
@@ -1944,6 +1978,8 @@ pub struct ServerConfig {
     pub session_provider: Option<Arc<dyn SessionProvider>>,
     /// How often session expiry and interrupted transitions are reconciled.
     pub session_sweep: std::time::Duration,
+    /// Features this endpoint advertises as a placement target.
+    pub target_features: Vec<String>,
 }
 
 impl ServerConfig {
@@ -1989,6 +2025,7 @@ impl ServerConfig {
             session_store: std::env::temp_dir().join(format!("compute-sessions-{store_id}")),
             session_provider: None,
             session_sweep: DEFAULT_SESSION_SWEEP,
+            target_features: vec![],
         }
     }
 }
@@ -2221,6 +2258,7 @@ impl RemoteService {
                                 .sessions
                                 .as_ref()
                                 .map(|sessions| sessions.capabilities());
+                            value.target_features = self.state.config.target_features.clone();
                             value.resources.available = ResourceVector {
                                 cpu_count: snapshot.available.cpu_millis / 1_000,
                                 memory_bytes: snapshot.available.memory_bytes,

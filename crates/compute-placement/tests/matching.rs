@@ -530,6 +530,7 @@ fn session_requirements(capabilities: &[&str]) -> compute_placement::PlacementRe
         },
         network: NetworkPolicy::Network,
         isolation: IsolationProfile::Process,
+        architecture: None,
     })
     .unwrap();
     compute_placement::PlacementRequirements::for_session(
@@ -619,4 +620,124 @@ fn a_provider_without_sessions_keeps_its_capability_version() {
     let encoded = serde_json::to_value(&plain).unwrap();
     assert!(encoded.get("sessions").is_none());
     assert!(encoded["artifact_limits"].get("sessions").is_none());
+}
+
+fn computer(features: &[&str], capabilities: &[&str]) -> compute_core::ComputerRequirements {
+    compute_core::ComputerRequirements {
+        cpu_count: Some(4),
+        memory_bytes: Some(8 << 30),
+        network: NetworkPolicy::Network,
+        features: features.iter().map(|name| name.to_string()).collect(),
+        capabilities: capabilities.iter().map(|name| name.to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+fn host(features: &[&str], sessions: compute_core::SessionCapabilities) -> ProviderDescriptor {
+    let mut target = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Shell]);
+    target.sessions = Some(sessions);
+    target.features = features.iter().map(|name| name.to_string()).collect();
+    target.descriptor("target")
+}
+
+#[test]
+fn a_computer_is_placed_by_what_it_needs_never_by_provider() {
+    let (requirements, create) = compute_placement::PlacementRequirements::for_computer(
+        &computer(&["kvm", "firecracker"], &[]),
+        compute_core::ComputerLifecycle::Persistent,
+    )
+    .unwrap();
+    assert!(create.spec.persistent);
+    assert_eq!(requirements.target_features, ["firecracker", "kvm"]);
+    // A persistent computer needs a target that can keep it.
+    assert!(
+        requirements
+            .session_capabilities
+            .contains(&"claim".to_string())
+    );
+    let full = compute_core::SessionCapabilities {
+        claim: true,
+        ..session_capabilities(true)
+    };
+
+    let firecracker = host(&["firecracker", "kvm", "virtualization"], full);
+    assert!(match_provider(&requirements, &firecracker).compatible);
+
+    let plain = host(&["containers"], full);
+    let matched = match_provider(&requirements, &plain);
+    assert_eq!(matched.codes(), [ReasonCode::TargetFeatureUnsupported]);
+    assert_eq!(
+        matched.reasons[0].required,
+        serde_json::json!(["firecracker", "kvm"])
+    );
+    assert_eq!(ReasonCode::TargetFeatureUnsupported.dimension(), "target");
+
+    let ephemeral_only = host(&["firecracker", "kvm"], session_capabilities(true));
+    assert_eq!(
+        codes(&requirements, &ephemeral_only),
+        [ReasonCode::SessionCapabilityUnsupported]
+    );
+    // An ephemeral computer does not need `claim`.
+    let (ephemeral, create) = compute_placement::PlacementRequirements::for_computer(
+        &computer(&["kvm"], &[]),
+        compute_core::ComputerLifecycle::Ephemeral,
+    )
+    .unwrap();
+    assert!(!create.spec.persistent);
+    assert!(match_provider(&ephemeral, &ephemeral_only).compatible);
+}
+
+#[test]
+fn a_computer_architecture_is_a_placement_requirement() {
+    let mut requirements = computer(&[], &[]);
+    requirements.architecture = Some("arm64".into());
+    let (placed, _) = compute_placement::PlacementRequirements::for_computer(
+        &requirements,
+        compute_core::ComputerLifecycle::Ephemeral,
+    )
+    .unwrap();
+    let x86 = host(&[], session_capabilities(true));
+    assert_eq!(
+        match_provider(&placed, &x86).codes(),
+        [ReasonCode::ArchitectureMismatch]
+    );
+    requirements.features = vec!["teleport".into()];
+    assert!(
+        compute_placement::PlacementRequirements::for_computer(
+            &requirements,
+            compute_core::ComputerLifecycle::Ephemeral
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_target_is_described_by_what_it_can_host() {
+    let record = compute_placement::DiscoveryRecord {
+        provider_id: "firecracker-host".into(),
+        status: compute_placement::DiscoveryStatus::Discovered,
+        descriptor: Some(host(
+            &["firecracker", "kvm"],
+            compute_core::SessionCapabilities {
+                claim: true,
+                ..session_capabilities(true)
+            },
+        )),
+        error: None,
+    };
+    let target = compute_placement::ComputeTarget::from_record(&record, ProviderKind::Remote);
+    assert!(target.hosts_computers);
+    assert_eq!(target.features, ["firecracker", "kvm"]);
+    assert!(target.capabilities.unwrap().claim);
+    assert_eq!(target.platform.unwrap().architecture, "x86_64");
+    let jobs_only = compute_placement::DiscoveryRecord {
+        descriptor: Some(
+            Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Shell]).descriptor("j"),
+        ),
+        ..record
+    };
+    assert!(
+        !compute_placement::ComputeTarget::from_record(&jobs_only, ProviderKind::Remote)
+            .hosts_computers
+    );
 }

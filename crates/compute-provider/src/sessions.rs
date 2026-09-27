@@ -64,6 +64,8 @@ pub struct SessionEnvironmentSpec {
     pub resources: SessionResources,
     pub network: NetworkPolicy,
     pub isolation: IsolationProfile,
+    /// Required architecture (`x86_64`, `arm64`), when it matters.
+    pub architecture: Option<String>,
 }
 
 impl SessionCreateRequest {
@@ -93,7 +95,7 @@ impl SessionCreateRequest {
 pub fn environment_bundle(
     environment: &SessionEnvironmentSpec,
 ) -> Result<WorkloadBundle, ProviderError> {
-    shell_bundle(
+    let mut bundle = shell_bundle(
         "session.sh",
         SESSION_READINESS_SCRIPT,
         vec![],
@@ -101,7 +103,12 @@ pub fn environment_bundle(
         session_limits(&environment.resources, None),
         environment.network.clone(),
         environment.isolation,
-    )
+    )?;
+    if let Some(architecture) = &environment.architecture {
+        bundle.workload.architecture = Some(architecture.clone());
+        bundle.validate().map_err(artifact_error)?;
+    }
+    Ok(bundle)
 }
 
 fn session_limits(resources: &SessionResources, timeout: Option<Duration>) -> ResourceLimits {
@@ -164,21 +171,45 @@ pub fn command_in_directory(
     command: &SessionCommand,
 ) -> Result<ProviderRequest, ProviderError> {
     const SCRIPT: &str = "cd \"$COMPUTE_SESSION_WORKSPACE\" || {\n  printf 'compute: the session workspace is unavailable\\n' >&2\n  exit 125\n}\nexec \"$@\"\n";
+    let directory = directory.display().to_string();
+    session_request(
+        environment,
+        command,
+        SCRIPT,
+        [
+            ("HOME".to_owned(), directory.clone()),
+            ("COMPUTE_SESSION_WORKSPACE".to_owned(), directory),
+        ],
+    )
+}
+
+/// A provider request that runs `command` on this node as it is. Providers
+/// whose environments are entered through a command on the node (a
+/// container runtime's `exec`, a VM agent) build their executions with it.
+pub fn shell_request(
+    environment: &SessionEnvironment,
+    command: &SessionCommand,
+) -> Result<ProviderRequest, ProviderError> {
+    session_request(environment, command, "exec \"$@\"\n", [])
+}
+
+fn session_request(
+    environment: &SessionEnvironment,
+    command: &SessionCommand,
+    script: &str,
+    extra: impl IntoIterator<Item = (String, String)>,
+) -> Result<ProviderRequest, ProviderError> {
     command.validate().map_err(|error| {
         ProviderError::new(ProviderErrorKind::ArtifactInvalid, error.to_string())
     })?;
     let mut env = BTreeMap::from([
         ("PATH".to_owned(), "/usr/local/bin:/usr/bin:/bin".to_owned()),
-        ("HOME".to_owned(), directory.display().to_string()),
-        (
-            "COMPUTE_SESSION_WORKSPACE".to_owned(),
-            directory.display().to_string(),
-        ),
         (
             "COMPUTE_SESSION_ID".to_owned(),
             environment.session_id.to_string(),
         ),
     ]);
+    env.extend(extra);
     for (key, value) in &command.env {
         if key.starts_with("COMPUTE_SESSION_") {
             return Err(ProviderError::new(
@@ -190,7 +221,7 @@ pub fn command_in_directory(
     }
     let bundle = shell_bundle(
         "session-exec.sh",
-        SCRIPT,
+        script,
         command.command.clone(),
         env,
         session_limits(&environment.resources, command.timeout),
@@ -602,6 +633,29 @@ impl SessionManager {
                 ),
             ));
         }
+        if spec.persistent {
+            if spec.ttl_seconds.is_some() {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::PolicyRejected,
+                    "a persistent session has no TTL",
+                ));
+            }
+            if !offered.claim {
+                return Err(unsupported(&self.provider.kind(), "persistent sessions"));
+            }
+        }
+        if let Some(reference) = &spec.reference {
+            if !compute_core::valid_session_reference(reference) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::PolicyRejected,
+                    "a session reference is 1-128 letters, digits, and .:_-",
+                ));
+            }
+            // The same reference: the same session, never a second one.
+            if let Some(existing) = self.find_reference(&owner, reference)? {
+                return Ok(existing);
+            }
+        }
         let ttl_seconds = match spec.ttl_seconds {
             Some(0) => {
                 return Err(ProviderError::new(
@@ -642,7 +696,11 @@ impl SessionManager {
             job_id: JobId::generate(),
             execution_id: compute_core::new_execution_id(),
             owner: owner.clone(),
-            ownership: SessionOwnership::Ephemeral,
+            ownership: if spec.persistent {
+                SessionOwnership::Claimed
+            } else {
+                SessionOwnership::Ephemeral
+            },
             resources: SessionResources {
                 cpu_count: resources.cpu_count,
                 memory_bytes: resources.memory_required_bytes.or(resources.memory_bytes),
@@ -651,6 +709,7 @@ impl SessionManager {
             network: bundle.workload.network.clone(),
             capabilities: offered,
             required_capabilities: spec.required_capabilities.clone(),
+            reference: spec.reference.clone(),
             connection: None,
             endpoints: vec![],
             requested_endpoints: spec.endpoints.clone(),
@@ -661,12 +720,12 @@ impl SessionManager {
                 .map(|placement| placement.placement_id.clone()),
             placement: request.execution.placement.clone(),
             admission: Some(admission.summary()),
-            ttl_seconds: Some(ttl_seconds),
+            ttl_seconds: (!spec.persistent).then_some(ttl_seconds),
             created_at: now,
             updated_at: now,
-            expires_at: Some(
-                now + chrono::Duration::seconds(i64::try_from(ttl_seconds).unwrap_or(i64::MAX)),
-            ),
+            expires_at: (!spec.persistent).then(|| {
+                now + chrono::Duration::seconds(i64::try_from(ttl_seconds).unwrap_or(i64::MAX))
+            }),
             ready_at: None,
             ended_at: None,
             generation: 1,
@@ -676,6 +735,12 @@ impl SessionManager {
         // The session is durable before any provider is asked for anything.
         {
             let _guard = self.mutation.lock().await;
+            // A concurrent creation with the same reference won.
+            if let Some(reference) = &session.reference
+                && let Some(existing) = self.find_reference(&session.owner, reference)?
+            {
+                return Ok(existing);
+            }
             let staging = tempfile::Builder::new()
                 .prefix(".compute-session-")
                 .tempdir_in(&self.root)
@@ -698,6 +763,29 @@ impl SessionManager {
         self.live().insert(session_id.clone());
         self.drive(session_id);
         Ok(session)
+    }
+
+    /// The owner's live session with this reference.
+    fn find_reference(
+        &self,
+        owner: &str,
+        reference: &str,
+    ) -> Result<Option<ComputeSession>, ProviderError> {
+        for entry in fs::read_dir(&self.root).map_err(transport_error)? {
+            let entry = entry.map_err(transport_error)?;
+            let Ok(session_id) = SessionId::parse(entry.file_name().to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            if let Ok(session) = self.read_session(&session_id)
+                && session.owner == owner
+                && session.reference.as_deref() == Some(reference)
+                && !session.status.is_terminal()
+            {
+                return Ok(Some(session));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn list(&self, owner: &str) -> Result<Vec<ComputeSession>, ProviderError> {

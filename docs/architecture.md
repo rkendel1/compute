@@ -49,6 +49,14 @@ authorized, durable execution environments whose commands are durable jobs.
 Session providers implement environments; they are never an authority. See
 [sessions.md](sessions.md) and [session-architecture.md](session-architecture.md).
 
+An environment can also have **its own computer**: a durable machine the
+controller places on a target (a `compute serve` node offering sessions),
+provisions as a persistent session, and keeps holding what the environment
+asks for — repositories, packages, applications, services, agents —
+changed in place by durable jobs. The `Computer` record in FeltDB is the
+authority; the target and its provider only answer, fenced by generation.
+See [computers.md](computers.md).
+
 ## Invariants
 
 These hold for every change to Compute. Each has regression tests; a change

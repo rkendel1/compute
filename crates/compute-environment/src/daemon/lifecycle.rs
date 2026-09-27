@@ -75,6 +75,9 @@ impl Daemon {
                 .map(|policy| serde_json::to_value(policy).expect("policies serialize")),
             provider: definition.provider,
             created_at,
+            owner: None,
+            computer: None,
+            contents: None,
         };
         let change = Change::new().with(|batch| batch.create(&id, &record));
         let change = self.event(

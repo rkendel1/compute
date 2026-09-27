@@ -44,6 +44,7 @@ pub enum ReasonCode {
     RunUnsupported,
     SessionsUnsupported,
     SessionCapabilityUnsupported,
+    TargetFeatureUnsupported,
 }
 
 impl ReasonCode {
@@ -78,6 +79,7 @@ impl ReasonCode {
                 "execution"
             }
             SessionCapabilityUnsupported => "session",
+            TargetFeatureUnsupported => "target",
         }
     }
 
@@ -589,6 +591,22 @@ pub fn match_provider(
                 Some("the provider's session environments do not offer these".into()),
             );
         }
+    }
+
+    // Machine features: what the target reports, never inferred.
+    let missing = requirements
+        .target_features
+        .iter()
+        .filter(|feature| !descriptor.target_features.contains(feature))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        reasons.push(
+            ReasonCode::TargetFeatureUnsupported,
+            json!(missing),
+            json!(descriptor.target_features),
+            Some("the target does not report these machine features".into()),
+        );
     }
 
     let mut reasons = reasons.0;

@@ -86,7 +86,28 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
     match (method, segments) {
         ("GET", ["audit", ..]) | ("GET", ["auth", "credentials", ..]) => Scope::Admin,
         ("GET", _) => Scope::Read,
-        ("POST", ["environments", _, "projects", _, "workloads", _, "run"]) => Scope::Execute,
+        ("POST", ["environments", _, "projects", _, "workloads", _, "run"])
+        | ("POST", ["environments", _, "exec" | "connect"]) => Scope::Execute,
+        // What belongs in an environment's computer, and its computer.
+        (
+            "POST",
+            [
+                "environments",
+                _,
+                "contents" | "repositories" | "packages" | "processes",
+            ],
+        )
+        | ("POST", ["environments", _, "processes", _, "start" | "stop"])
+        | ("POST", ["environments", _, "reconcile" | "replace"])
+        | (
+            "DELETE",
+            [
+                "environments",
+                _,
+                "repositories" | "packages" | "processes",
+                _,
+            ],
+        ) => Scope::Operate,
         // Runs, jobs, admission, and runtime preparation on this node as a
         // provider.
         ("POST", ["compute", ..]) => Scope::Execute,

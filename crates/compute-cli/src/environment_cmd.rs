@@ -911,6 +911,9 @@ pub enum EnvironmentCommands {
         stopped: bool,
         #[arg(long)]
         json: bool,
+        /// The computer the environment asks for, if it asks for one.
+        #[command(flatten)]
+        computer: crate::computer_cmd::ComputerArgs,
     },
     /// Create or update an environment and its projects from a manifest.
     Apply {
@@ -918,6 +921,7 @@ pub enum EnvironmentCommands {
         #[arg(long)]
         json: bool,
     },
+    #[command(alias = "info")]
     Inspect {
         environment: String,
         #[arg(long)]
@@ -946,12 +950,16 @@ pub enum EnvironmentCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Stop and delete an environment and all of its state.
+    /// Stop and delete an environment and all of its state. An
+    /// environment on a computer has its computer destroyed; its record
+    /// stays as evidence.
     Destroy {
         environment: String,
         #[arg(long)]
         json: bool,
     },
+    #[command(flatten)]
+    Computer(crate::computer_cmd::ComputerCommands),
 }
 
 pub async fn environment(command: EnvironmentCommand) -> compute_core::Result<()> {
@@ -984,6 +992,32 @@ pub async fn environment(command: EnvironmentCommand) -> compute_core::Result<()
             env,
             stopped,
             json,
+            computer,
+        } if computer.requested() => {
+            if provider.is_some() {
+                return Err(ComputeError::InvalidWorkload(
+                    "a computer is placed on a target (--target), not pinned to a provider".into(),
+                ));
+            }
+            let view = crate::computer_cmd::create(
+                &client,
+                name,
+                env.into_iter().collect(),
+                policy.as_deref().map(load_policy).transpose()?,
+                stopped,
+                computer,
+            )
+            .await?;
+            print_environment(&view, json);
+        }
+        EnvironmentCommands::Create {
+            name,
+            policy,
+            provider,
+            env,
+            stopped,
+            json,
+            computer: _,
         } => {
             let definition = EnvironmentDefinition {
                 name,
@@ -1057,6 +1091,9 @@ pub async fn environment(command: EnvironmentCommand) -> compute_core::Result<()
         EnvironmentCommands::Restart { target, json } => {
             lifecycle(&client, &target, "restart", json).await?;
         }
+        EnvironmentCommands::Computer(command) => {
+            crate::computer_cmd::run(&client, command).await?;
+        }
         EnvironmentCommands::Destroy { environment, json } => {
             let value: serde_json::Value = client
                 .delete(&format!("/environments/{environment}"))
@@ -1128,6 +1165,10 @@ fn print_environment(view: &EnvironmentView, json: bool) {
             project.actual_state.as_str(),
             label(&project.health)
         );
+    }
+    if let Some(computer) = &view.computer {
+        println!();
+        crate::computer_cmd::print_computer(computer, false);
     }
 }
 

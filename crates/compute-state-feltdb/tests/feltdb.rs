@@ -143,6 +143,9 @@ async fn an_older_compute_model_is_upgraded_in_place() {
         policy: None,
         provider: None,
         created_at: chrono::Utc::now(),
+        owner: None,
+        computer: None,
+        contents: None,
     };
     state
         .transaction(Batch::new().create("env_upgrade", &environment))
@@ -390,6 +393,9 @@ async fn compute_speaks_to_feltdb_over_verified_https() {
         policy: None,
         provider: None,
         created_at: chrono::Utc::now(),
+        owner: None,
+        computer: None,
+        contents: None,
     };
     state
         .transaction(Batch::new().create("env_tls", &environment))

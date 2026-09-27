@@ -23,6 +23,8 @@ pub use dependencies::*;
 mod jobs;
 mod sessions;
 pub use sessions::*;
+mod computers;
+pub use computers::*;
 
 pub mod application_artifact;
 pub use application_artifact::{

@@ -97,6 +97,13 @@ Where each requirement comes from:
 | Platform | The dependency capsule, the ELF header of a native entrypoint, or `--platform`. Conflicting sources are an error |
 | `submission` | `job` for `compute pool submit` or `--submit`; `session` for `compute session create` |
 | Session capabilities | `compute session create --require`, plus `network` when the session asks for a network |
+| Target features | An environment computer's `--feature` (`kvm`, `firecracker`, `containers`, `gpu`, `virtualization`); [computers.md](computers.md) |
+
+An environment on a computer is placed as a session
+(`PlacementRequirements::for_computer`): its CPU, memory, disk,
+architecture, network, isolation, and session capabilities, its target
+features, and, for a persistent computer, the `claim` capability (a
+persistent computer never expires).
 
 ## Matching
 
@@ -130,6 +137,7 @@ value, and the available value:
 | artifact | `artifact_mode_unsupported`, `artifact_too_large`, `output_exceeds_limit` |
 | execution | `run_unsupported`, `jobs_unsupported`, `deployment_unsupported`, `sessions_unsupported`: the provider does not offer the submission's mode (its `execution` capability); `required` names the mode and `available` lists what it offers |
 | session | `session_capability_unsupported`: the provider's session environments lack capabilities the session requires; `required` lists them and `available` lists what they offer |
+| target | `target_feature_unsupported`: the target does not offer features the computer requires (`compute serve --target-feature`, or detected at start); `required` lists them and `available` lists what it offers |
 
 Runtime isolation is resolved by the same function execution uses, so
 placement never admits a request that execution would reject.

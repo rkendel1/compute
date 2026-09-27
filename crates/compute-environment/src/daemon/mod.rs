@@ -13,6 +13,7 @@
 //! running and should not.
 
 mod applications;
+mod computers;
 mod deploy;
 mod execute;
 mod lifecycle;
@@ -28,6 +29,7 @@ pub use supervision::Recovery;
 mod views;
 
 pub use applications::{APPLICATION_WORKLOAD, APPLICATIONS_ENVIRONMENT};
+pub use computers::{ComputerExec, ComputerJob};
 pub use views::EventFilter;
 
 /// A bundle's memory limit, wall-time limit, network policy, required CPUs,
@@ -124,6 +126,8 @@ pub struct DaemonConfig {
     /// What this node offers callers: on-request runs, durable jobs, and
     /// application deployments. All three by default.
     pub execution: compute_provider::ExecutionModes,
+    /// How often a running computer's processes are checked for drift.
+    pub computer_probe: Duration,
 }
 
 impl DaemonConfig {
@@ -159,6 +163,7 @@ impl DaemonConfig {
                 deployments: true,
                 sessions: false,
             },
+            computer_probe: Duration::from_secs(15),
         }
     }
 }
@@ -285,6 +290,8 @@ pub(crate) struct Desired {
     pub dns_records: BTreeMap<String, Stored<DnsRecordRecord>>,
     /// Certificates by domain.
     pub certificates: BTreeMap<String, Stored<CertificateRecord>>,
+    /// Environments' computers, by environment ID.
+    pub computers: BTreeMap<String, Stored<compute_state::ComputerRecord>>,
     /// Instance IDs by workload and deployment, so finding a unit's
     /// instance does not scan every instance.
     pub instance_index: BTreeMap<(Key, String), String>,
@@ -318,6 +325,7 @@ pub fn desired_snapshot() -> compute_state::SnapshotDefinition {
             SnapshotSource::all(Collection::Domain),
             SnapshotSource::all(Collection::DnsRecord),
             SnapshotSource::all(Collection::Certificate),
+            SnapshotSource::all(Collection::Computer),
             SnapshotSource::filtered(
                 Query::all(Collection::Deployment)
                     .one_of("status", IN_FLIGHT.iter().map(|status| status.as_str())),
@@ -363,6 +371,11 @@ impl Desired {
         snapshot: &compute_state::Snapshot,
     ) -> Result<Self, compute_state::StateError> {
         let mut desired = Desired::default();
+        for computer in snapshot.typed::<compute_state::ComputerRecord>()? {
+            desired
+                .computers
+                .insert(computer.value.environment_id.clone(), computer);
+        }
         for environment in snapshot.typed::<EnvironmentRecord>()? {
             desired
                 .environments
@@ -684,6 +697,13 @@ pub struct Daemon {
     upgrade: std::sync::Mutex<Option<crate::upgrade::UpgradeRecord>>,
     /// The node lock: held until the controller hands the node over.
     lock: std::sync::Mutex<Option<std::fs::File>>,
+    /// Environments whose computer a task is driving: working state,
+    /// rebuilt from durable records by every reconcile cycle.
+    computer_drivers: std::sync::Mutex<BTreeSet<String>>,
+    /// Wakes computer drivers after a change to what they drive.
+    computer_wake: Notify,
+    /// When targets were last swept for orphaned computers.
+    orphan_sweep: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 pub(crate) enum Outcome {
@@ -958,6 +978,9 @@ impl Daemon {
             recovery: std::sync::Mutex::new(Recovery::default()),
             upgrade: std::sync::Mutex::new(None),
             lock: std::sync::Mutex::new(Some(lock)),
+            computer_drivers: std::sync::Mutex::new(BTreeSet::new()),
+            computer_wake: Notify::new(),
+            orphan_sweep: std::sync::Mutex::new(None),
         });
         if let Some(error) = &degraded {
             let mut inner = daemon.inner.lock().await;
@@ -1692,6 +1715,7 @@ impl Daemon {
                         | Collection::Domain
                         | Collection::DnsRecord
                         | Collection::Certificate
+                        | Collection::Computer
                         | Collection::Deployment
                 )
             })
@@ -1886,6 +1910,14 @@ impl Daemon {
                         desired.dns_records.insert(id.clone(), stored);
                     }
                 }
+                Collection::Computer => {
+                    desired.computers.retain(|_, stored| stored.id != id);
+                    if let Some(stored) = decode::<compute_state::ComputerRecord>(&id, record)? {
+                        desired
+                            .computers
+                            .insert(stored.value.environment_id.clone(), stored);
+                    }
+                }
                 Collection::Certificate => {
                     desired.certificates.retain(|_, stored| stored.id != id);
                     if let Some(stored) = decode::<CertificateRecord>(&id, record)? {
@@ -2048,6 +2080,8 @@ impl Daemon {
     /// it read in full before making it.
     pub(crate) async fn changed(self: &Arc<Self>) {
         self.reconcile_targeted().await;
+        // Computers act on desired state too: their drivers look again.
+        self.computer_wake.notify_waiters();
     }
 
     async fn register_providers(&self) -> Result<(), EnvironmentError> {
@@ -2203,8 +2237,9 @@ impl Daemon {
 
 /// The collections desired state is derived from (the desired-state
 /// snapshot's sources and references).
-const DESIRED_COLLECTIONS: [Collection; 11] = [
+const DESIRED_COLLECTIONS: [Collection; 12] = [
     Collection::Environment,
+    Collection::Computer,
     Collection::Project,
     Collection::EnvironmentProject,
     Collection::Workload,
@@ -2302,12 +2337,19 @@ fn build_pool(config: &DaemonConfig) -> Result<ProviderPool, EnvironmentError> {
             }
             ProviderKind::Remote => {
                 let endpoint = provider.endpoint.clone().expect("validated");
-                pool.add_remote(
-                    id.clone(),
-                    provider.clone(),
-                    Arc::new(RemoteProvider::new(endpoint)),
-                )
-                .map_err(invalid)?;
+                let mut remote = RemoteProvider::new(endpoint);
+                // The target's credential authenticates this controller to
+                // it; it is never an authority over what Compute owns.
+                if let Some(name) = &provider.token_env {
+                    let token = std::env::var(name).map_err(|_| {
+                        EnvironmentError::Invalid(format!(
+                            "provider {id} names token variable {name}, which is not set"
+                        ))
+                    })?;
+                    remote = remote.with_bearer_token(token);
+                }
+                pool.add_remote(id.clone(), provider.clone(), Arc::new(remote))
+                    .map_err(invalid)?;
             }
         }
     }
