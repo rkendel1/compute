@@ -633,6 +633,32 @@ impl RequestContext {
     }
 }
 
+/// The authority of the daemon's own `compute.remote@1` service: a request
+/// reaches it only after the daemon's API authenticated it and checked its
+/// scope, which leaves the request's context behind. Without one, nothing
+/// is admitted: the service is never reachable around the daemon.
+pub(crate) struct DaemonAuthorized;
+
+#[async_trait::async_trait]
+impl compute_provider::ProviderAuthorizer for DaemonAuthorized {
+    async fn authorize(
+        &self,
+        _: compute_provider::ProviderOperation,
+        _: Option<&str>,
+    ) -> Result<(), compute_provider::ProviderError> {
+        RequestContext::current().map(|_| ()).ok_or_else(|| {
+            compute_provider::ProviderError::new(
+                compute_provider::ProviderErrorKind::Unauthorized,
+                "this service is reachable only through the Compute API",
+            )
+        })
+    }
+
+    fn authentication(&self) -> &'static str {
+        "operator-credential"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

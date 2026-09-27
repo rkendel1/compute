@@ -13,6 +13,8 @@
 
 #[path = "support/runtimes.rs"]
 mod runtimes;
+#[path = "support/targets.rs"]
+mod targets;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Output, Stdio};
@@ -160,6 +162,7 @@ fn a_computer_is_created_once_and_changed_in_place_from_the_cli() {
     let root = temporary.path().to_path_buf();
     let source = repository(&root);
     let target_listen = format!("127.0.0.1:{}", free_port());
+    let credential = targets::issue(&root, "target-a", "control-plane");
     let mut serve = std::process::Command::new(env!("CARGO_BIN_EXE_compute"));
     runtimes::with_fixture_runtimes(&mut serve);
     let _target = Serve(
@@ -170,6 +173,8 @@ fn a_computer_is_created_once_and_changed_in_place_from_the_cli() {
             .arg(root.join("target-jobs"))
             .arg("--session-store")
             .arg(root.join("target-sessions"))
+            .arg("--credentials")
+            .arg(&credential.credentials)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -178,7 +183,10 @@ fn a_computer_is_created_once_and_changed_in_place_from_the_cli() {
     wait_for_port(&target_listen);
     std::fs::write(
         root.join("compute-pool.toml"),
-        format!("[providers.target-a]\nkind = \"remote\"\nendpoint = \"http://{target_listen}\"\n"),
+        format!(
+            "[providers.target-a]\nkind = \"remote\"\nendpoint = \"http://{target_listen}\"\n{}",
+            credential.pool_line()
+        ),
     )
     .unwrap();
     let listen = format!("127.0.0.1:{}", free_port());
@@ -332,6 +340,7 @@ fn deploy_is_a_release_and_work_runs_in_the_computer() {
     let root = temporary.path().to_path_buf();
     let source = repository(&root);
     let target_listen = format!("127.0.0.1:{}", free_port());
+    let credential = targets::issue(&root, "target-a", "control-plane");
     let mut serve = std::process::Command::new(env!("CARGO_BIN_EXE_compute"));
     runtimes::with_fixture_runtimes(&mut serve);
     let _target = Serve(
@@ -342,6 +351,8 @@ fn deploy_is_a_release_and_work_runs_in_the_computer() {
             .arg(root.join("target-jobs"))
             .arg("--session-store")
             .arg(root.join("target-sessions"))
+            .arg("--credentials")
+            .arg(&credential.credentials)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -350,7 +361,10 @@ fn deploy_is_a_release_and_work_runs_in_the_computer() {
     wait_for_port(&target_listen);
     std::fs::write(
         root.join("compute-pool.toml"),
-        format!("[providers.target-a]\nkind = \"remote\"\nendpoint = \"http://{target_listen}\"\n"),
+        format!(
+            "[providers.target-a]\nkind = \"remote\"\nendpoint = \"http://{target_listen}\"\n{}",
+            credential.pool_line()
+        ),
     )
     .unwrap();
     let listen = format!("127.0.0.1:{}", free_port());

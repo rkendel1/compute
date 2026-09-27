@@ -285,6 +285,7 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
     let remote_job_store_path = remote_job_store.path().to_path_buf();
     let remote_server = tokio::spawn(async move {
         let mut config = ServerConfig::local(remote_server_endpoint);
+        config.authorizer = harness_authorizer();
         config.job_store = remote_job_store_path;
         let _ = compute_provider::serve_listener(remote_listener, config).await;
     });
@@ -299,7 +300,7 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
         Err(error) => Err(error.to_string()),
     };
     let mut placement_results: Vec<(RuntimeKind, Result<(), String>)> = vec![];
-    let remote_provider = RemoteProvider::new(remote_endpoint);
+    let remote_provider = harness_client(remote_endpoint);
     let mut certified_bundle: Option<CertifiedArtifact> = None;
     for kind in RuntimeKind::ALL {
         let locked = lock.runtimes.get(kind.as_str());
@@ -1348,4 +1349,31 @@ mod tests {
         fs::write(root.path().join("runtime-lock.json"), b"{}").unwrap();
         assert!(load_artifact_metadata(root.path()).is_err());
     }
+}
+
+/// The credential every target a certification starts trusts, and presents:
+/// certification exercises authenticated targets, as they run in
+/// production.
+fn harness() -> &'static (compute_provider::TargetCredentials, String) {
+    static HARNESS: std::sync::OnceLock<(compute_provider::TargetCredentials, String)> =
+        std::sync::OnceLock::new();
+    HARNESS.get_or_init(|| {
+        let mut credentials = compute_provider::TargetCredentials::default();
+        let (_, token) = credentials
+            .issue("certification")
+            .expect("randomness for a certification credential");
+        (credentials, token)
+    })
+}
+
+/// The authority of a target a certification starts.
+pub(crate) fn harness_authorizer() -> std::sync::Arc<dyn compute_provider::ProviderAuthorizer> {
+    std::sync::Arc::new(compute_provider::TargetAuthorizer::fixed(
+        harness().0.clone(),
+    ))
+}
+
+/// A client of a target a certification started.
+pub(crate) fn harness_client(endpoint: impl Into<String>) -> RemoteProvider {
+    RemoteProvider::new(endpoint).with_bearer_token(harness().1.clone())
 }

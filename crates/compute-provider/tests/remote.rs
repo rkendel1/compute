@@ -118,6 +118,7 @@ async fn remote_transport_is_semantically_equivalent() {
     let job_store_path = job_store.path().to_path_buf();
     let server = tokio::spawn(async move {
         let mut config = ServerConfig::local(server_endpoint);
+        config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
         config.job_store = job_store_path;
         let _ = compute_provider::serve(addr, config).await;
     });
@@ -166,6 +167,7 @@ async fn durable_jobs_are_idempotent_owned_verifiable_and_restart_safe() {
     let addr = listener.local_addr().unwrap();
     let endpoint = format!("http://{addr}");
     let mut config = ServerConfig::local(endpoint.clone());
+    config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     config.job_store = store.path().to_path_buf();
     config.max_concurrent_jobs = 1;
     let server = tokio::spawn(async move {
@@ -265,6 +267,7 @@ async fn durable_jobs_are_idempotent_owned_verifiable_and_restart_safe() {
     let restart_addr = listener.local_addr().unwrap();
     let restart_endpoint = format!("http://{restart_addr}");
     let mut restart_config = ServerConfig::local(restart_endpoint.clone());
+    restart_config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     restart_config.job_store = store.path().to_path_buf();
     let restarted = tokio::spawn(async move {
         let _ = compute_provider::serve_listener(listener, restart_config).await;
@@ -370,6 +373,7 @@ async fn durable_jobs_are_idempotent_owned_verifiable_and_restart_safe() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let mut config = ServerConfig::local(endpoint.clone());
+    config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     config.job_store = store.path().to_path_buf();
     let recovery_server = tokio::spawn(async move {
         let _ = compute_provider::serve_listener(listener, config).await;
@@ -414,6 +418,7 @@ async fn queued_jobs_cancel_truthfully_and_terminal_jobs_expire() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let mut config = ServerConfig::local(endpoint.clone());
+    config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     config.job_store = store.path().to_path_buf();
     config.max_concurrent_jobs = 1;
     config.job_retention = Duration::from_secs(1);
@@ -530,6 +535,7 @@ async fn asynchronous_failures_and_timeouts_agree_with_execution_evidence() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let mut config = ServerConfig::local(endpoint.clone());
+    config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     config.job_store = store.path().to_path_buf();
     let server = tokio::spawn(async move {
         let _ = compute_provider::serve_listener(listener, config).await;
@@ -597,6 +603,7 @@ async fn reservations_are_atomic_resource_aware_and_never_oversubscribe() {
         ..ProviderPolicy::default()
     };
     let mut config = ServerConfig::local_with_policy(endpoint.clone(), policy);
+    config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     config.job_store = store.path().to_path_buf();
     config.max_concurrent_jobs = 2;
     let server = tokio::spawn(async move {
@@ -662,6 +669,7 @@ async fn permanently_oversized_jobs_reject_without_waiting_or_executing() {
         ..ProviderPolicy::default()
     };
     let mut config = ServerConfig::local_with_policy(endpoint.clone(), policy);
+    config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     config.job_store = store.path().to_path_buf();
     let server = tokio::spawn(async move {
         let _ = compute_provider::serve_listener(listener, config).await;
@@ -720,6 +728,7 @@ async fn scheduler_is_oldest_fitting_without_head_of_line_blocking() {
         ..ProviderPolicy::default()
     };
     let mut config = ServerConfig::local_with_policy(endpoint.clone(), policy);
+    config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     config.job_store = store.path().to_path_buf();
     config.max_concurrent_jobs = 2;
     let server = tokio::spawn(async move {

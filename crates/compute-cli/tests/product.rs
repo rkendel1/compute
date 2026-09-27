@@ -27,6 +27,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+#[path = "support/targets.rs"]
+mod targets;
+
 const BIN: &str = env!("CARGO_BIN_EXE_compute");
 const TOKEN_A: &str = "provider-a-operator";
 const TOKEN_B: &str = "provider-b-operator";
@@ -75,6 +78,8 @@ struct Pool {
     catalog: PathBuf,
     daemons: Vec<Node>,
     servers: Vec<Child>,
+    /// The token file each `compute serve` target trusts, by endpoint.
+    target_tokens: std::collections::BTreeMap<String, PathBuf>,
     /// The daemon the `local` pool member uses, when there is one.
     local: Option<usize>,
 }
@@ -90,6 +95,7 @@ impl Pool {
             catalog,
             daemons: vec![],
             servers: vec![],
+            target_tokens: Default::default(),
             local: None,
         }
     }
@@ -187,11 +193,14 @@ impl Pool {
     /// Start `compute serve` offering `offer` (its default when `None`).
     fn start_serve(&mut self, name: &str, offer: Option<&str>) -> String {
         let port = free_window(1);
+        let credential = targets::issue(self.root.path(), name, "product");
         let mut command = Command::new(BIN);
         command
             .args(["serve", "--listen", &format!("127.0.0.1:{port}")])
             .arg("--job-store")
-            .arg(self.root.path().join(format!("jobs-{name}")));
+            .arg(self.root.path().join(format!("jobs-{name}")))
+            .arg("--credentials")
+            .arg(&credential.credentials);
         if let Some(offer) = offer {
             command.args(["--offer", offer]);
         }
@@ -209,7 +218,10 @@ impl Pool {
         wait_until("compute serve answers", || {
             TcpStream::connect(("127.0.0.1", port)).is_ok()
         });
-        format!("http://127.0.0.1:{port}")
+        let endpoint = format!("http://127.0.0.1:{port}");
+        self.target_tokens
+            .insert(endpoint.clone(), credential.token_file);
+        endpoint
     }
 
     /// Write the pool: each member's ID, what it is, and its priority.
@@ -232,7 +244,8 @@ impl Pool {
                     ));
                 }
                 Member::Remote(endpoint) => config.push_str(&format!(
-                    "[providers.{id}]\nkind = \"remote\"\nendpoint = \"{endpoint}\"\npriority = {priority}\n\n"
+                    "[providers.{id}]\nkind = \"remote\"\nendpoint = \"{endpoint}\"\ntoken_file = {:?}\npriority = {priority}\n\n",
+                    self.target_tokens[endpoint.as_str()].display().to_string()
                 )),
             }
         }

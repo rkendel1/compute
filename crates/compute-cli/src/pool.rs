@@ -611,7 +611,13 @@ fn adhoc(value: &str) -> compute_core::Result<Box<dyn ComputeProvider>> {
     if value == "local" {
         Ok(Box::new(LocalProvider::new()))
     } else if value.starts_with("http://") || value.starts_with("https://") {
-        Ok(Box::new(RemoteProvider::new(value)))
+        // An endpoint outside the pool authenticates with
+        // $COMPUTE_TARGET_TOKEN, when set.
+        let mut remote = RemoteProvider::new(value);
+        if let Ok(token) = std::env::var("COMPUTE_TARGET_TOKEN") {
+            remote = remote.with_bearer_token(token);
+        }
+        Ok(Box::new(remote))
     } else {
         Err(ComputeError::InvalidWorkload(format!(
             "provider {value} is not configured in this pool and is not an http(s) endpoint"

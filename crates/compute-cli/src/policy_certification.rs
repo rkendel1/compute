@@ -21,8 +21,7 @@ use compute_placement::{
 };
 use compute_policy::{EffectivePolicy, ExecutionContract, Policy, PolicySourceKind, ReasonKind};
 use compute_provider::{
-    ComputeProvider, LocalProvider, ProviderErrorKind, ProviderRequest, RemoteProvider,
-    ServerConfig,
+    ComputeProvider, LocalProvider, ProviderErrorKind, ProviderRequest, ServerConfig,
 };
 
 pub struct PolicyCertification {
@@ -63,6 +62,7 @@ async fn serve(execution_policy: Option<Policy>) -> Result<Server, String> {
         .with_execution_policy(execution_policy),
     );
     let mut config = ServerConfig::local(endpoint.clone());
+    config.authorizer = crate::certification::harness_authorizer();
     config.provider = provider.clone();
     config.job_store = jobs.path().to_path_buf();
     let handle = tokio::spawn(async move {
@@ -274,6 +274,7 @@ fn remote(endpoint: &str, priority: i64) -> ProviderConfig {
         application_endpoint: None,
         priority,
         token_env: None,
+        token_file: None,
     }
 }
 
@@ -291,7 +292,9 @@ async fn certify_placement(bundle: &WorkloadBundle) -> Result<String, String> {
         pool.add_remote(
             id,
             remote(&server.endpoint, priority),
-            Arc::new(RemoteProvider::new(server.endpoint.clone())),
+            Arc::new(crate::certification::harness_client(
+                server.endpoint.clone(),
+            )),
         )
         .map_err(|error| error.to_string())?;
     }
@@ -362,7 +365,7 @@ async fn certify_placement(bundle: &WorkloadBundle) -> Result<String, String> {
         Err(error) if error.code == DispatchErrorCode::PlacementFailed => {}
         _ => return Err("explicit selection bypassed policy".into()),
     }
-    match RemoteProvider::new(locked.endpoint.clone())
+    match crate::certification::harness_client(locked.endpoint.clone())
         .execute(request)
         .await
     {
@@ -385,7 +388,7 @@ async fn certify_jobs(bundle: &WorkloadBundle) -> Result<String, String> {
     .await?;
     let open = serve(None).await?;
     let request = ProviderRequest::bundle(bundle.to_bytes().map_err(|e| e.to_string())?);
-    let locked_client = RemoteProvider::new(locked.endpoint.clone());
+    let locked_client = crate::certification::harness_client(locked.endpoint.clone());
     let denied_submission = locked_client
         .submit(request.clone(), None)
         .await
@@ -412,7 +415,7 @@ async fn certify_jobs(bundle: &WorkloadBundle) -> Result<String, String> {
     {
         return Err("a denied job did not preserve its admission decision".into());
     }
-    let client = RemoteProvider::new(open.endpoint.clone());
+    let client = crate::certification::harness_client(open.endpoint.clone());
     let submission = client
         .submit(request, None)
         .await

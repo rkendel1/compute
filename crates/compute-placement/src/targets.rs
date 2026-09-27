@@ -30,6 +30,15 @@ pub struct ComputeTarget {
     pub capabilities: Option<SessionCapabilities>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<String>,
+    /// How the target authenticates its callers, as it advertises it:
+    /// `credential`, or `insecure-unauthenticated` for an open development
+    /// target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<String>,
+    /// Whether this control plane presents a credential to the target. The
+    /// credential itself is never shown.
+    #[serde(default)]
+    pub credential: bool,
     /// Why the target could not be described, when it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -51,6 +60,8 @@ impl ComputeTarget {
             features: descriptor
                 .map(|descriptor| descriptor.target_features.clone())
                 .unwrap_or_default(),
+            authentication: descriptor.and_then(|descriptor| descriptor.authentication.clone()),
+            credential: false,
             error: (!matches!(
                 record.status,
                 DiscoveryStatus::Discovered | DiscoveryStatus::Cached

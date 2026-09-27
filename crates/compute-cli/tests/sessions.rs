@@ -12,6 +12,8 @@
 
 #[path = "support/runtimes.rs"]
 mod runtimes;
+#[path = "support/targets.rs"]
+mod targets;
 
 use std::process::{Child, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -48,6 +50,8 @@ fn serve(root: &std::path::Path, port: u16) -> Server {
         .arg(root.join("jobs"))
         .arg("--session-store")
         .arg(root.join("sessions"))
+        .arg("--credentials")
+        .arg(root.join("node-credentials.json"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -100,11 +104,13 @@ fn a_session_is_a_durable_computer_on_whatever_provider_placement_selects() {
     let temporary = tempfile::tempdir().unwrap();
     let port = free_port();
     let root = temporary.path().to_path_buf();
+    let credential = targets::issue(&root, "node", "cli");
     std::fs::write(
         root.join("compute-pool.toml"),
         format!(
             "[providers.local]\nkind = \"local\"\npriority = 100\n\
-             [providers.node]\nkind = \"remote\"\nendpoint = \"http://127.0.0.1:{port}\"\n"
+             [providers.node]\nkind = \"remote\"\nendpoint = \"http://127.0.0.1:{port}\"\n{}",
+            credential.pool_line()
         ),
     )
     .unwrap();

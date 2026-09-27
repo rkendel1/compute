@@ -811,13 +811,36 @@ impl SessionManager {
         Ok(sessions)
     }
 
-    /// The authoritative session record.
+    /// The authoritative session record. A session that should have a
+    /// machine is checked against its provider first: one the provider no
+    /// longer has is recorded as lost (failed, `environment_lost`), never
+    /// reported as ready and never recreated.
     pub async fn inspect(
         &self,
         session_id: &SessionId,
         owner: &str,
     ) -> Result<ComputeSession, ProviderError> {
-        self.owned(session_id, owner)
+        let session = self.owned(session_id, owner)?;
+        if matches!(
+            session.status,
+            SessionStatus::Ready | SessionStatus::Running | SessionStatus::Stopped
+        ) && let Some(provider_session_id) = &session.provider_session_id
+            && let Ok(EnvironmentState::Missing) = self.provider.inspect(provider_session_id).await
+        {
+            let failure = SessionFailure {
+                phase: SessionPhase::Reconciliation,
+                provider: Some(session.provider_kind.clone()),
+                code: "environment_lost".into(),
+                message: "the provider no longer has this environment".into(),
+                retryable: false,
+                at: Utc::now(),
+            };
+            // Another request may have settled it first; either way the
+            // record now says what is true.
+            let _ = self.fail(&session, failure).await;
+            return self.owned(session_id, owner);
+        }
+        Ok(session)
     }
 
     pub async fn events(
@@ -1623,10 +1646,11 @@ impl SessionManager {
         let session = self.read_session(session_id)?;
         if session.owner != owner {
             // Indistinguishable from an unknown session, so a principal
-            // cannot probe for sessions it does not own.
+            // cannot probe for sessions it does not own, and a refusal
+            // (`unauthorized`) always means the credential itself.
             return Err(ProviderError::new(
-                ProviderErrorKind::Unauthorized,
-                "session belongs to another principal",
+                ProviderErrorKind::UnknownSession,
+                "unknown session",
             ));
         }
         Ok(session)

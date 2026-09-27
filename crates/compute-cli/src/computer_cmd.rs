@@ -1309,22 +1309,164 @@ enum TargetCommands {
         #[arg(long)]
         json: bool,
     },
+    /// The control planes a target trusts, on the target's machine: its
+    /// `compute serve --credentials` file.
+    Credential {
+        #[command(subcommand)]
+        command: TargetCredentialCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TargetCredentialCommands {
+    /// Issue a credential that lets a control plane control this target.
+    /// The token is shown (or written to --token-file) once; the target
+    /// keeps only its verifier.
+    Issue {
+        /// The target's trust file.
+        #[arg(long, default_value = ".compute/target-credentials.json")]
+        credentials: PathBuf,
+        /// The control plane the credential identifies. What it creates on
+        /// the target belongs to this identity.
+        #[arg(long)]
+        control_plane: String,
+        /// Write the token here (owner-only) instead of printing it: the
+        /// file a pool member's `token_file` names.
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The credentials a target trusts: never a secret.
+    List {
+        #[arg(long, default_value = ".compute/target-credentials.json")]
+        credentials: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke a credential: the target refuses it at the next request.
+    Revoke {
+        credential_id: String,
+        #[arg(long, default_value = ".compute/target-credentials.json")]
+        credentials: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn credential_error(error: compute_provider::ProviderError) -> ComputeError {
+    ComputeError::InvalidWorkload(error.message)
+}
+
+fn target_credential(command: TargetCredentialCommands) -> compute_core::Result<()> {
+    use compute_provider::TargetCredentials;
+    match command {
+        TargetCredentialCommands::Issue {
+            credentials,
+            control_plane,
+            token_file,
+            json,
+        } => {
+            let mut trusted =
+                TargetCredentials::load_or_default(&credentials).map_err(credential_error)?;
+            let (record, token) = trusted.issue(&control_plane).map_err(credential_error)?;
+            trusted.save(&credentials).map_err(credential_error)?;
+            if let Some(path) = &token_file {
+                compute_provider::credentials::write_token_file(path, &token)?;
+            }
+            if json {
+                let mut value = serde_json::json!({
+                    "credential_id": record.credential_id,
+                    "control_plane": record.control_plane,
+                    "created_at": record.created_at,
+                });
+                match &token_file {
+                    Some(path) => value["token_file"] = serde_json::json!(path),
+                    None => value["token"] = serde_json::json!(token),
+                }
+                print_json(&value);
+            } else {
+                println!(
+                    "Issued {} for control plane {}",
+                    record.credential_id, record.control_plane
+                );
+                match &token_file {
+                    Some(path) => println!("Token written to {}", path.display()),
+                    None => println!("Token (shown once): {token}"),
+                }
+            }
+        }
+        TargetCredentialCommands::List { credentials, json } => {
+            let trusted =
+                TargetCredentials::load_or_default(&credentials).map_err(credential_error)?;
+            let rows = trusted
+                .credentials
+                .iter()
+                .map(|record| {
+                    serde_json::json!({
+                        "credential_id": record.credential_id,
+                        "control_plane": record.control_plane,
+                        "created_at": record.created_at,
+                        "revoked_at": record.revoked_at,
+                        "status": if record.active() { "active" } else { "revoked" },
+                    })
+                })
+                .collect::<Vec<_>>();
+            if json {
+                print_json(&rows);
+            } else {
+                println!("CREDENTIAL\tCONTROL PLANE\tSTATUS\tCREATED");
+                for record in &trusted.credentials {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        record.credential_id,
+                        record.control_plane,
+                        if record.active() { "active" } else { "revoked" },
+                        record.created_at.to_rfc3339()
+                    );
+                }
+            }
+        }
+        TargetCredentialCommands::Revoke {
+            credential_id,
+            credentials,
+            json,
+        } => {
+            let mut trusted = TargetCredentials::load(&credentials).map_err(credential_error)?;
+            let record = trusted.revoke(&credential_id).map_err(credential_error)?;
+            trusted.save(&credentials).map_err(credential_error)?;
+            if json {
+                print_json(&serde_json::json!({
+                    "credential_id": record.credential_id,
+                    "control_plane": record.control_plane,
+                    "revoked_at": record.revoked_at,
+                    "status": "revoked",
+                }));
+            } else {
+                println!("Revoked {}", record.credential_id);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn target(command: TargetCommand) -> compute_core::Result<()> {
-    let client = command.daemon.client()?;
     match command.command {
+        TargetCommands::Credential { command } => return target_credential(command),
         TargetCommands::List { json } => {
+            let client = command.daemon.client()?;
             let targets: Vec<compute_placement::ComputeTarget> =
                 client.get("/targets").await.map_err(error)?;
             if json {
                 print_json(&targets);
                 return Ok(());
             }
-            println!("TARGET\tHOSTS COMPUTERS\tPLATFORM\tCPU\tMEMORY\tFEATURES\tHEALTH");
+            println!(
+                "TARGET\tHOSTS COMPUTERS\tPLATFORM\tCPU\tMEMORY\tFEATURES\tHEALTH\tAUTHENTICATION"
+            );
             for target in targets {
                 println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     target.target_id,
                     if target.hosts_computers { "yes" } else { "no" },
                     target
@@ -1343,7 +1485,13 @@ pub async fn target(command: TargetCommand) -> compute_core::Result<()> {
                         .map(|resources| size(resources.capacity.memory_bytes))
                         .unwrap_or_default(),
                     target.features.join(","),
-                    target.health
+                    target.health,
+                    match (target.authentication.as_deref(), target.credential) {
+                        (Some("credential"), true) => "credential".to_owned(),
+                        (Some(other), _) => other.to_owned(),
+                        (None, true) => "credential (unconfirmed)".to_owned(),
+                        (None, false) => "-".to_owned(),
+                    }
                 );
             }
         }

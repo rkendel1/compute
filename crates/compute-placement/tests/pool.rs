@@ -87,6 +87,7 @@ async fn serve(policy: ProviderPolicy) -> Server {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let jobs = tempfile::tempdir().unwrap();
     let mut config = ServerConfig::local(endpoint.clone());
+    config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     config.provider = Arc::new(
         LocalProvider::with_identity(ProviderIdentity::Remote {
             id: endpoint.clone(),
@@ -135,6 +136,7 @@ fn remote(endpoint: &str, priority: i64) -> ProviderConfig {
         application_endpoint: None,
         priority,
         token_env: None,
+        token_file: None,
     }
 }
 
@@ -145,6 +147,7 @@ fn local(priority: i64) -> ProviderConfig {
         application_endpoint: None,
         priority,
         token_env: None,
+        token_file: None,
     }
 }
 
@@ -788,6 +791,7 @@ async fn policy_denied_providers_are_excluded_and_never_execute() {
         .with_runtime_catalog(catalog()),
     );
     let mut config = ServerConfig::local(endpoint.clone());
+    config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     config.provider = locked.clone();
     config.job_store = jobs.path().to_path_buf();
     let handle = tokio::spawn(async move {

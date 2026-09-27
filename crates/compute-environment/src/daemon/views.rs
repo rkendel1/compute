@@ -55,6 +55,10 @@ impl Daemon {
                     .computer
                     .as_ref()
                     .and_then(|computer| computer.target.clone()),
+                reality: view
+                    .computer
+                    .as_ref()
+                    .map(|computer| computer.reality.clone()),
                 computer: view.computer.map(|computer| computer.status),
             });
         }

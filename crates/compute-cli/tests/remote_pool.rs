@@ -1,3 +1,5 @@
+#[path = "support/targets.rs"]
+mod targets;
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
@@ -34,6 +36,8 @@ fn start_server(root: &std::path::Path, port: u16) -> Server {
     let child = std::process::Command::new(env!("CARGO_BIN_EXE_compute"))
         .args(["serve", "--listen", &listen, "--job-store"])
         .arg(root.join("jobs"))
+        .arg("--credentials")
+        .arg(targets::issue(root, "remote-dev", "cli").credentials)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -72,7 +76,13 @@ fn remote_commands_resolve_named_providers_from_the_caller_owned_pool() {
              [providers.remote-dev]\n\
              kind = \"remote\"\n\
              endpoint = \"http://127.0.0.1:{port}\"\n\
-             priority = 50\n"
+             token_file = {:?}\n\
+             priority = 50\n",
+            temporary
+                .path()
+                .join("remote-dev-cli.token")
+                .display()
+                .to_string()
         ),
     )
     .unwrap();

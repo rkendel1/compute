@@ -20,10 +20,10 @@ use compute_core::{
     SessionOwnership, SessionPhase, SessionResources, SessionSpec, SessionStatus,
 };
 use compute_provider::{
-    EnvironmentState, Policy, ProviderAuthorizer, ProviderConnection, ProviderError,
-    ProviderErrorKind, ProviderOperation, ProviderRequest, ProvisionRequest, ProvisionedSession,
-    RemoteProvider, ServerConfig, SessionCreateRequest, SessionEnvironment, SessionEnvironmentSpec,
-    SessionProvider,
+    ComputeProvider, EnvironmentState, Policy, ProviderAuthorizer, ProviderConnection,
+    ProviderError, ProviderErrorKind, ProviderOperation, ProviderRequest, ProvisionRequest,
+    ProvisionedSession, RemoteProvider, ServerConfig, SessionCreateRequest, SessionEnvironment,
+    SessionEnvironmentSpec, SessionProvider,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::Semaphore;
@@ -985,7 +985,9 @@ fn every_operation_is_authorized_and_bound_to_its_owner() {
             mallory.destroy_session(&id).await.unwrap_err(),
             mallory.claim_session(&id).await.unwrap_err(),
         ] {
-            assert_eq!(error.kind, ProviderErrorKind::Unauthorized, "{error:?}");
+            // Indistinguishable from a session that does not exist.
+            assert_eq!(error.kind, ProviderErrorKind::UnknownSession, "{error:?}");
+            assert_eq!(error.message, "unknown session");
         }
         // Nor the jobs the session runs.
         let (submission, _) = run(&alice, &id, &["true"]).await;
@@ -1229,9 +1231,19 @@ fn a_provider_that_cannot_resume_fails_explicitly_and_never_substitutes() {
             .store(true, Ordering::SeqCst);
         let error = client.resume_session(&id).await.unwrap_err();
         assert!(error.message.contains("reclaimed"), "{error:?}");
+        // The environment is gone: the session says so the next time it is
+        // inspected, instead of claiming a stopped machine that no longer
+        // exists. Nothing is recreated in its place.
         let session = client.session(&id).await.unwrap();
-        assert_eq!(session.status, SessionStatus::Stopped);
-        assert_eq!(session.failure.unwrap().phase, SessionPhase::Resuming);
+        assert_eq!(session.status, SessionStatus::Failed);
+        let failure = session.failure.unwrap();
+        assert_eq!(failure.code, "environment_lost");
+        assert_eq!(failure.phase, SessionPhase::Reconciliation);
+        let events = client.session_events(&id).await.unwrap();
+        assert!(
+            events.iter().any(|event| event.event_type == "failed"),
+            "{events:?}"
+        );
         assert_eq!(fake.calls("provision"), 1, "no replacement environment");
     });
     server.kill();
@@ -1491,4 +1503,181 @@ fn the_container_adapter_translates_the_session_contract() {
         );
     });
     server.kill();
+}
+
+/// A `compute serve` target trusts only the control planes it issued
+/// credentials to, owns what they create by control-plane identity, keeps
+/// that across a restart, and lets no revoked or unknown credential back
+/// in.
+#[test]
+fn a_target_is_controlled_only_by_the_control_planes_it_trusts() {
+    use compute_provider::{TargetAuthorizer, TargetCredentials};
+    let stores = Stores::new();
+    let trust = stores
+        .jobs
+        .parent()
+        .unwrap()
+        .join("target-credentials.json");
+    let mut credentials = TargetCredentials::default();
+    let (daemon_credential, daemon) = credentials.issue("control-plane-a").unwrap();
+    let (_, other) = credentials.issue("control-plane-b").unwrap();
+    credentials.save(&trust).unwrap();
+    let fake = Fake::new(&stores.environments, everything());
+    let server = Server::start(
+        &stores,
+        fake.clone(),
+        Arc::new(TargetAuthorizer::from_file(&trust)),
+    );
+    let anonymous = RemoteProvider::new(server.endpoint.clone());
+    let wrong = server.client("cmpt_tcred_0000000000000000_00");
+    let forged = server.client(&forge(&daemon));
+    let authenticated = server.client(&daemon);
+    let intruder = server.client(&other);
+    let id = client_runtime().block_on(async {
+        // 1. No credential: rejected, for reads too.
+        for error in [
+            anonymous.health().await.unwrap_err(),
+            anonymous.sessions().await.unwrap_err(),
+            anonymous
+                .create_session(&request(NetworkPolicy::Network, ttl(3600)))
+                .await
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.kind, ProviderErrorKind::Unauthorized, "{error:?}");
+        }
+        // 2. A wrong or forged credential: rejected.
+        for client in [&wrong, &forged] {
+            assert_eq!(
+                client.sessions().await.unwrap_err().kind,
+                ProviderErrorKind::Unauthorized
+            );
+        }
+        // 3. The control plane's credential: accepted, and the target says
+        // how it authenticates.
+        let capabilities = authenticated.capabilities().await.unwrap();
+        assert_eq!(capabilities.authentication.as_deref(), Some("credential"));
+        // 4. The authenticated control plane lists, creates, execs in, and
+        // owns its sessions, as its identity.
+        let created = authenticated
+            .create_session(&request(NetworkPolicy::Network, ttl(3600)))
+            .await
+            .unwrap();
+        let id = created.session_id.0.clone();
+        assert_eq!(created.owner, "control-plane:control-plane-a");
+        ready(&authenticated, &id).await;
+        let (submission, result) = run(&authenticated, &id, &["true"]).await;
+        assert_eq!(result.status, JobStatus::Succeeded);
+        assert_eq!(authenticated.sessions().await.unwrap().len(), 1);
+        // 5. Another control plane's valid credential reaches none of it:
+        // its sessions are unknown to it, its jobs refused.
+        assert!(intruder.sessions().await.unwrap().is_empty());
+        for error in [
+            intruder.session(&id).await.unwrap_err(),
+            intruder
+                .session_exec(&id, &SessionCommand::new(vec!["true".into()]))
+                .await
+                .unwrap_err(),
+            intruder.destroy_session(&id).await.unwrap_err(),
+        ] {
+            assert_eq!(error.kind, ProviderErrorKind::UnknownSession, "{error:?}");
+        }
+        assert_eq!(
+            intruder
+                .job_status(&submission.job_id.0)
+                .await
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::Unauthorized
+        );
+        id
+    });
+    server.kill();
+
+    // 6. A restart keeps the relationship: the same trust file, the same
+    // control plane, the same session.
+    let server = Server::start(
+        &stores,
+        fake.clone(),
+        Arc::new(TargetAuthorizer::from_file(&trust)),
+    );
+    let authenticated = server.client(&daemon);
+    let intruder = server.client(&other);
+    client_runtime().block_on(async {
+        let session = ready(&authenticated, &id).await;
+        assert_eq!(session.owner, "control-plane:control-plane-a");
+        assert_eq!(
+            intruder.session(&id).await.unwrap_err().kind,
+            ProviderErrorKind::UnknownSession
+        );
+
+        // A rotated credential for the same control plane keeps what it
+        // owns; the one it replaced is revoked.
+        let mut credentials = TargetCredentials::load(&trust).unwrap();
+        let (_, rotated) = credentials.issue("control-plane-a").unwrap();
+        credentials
+            .revoke(&daemon_credential.credential_id)
+            .unwrap();
+        credentials.save(&trust).unwrap();
+        bump(&trust);
+        let rotated = RemoteProvider::new(server.endpoint.clone()).with_bearer_token(&rotated);
+        assert_eq!(rotated.session(&id).await.unwrap().session_id.0, id);
+
+        // 7. A revoked credential cannot revive access, nor can one the
+        // target no longer lists at all.
+        let revoked = authenticated.session(&id).await.unwrap_err();
+        assert_eq!(revoked.kind, ProviderErrorKind::Unauthorized);
+        assert!(revoked.message.contains("revoked"), "{revoked:?}");
+        let mut credentials = TargetCredentials::load(&trust).unwrap();
+        credentials
+            .credentials
+            .retain(|record| record.control_plane != "control-plane-b");
+        credentials.save(&trust).unwrap();
+        bump(&trust);
+        assert_eq!(
+            intruder.sessions().await.unwrap_err().kind,
+            ProviderErrorKind::Unauthorized
+        );
+        rotated.destroy_session(&id).await.unwrap();
+    });
+    server.kill();
+}
+
+/// The same credential with a different secret.
+fn forge(token: &str) -> String {
+    let last = if token.ends_with('0') { '1' } else { '0' };
+    format!("{}{last}", &token[..token.len() - 1])
+}
+
+/// Make a rewritten trust file visibly newer, whatever the filesystem's
+/// timestamp resolution.
+fn bump(path: &Path) {
+    let file = std::fs::File::options().append(true).open(path).unwrap();
+    let modified = file.metadata().unwrap().modified().unwrap();
+    file.set_modified(modified + Duration::from_secs(2))
+        .unwrap();
+}
+
+/// An endpoint that nobody configured an authority for accepts nothing.
+#[test]
+fn a_server_without_an_authority_fails_closed() {
+    let socket = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", socket.local_addr().unwrap());
+    let stores = Stores::new();
+    let mut config = ServerConfig::local(endpoint.clone());
+    config.job_store = stores.jobs.clone();
+    let runtime = client_runtime();
+    runtime.spawn(async move {
+        let listener = tokio::net::TcpListener::from_std(socket).unwrap();
+        let _ = compute_provider::serve_listener(listener, config).await;
+    });
+    runtime.block_on(async {
+        let error = RemoteProvider::new(endpoint.clone())
+            .with_bearer_token("anything")
+            .health()
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Unauthorized);
+    });
+    runtime.shutdown_background();
 }

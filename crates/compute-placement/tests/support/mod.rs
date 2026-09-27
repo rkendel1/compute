@@ -228,6 +228,7 @@ impl Synthetic {
             }),
             sessions: self.sessions,
             target_features: self.features.clone(),
+            authentication: None,
             inventory: RuntimeInventory {
                 compute_version: "0.1.0".into(),
                 platform: self.platform.clone(),
@@ -305,6 +306,7 @@ pub fn config(entries: &[(&str, ProviderKind, i64)]) -> PoolConfig {
                         application_endpoint: None,
                         priority: *priority,
                         token_env: None,
+                        token_file: None,
                     },
                 )
             })
