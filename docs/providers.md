@@ -81,6 +81,7 @@ executes, with a reason naming what was required and what is offered:
 | `compute run`, `compute pool run` | `run` | `run_unsupported` |
 | `compute submit`, `compute pool submit` | `jobs` | `jobs_unsupported` |
 | `compute deploy`, `compute application deploy` | `deployments` | `deployment_unsupported` |
+| `compute session create` | `sessions` | `sessions_unsupported` |
 
 ```text
 provider deployment-only: incompatible
@@ -92,7 +93,7 @@ What each kind of provider offers by default, and how to narrow it:
 | Provider | Started with | Offers | Narrow with |
 | --- | --- | --- | --- |
 | `local` pool member | (this machine) | run, deployments (through this machine's daemon) | - |
-| Compute server | `compute serve` | run, jobs | `--offer run` or `--offer jobs` |
+| Compute server | `compute serve` | run, jobs, sessions | `--offer run`, `--offer jobs`, `--offer run,jobs`, ... |
 | Compute daemon | `compute start` | run, jobs, deployments | `--offer deployments`, `--offer run,jobs`, ... |
 
 A mode that is not offered is neither advertised nor accepted: a
@@ -108,6 +109,13 @@ the same admission, runtime preparation, and receipts. A daemon in a run
 pool therefore runs workloads. Its `compute.remote@1` routes need the
 daemon's credential (`execute` scope for changes, `read` for discovery),
 like the rest of its API.
+
+A provider that hosts sessions also advertises what its session
+environments support (`sessions`: `exec`, `terminal`, `filesystem`,
+`network`, `public_endpoint`, `persistent_storage`, `suspend`, `resume`,
+`claim`). A session is placed with `SubmissionMode::Session` and then created
+through the selected server's `/compute/sessions` routes; see
+[sessions.md](sessions.md). The daemon does not host sessions yet.
 
 A deployment is placed with `SubmissionMode::Deployment` and then released
 through the selected daemon's authenticated `/applications` API (see

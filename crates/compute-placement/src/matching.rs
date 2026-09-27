@@ -42,6 +42,8 @@ pub enum ReasonCode {
     JobsUnsupported,
     DeploymentUnsupported,
     RunUnsupported,
+    SessionsUnsupported,
+    SessionCapabilityUnsupported,
 }
 
 impl ReasonCode {
@@ -72,7 +74,10 @@ impl ReasonCode {
             | ProcessLimitUnenforceable
             | OutputLimitUnenforceable => "resources",
             ArtifactModeUnsupported | ArtifactTooLarge | OutputExceedsLimit => "artifact",
-            DeploymentUnsupported | RunUnsupported | JobsUnsupported => "execution",
+            DeploymentUnsupported | RunUnsupported | JobsUnsupported | SessionsUnsupported => {
+                "execution"
+            }
+            SessionCapabilityUnsupported => "session",
         }
     }
 
@@ -534,6 +539,7 @@ pub fn match_provider(
         (transport.run, "run"),
         (transport.jobs, "jobs"),
         (transport.deployments, "deployments"),
+        (transport.sessions, "sessions"),
     ]
     .into_iter()
     .filter_map(|(offered, mode)| offered.then_some(mode))
@@ -554,10 +560,35 @@ pub fn match_provider(
             "deployments",
             "the provider does not host application deployments",
         )),
+        SubmissionMode::Session if !transport.sessions => Some((
+            ReasonCode::SessionsUnsupported,
+            "sessions",
+            "the provider does not host sessions",
+        )),
         _ => None,
     };
     if let Some((code, required, detail)) = missing {
         reasons.push(code, json!(required), json!(offered), Some(detail.into()));
+    }
+    // Session capabilities: what the provider reports for its environments.
+    if artifact.submission == SubmissionMode::Session && transport.sessions {
+        let offered = descriptor.sessions.unwrap_or_default();
+        let missing = offered.missing(&requirements.session_capabilities);
+        if !missing.is_empty() {
+            reasons.push(
+                ReasonCode::SessionCapabilityUnsupported,
+                json!(missing),
+                json!(
+                    offered
+                        .entries()
+                        .into_iter()
+                        .filter(|(_, present)| *present)
+                        .map(|(name, _)| name)
+                        .collect::<Vec<_>>()
+                ),
+                Some("the provider's session environments do not offer these".into()),
+            );
+        }
     }
 
     let mut reasons = reasons.0;

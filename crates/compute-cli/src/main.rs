@@ -26,6 +26,7 @@ mod policy_certification;
 mod policy_cmd;
 mod pool;
 mod receipt;
+mod session_cmd;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -75,6 +76,9 @@ enum Commands {
     Placement(pool::PlacementCommand),
     /// Place a workload on a compatible provider and execute or submit it.
     Pool(pool::PoolCommand),
+    /// Temporary, authorized, durable computers: create one, run commands
+    /// in it, and destroy it, on whichever provider placement selects.
+    Session(Box<session_cmd::SessionCommand>),
     /// Inspect, validate, and check execution policy. Never executes.
     Policy(policy_cmd::PolicyCommand),
     /// Show the full decision chain for a workload: requirements,
@@ -140,14 +144,18 @@ struct ServeCommand {
     public_url: Option<String>,
     #[arg(long, default_value = ".compute/jobs")]
     job_store: PathBuf,
+    /// Where session records and session workspaces are kept.
+    #[arg(long, default_value = ".compute/sessions")]
+    session_store: PathBuf,
     #[arg(long, default_value = "7d", value_parser = parse_retention)]
     job_retention: Duration,
     #[arg(long, default_value_t = 4)]
     max_concurrent_jobs: usize,
-    /// Execution modes this server offers: `run`, `jobs` (comma-separated
-    /// or repeated). A server does not host deployments; `compute start`
-    /// does. Modes not offered are neither advertised nor accepted.
-    #[arg(long, value_delimiter = ',', default_values = ["run", "jobs"])]
+    /// Execution modes this server offers: `run`, `jobs`, `sessions`
+    /// (comma-separated or repeated). A server does not host deployments;
+    /// `compute start` does. Modes not offered are neither advertised nor
+    /// accepted.
+    #[arg(long, value_delimiter = ',', default_values = ["run", "jobs", "sessions"])]
     offer: Vec<String>,
     /// Offer only these runtimes (repeatable). Withheld runtimes are neither
     /// advertised nor executed.
@@ -1448,6 +1456,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
             }
             let mut config = ServerConfig::local_with_policies(endpoint, policy, execution_policy);
             config.job_store = command.job_store;
+            config.session_store = command.session_store;
             config.job_retention = command.job_retention;
             config.max_concurrent_jobs = command.max_concurrent_jobs;
             config.execution = environment_cmd::execution_modes(&command.offer, false)?;
@@ -1460,6 +1469,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Jobs(command) => pool::jobs(command).await?,
         Commands::Placement(command) => pool::placement(command).await?,
         Commands::Pool(command) => pool::pool(command).await?,
+        Commands::Session(command) => session_cmd::session(*command).await?,
         Commands::Policy(command) => policy_cmd::policy(command).await?,
         Commands::Explain(command) => policy_cmd::explain(command).await?,
         Commands::Start(command) => environment_cmd::start(command).await?,
@@ -1653,13 +1663,13 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     let receipt_path = request.3;
                     let jobs = jobs.expect("remote_request requires a remote provider");
                     let submission = jobs.submit(request.0, None).await.map_err(provider_error)?;
-                    let result = wait_for_remote_result(&jobs, &submission.job_id.0).await?;
-                    print_remote_execution_result(
+                    finish_remote_job(
+                        &jobs,
                         &submission.job_id,
-                        result.result,
                         request.1,
                         receipt_path.as_deref(),
-                    )?;
+                    )
+                    .await?;
                 }
             }
         },
@@ -2005,6 +2015,19 @@ async fn wait_for_remote_result(
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(Duration::from_secs(2));
     }
+}
+
+/// Wait for a durable job and report its result and evidence. A one-shot
+/// `remote run` and a command run in a session end the same way: they are
+/// both durable jobs on the provider.
+async fn finish_remote_job(
+    provider: &RemoteProvider,
+    job_id: &compute_core::JobId,
+    json: bool,
+    receipt_path: Option<&std::path::Path>,
+) -> compute_core::Result<()> {
+    let result = wait_for_remote_result(provider, &job_id.0).await?;
+    print_remote_execution_result(job_id, result.result, json, receipt_path)
 }
 
 fn provider_error(error: compute_provider::ProviderError) -> compute_core::ComputeError {
@@ -2496,6 +2519,19 @@ fn parse_memory(value: &str) -> Result<u64, String> {
         return gib
             .checked_mul(1024 * 1024 * 1024)
             .ok_or_else(|| "resource size overflows u64".into());
+    }
+    // Kubernetes-style binary suffixes: 512Mi, 2Gi.
+    for (suffix, unit) in [
+        ("ki", 1024_u64),
+        ("mi", 1024 * 1024),
+        ("gi", 1024 * 1024 * 1024),
+    ] {
+        if let Some(raw) = normalized.strip_suffix(suffix) {
+            let value = raw.parse::<u64>().map_err(|error| error.to_string())?;
+            return value
+                .checked_mul(unit)
+                .ok_or_else(|| "resource size overflows u64".into());
+        }
     }
     if let Some(raw) = normalized.strip_suffix("mb") {
         let mib = raw.parse::<u64>().map_err(|error| error.to_string())?;

@@ -66,6 +66,8 @@ pub struct Synthetic {
     pub unavailable: Vec<RuntimeKind>,
     pub policy: Option<compute_policy::Policy>,
     pub resources: compute_core::ProviderResourceInventory,
+    /// Session environments' capabilities; `Some` hosts sessions.
+    pub sessions: Option<compute_core::SessionCapabilities>,
 }
 
 impl Synthetic {
@@ -92,6 +94,7 @@ impl Synthetic {
             artifacts: BTreeMap::new(),
             unavailable: vec![],
             policy: None,
+            sessions: None,
             resources: compute_core::ProviderResourceInventory {
                 capacity: compute_core::ResourceVector {
                     cpu_count: 8,
@@ -127,6 +130,7 @@ impl Synthetic {
             unavailable: self.unavailable.clone(),
             policy: self.policy.clone(),
             resources: self.resources.clone(),
+            sessions: self.sessions,
         }
     }
 
@@ -217,7 +221,9 @@ impl Synthetic {
                 run: self.run,
                 jobs: self.jobs,
                 deployments: self.deployments,
+                sessions: self.sessions.is_some(),
             }),
+            sessions: self.sessions,
             inventory: RuntimeInventory {
                 compute_version: "0.1.0".into(),
                 platform: self.platform.clone(),
@@ -275,6 +281,7 @@ pub fn requirements(kind: RuntimeKind) -> PlacementRequirements {
             output_bytes: None,
             submission: SubmissionMode::Synchronous,
         },
+        session_capabilities: vec![],
     }
 }
 

@@ -29,7 +29,14 @@ use tokio::net::{TcpListener, TcpStream};
 
 mod jobs;
 mod runtime;
+mod sessions;
 pub use runtime::RuntimeCatalog;
+pub use sessions::{
+    DEFAULT_SESSION_SWEEP, DEFAULT_SESSION_TTL, EnvironmentState, ProviderConnection,
+    ProvisionRequest, ProvisionedSession, SESSION_READINESS_SCRIPT, SessionCreateRequest,
+    SessionEnvironment, SessionEnvironmentSpec, SessionManager, SessionProvider,
+    WorkspaceSessionProvider, command_in_directory, environment_bundle, unsupported,
+};
 #[doc(hidden)]
 pub mod testing;
 pub use jobs::JobEvent;
@@ -59,6 +66,12 @@ pub enum ProviderErrorKind {
     ProviderInterrupted,
     /// Policy admission denied the execution; nothing was executed.
     AdmissionDenied,
+    UnknownSession,
+    /// The session's state does not allow the operation (for example, a
+    /// command in a stopped session), or it changed while the operation ran.
+    SessionConflict,
+    /// The provider does not offer this operation; its capabilities say so.
+    OperationUnsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +346,10 @@ pub struct ProviderCapabilities {
     /// [`ProviderCapabilities::execution_modes`] for payloads that predate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionModes>,
+    /// What this provider's session environments support, when it hosts
+    /// sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<compute_core::SessionCapabilities>,
     pub inventory: RuntimeInventory,
 }
 
@@ -349,6 +366,10 @@ pub struct ExecutionModes {
     /// Hosts application deployments: revisions, releases, a stable
     /// endpoint, and their evidence (`compute deploy`).
     pub deployments: bool,
+    /// Hosts durable sessions: temporary environments that run commands as
+    /// durable jobs (`compute session`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sessions: bool,
 }
 
 impl ProviderCapabilities {
@@ -360,6 +381,7 @@ impl ProviderCapabilities {
             run: true,
             jobs: self.max_concurrent_jobs.is_some(),
             deployments: false,
+            sessions: false,
         })
     }
 }
@@ -719,6 +741,7 @@ impl LocalProvider {
                 run: true,
                 jobs: false,
                 deployments: false,
+                sessions: false,
             },
             identity,
             policy: ProviderPolicy::default(),
@@ -1317,6 +1340,7 @@ impl ComputeProvider for LocalProvider {
             resources: provider_resources(&self.policy),
             policy: self.execution_policy(),
             execution: Some(self.execution),
+            sessions: None,
             inventory,
         })
     }
@@ -1591,10 +1615,122 @@ impl RemoteProvider {
         self.get(&format!("/compute/jobs/{job_id}/events")).await
     }
 
+    pub async fn create_session(
+        &self,
+        request: &SessionCreateRequest,
+    ) -> Result<compute_core::ComputeSession, ProviderError> {
+        self.send("POST", "/compute/sessions", Some(request), None)
+            .await
+    }
+
+    pub async fn sessions(&self) -> Result<Vec<compute_core::ComputeSession>, ProviderError> {
+        self.get("/compute/sessions").await
+    }
+
+    pub async fn session(
+        &self,
+        session_id: &str,
+    ) -> Result<compute_core::ComputeSession, ProviderError> {
+        let session_id = checked_session_id(session_id)?;
+        self.get(&format!("/compute/sessions/{session_id}")).await
+    }
+
+    pub async fn session_events(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<compute_core::SessionEvent>, ProviderError> {
+        let session_id = checked_session_id(session_id)?;
+        self.get(&format!("/compute/sessions/{session_id}/events"))
+            .await
+    }
+
+    pub async fn connect_session(
+        &self,
+        session_id: &str,
+    ) -> Result<compute_core::SessionConnectionGrant, ProviderError> {
+        self.session_action(session_id, "connect").await
+    }
+
+    pub async fn session_exec(
+        &self,
+        session_id: &str,
+        command: &compute_core::SessionCommand,
+    ) -> Result<compute_core::SessionExecSubmission, ProviderError> {
+        let session_id = checked_session_id(session_id)?;
+        self.send(
+            "POST",
+            &format!("/compute/sessions/{session_id}/exec"),
+            Some(command),
+            None,
+        )
+        .await
+    }
+
+    pub async fn session_logs(
+        &self,
+        session_id: &str,
+    ) -> Result<compute_core::SessionLogs, ProviderError> {
+        let session_id = checked_session_id(session_id)?;
+        self.get(&format!("/compute/sessions/{session_id}/logs"))
+            .await
+    }
+
+    pub async fn stop_session(
+        &self,
+        session_id: &str,
+    ) -> Result<compute_core::ComputeSession, ProviderError> {
+        self.session_action(session_id, "stop").await
+    }
+
+    pub async fn resume_session(
+        &self,
+        session_id: &str,
+    ) -> Result<compute_core::ComputeSession, ProviderError> {
+        self.session_action(session_id, "resume").await
+    }
+
+    pub async fn destroy_session(
+        &self,
+        session_id: &str,
+    ) -> Result<compute_core::ComputeSession, ProviderError> {
+        self.session_action(session_id, "destroy").await
+    }
+
+    pub async fn claim_session(
+        &self,
+        session_id: &str,
+    ) -> Result<compute_core::ComputeSession, ProviderError> {
+        self.session_action(session_id, "claim").await
+    }
+
+    async fn session_action<T: DeserializeOwned>(
+        &self,
+        session_id: &str,
+        action: &str,
+    ) -> Result<T, ProviderError> {
+        let session_id = checked_session_id(session_id)?;
+        self.send::<(), T>(
+            "POST",
+            &format!("/compute/sessions/{session_id}/{action}"),
+            None,
+            None,
+        )
+        .await
+    }
+
     pub async fn job_logs(&self, job_id: &str) -> Result<compute_core::JobLogs, ProviderError> {
         let job_id = checked_job_id(job_id)?;
         self.get(&format!("/compute/jobs/{job_id}/logs")).await
     }
+}
+
+fn checked_session_id(value: &str) -> Result<compute_core::SessionId, ProviderError> {
+    compute_core::SessionId::parse(value.to_owned()).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::UnknownSession,
+            "malformed session identity",
+        )
+    })
 }
 
 fn checked_job_id(value: &str) -> Result<compute_core::JobId, ProviderError> {
@@ -1723,6 +1859,40 @@ pub enum ProviderOperation {
     Cancel,
     Events,
     Logs,
+    SessionCreate,
+    SessionList,
+    SessionInspect,
+    SessionEvents,
+    SessionConnect,
+    SessionExec,
+    SessionLogs,
+    SessionStop,
+    SessionResume,
+    SessionDestroy,
+    SessionClaim,
+    /// Expose an endpoint of a session. Every requested endpoint is its own
+    /// authorization decision.
+    SessionExpose,
+}
+
+impl ProviderOperation {
+    pub const fn is_session(self) -> bool {
+        matches!(
+            self,
+            Self::SessionCreate
+                | Self::SessionList
+                | Self::SessionInspect
+                | Self::SessionEvents
+                | Self::SessionConnect
+                | Self::SessionExec
+                | Self::SessionLogs
+                | Self::SessionStop
+                | Self::SessionResume
+                | Self::SessionDestroy
+                | Self::SessionClaim
+                | Self::SessionExpose
+        )
+    }
 }
 
 #[async_trait]
@@ -1738,6 +1908,14 @@ pub trait ProviderAuthorizer: Send + Sync {
             || "anonymous".into(),
             |value| compute_core::sha256_identity(value.as_bytes()),
         ))
+    }
+
+    /// Authorize Compute's own teardown of `owner`'s session when its TTL
+    /// ends. The TTL was granted with the session; an authority may still
+    /// refuse, and then nothing is torn down and expiry is retried.
+    async fn authorize_expiry(&self, owner: &str) -> Result<(), ProviderError> {
+        let _ = owner;
+        Ok(())
     }
 }
 
@@ -1759,6 +1937,13 @@ pub struct ServerConfig {
     /// What this endpoint accepts. `compute serve` runs workloads and
     /// durable jobs; a daemon also hosts deployments, and may offer less.
     pub execution: ExecutionModes,
+    /// Where session records are kept, when the endpoint hosts sessions.
+    pub session_store: std::path::PathBuf,
+    /// The environments sessions run in. `None` uses a
+    /// [`WorkspaceSessionProvider`] under `session_store`.
+    pub session_provider: Option<Arc<dyn SessionProvider>>,
+    /// How often session expiry and interrupted transitions are reconciled.
+    pub session_sweep: std::time::Duration,
 }
 
 impl ServerConfig {
@@ -1799,7 +1984,11 @@ impl ServerConfig {
                 run: true,
                 jobs: true,
                 deployments: false,
+                sessions: false,
             },
+            session_store: std::env::temp_dir().join(format!("compute-sessions-{store_id}")),
+            session_provider: None,
+            session_sweep: DEFAULT_SESSION_SWEEP,
         }
     }
 }
@@ -1807,6 +1996,7 @@ impl ServerConfig {
 struct ServerState {
     config: ServerConfig,
     jobs: Arc<JobManager>,
+    sessions: Option<Arc<SessionManager>>,
 }
 
 pub async fn serve(addr: SocketAddr, config: ServerConfig) -> Result<(), ProviderError> {
@@ -1879,8 +2069,29 @@ impl RemoteService {
             capacity,
             config.provider.clone(),
         )?;
+        let sessions = if config.execution.sessions {
+            let provider = config.session_provider.clone().unwrap_or_else(|| {
+                Arc::new(WorkspaceSessionProvider::new(
+                    config.session_store.join("workspaces"),
+                ))
+            });
+            Some(SessionManager::start(
+                config.session_store.join("sessions"),
+                jobs.clone(),
+                provider,
+                config.provider.clone(),
+                config.authorizer.clone(),
+                config.session_sweep,
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
-            state: Arc::new(ServerState { config, jobs }),
+            state: Arc::new(ServerState {
+                config,
+                jobs,
+                sessions,
+            }),
         })
     }
 
@@ -1914,7 +2125,12 @@ impl RemoteService {
         body: &[u8],
     ) -> Result<Vec<u8>, (u16, ProviderError)> {
         let failed = |error: ProviderError| (error_status(error.kind), error);
-        let Some((operation, job_id)) = parse_route(method, path).map_err(failed)? else {
+        let Some(Route {
+            operation,
+            job_id,
+            session_id,
+        }) = parse_route(method, path).map_err(failed)?
+        else {
             return Err((
                 404,
                 ProviderError::new(
@@ -1945,6 +2161,7 @@ impl RemoteService {
             | ProviderOperation::Cancel
             | ProviderOperation::Events
             | ProviderOperation::Logs => (modes.jobs, "durable jobs"),
+            operation if operation.is_session() => (modes.sessions, "sessions"),
             _ => (true, ""),
         };
         if !offered {
@@ -1960,6 +2177,19 @@ impl RemoteService {
             .authorize(operation, authorization)
             .await
             .map_err(|error| (401, error))?;
+        if operation.is_session() {
+            let owner = self
+                .state
+                .config
+                .authorizer
+                .owner(authorization)
+                .await
+                .map_err(|error| (401, error))?;
+            return self
+                .session(operation, session_id, owner, authorization, body)
+                .await
+                .map_err(failed);
+        }
         let owner = self
             .state
             .config
@@ -1986,6 +2216,11 @@ impl RemoteService {
                             value.job_retention_seconds =
                                 Some(self.state.config.job_retention.as_secs());
                             value.execution = Some(self.state.config.execution);
+                            value.sessions = self
+                                .state
+                                .sessions
+                                .as_ref()
+                                .map(|sessions| sessions.capabilities());
                             value.resources.available = ResourceVector {
                                 cpu_count: snapshot.available.cpu_millis / 1_000,
                                 memory_bytes: snapshot.available.memory_bytes,
@@ -2078,9 +2313,76 @@ impl RemoteService {
                     .logs(job_id.as_ref().expect("job route"), &owner)
                     .await,
             ),
+            _ => Err(ProviderError::new(
+                ProviderErrorKind::ProtocolUnsupported,
+                "unknown provider endpoint",
+            )),
         };
         result.map_err(failed)
     }
+
+    /// Session operations. The authority has already authorized the
+    /// operation; ownership comes from it, never from the request.
+    async fn session(
+        &self,
+        operation: ProviderOperation,
+        session_id: Option<compute_core::SessionId>,
+        owner: String,
+        authorization: Option<&str>,
+        body: &[u8],
+    ) -> Result<Vec<u8>, ProviderError> {
+        let sessions = self.state.sessions.as_ref().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::CapabilityMismatch,
+                "this provider does not accept sessions",
+            )
+        })?;
+        let id = || session_id.clone().expect("session route");
+        match operation {
+            ProviderOperation::SessionCreate => {
+                let request: SessionCreateRequest = decode(body)?;
+                // Every endpoint is exposed only by an explicit decision.
+                for _ in &request.spec.endpoints {
+                    self.state
+                        .config
+                        .authorizer
+                        .authorize(ProviderOperation::SessionExpose, authorization)
+                        .await?;
+                }
+                encode_result(sessions.create(request, owner).await)
+            }
+            ProviderOperation::SessionList => encode_result(sessions.list(&owner).await),
+            ProviderOperation::SessionInspect => {
+                encode_result(sessions.inspect(&id(), &owner).await)
+            }
+            ProviderOperation::SessionEvents => encode_result(sessions.events(&id(), &owner).await),
+            ProviderOperation::SessionConnect => {
+                encode_result(sessions.connect(&id(), &owner).await)
+            }
+            ProviderOperation::SessionExec => {
+                let command: compute_core::SessionCommand = decode(body)?;
+                encode_result(sessions.exec(&id(), &owner, command).await)
+            }
+            ProviderOperation::SessionLogs => encode_result(sessions.logs(&id(), &owner).await),
+            ProviderOperation::SessionStop => encode_result(sessions.stop(&id(), &owner).await),
+            ProviderOperation::SessionResume => encode_result(sessions.resume(&id(), &owner).await),
+            ProviderOperation::SessionDestroy => {
+                encode_result(sessions.destroy(&id(), &owner).await)
+            }
+            ProviderOperation::SessionClaim => encode_result(sessions.claim(&id(), &owner).await),
+            _ => Err(ProviderError::new(
+                ProviderErrorKind::ProtocolUnsupported,
+                "unknown provider endpoint",
+            )),
+        }
+    }
+}
+
+/// A parsed `compute.remote@1` route.
+struct Route {
+    operation: ProviderOperation,
+    job_id: Option<compute_core::JobId>,
+    session_id: Option<compute_core::SessionId>,
 }
 
 fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -2090,10 +2392,14 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .map(|(_, value)| value.as_str())
 }
 
-fn parse_route(
-    method: &str,
-    path: &str,
-) -> Result<Option<(ProviderOperation, Option<compute_core::JobId>)>, ProviderError> {
+fn parse_route(method: &str, path: &str) -> Result<Option<Route>, ProviderError> {
+    let route = |operation, job_id, session_id| {
+        Some(Route {
+            operation,
+            job_id,
+            session_id,
+        })
+    };
     let static_route = match (method, path) {
         ("GET", "/compute/health") => Some(ProviderOperation::Health),
         ("GET", "/compute/capabilities") => Some(ProviderOperation::Capabilities),
@@ -2106,10 +2412,42 @@ fn parse_route(
         ("POST", "/compute/runtimes/status") => Some(ProviderOperation::RuntimeStatus),
         ("POST", "/compute/jobs") => Some(ProviderOperation::Submit),
         ("GET", "/compute/jobs") => Some(ProviderOperation::Jobs),
+        ("POST", "/compute/sessions") => Some(ProviderOperation::SessionCreate),
+        ("GET", "/compute/sessions") => Some(ProviderOperation::SessionList),
         _ => None,
     };
     if let Some(operation) = static_route {
-        return Ok(Some((operation, None)));
+        return Ok(route(operation, None, None));
+    }
+    if let Some(remainder) = path.strip_prefix("/compute/sessions/") {
+        let mut parts = remainder.split('/');
+        let raw_id = parts.next().unwrap_or_default();
+        let suffix = parts.next();
+        if raw_id.is_empty() || parts.next().is_some() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::UnknownSession,
+                "malformed session path",
+            ));
+        }
+        let session_id = compute_core::SessionId::parse(raw_id.to_string()).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::UnknownSession,
+                "malformed session identity",
+            )
+        })?;
+        let operation = match (method, suffix) {
+            ("GET", None) => ProviderOperation::SessionInspect,
+            ("GET", Some("events")) => ProviderOperation::SessionEvents,
+            ("GET", Some("logs")) => ProviderOperation::SessionLogs,
+            ("POST", Some("connect")) => ProviderOperation::SessionConnect,
+            ("POST", Some("exec")) => ProviderOperation::SessionExec,
+            ("POST", Some("stop")) => ProviderOperation::SessionStop,
+            ("POST", Some("resume")) => ProviderOperation::SessionResume,
+            ("POST", Some("destroy")) => ProviderOperation::SessionDestroy,
+            ("POST", Some("claim")) => ProviderOperation::SessionClaim,
+            _ => return Ok(None),
+        };
+        return Ok(route(operation, None, Some(session_id)));
     }
     let Some(remainder) = path.strip_prefix("/compute/jobs/") else {
         return Ok(None);
@@ -2135,7 +2473,7 @@ fn parse_route(
         ("POST", Some("cancel")) => ProviderOperation::Cancel,
         _ => return Ok(None),
     };
-    Ok(Some((operation, Some(job_id))))
+    Ok(route(operation, Some(job_id), None))
 }
 
 fn encode_result<T: Serialize>(result: Result<T, ProviderError>) -> Result<Vec<u8>, ProviderError> {
@@ -2337,7 +2675,7 @@ fn artifact_error(error: impl fmt::Display) -> ProviderError {
 fn transport_error(error: impl fmt::Display) -> ProviderError {
     ProviderError::new(ProviderErrorKind::TransportFailure, error.to_string())
 }
-fn error_code(kind: ProviderErrorKind) -> String {
+pub(crate) fn error_code(kind: ProviderErrorKind) -> String {
     serde_json::to_value(kind)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
@@ -2363,7 +2701,9 @@ fn error_status(kind: ProviderErrorKind) -> u16 {
     match kind {
         ProviderErrorKind::Unauthorized => 401,
         ProviderErrorKind::AdmissionDenied => 403,
-        ProviderErrorKind::UnknownJob => 404,
+        ProviderErrorKind::UnknownJob | ProviderErrorKind::UnknownSession => 404,
+        ProviderErrorKind::SessionConflict => 409,
+        ProviderErrorKind::OperationUnsupported => 400,
         ProviderErrorKind::JobExpired => 410,
         ProviderErrorKind::IdempotencyConflict => 409,
         ProviderErrorKind::EvidenceInvalid => 422,

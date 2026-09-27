@@ -648,11 +648,22 @@ pub fn execution_modes(
         run: false,
         jobs: false,
         deployments: false,
+        sessions: false,
     };
     for mode in offer.iter().map(|mode| mode.trim()) {
         match mode {
             "run" => modes.run = true,
             "jobs" => modes.jobs = true,
+            // Session records live beside the server's durable job store.
+            // The daemon keeps its durable state in FeltDB and does not host
+            // them yet.
+            "sessions" if !hosts_deployments => modes.sessions = true,
+            "sessions" => {
+                return Err(ComputeError::InvalidWorkload(
+                    "the Compute daemon does not host sessions; serve them with `compute serve --offer sessions`"
+                        .into(),
+                ));
+            }
             "deployments" if hosts_deployments => modes.deployments = true,
             "deployments" => return Err(ComputeError::InvalidWorkload(
                 "a Compute server does not host deployments; start a daemon with `compute start`"
@@ -664,13 +675,13 @@ pub fn execution_modes(
                     if hosts_deployments {
                         ", or deployments"
                     } else {
-                        ""
+                        ", or sessions"
                     }
                 )));
             }
         }
     }
-    if !(modes.run || modes.jobs || modes.deployments) {
+    if !(modes.run || modes.jobs || modes.deployments || modes.sessions) {
         return Err(ComputeError::InvalidWorkload(
             "--offer must name at least one execution mode".into(),
         ));

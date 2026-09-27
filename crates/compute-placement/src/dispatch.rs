@@ -6,8 +6,8 @@
 //! provider, and checks that the returned evidence names the provider the
 //! placement selected.
 
-use compute_core::{JobSubmission, ProviderIdentity};
-use compute_provider::{ExecuteResponse, ProviderErrorKind, ProviderRequest};
+use compute_core::{ComputeSession, JobSubmission, ProviderIdentity};
+use compute_provider::{ExecuteResponse, ProviderErrorKind, ProviderRequest, SessionCreateRequest};
 use serde::{Deserialize, Serialize};
 
 use crate::placement::{PlacementOutcome, PlacementReport};
@@ -26,6 +26,8 @@ pub enum DispatchErrorCode {
     AdmissionDenied,
     /// The selected provider does not accept durable jobs.
     JobsUnsupported,
+    /// The selected provider does not host sessions.
+    SessionsUnsupported,
     /// Returned evidence does not prove execution at the selected provider.
     EvidenceInvalid,
 }
@@ -69,6 +71,17 @@ pub struct PlacedSubmission {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     pub job: JobSubmission,
+}
+
+/// A created session and the provider that hosts it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacedSession {
+    pub placement_id: String,
+    pub provider_id: String,
+    pub provider_identity: ProviderIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    pub session: ComputeSession,
 }
 
 fn prepare<'a>(
@@ -299,5 +312,41 @@ pub async fn submit(
         provider_identity: selected.provider_identity.clone(),
         endpoint: member.config.endpoint.clone(),
         job,
+    })
+}
+
+/// Create a session on the selected provider. The placement travels with
+/// the environment's contract exactly as it does with a job, and every
+/// command the session runs binds it into its receipt.
+pub async fn create_session(
+    pool: &ProviderPool,
+    report: &PlacementReport,
+    create: SessionCreateRequest,
+) -> Result<PlacedSession, DispatchError> {
+    let SessionCreateRequest { request, spec } = create;
+    let (member, request) = prepare(pool, report, request)?;
+    let request = prepare_selected_runtime(report, member, request).await?;
+    let Some(sessions) = &member.jobs else {
+        return Err(DispatchError {
+            code: DispatchErrorCode::SessionsUnsupported,
+            placement_id: report.placement_id.clone(),
+            provider_id: Some(member.id.clone()),
+            provider_error: None,
+            message: "the selected provider does not host sessions".into(),
+            admission: None,
+            retried: false,
+        });
+    };
+    let session = sessions
+        .create_session(&SessionCreateRequest { request, spec })
+        .await
+        .map_err(|error| provider_failure(report, &member.id, error))?;
+    let selected = report.selected.as_ref().expect("checked by prepare");
+    Ok(PlacedSession {
+        placement_id: report.placement_id.clone(),
+        provider_id: member.id.clone(),
+        provider_identity: selected.provider_identity.clone(),
+        endpoint: member.config.endpoint.clone(),
+        session,
     })
 }

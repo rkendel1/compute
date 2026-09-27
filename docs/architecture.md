@@ -43,6 +43,12 @@ controller  (`compute start`)
   environment of the processes it started. Its manifest
   (`<state-dir>/supervisor/`) never contains plaintext secrets.
 
+Beside the controller, `compute serve` hosts the `compute.remote@1`
+protocol: on-request runs, durable jobs, and sessions — temporary,
+authorized, durable execution environments whose commands are durable jobs.
+Session providers implement environments; they are never an authority. See
+[sessions.md](sessions.md) and [session-architecture.md](session-architecture.md).
+
 ## Invariants
 
 These hold for every change to Compute. Each has regression tests; a change
@@ -68,6 +74,8 @@ that breaks one fails them.
 | 16 | Controller paths read FeltDB through bounded, indexed queries and snapshots; nothing scans a collection to find a few records. | `feltdb_consumer.rs`: `the_controller_keeps_authority_in_feltdb_through_an_outage` (a quiet cycle runs no queries; scans are limited to the listed shapes); `consumer.rs`: `targeted_reads_are_indexed_and_bounded` |
 | 17 | A snapshot is coherent: it never observes part of a transaction, and it is reused only while the revision it represents is current. | `compute_state::conformance` (memory, file, and a real FeltDB): concurrent paired writes, reuse, staleness, identity |
 | 18 | A controller never runs on a model it would misuse, and the model is never downgraded. | `consumer.rs`: `the_upgrade_backs_up_migrates_and_verifies`, `a_newer_model_is_never_downgraded` |
+| 19 | A session is durable before any provider acts, keeps its identities across restarts, and a stale provider answer never revives it. | `compute-provider/tests/sessions.rs`: `a_session_is_durable_before_the_provider_answers_and_survives_a_restart_while_provisioning`, `a_ready_session_and_its_evidence_survive_a_restart`, `a_stale_provider_response_cannot_resurrect_a_destroyed_session`; `compute-cli/tests/sessions.rs` |
+| 20 | Session providers are executors, never authorities: every session operation is authorized and bound to its owner, and commands in a session are ordinary durable jobs. | `sessions.rs`: `every_operation_is_authorized_and_bound_to_its_owner`, `a_session_lives_its_whole_lifecycle_on_any_provider`, `a_provider_without_optional_capabilities_is_still_a_complete_provider` |
 
 ## Failure kinds
 

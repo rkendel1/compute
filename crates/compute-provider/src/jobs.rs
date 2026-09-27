@@ -35,6 +35,23 @@ struct StoredRequest {
     admission: Option<Admission>,
 }
 
+/// What `JobManager::accept` receives.
+pub(crate) struct Acceptance<'a> {
+    pub request: ProviderRequest,
+    pub owner: String,
+    pub idempotency_key: Option<&'a str>,
+    /// Identities the caller reserved before submitting, so they are durable
+    /// before the job exists.
+    pub reserved: Option<ReservedJob>,
+}
+
+/// Identities a session reserves for one of its executions.
+pub(crate) struct ReservedJob {
+    pub job_id: JobId,
+    pub execution_id: String,
+    pub session_id: Option<compute_core::SessionId>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ExpiredMarker {
     owner: String,
@@ -211,6 +228,36 @@ impl JobManager {
         owner: String,
         idempotency_key: Option<&str>,
     ) -> Result<compute_core::JobSubmission, ProviderError> {
+        self.accept(Acceptance {
+            request,
+            owner,
+            idempotency_key,
+            reserved: None,
+        })
+        .await
+    }
+
+    /// Accept a durable job. Remote submissions and session executions both
+    /// arrive here, so they share one lifecycle: persistence, admission,
+    /// reservation, execution, evidence, recovery, and retention.
+    pub(crate) async fn accept(
+        self: &Arc<Self>,
+        acceptance: Acceptance<'_>,
+    ) -> Result<compute_core::JobSubmission, ProviderError> {
+        let Acceptance {
+            request,
+            owner,
+            idempotency_key,
+            reserved,
+        } = acceptance;
+        if let Some(reserved) = &reserved
+            && !compute_core::is_execution_id(&reserved.execution_id)
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::EvidenceInvalid,
+                "reserved execution identity is malformed",
+            ));
+        }
         if idempotency_key.is_some_and(|value| {
             value.is_empty()
                 || value.len() > 256
@@ -233,6 +280,29 @@ impl JobManager {
         let request_hash = request.request_hash()?;
         let key_hash = idempotency_key.map(|key| compute_core::sha256_identity(key.as_bytes()));
         let _guard = self.mutation.lock().await;
+        // A reserved job that already exists was accepted before (a session
+        // reconciling after a restart): accept it again only as the same
+        // request from the same owner.
+        if let Some(reserved) = &reserved
+            && self.directory(&reserved.job_id).is_dir()
+        {
+            let stored = self.read_request(&reserved.job_id)?;
+            let job = self.read_job(&reserved.job_id)?;
+            if stored.owner != owner
+                || stored.request.request_hash()? != request_hash
+                || job.execution_id.as_deref() != Some(reserved.execution_id.as_str())
+            {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::IdempotencyConflict,
+                    "reserved job identity was already used for a different request",
+                ));
+            }
+            return Ok(compute_core::JobSubmission {
+                job_id: job.job_id,
+                request_id: job.request.request_id,
+                status: job.status,
+            });
+        }
         if let Some(key_hash) = &key_hash
             && let Some(existing) = self.find_idempotent(&owner, key_hash)?
         {
@@ -250,7 +320,14 @@ impl JobManager {
                 status: job.status,
             });
         }
-        let job_id = JobId::generate();
+        let (job_id, execution_id, session_id) = match reserved {
+            Some(reserved) => (
+                reserved.job_id,
+                Some(reserved.execution_id),
+                reserved.session_id,
+            ),
+            None => (JobId::generate(), None, None),
+        };
         let directory = self.directory(&job_id);
         let dependency_id = bundle
             .dependency_capsule
@@ -315,10 +392,11 @@ impl JobManager {
             admission: None,
             reservation: Some(reservation),
             capacity_wait: None,
-            execution_id: None,
+            execution_id,
             result_digest: None,
             cancellation: JobCancellation::default(),
             failure: None,
+            session_id,
             created_at: now,
             updated_at: now,
         };
@@ -480,7 +558,11 @@ impl JobManager {
                 .await;
             return;
         }
-        let control = compute_core::ExecutionControl::new().with_log_directory(log_directory);
+        let mut control = compute_core::ExecutionControl::new().with_log_directory(log_directory);
+        let reserved_execution_id = self.read_job(&job_id).ok().and_then(|job| job.execution_id);
+        if let Some(execution_id) = &reserved_execution_id {
+            control = control.with_execution_id(execution_id.clone());
+        }
         self.active
             .lock()
             .await
@@ -824,6 +906,15 @@ impl JobManager {
             )?;
         }
         let mut job = self.read_job(job_id)?;
+        if job
+            .execution_id
+            .as_ref()
+            .is_some_and(|reserved| reserved != &result.execution_id)
+        {
+            return Err(evidence_error(
+                "the execution did not use the identity reserved for it",
+            ));
+        }
         job.execution_id = Some(result.execution_id.clone());
         job.result_digest = Some(compute_core::sha256_identity(
             &serde_json::to_vec(&JobResult {
@@ -1023,6 +1114,21 @@ impl JobManager {
             stderr: read_optional_log(&directory.join("stderr.log"))?,
             complete: job.status.is_terminal(),
         })
+    }
+
+    /// Wait until the job is terminal, observing the durable record.
+    pub(crate) async fn wait_terminal(
+        &self,
+        job_id: &JobId,
+        owner: &str,
+    ) -> Result<ExecutionJob, ProviderError> {
+        loop {
+            let job = self.status(job_id, owner).await?;
+            if job.status.is_terminal() {
+                return Ok(job);
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     pub async fn events(

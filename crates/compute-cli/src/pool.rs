@@ -278,7 +278,7 @@ pub struct PlacementArtifact {
     pub args: Vec<String>,
 }
 
-fn placement_error(error: compute_placement::PlacementError) -> ComputeError {
+pub(crate) fn placement_error(error: compute_placement::PlacementError) -> ComputeError {
     ComputeError::InvalidWorkload(error.to_string())
 }
 
@@ -287,7 +287,7 @@ fn parse_platform(value: &str) -> Result<PlatformIdentity, String> {
         .ok_or_else(|| "platform must be <os>-<architecture>".into())
 }
 
-fn print_json(value: &impl serde::Serialize) {
+pub(crate) fn print_json(value: &impl serde::Serialize) {
     println!(
         "{}",
         serde_json::to_string_pretty(value).expect("placement values are serializable")
@@ -634,7 +634,7 @@ pub(crate) async fn runtime_inventory(
 
 /// Discover capabilities. `refresh` forces discovery and persists the
 /// result to the capability cache.
-async fn discover(
+pub(crate) async fn discover(
     location: &PoolLocation,
     pool: &ProviderPool,
     refresh: bool,
@@ -890,7 +890,7 @@ pub(crate) async fn evaluate(
     Ok((pool, report, request))
 }
 
-fn parse_placement_policy(
+pub(crate) fn parse_placement_policy(
     provider: Option<&str>,
     policy: Option<&str>,
     prefer_provider: Option<&str>,
@@ -1244,7 +1244,7 @@ async fn wait_for_result(
 }
 
 /// Report a failed placement. Returns whether a provider was selected.
-fn placed(report: &PlacementReport, json: bool) -> bool {
+pub(crate) fn placed(report: &PlacementReport, json: bool) -> bool {
     if report.outcome == PlacementOutcome::Placed {
         return true;
     }
@@ -1293,7 +1293,7 @@ fn placed(report: &PlacementReport, json: bool) -> bool {
     false
 }
 
-fn dispatch_failure(
+pub(crate) fn dispatch_failure(
     error: &compute_placement::DispatchError,
     json: bool,
 ) -> compute_core::Result<()> {

@@ -1125,8 +1125,15 @@ fn explain(
             crate::SubmissionMode::Synchronous => "synchronous",
             crate::SubmissionMode::Job => "job",
             crate::SubmissionMode::Deployment => "deployment",
+            crate::SubmissionMode::Session => "session",
         }
     ));
+    if !requirements.session_capabilities.is_empty() {
+        requires.push(format!(
+            "session capabilities: {}",
+            requirements.session_capabilities.join(", ")
+        ));
+    }
 
     let considered = providers
         .iter()

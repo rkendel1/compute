@@ -95,7 +95,8 @@ Where each requirement comes from:
 | Distribution | `--distribution` |
 | Isolation | The workload's profile. `--isolation` may strengthen it, never weaken it |
 | Platform | The dependency capsule, the ELF header of a native entrypoint, or `--platform`. Conflicting sources are an error |
-| `submission` | `job` for `compute pool submit` or `--submit` |
+| `submission` | `job` for `compute pool submit` or `--submit`; `session` for `compute session create` |
+| Session capabilities | `compute session create --require`, plus `network` when the session asks for a network |
 
 ## Matching
 
@@ -127,7 +128,8 @@ value, and the available value:
 | network | `network_unsupported` |
 | resources | `cpu_unavailable`, `memory_unavailable`, `disk_unavailable`, `timeout_unenforceable`, `timeout_exceeds_limit`, `memory_unenforceable`, `memory_exceeds_limit`, `cpu_limit_unenforceable`, `process_limit_unenforceable`, `output_limit_unenforceable` |
 | artifact | `artifact_mode_unsupported`, `artifact_too_large`, `output_exceeds_limit` |
-| execution | `run_unsupported`, `jobs_unsupported`, `deployment_unsupported`: the provider does not offer the submission's mode (its `execution` capability); `required` names the mode and `available` lists what it offers |
+| execution | `run_unsupported`, `jobs_unsupported`, `deployment_unsupported`, `sessions_unsupported`: the provider does not offer the submission's mode (its `execution` capability); `required` names the mode and `available` lists what it offers |
+| session | `session_capability_unsupported`: the provider's session environments lack capabilities the session requires; `required` lists them and `available` lists what they offer |
 
 Runtime isolation is resolved by the same function execution uses, so
 placement never admits a request that execution would reject.
@@ -268,8 +270,9 @@ prefer_provider = "remote-dev"
 CLI placement flags override these defaults.
 
 Every submission requires a provider that offers its mode: `pool run` a
-provider that offers `run`, `pool submit` one that offers `jobs`, and
-`compute deploy` one that offers `deployments`. The local provider has no
+provider that offers `run`, `pool submit` one that offers `jobs`,
+`compute deploy` one that offers `deployments`, and `compute session create`
+one that offers `sessions` ([sessions.md](sessions.md)). The local provider has no
 durable jobs, so for `pool submit` it is `incompatible` with
 `jobs_unsupported`. The output
 names the provider and endpoint that own the job, for example:

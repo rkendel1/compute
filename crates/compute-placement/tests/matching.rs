@@ -520,3 +520,103 @@ fn isolation_is_reported_even_when_network_also_fails() {
         ]
     );
 }
+
+fn session_requirements(capabilities: &[&str]) -> compute_placement::PlacementRequirements {
+    let bundle = compute_provider::environment_bundle(&compute_provider::SessionEnvironmentSpec {
+        resources: compute_core::SessionResources {
+            cpu_count: Some(2),
+            memory_bytes: Some(2 * 1024 * 1024 * 1024),
+            disk_bytes: None,
+        },
+        network: NetworkPolicy::Network,
+        isolation: IsolationProfile::Process,
+    })
+    .unwrap();
+    compute_placement::PlacementRequirements::for_session(
+        &bundle,
+        4096,
+        &Default::default(),
+        &capabilities
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap()
+}
+
+fn session_capabilities(resume: bool) -> compute_core::SessionCapabilities {
+    compute_core::SessionCapabilities {
+        exec: true,
+        filesystem: true,
+        network: true,
+        suspend: true,
+        resume,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_session_is_placed_like_a_workload_on_a_provider_that_hosts_sessions() {
+    let requirements = session_requirements(&["exec"]);
+    assert_eq!(requirements.artifact.submission, SubmissionMode::Session);
+    assert_eq!(requirements.runtime.kind, RuntimeKind::Shell);
+    assert_eq!(requirements.resources.cpu_count, Some(2));
+    assert_eq!(
+        requirements.resources.memory_bytes,
+        Some(2 * 1024 * 1024 * 1024)
+    );
+    // Network access is a capability of a session that asks for it.
+    assert_eq!(requirements.session_capabilities, ["exec", "network"]);
+
+    let jobs_only = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Shell]).descriptor("jobs");
+    assert_eq!(
+        codes(&requirements, &jobs_only),
+        [ReasonCode::SessionsUnsupported]
+    );
+
+    let mut hosting = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Shell]);
+    hosting.sessions = Some(session_capabilities(true));
+    let descriptor = hosting.descriptor("sessions");
+    assert!(descriptor.artifact_limits.sessions);
+    assert!(match_provider(&requirements, &descriptor).compatible);
+}
+
+#[test]
+fn session_capabilities_come_from_the_provider_and_are_never_assumed() {
+    let requirements = session_requirements(&["resume"]);
+    let mut provider = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Shell]);
+    provider.sessions = Some(session_capabilities(false));
+    let matched = match_provider(&requirements, &provider.descriptor("no-resume"));
+    assert_eq!(matched.codes(), [ReasonCode::SessionCapabilityUnsupported]);
+    assert_eq!(matched.reasons[0].required, serde_json::json!(["resume"]));
+    assert_eq!(
+        ReasonCode::SessionCapabilityUnsupported.dimension(),
+        "session"
+    );
+
+    // A name Compute does not define is an error, not "not required".
+    let bundle = compute_provider::environment_bundle(&Default::default()).unwrap();
+    assert!(
+        compute_placement::PlacementRequirements::for_session(
+            &bundle,
+            1,
+            &Default::default(),
+            &["teleport".into()]
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_provider_without_sessions_keeps_its_capability_version() {
+    let plain = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Shell]).descriptor("p");
+    let mut hosting = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Shell]);
+    hosting.sessions = Some(session_capabilities(true));
+    let hosting = hosting.descriptor("p");
+    assert_ne!(plain.capability_version, hosting.capability_version);
+    // The descriptor of a provider that hosts no sessions serializes as
+    // before, so cached descriptors and their digests stay valid.
+    let encoded = serde_json::to_value(&plain).unwrap();
+    assert!(encoded.get("sessions").is_none());
+    assert!(encoded["artifact_limits"].get("sessions").is_none());
+}
