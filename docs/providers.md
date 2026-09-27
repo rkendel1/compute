@@ -39,6 +39,7 @@ remotely, `LocalProvider::capabilities` locally). The response describes:
 | `artifact_modes`, `max_request_bytes`, `max_output_bytes` | Artifact transport limits |
 | `max_concurrent_jobs`, `job_retention_seconds` | Durable job limits, when jobs are accepted |
 | `execution` | The execution modes the provider accepts: `run` (synchronous workloads), `jobs` (durable asynchronous jobs), `deployments` (durable applications) |
+| `target_features` | What the node offers environment computers: `kvm`, `firecracker`, `containers`, `gpu`, `virtualization`. Detected at start (`/dev/kvm`, a `firecracker` binary, `docker`/`podman`, `/dev/nvidia0`) or declared with `compute serve --target-feature`; see [computers.md](computers.md#targets) |
 
 Placement turns this response into a canonical, validated **provider
 descriptor** with a `capability_version` digest. See

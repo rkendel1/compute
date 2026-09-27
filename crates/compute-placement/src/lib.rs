@@ -20,6 +20,7 @@ pub mod matching;
 pub mod placement;
 pub mod pool;
 pub mod requirements;
+pub mod targets;
 
 pub use descriptor::{
     ArtifactLimits, Availability, DESCRIPTOR_VERSION, DependencyCapsuleSupport, DescriptorError,
@@ -46,6 +47,7 @@ pub use requirements::{
     REQUIREMENTS_VERSION, RequirementOptions, ResourceRequirement, RuntimeRequirement,
     SubmissionMode, elf_platform,
 };
+pub use targets::ComputeTarget;
 
 pub const LOCAL_PROTOCOL: &str = "compute.local@1";
 

@@ -687,6 +687,8 @@ export interface EnvironmentSummary {
   workload_count: number;
   service_count: number;
   provider: string;
+  /** The status of the environment's computer, when it has one. */
+  computer?: string;
 }
 
 export interface EnvironmentCreateInput {

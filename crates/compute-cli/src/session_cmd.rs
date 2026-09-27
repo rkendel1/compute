@@ -273,11 +273,13 @@ async fn create(
         },
         network: args.network.clone(),
         isolation: args.isolation.unwrap_or_default(),
+        architecture: None,
     };
     let spec = SessionSpec {
         ttl_seconds: Some(args.ttl.as_secs().max(1)),
         required_capabilities: args.require.clone(),
         endpoints: args.expose.clone(),
+        ..SessionSpec::default()
     };
     let create = SessionCreateRequest::new(&environment, spec).map_err(session_error)?;
     let bundle = create.environment().map_err(session_error)?;

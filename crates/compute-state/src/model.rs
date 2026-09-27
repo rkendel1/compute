@@ -36,7 +36,11 @@ pub const STATE_VERSION: &str = "compute.state@1";
 ///   every collection, and indexes for the filters Compute's views use
 ///   (`Execution.project_id`, `Receipt.project_id`, `Event.environment`,
 ///   `Event.project`, `Event.deployment_id`).
-pub const MODEL_GENERATION: u32 = 3;
+/// - 3: versioned deployments and the runtime identity of their workloads.
+/// - 4: environments on a computer: `Environment.owner`,
+///   `Environment.computer`, `Environment.contents`, and the `Computer`
+///   collection (the computer's lifecycle and observed contents).
+pub const MODEL_GENERATION: u32 = 4;
 
 /// A typed document of one collection.
 pub trait Document: Serialize + DeserializeOwned + Clone + Send + Sync {
@@ -244,8 +248,70 @@ pub struct EnvironmentRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// The principal that created the environment, when it owns a
+    /// computer. Every operation on the computer is bound to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// The computer this environment asks for, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<compute_core::ComputerSpec>,
+    /// What belongs in the computer: desired state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contents: Option<compute_core::EnvironmentContents>,
 }
 document!(EnvironmentRecord, Environment);
+
+/// An environment's computer: its lifecycle, where it runs, and what it
+/// holds, as Compute drives and observes it. Written by the controller,
+/// before it asks a target for anything; never read back as intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerRecord {
+    pub environment_id: String,
+    pub environment: String,
+    pub owner: String,
+    pub lifecycle: compute_core::ComputerLifecycle,
+    pub status: compute_core::ComputerStatus,
+    /// Increases with every transition. A target's answer is applied only
+    /// to the generation it answers.
+    pub generation: u64,
+    /// The computer spec generation this computer was provisioned for.
+    pub spec_generation: u64,
+    /// The target (a pool member) the computer was placed on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_id: Option<String>,
+    /// The session on the target that holds the computer: the provider's
+    /// handle, never an identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The reference provisioning is keyed by on the target, so repeating
+    /// it after a restart finds the same session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<compute_core::SessionCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<compute_core::SessionConnection>,
+    /// Sessions of earlier generations, until their teardown is confirmed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired: Vec<compute_core::RetiredSession>,
+    #[serde(default)]
+    pub observed: compute_core::ObservedContents,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<compute_core::ComputerFailure>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+document!(ComputerRecord, Computer);
 
 /// A project's membership in an environment: its desired state there, its
 /// configuration there, and which deployment is current.
@@ -996,6 +1062,28 @@ pub mod events {
     pub const CREDENTIAL_REVOKED: &str = "credential.revoked";
     pub const CREDENTIAL_ROTATED: &str = "credential.rotated";
     pub const CREDENTIAL_BOOTSTRAPPED: &str = "credential.bootstrapped";
+    // Environments on a computer.
+    pub const COMPUTER_REQUESTED: &str = "computer.requested";
+    pub const COMPUTER_PLACED: &str = "computer.placed";
+    pub const COMPUTER_PROVISIONED: &str = "computer.provisioned";
+    pub const COMPUTER_RUNNING: &str = "computer.running";
+    pub const COMPUTER_STOPPING: &str = "computer.stopping";
+    pub const COMPUTER_STOPPED: &str = "computer.stopped";
+    pub const COMPUTER_RESUMED: &str = "computer.resumed";
+    pub const COMPUTER_FAILED: &str = "computer.failed";
+    pub const COMPUTER_DESTROYING: &str = "computer.destroying";
+    pub const COMPUTER_DESTROYED: &str = "computer.destroyed";
+    pub const COMPUTER_EXPIRED: &str = "computer.expired";
+    pub const COMPUTER_REPLACING: &str = "computer.replacing";
+    pub const COMPUTER_ORPHAN_DESTROYED: &str = "computer.orphan_destroyed";
+    pub const COMPUTER_ENVIRONMENT_LOST: &str = "computer.environment_lost";
+    pub const CONTENTS_CHANGED: &str = "environment.contents_changed";
+    pub const CONTENTS_APPLIED: &str = "environment.contents_applied";
+    pub const CONTENTS_FAILED: &str = "environment.contents_failed";
+    pub const CONTENTS_CONVERGED: &str = "environment.contents_converged";
+    pub const ENVIRONMENT_EXEC: &str = "environment.exec";
+    pub const ENVIRONMENT_CONNECTED: &str = "environment.connected";
+    pub const ENVIRONMENT_RECONCILE_REQUESTED: &str = "environment.reconcile_requested";
 }
 
 /// A 24-hex-digit digest of length-prefixed parts.
@@ -1047,6 +1135,11 @@ pub mod ids {
 
     pub fn provider(id: &str) -> String {
         format!("pvd_{id}")
+    }
+
+    /// An environment has at most one computer record.
+    pub fn computer(environment_id: &str) -> String {
+        format!("cmp_{}", short_digest(&[environment_id]))
     }
 
     pub fn workload_status(workload_id: &str) -> String {
@@ -1137,5 +1230,6 @@ pub fn decode_document(
         C::Certificate => decode::<CertificateRecord>(value),
         C::OperatorCredential => decode::<OperatorCredentialRecord>(value),
         C::Audit => decode::<AuditRecord>(value),
+        C::Computer => decode::<ComputerRecord>(value),
     }
 }

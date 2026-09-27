@@ -68,6 +68,7 @@ pub struct Synthetic {
     pub resources: compute_core::ProviderResourceInventory,
     /// Session environments' capabilities; `Some` hosts sessions.
     pub sessions: Option<compute_core::SessionCapabilities>,
+    pub features: Vec<String>,
 }
 
 impl Synthetic {
@@ -95,6 +96,7 @@ impl Synthetic {
             unavailable: vec![],
             policy: None,
             sessions: None,
+            features: vec![],
             resources: compute_core::ProviderResourceInventory {
                 capacity: compute_core::ResourceVector {
                     cpu_count: 8,
@@ -131,6 +133,7 @@ impl Synthetic {
             policy: self.policy.clone(),
             resources: self.resources.clone(),
             sessions: self.sessions,
+            features: self.features.clone(),
         }
     }
 
@@ -224,6 +227,7 @@ impl Synthetic {
                 sessions: self.sessions.is_some(),
             }),
             sessions: self.sessions,
+            target_features: self.features.clone(),
             inventory: RuntimeInventory {
                 compute_version: "0.1.0".into(),
                 platform: self.platform.clone(),
@@ -282,6 +286,7 @@ pub fn requirements(kind: RuntimeKind) -> PlacementRequirements {
             submission: SubmissionMode::Synchronous,
         },
         session_capabilities: vec![],
+        target_features: vec![],
     }
 }
 

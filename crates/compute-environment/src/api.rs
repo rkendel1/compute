@@ -103,6 +103,33 @@ pub const ROUTES: &[(&str, &str)] = &[
         "GET",
         "/environments/{environment}/projects/{project}/workloads/{workload}/logs",
     ),
+    // Environments on a computer.
+    ("GET", "/environments/{environment}/computer"),
+    ("POST", "/environments/{environment}/contents"),
+    ("POST", "/environments/{environment}/repositories"),
+    (
+        "DELETE",
+        "/environments/{environment}/repositories/{repository}",
+    ),
+    ("POST", "/environments/{environment}/packages"),
+    ("DELETE", "/environments/{environment}/packages/{package}"),
+    ("POST", "/environments/{environment}/processes"),
+    ("DELETE", "/environments/{environment}/processes/{process}"),
+    (
+        "POST",
+        "/environments/{environment}/processes/{process}/start",
+    ),
+    (
+        "POST",
+        "/environments/{environment}/processes/{process}/stop",
+    ),
+    ("POST", "/environments/{environment}/reconcile"),
+    ("POST", "/environments/{environment}/replace"),
+    ("POST", "/environments/{environment}/exec"),
+    ("POST", "/environments/{environment}/connect"),
+    ("GET", "/environments/{environment}/jobs/{job}"),
+    ("GET", "/environments/{environment}/logs"),
+    ("GET", "/targets"),
     ("GET", "/projects"),
     ("GET", "/projects/{project}"),
     ("GET", "/projects/{project}/status"),
@@ -916,17 +943,117 @@ async fn route(
 
         // Environments.
         ("GET", ["environments"]) => ok(to_value(Box::pin(daemon.environments()).await?)?),
-        ("POST", ["environments"]) => created(to_value(
-            Box::pin(daemon.create_environment(parse(body)?)).await?,
+        ("POST", ["environments"]) => {
+            // An environment that asks for a computer is owned by the
+            // principal that created it.
+            let definition: Value = parse(body)?;
+            if definition.get("computer").is_some() {
+                created(to_value(
+                    Box::pin(
+                        daemon.create_computer_environment(
+                            serde_json::from_value(definition)
+                                .map_err(|error| EnvironmentError::Invalid(error.to_string()))?,
+                            &principal.operator_id,
+                        ),
+                    )
+                    .await?,
+                )?)
+            } else {
+                created(to_value(
+                    Box::pin(
+                        daemon.create_environment(
+                            serde_json::from_value(definition)
+                                .map_err(|error| EnvironmentError::Invalid(error.to_string()))?,
+                        ),
+                    )
+                    .await?,
+                )?)
+            }
+        }
+        ("GET", ["environments", id, "computer"]) => {
+            ok(to_value(Box::pin(daemon.computer(id)).await?)?)
+        }
+        ("POST", ["environments", id, "contents"]) => ok(to_value(
+            Box::pin(daemon.set_contents(id, &principal.operator_id, parse(body)?)).await?,
         )?),
+        ("POST", ["environments", id, "repositories"]) => ok(to_value(
+            Box::pin(daemon.upsert_repository(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "packages"]) => ok(to_value(
+            Box::pin(daemon.upsert_package(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "processes"]) => ok(to_value(
+            Box::pin(daemon.upsert_process(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        (
+            "DELETE",
+            [
+                "environments",
+                id,
+                kind @ ("repositories" | "packages" | "processes"),
+                name,
+            ],
+        ) => ok(to_value(
+            Box::pin(daemon.remove_content(id, &principal.operator_id, kind, name)).await?,
+        )?),
+        (
+            "POST",
+            [
+                "environments",
+                id,
+                "processes",
+                name,
+                action @ ("start" | "stop"),
+            ],
+        ) => {
+            let desired = if *action == "start" {
+                compute_core::ProcessDesired::Running
+            } else {
+                compute_core::ProcessDesired::Stopped
+            };
+            ok(to_value(
+                Box::pin(daemon.set_process(id, &principal.operator_id, name, desired)).await?,
+            )?)
+        }
+        ("POST", ["environments", id, "reconcile"]) => ok(to_value(
+            Box::pin(daemon.reconcile_computer(id, &principal.operator_id)).await?,
+        )?),
+        ("POST", ["environments", id, "replace"]) => ok(to_value(
+            Box::pin(daemon.replace_computer(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "exec"]) => created(to_value(
+            Box::pin(daemon.computer_exec(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "connect"]) => ok(to_value(
+            Box::pin(daemon.computer_connect(id, &principal.operator_id)).await?,
+        )?),
+        ("GET", ["environments", id, "jobs", job]) => ok(to_value(
+            Box::pin(daemon.computer_job(id, &principal.operator_id, job)).await?,
+        )?),
+        ("GET", ["environments", id, "logs"]) => ok(Box::pin(daemon.computer_logs(
+            id,
+            &principal.operator_id,
+            query.get("process").map(String::as_str),
+            limit(200),
+        ))
+        .await?),
+        ("GET", ["targets"]) => ok(to_value(Box::pin(daemon.targets()).await)?),
         ("GET", ["environments", id]) | ("GET", ["environments", id, "status"]) => {
             ok(to_value(Box::pin(daemon.environment(id)).await?)?)
         }
         ("DELETE", ["environments", id]) => {
-            Box::pin(daemon.destroy_environment(id)).await?;
-            ok(serde_json::json!({ "destroyed": id }))
+            if Box::pin(daemon.has_computer(id)).await? {
+                // The computer is destroyed; the record stays as evidence.
+                ok(to_value(
+                    Box::pin(daemon.destroy_computer(id, &principal.operator_id)).await?,
+                )?)
+            } else {
+                Box::pin(daemon.destroy_environment(id)).await?;
+                ok(serde_json::json!({ "destroyed": id }))
+            }
         }
         ("POST", ["environments", id, action @ ("start" | "stop" | "restart")]) => {
+            Box::pin(daemon.authorize_environment(id, &principal.operator_id)).await?;
             let (desired, restart) = lifecycle(action);
             ok(to_value(
                 Box::pin(daemon.set_environment_state(id, desired, restart)).await?,

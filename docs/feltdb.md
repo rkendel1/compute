@@ -104,7 +104,7 @@ shapes listed below.
 
 | Shape | Why | Bound |
 | --- | --- | --- |
-| The whole-collection sources of the desired-state snapshot (`Environment`, `Project`, `EnvironmentProject`, `Workload`, `WorkloadInstance`, `TrafficAssignment`, `Domain`, `DnsRecord`, `Certificate`) | The controller converges every record of desired state; it needs them all | What the control plane runs, never history. Read only when the revision moved |
+| The whole-collection sources of the desired-state snapshot (`Environment`, `Project`, `EnvironmentProject`, `Workload`, `WorkloadInstance`, `TrafficAssignment`, `Domain`, `DnsRecord`, `Certificate`, `Computer`) | The controller converges every record of desired state; it needs them all | What the control plane runs, never history. Read only when the revision moved |
 | `WorkloadStatus` (the observed-state snapshot) | One status per workload, all compared each cycle | Workloads the control plane has run. Read only when the revision moved |
 | `OperatorCredential` | The node's credential cache | Operators. At start, after recovery, and every 30 s |
 | `Event` newest by `sequence` | Continuing the event sequence at start and after an outage | FeltDB 0.11.8 has no ordered index access; FeltDB scans `Event` server-side and returns one record |
@@ -180,6 +180,8 @@ The controller keeps working state in memory. None of it is authority.
 | Recently finished executions (4,096) | `Execution` records | Idempotent terminalization; serving an execution this controller just ran | Capacity | — (its own evidence) | Served marked `stale` when durable state cannot confirm it |
 | Evidence and audit held during an outage | Written to FeltDB once it answers | Nothing is lost while FeltDB is down | Written, in order, before mutations resume | Until FeltDB answers | Flushed during recovery |
 | Operator credential verifiers | `OperatorCredential` | Authenticating without a round trip | Reload every 30 s and after recovery | 30 s | Reloaded |
+| Computer drivers (one task per environment computer) | The `Computer` record | Driving one computer's lifecycle and contents | Every step re-reads its record by identity (`refresh_targeted`) and writes fenced by its version; a record another writer changed wins | One step; a driver never acts on a record older than its last read | Restarted from the records; provisioning finds the session by its idempotency reference, never creates a second |
+| Orphan sweep schedule | — | When to compare target sessions against `Computer` records | Every 60 s | — | Runs on the first cycle |
 
 Rules:
 
@@ -232,7 +234,7 @@ Recovery, in order, before a mutation is accepted:
 
 ## The model and upgrades
 
-The model is `compute.flow` (`compute.state@1`), at **generation 2**
+The model is `compute.flow` (`compute.state@1`), at **generation 4**
 (`compute_state::MODEL_GENERATION`). Each generation only adds collections,
 optional fields, and indexes.
 

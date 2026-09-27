@@ -1,0 +1,126 @@
+import assert from "node:assert/strict";
+import { createServer, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
+import test from "node:test";
+import {
+  ComputeDaemonClient,
+  createComputeEnvironment,
+  destroyComputeEnvironment,
+  executeComputeEnvironment,
+  getComputeEnvironment,
+  listComputeEnvironments,
+  listComputeTargets,
+  updateComputeEnvironment,
+} from "../index.js";
+
+interface Seen {
+  method: string;
+  path: string;
+  authorization?: string;
+  body?: unknown;
+}
+
+const view = {
+  environment: "my-app",
+  environment_id: "env_1",
+  owner: "alice",
+  lifecycle: "persistent",
+  status: "running",
+  requirements: { cpu_count: 4 },
+  spec_generation: 1,
+  running_generation: 1,
+  target: "railway-1",
+  session_id: "ses_1",
+  desired: { repositories: [{ name: "app", url: "https://example.invalid/app.git", revision: "main" }], generation: 3 },
+  observed: { converged_generation: 3 },
+  converged: true,
+  generation: 9,
+  created_at: "2026-09-27T00:00:00Z",
+};
+
+async function body(request: IncomingMessage): Promise<unknown> {
+  let text = "";
+  for await (const chunk of request) text += chunk;
+  return text ? JSON.parse(text) : undefined;
+}
+
+/** A stand-in for the Compute daemon: it records requests and answers like the API. */
+async function daemon(): Promise<{ endpoint: string; seen: Seen[]; close: () => void }> {
+  const seen: Seen[] = [];
+  let polls = 0;
+  const server = createServer(async (request, response) => {
+    const entry: Seen = { method: request.method ?? "", path: request.url ?? "", body: await body(request) };
+    if (request.headers.authorization) entry.authorization = request.headers.authorization;
+    seen.push(entry);
+    const reply = (status: number, value: unknown) => {
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(JSON.stringify(value));
+    };
+    const route = `${request.method} ${request.url}`;
+    if (route === "POST /environments") return reply(201, { name: "my-app", computer: view });
+    if (route === "GET /environments") return reply(200, [{ name: "plain" }, { name: "my-app", computer: "running" }]);
+    if (route === "GET /environments/my-app/computer") return reply(200, view);
+    if (route === "POST /environments/my-app/contents") return reply(200, { ...view, desired: (entry.body as { contents: unknown }).contents });
+    if (route === "POST /environments/my-app/exec") {
+      return reply(201, { environment: "my-app", target: "railway-1", session_id: "ses_1", job_id: "job_1", execution_id: "exec_1", status: "queued" });
+    }
+    if (route === "GET /environments/my-app/jobs/job_1") {
+      polls += 1;
+      if (polls < 2) return reply(200, { job: { status: "running" } });
+      return reply(200, { job: { status: "failed" }, result: { result: { exit_code: 3, status: "completed", stdout: { text: "out" }, stderr: { text: "err" } } } });
+    }
+    if (route === "DELETE /environments/my-app") return reply(200, { ...view, status: "destroying" });
+    if (route === "GET /targets") return reply(200, [{ target_id: "railway-1", kind: "remote", health: "healthy", hosts_computers: true, features: ["containers"] }]);
+    if (route === "GET /environments/other/computer") return reply(403, { kind: "authorization_denied", message: "environment other belongs to another principal" });
+    return reply(404, { kind: "not_found", message: route });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  return { endpoint: `http://127.0.0.1:${port}`, seen, close: () => server.close() };
+}
+
+test("environment operations are thin requests to the Compute API", async () => {
+  const stub = await daemon();
+  try {
+    const client = new ComputeDaemonClient({ endpoint: stub.endpoint, token: "secret" });
+    await createComputeEnvironment(client, { name: "my-app", computer: { requirements: { cpu_count: 4 } } });
+    assert.deepEqual(stub.seen[0]?.body, { name: "my-app", computer: { lifecycle: "persistent", requirements: { cpu_count: 4 } } });
+    assert.equal(stub.seen[0]?.authorization, "Bearer secret");
+
+    // Only environments with a computer are listed.
+    const listed = await listComputeEnvironments(client);
+    assert.deepEqual(listed.map((environment) => environment.environment), ["my-app"]);
+
+    // An update edits the current desired contents and is fenced on the
+    // generation it was based on.
+    const updated = await updateComputeEnvironment(client, "my-app", (contents) => {
+      contents.repositories![0]!.revision = "v2";
+      contents.processes = [{ name: "api", command: ["npm", "start"], repository: "app" }];
+    });
+    const sent = stub.seen.find((request) => request.path === "/environments/my-app/contents")!.body as {
+      contents: { repositories: { revision: string }[] };
+      expected_generation: number;
+    };
+    assert.equal(sent.expected_generation, 3);
+    assert.equal(sent.contents.repositories[0]!.revision, "v2");
+    assert.equal(updated.desired.processes?.[0]?.name, "api");
+
+    // A command is a durable job; its failure is a result, not an exception.
+    const ran = await executeComputeEnvironment(client, "my-app", ["npm", "test"], { env: { CI: "1" }, pollMs: 1 });
+    assert.equal(ran.job_id, "job_1");
+    assert.equal(ran.execution_id, "exec_1");
+    assert.equal(ran.exit_code, 3);
+    assert.equal(ran.stdout, "out");
+    assert.deepEqual(stub.seen.find((request) => request.path === "/environments/my-app/exec")?.body, { command: ["npm", "test"], env: { CI: "1" } });
+
+    const destroyed = await destroyComputeEnvironment(client, "my-app");
+    assert.equal(destroyed.status, "destroying");
+    const targets = await listComputeTargets(client);
+    assert.equal(targets[0]?.hosts_computers, true);
+    // Refusals keep their meaning.
+    await assert.rejects(getComputeEnvironment(client, "other"), (error: Error & { kind?: string; status?: number }) =>
+      error.kind === "authorization_denied" && error.status === 403);
+  } finally {
+    stub.close();
+  }
+});

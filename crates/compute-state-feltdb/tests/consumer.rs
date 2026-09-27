@@ -82,6 +82,9 @@ fn environment(name: &str) -> EnvironmentRecord {
         policy: None,
         provider: None,
         created_at: chrono::Utc::now(),
+        owner: None,
+        computer: None,
+        contents: None,
     }
 }
 

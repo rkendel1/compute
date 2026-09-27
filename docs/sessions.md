@@ -289,6 +289,20 @@ and a provider that does not offer them is `incompatible` for sessions with
 sessions yet: it keeps its durable state in FeltDB, and session records live
 beside the `compute serve` job store.
 
+`--session-provider container` hosts each session in its own container
+instead (`--container-runtime docker|podman`, `--container-image`,
+default `debian:stable-slim`): the workspace directory is mounted at
+`/workspace`, `--cpu`/`--memory`/`--network none` become the container's
+limits, commands run through `docker exec`, `stop` and `resume` stop and
+start the same container, and destroy removes it and its workspace. A
+container that vanished is reported lost, never silently recreated.
+
+Two session fields exist for environment computers
+([computers.md](computers.md)): `persistent` (created claimed, with no
+TTL; requires the `claim` capability) and `reference`, an idempotency key
+unique among the owner's live sessions — a create that names the reference
+of a live session returns that session instead of making a second.
+
 Other environments — Apple Container, Fly Machines, cloud VMs, local Linux
 VMs, WASM runtimes — plug in by implementing `SessionProvider`
 ([session-architecture.md](session-architecture.md#the-provider-contract)).

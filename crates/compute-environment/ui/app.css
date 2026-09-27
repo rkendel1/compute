@@ -212,3 +212,17 @@ dialog ul { margin: 6px 0 12px; padding-left: 20px; }
   th:nth-child(3), td:nth-child(3), th:nth-child(n+6), td:nth-child(n+6) { display: none; }
   .title h1 { font-size: 19px; }
 }
+
+/* An environment's computer: a draft of its contents, submitted with GO. */
+.computer h3 { margin: 18px 0 8px; font-size: 14px; }
+.computer td input, .computer td select, .add-row input {
+  font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--bg); color: var(--text); max-width: 100%;
+}
+.add-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 4px; }
+.add-row input { flex: 1 1 140px; min-width: 0; }
+.panel.go { margin-top: 18px; padding: 14px 16px; }
+.panel.go ul { margin: 0 0 10px; padding-left: 18px; }
+.panel.go .actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+dialog label.check { display: flex; align-items: center; gap: 8px; color: inherit; }
+dialog label.check input { width: auto; }

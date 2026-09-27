@@ -321,6 +321,9 @@ async fn the_controller_keeps_authority_in_feltdb_through_an_outage() {
                 policy: None,
                 provider: None,
                 created_at: chrono::Utc::now(),
+                owner: None,
+                computer: None,
+                contents: None,
             },
         ))
         .await
@@ -521,6 +524,7 @@ fn assert_scans_are_expected(state: &FeltDbState) {
         "Domain[]",
         "DnsRecord[]",
         "Certificate[]",
+        "Computer[]",
         "WorkloadStatus[]",
         "OperatorCredential[]",
         "Event[] by sequence desc",

@@ -379,6 +379,7 @@ fn request(network: NetworkPolicy, spec: SessionSpec) -> SessionCreateRequest {
             },
             network,
             isolation: Default::default(),
+            architecture: None,
         },
         spec,
     )
@@ -1270,6 +1271,224 @@ fn the_workspace_provider_runs_commands_in_a_private_persistent_directory() {
         assert_eq!(failed.result.exit_code, Some(3));
         client.destroy_session(&id).await.unwrap();
         assert!(!workspace.exists());
+    });
+    server.kill();
+}
+
+#[test]
+fn a_persistent_session_never_expires_and_a_reference_never_makes_a_second_one() {
+    let stores = Stores::new();
+    let fake = Fake::new(&stores.environments, everything());
+    let tokens: Arc<Tokens> = Arc::new(Tokens::default());
+    let client_runtime = client_runtime();
+    let server = Server::start(&stores, fake.clone(), tokens.clone());
+    let client = server.client("alice");
+    let keyed = SessionSpec {
+        persistent: true,
+        reference: Some("cmp_1:1".into()),
+        ..Default::default()
+    };
+    let created = client_runtime.block_on(async {
+        let created = client
+            .create_session(&request(NetworkPolicy::Network, keyed.clone()))
+            .await
+            .unwrap();
+        assert_eq!(created.ownership, SessionOwnership::Claimed);
+        assert!(created.expires_at.is_none() && created.ttl_seconds.is_none());
+        assert_eq!(created.reference.as_deref(), Some("cmp_1:1"));
+        // Repeating the creation returns the same session.
+        let again = client
+            .create_session(&request(NetworkPolicy::Network, keyed.clone()))
+            .await
+            .unwrap();
+        assert_eq!(again.session_id, created.session_id);
+        // The reference belongs to its owner: another principal gets its own.
+        let other = server
+            .client("bob")
+            .create_session(&request(NetworkPolicy::Network, keyed.clone()))
+            .await
+            .unwrap();
+        assert_ne!(other.session_id, created.session_id);
+        ready(&client, &created.session_id.0).await;
+        created
+    });
+    server.kill();
+    // After a restart the same reference still finds it.
+    let server = Server::start(&stores, fake.clone(), tokens);
+    let client = server.client("alice");
+    client_runtime.block_on(async {
+        wait_for(&client, &created.session_id.0, |_| true).await;
+        let again = client
+            .create_session(&request(NetworkPolicy::Network, keyed.clone()))
+            .await
+            .unwrap();
+        assert_eq!(again.session_id, created.session_id);
+        // A destroyed session frees its reference.
+        client.destroy_session(&created.session_id.0).await.unwrap();
+        let fresh = client
+            .create_session(&request(NetworkPolicy::Network, keyed.clone()))
+            .await
+            .unwrap();
+        assert_ne!(fresh.session_id, created.session_id);
+        // A TTL contradicts persistence; a malformed reference is refused.
+        for spec in [
+            SessionSpec {
+                ttl_seconds: Some(60),
+                ..keyed.clone()
+            },
+            SessionSpec {
+                reference: Some("has space".into()),
+                ..keyed.clone()
+            },
+        ] {
+            let error = client
+                .create_session(&request(NetworkPolicy::Network, spec))
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, ProviderErrorKind::PolicyRejected, "{error:?}");
+        }
+    });
+    server.kill();
+    // A provider that cannot keep sessions cannot host a persistent one.
+    let stores = Stores::new();
+    let server = Server::start(
+        &stores,
+        Fake::new(&stores.environments, minimal()),
+        Arc::new(Tokens::default()),
+    );
+    client_runtime.block_on(async {
+        let error = server
+            .client("alice")
+            .create_session(&request(NetworkPolicy::Network, keyed))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::OperationUnsupported);
+    });
+    server.kill();
+}
+
+/// A Docker-compatible CLI that keeps "containers" as directories, so the
+/// container adapter's translation is tested without a container runtime.
+fn fake_container_runtime(root: &Path) -> PathBuf {
+    let state = root.join("containers");
+    std::fs::create_dir_all(&state).unwrap();
+    let script = format!(
+        r#"#!/bin/sh
+state='{state}'
+verb="$1"; shift
+case "$verb" in
+  inspect)
+    name="$3"
+    if [ -f "$state/$name/status" ]; then cat "$state/$name/status"; else echo "Error: No such object: $name" >&2; exit 1; fi ;;
+  run)
+    printf '%s\n' "$@" > "$state/last-run"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --name) name="$2"; shift 2 ;;
+        --volume) volume="${{2%%:*}}"; shift 2 ;;
+        --label|--workdir|--cpus|--memory|--network) shift 2 ;;
+        --detach) shift ;;
+        *) break ;;
+      esac
+    done
+    mkdir -p "$state/$name"; echo running > "$state/$name/status"; echo "$volume" > "$state/$name/volume" ;;
+  exec)
+    set --  "$@"
+    envs=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --workdir) shift 2 ;;
+        --env) envs="$envs $2"; shift 2 ;;
+        *) break ;;
+      esac
+    done
+    name="$1"; shift
+    [ "$(cat "$state/$name/status" 2>/dev/null)" = running ] || {{ echo "container $name is not running" >&2; exit 1; }}
+    cd "$(cat "$state/$name/volume")" && exec env $envs "$@" ;;
+  stop) echo exited > "$state/$1/status" ;;
+  start) [ -d "$state/$1" ] || exit 1; echo running > "$state/$1/status" ;;
+  rm) rm -rf "$state/$2" ;;
+  *) echo "unknown verb $verb" >&2; exit 2 ;;
+esac
+"#,
+        state = state.display()
+    );
+    let path = root.join("fake-docker");
+    std::fs::write(&path, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn the_container_adapter_translates_the_session_contract() {
+    let stores = Stores::new();
+    let runtime = fake_container_runtime(&stores.environments);
+    let provider = Arc::new(compute_provider::ContainerSessionProvider::new(
+        runtime.display().to_string(),
+        "debian:stable-slim",
+        stores.environments.join("volumes"),
+    ));
+    let server = Server::start(&stores, provider, Arc::new(Tokens::default()));
+    let client = server.client("alice");
+    let state = stores.environments.join("containers");
+    client_runtime().block_on(async {
+        let created = client
+            .create_session(&request(NetworkPolicy::Network, ttl(3600)))
+            .await
+            .unwrap();
+        let id = created.session_id.0.clone();
+        let session = ready(&client, &id).await;
+        assert_eq!(session.provider_kind, "container");
+        let container = session.provider_session_id.clone().unwrap();
+        assert!(container.starts_with("compute-"));
+        let launched = std::fs::read_to_string(state.join("last-run")).unwrap();
+        for expected in [
+            "--cpus\n1\n",
+            "--memory\n67108864b\n",
+            "debian:stable-slim\nsleep\ninfinity",
+        ] {
+            assert!(
+                launched.contains(expected),
+                "{expected:?} missing from {launched}"
+            );
+        }
+        // Commands are durable jobs that enter the container.
+        let (_, result) = run(
+            &client,
+            &id,
+            &[
+                "sh",
+                "-c",
+                "echo $COMPUTE_SESSION_WORKSPACE > where; echo kept > note",
+            ],
+        )
+        .await;
+        assert_eq!(result.status, JobStatus::Succeeded, "{result:?}");
+        client.stop_session(&id).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(state.join(&container).join("status"))
+                .unwrap()
+                .trim(),
+            "exited"
+        );
+        client.resume_session(&id).await.unwrap();
+        let (_, again) = run(&client, &id, &["cat", "note", "where"]).await;
+        assert_eq!(again.result.stdout.text, "kept\n/workspace\n");
+        client.destroy_session(&id).await.unwrap();
+        assert!(!state.join(&container).exists());
+        // Resuming a container that is gone fails; it is never recreated.
+        let provider = compute_provider::ContainerSessionProvider::new(
+            runtime.display().to_string(),
+            "debian:stable-slim",
+            stores.environments.join("volumes"),
+        );
+        use compute_provider::SessionProvider;
+        assert!(provider.resume(&container).await.is_err());
+        assert_eq!(
+            provider.inspect(&container).await.unwrap(),
+            EnvironmentState::Missing
+        );
     });
     server.kill();
 }

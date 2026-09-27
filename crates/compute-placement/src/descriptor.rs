@@ -197,6 +197,9 @@ pub struct ProviderDescriptor {
     /// sessions. Reported by the provider, never inferred from its kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sessions: Option<compute_core::SessionCapabilities>,
+    /// Machine features the provider reports as a target (`kvm`, ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_features: Vec<String>,
     pub availability: Availability,
 }
 
@@ -519,6 +522,14 @@ impl ProviderDescriptor {
                 .sessions
                 .then_some(capabilities.sessions)
                 .flatten(),
+            target_features: {
+                let mut features = capabilities.target_features.clone();
+                compute_core::validate_target_features(&features)
+                    .map_err(|error| invalid("target_features", error.to_string()))?;
+                features.sort();
+                features.dedup();
+                features
+            },
             availability,
         };
         descriptor.capability_version = descriptor.compute_capability_version();
@@ -548,6 +559,8 @@ impl ProviderDescriptor {
             policy: &'a Option<compute_policy::Policy>,
             #[serde(skip_serializing_if = "Option::is_none")]
             sessions: &'a Option<compute_core::SessionCapabilities>,
+            #[serde(skip_serializing_if = "<[String]>::is_empty")]
+            target_features: &'a [String],
         }
         canonical_identity(&Body {
             descriptor_version: &self.descriptor_version,
@@ -566,6 +579,7 @@ impl ProviderDescriptor {
             artifact_limits: &self.artifact_limits,
             policy: &self.policy,
             sessions: &self.sessions,
+            target_features: &self.target_features,
         })
     }
 

@@ -41,6 +41,10 @@ app compute {
     policy: json?
     provider: text?
     created_at: datetime
+    // Generation 4: an environment on a computer.
+    owner: text?
+    computer: json?
+    contents: json?
     index name using hash(name)
     record_id: text?
     index record_id using hash(record_id)
@@ -381,6 +385,36 @@ app compute {
     index record_id using hash(record_id)
   }
 
+  // Generation 4: an environment's computer, as the controller drives and
+  // observes it. One record per environment.
+  collection Computer {
+    environment_id: text
+    environment: text
+    owner: text
+    lifecycle: enum(persistent, ephemeral)
+    status: enum(pending, provisioning, running, stopping, stopped, resuming, failed, destroying, destroyed, expired)
+    generation: integer
+    spec_generation: integer
+    target: text?
+    placement_id: text?
+    session_id: text?
+    reference: text?
+    provider_kind: text?
+    capabilities: json?
+    connection: json?
+    retired: json?
+    observed: json
+    failure: json?
+    created_at: datetime
+    updated_at: datetime
+    ready_at: datetime?
+    ended_at: datetime?
+    expires_at: datetime?
+    index environment_id using hash(environment_id)
+    record_id: text?
+    index record_id using hash(record_id)
+  }
+
   policy Project {
     read: authenticated
     write: authenticated
@@ -462,6 +496,10 @@ app compute {
     write: authenticated
   }
   policy Audit {
+    read: authenticated
+    write: authenticated
+  }
+  policy Computer {
     read: authenticated
     write: authenticated
   }

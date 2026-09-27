@@ -401,6 +401,9 @@ pub struct ComputeSession {
     /// Capabilities the caller required at creation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_capabilities: Vec<String>,
+    /// The caller's key for the session (see [`SessionSpec::reference`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<SessionConnection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -460,6 +463,26 @@ pub struct SessionSpec {
     pub required_capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<SessionEndpointRequest>,
+    /// Keep the session until it is destroyed: created claimed, with no
+    /// TTL. Needs the provider's `claim` capability.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub persistent: bool,
+    /// The caller's key for this session. Creating a session with a
+    /// reference the owner already uses for a live session returns that
+    /// session, so a caller that repeats a creation after a restart never
+    /// gets a second environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+}
+
+/// Whether a session reference is well formed: 1-128 letters, digits, and
+/// `.:_-`.
+pub fn valid_session_reference(reference: &str) -> bool {
+    !reference.is_empty()
+        && reference.len() <= 128
+        && reference
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b':' | b'_' | b'-'))
 }
 
 /// A command to run inside a session.

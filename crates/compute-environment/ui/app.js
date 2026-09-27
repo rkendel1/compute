@@ -72,6 +72,11 @@ const STATES = {
   due: ['warn', '◐', 'Due'],
   deploying: ['warn', '◐', 'Deploying'],
   stopping: ['warn', '◐', 'Stopping'],
+  provisioning: ['warn', '◐', 'Provisioning'],
+  resuming: ['warn', '◐', 'Resuming'],
+  destroying: ['warn', '◐', 'Destroying'],
+  exited: ['idle', '○', 'Exited'],
+  destroyed: ['idle', '○', 'Destroyed'],
   degraded: ['warn', '◐', 'Degraded'],
   unknown: ['idle', '○', 'Unknown'],
   stopped: ['idle', '○', 'Stopped'],
@@ -389,11 +394,39 @@ async function environmentsView() {
 
 function createEnvironment() {
   const name = h('input', { id: 'environment-name', placeholder: 'production', autocomplete: 'off' });
-  modal('New environment', h('div', {}, h('label', { for: 'environment-name' }, 'Name'), name), [
+  const computer = h('input', { id: 'environment-computer', type: 'checkbox' });
+  const cpu = h('input', { id: 'environment-cpu', type: 'number', min: '1', value: '2' });
+  const memory = h('input', { id: 'environment-memory', type: 'number', min: '1', value: '4' });
+  const lifecycle = h('select', { id: 'environment-lifecycle' },
+    h('option', { value: 'persistent' }, 'Persistent: kept until destroyed'),
+    h('option', { value: 'ephemeral' }, 'Ephemeral: expires'));
+  const features = h('input', { id: 'environment-features', placeholder: 'kvm, gpu', autocomplete: 'off' });
+  const target = h('input', { id: 'environment-target', placeholder: 'any', autocomplete: 'off' });
+  modal('New environment', h('div', {},
+    h('label', { for: 'environment-name' }, 'Name'), name,
+    h('label', { class: 'check' }, computer, ' On its own computer (placement chooses the target)'),
+    h('label', { for: 'environment-cpu' }, 'CPUs'), cpu,
+    h('label', { for: 'environment-memory' }, 'Memory (GiB)'), memory,
+    h('label', { for: 'environment-lifecycle' }, 'Lifecycle'), lifecycle,
+    h('label', { for: 'environment-features' }, 'Target features'), features,
+    h('label', { for: 'environment-target' }, 'Target'), target), [
     h('button', { onclick: close }, 'Cancel'),
     h('button', { class: 'primary', onclick: async () => {
       close();
-      await act(`Environment ${name.value} created`, () => api('POST', '/environments', { name: name.value }));
+      const definition = { name: name.value };
+      if (computer.checked) {
+        definition.computer = {
+          lifecycle: lifecycle.value,
+          requirements: {
+            cpu_count: Number(cpu.value) || undefined,
+            memory_bytes: Number(memory.value) ? Math.round(Number(memory.value) * 2 ** 30) : undefined,
+            features: features.value.split(',').map((item) => item.trim()).filter(Boolean),
+          },
+          target: target.value.trim() || undefined,
+        };
+        if (lifecycle.value === 'ephemeral') definition.computer.ttl_seconds = 3600;
+      }
+      await act(`Environment ${name.value} created`, () => api('POST', '/environments', definition));
     } }, 'Create'),
   ]);
   name.focus();
@@ -421,9 +454,153 @@ async function environmentView(name) {
         h('button', { onclick: () => environmentLifecycle(name, 'restart') }, 'Restart'),
         h('button', { class: 'danger', onclick: () => environmentLifecycle(name, 'stop') }, 'Stop'))),
     h('div', { class: 'subtitle' }, `${environment.project_count} projects · ${environment.workload_count} workloads · desired ${environment.desired_state} · policy ${short(environment.policy_id)}`),
+    environment.computer ? computerSection(name, environment.computer) : null,
     h('h2', {}, 'Projects'),
     table(['Project', 'Revision', 'Desired', 'Status', 'Workloads', 'Provider', 'Last deployment'], rows, 'No projects in this environment. Add one.'),
   ];
+}
+
+// ---- An environment's computer ----------------------------------------------------
+//
+// Not a remote terminal with buttons. The operator edits what belongs in
+// the computer locally (a draft of its desired contents); nothing changes
+// until GO submits the whole draft as one durable, generation-fenced
+// change, which Compute reconciles in place on the running computer.
+
+/// Local drafts of desired contents, by environment. Only the page holds
+/// them; they are discarded on GO or Discard.
+const DRAFTS = new Map();
+
+function draftOf(name, computer) {
+  let draft = DRAFTS.get(name);
+  if (!draft) {
+    draft = { base: computer.desired.generation || 0, contents: structuredClone(computer.desired) };
+    for (const field of ['repositories', 'packages', 'processes']) draft.contents[field] = draft.contents[field] || [];
+  }
+  return draft;
+}
+
+function edit(name, draft, change) {
+  change(draft.contents);
+  DRAFTS.set(name, draft);
+  render();
+}
+
+/// The individual changes a draft makes, as the operator would say them.
+function changes(desired, contents) {
+  const out = [];
+  for (const field of ['repositories', 'packages', 'processes']) {
+    const before = new Map((desired[field] || []).map((item) => [item.name, JSON.stringify(item)]));
+    const after = new Map(contents[field].map((item) => [item.name, JSON.stringify(item)]));
+    const noun = field.replace(/ies$/, 'y').replace(/s$/, '');
+    for (const [item, value] of after) {
+      if (!before.has(item)) out.push(`Add ${noun} ${item}`);
+      else if (before.get(item) !== value) out.push(`Change ${noun} ${item}`);
+    }
+    for (const item of before.keys()) if (!after.has(item)) out.push(`Remove ${noun} ${item}`);
+  }
+  return out;
+}
+
+function computerSection(name, computer) {
+  const draft = draftOf(name, computer);
+  const { contents } = draft;
+  const observed = computer.observed || {};
+  const live = !['destroying', 'destroyed', 'expired'].includes(computer.status);
+  const pending = changes(computer.desired, contents);
+  const stale = DRAFTS.has(name) && draft.base !== (computer.desired.generation || 0);
+  const field = (value, onchange, attributes) => h('input', { value, autocomplete: 'off', disabled: !live, onchange: (event) => edit(name, draft, () => onchange(event.target.value)), ...attributes });
+  const remove = (list, item) => h('button', { class: 'danger', disabled: !live, onclick: () => edit(name, draft, (next) => { next[list] = next[list].filter((entry) => entry.name !== item); }) }, 'Remove');
+  const evidence = (item) => item ? h('span', { class: 'chip', title: item.evidence ? `job ${item.evidence.job_id}` : '' }, item.evidence && item.evidence.error ? h('span', { class: 'error' }, item.evidence.error) : ago(item.evidence && item.evidence.at)) : '—';
+
+  const repositories = contents.repositories.map((repository) => h('tr', { 'data-repository': repository.name },
+    h('td', {}, h('strong', {}, repository.name)),
+    h('td', { class: 'mono' }, repository.url),
+    h('td', {}, field(repository.revision, (value) => { repository.revision = value; }, { 'aria-label': `${repository.name} revision` })),
+    h('td', { class: 'mono' }, observed.repositories && observed.repositories[repository.name]
+      ? `${observed.repositories[repository.name].revision} ${short(observed.repositories[repository.name].commit)}` : '—'),
+    h('td', {}, evidence(observed.repositories && observed.repositories[repository.name])),
+    h('td', {}, remove('repositories', repository.name))));
+  const processes = contents.processes.map((process) => {
+    const seen = observed.processes && observed.processes[process.name];
+    return h('tr', { 'data-process': process.name },
+      h('td', {}, h('strong', {}, process.name), ' ', h('span', { class: 'chip' }, process.kind || 'process')),
+      h('td', { class: 'mono' }, process.command.join(' ')),
+      h('td', {}, process.repository || '—'),
+      h('td', {}, h('select', { disabled: !live, 'aria-label': `${process.name} desired`, onchange: (event) => edit(name, draft, () => { process.desired = event.target.value; }) },
+        ['running', 'stopped'].map((value) => h('option', { value, selected: (process.desired || 'running') === value }, value)))),
+      h('td', {}, seen ? state(seen.state, `${STATES[seen.state] ? STATES[seen.state][2] : seen.state}${seen.pid ? ` · pid ${seen.pid}` : ''}`) : '—'),
+      h('td', {}, remove('processes', process.name)));
+  });
+  const packages = contents.packages.map((item) => h('tr', { 'data-package': item.name },
+    h('td', {}, h('strong', {}, item.name)),
+    h('td', { class: 'mono' }, item.install.join(' ')),
+    h('td', {}, item.repository || '—'),
+    h('td', {}, evidence(observed.packages && observed.packages[item.name])),
+    h('td', {}, remove('packages', item.name))));
+
+  return h('div', { class: 'computer draft', 'data-computer': computer.status },
+    h('h2', {}, 'Computer'),
+    h('div', { class: 'grid' },
+      fact('Status', state(computer.status)),
+      fact('Target', computer.target || (computer.requested_target ? `${computer.requested_target} (requested)` : 'placing…'), true),
+      fact('Lifecycle', computer.lifecycle + (computer.expires_at ? ` · expires ${new Date(computer.expires_at).toLocaleString()}` : '')),
+      fact('Resources', [computer.requirements.cpu_count ? `${computer.requirements.cpu_count} CPU` : null, bytes(computer.requirements.memory_bytes)].filter((item) => item && item !== '—').join(' · ') || '—'),
+      fact('Contents', computer.converged ? state('running', `Converged · generation ${computer.desired.generation || 0}`) : state('pending', `Reconciling · ${observed.converged_generation || 0} of ${computer.desired.generation || 0}`)),
+      fact('Session', short(computer.session_id), true)),
+    computer.failure ? h('div', { class: 'panel error' }, `${computer.failure.phase}: ${computer.failure.code} — ${computer.failure.message}`) : null,
+    h('h3', {}, 'Repositories'),
+    table(['Repository', 'URL', 'Revision', 'Checked out', 'Last synced', ''], repositories, 'No repositories.'),
+    live ? addRow(['name', 'url', 'revision'], 'Add repository', (value) => edit(name, draft, (next) => {
+      next.repositories.push({ name: value.name, url: value.url, revision: value.revision || 'main' });
+    })) : null,
+    h('h3', {}, 'Applications, services, and processes'),
+    table(['Process', 'Command', 'Repository', 'Desired', 'Observed', ''], processes, 'Nothing runs yet.'),
+    live ? addRow(['name', 'command', 'repository', 'kind'], 'Add process', (value) => edit(name, draft, (next) => {
+      next.processes.push({
+        name: value.name,
+        kind: ['application', 'service', 'agent'].includes(value.kind) ? value.kind : 'process',
+        command: value.command.split(/\s+/).filter(Boolean),
+        repository: value.repository || undefined,
+        desired: 'running',
+      });
+    })) : null,
+    h('h3', {}, 'Packages'),
+    table(['Package', 'Install', 'Repository', 'Installed', ''], packages, 'No packages.'),
+    live ? addRow(['name', 'install', 'repository'], 'Add package', (value) => edit(name, draft, (next) => {
+      next.packages.push({ name: value.name, install: value.install.split(/\s+/).filter(Boolean), repository: value.repository || undefined });
+    })) : null,
+    h('div', { class: 'panel go' },
+      pending.length ? h('ul', {}, pending.map((item) => h('li', {}, item))) : h('div', {}, 'No local changes.'),
+      stale ? h('div', { class: 'error' }, 'Someone changed this computer after you started editing; GO will be refused. Discard and edit again.') : null,
+      h('div', { class: 'actions' },
+        h('button', { disabled: !pending.length, onclick: () => { DRAFTS.delete(name); render(); } }, 'Discard'),
+        h('button', { disabled: !live, onclick: () => act(`Reconciling ${name}`, () => api('POST', `/environments/${enc(name)}/reconcile`)) }, 'Reconcile'),
+        h('button', { class: 'danger', disabled: !live, onclick: () => destroyComputer(name) }, 'Destroy'),
+        h('button', { class: 'primary go', disabled: !pending.length || !live, 'data-go': 'true', onclick: async () => {
+          const result = await act(`GO: ${pending.length} change${pending.length === 1 ? '' : 's'} to ${name}`, () => {
+            DRAFTS.delete(name);
+            return api('POST', `/environments/${enc(name)}/contents`, { contents, expected_generation: draft.base });
+          });
+          if (!result) DRAFTS.set(name, draft);
+        } }, 'GO'))));
+}
+
+/// A row of inputs that adds one item to a draft.
+function addRow(fields, label, add) {
+  const inputs = Object.fromEntries(fields.map((item) => [item, h('input', { placeholder: item, autocomplete: 'off', 'aria-label': `${label}: ${item}` })]));
+  return h('div', { class: 'add-row' }, Object.values(inputs), h('button', { onclick: () => {
+    const value = Object.fromEntries(fields.map((item) => [item, inputs[item].value.trim()]));
+    if (!value.name) { toast(`${label}: a name is required`, true); return; }
+    add(value);
+  } }, label));
+}
+
+async function destroyComputer(name) {
+  if (await confirmImpact(`Destroy ${name}'s computer?`, ['The machine, its workspace, and everything running on it'], ['The environment\'s record, desired contents, and evidence'], 'danger')) {
+    DRAFTS.delete(name);
+    await act(`Destroying ${name}`, () => api('DELETE', `/environments/${enc(name)}`));
+  }
 }
 
 const TABS = ['Overview', 'Workloads', 'Deployments', 'Logs', 'Resources', 'Configuration', 'Receipts', 'Events'];
@@ -953,6 +1130,8 @@ async function refreshDaemon() {
 let refreshTimer = null;
 function scheduleRefresh() {
   if (dialog.open) return;
+  // Never re-render under an edit in progress; the next event catches up.
+  if (document.activeElement && document.activeElement.closest('.draft')) return;
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(render, 250);
 }

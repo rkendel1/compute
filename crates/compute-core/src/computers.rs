@@ -1,0 +1,534 @@
+//! Environments on a computer: the portable types of a durable computer that
+//! Compute provisions on a target and keeps changing in place.
+//!
+//! An environment has always been a place projects run. When it asks for a
+//! computer, Compute also provisions one on a target that satisfies its
+//! requirements, keeps it (persistent) or lets it expire (ephemeral), and
+//! reconciles what the environment says belongs in it — repositories,
+//! packages, processes — by running ordinary durable jobs inside it. Nothing
+//! is redeployed to change what runs there.
+
+use std::collections::BTreeMap;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::{IsolationProfile, NetworkPolicy, SessionCapabilities};
+
+/// Whether a computer outlives the work that created it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerLifecycle {
+    /// Kept until it is destroyed.
+    #[default]
+    Persistent,
+    /// Destroyed when its TTL passes.
+    Ephemeral,
+}
+
+impl ComputerLifecycle {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Persistent => "persistent",
+            Self::Ephemeral => "ephemeral",
+        }
+    }
+}
+
+/// The durable lifecycle of an environment's computer. `destroyed`,
+/// `expired`, and `failed` are terminal: a terminal computer never changes
+/// status again, and its record stays as evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerStatus {
+    Pending,
+    Provisioning,
+    Running,
+    Stopping,
+    Stopped,
+    Resuming,
+    Failed,
+    Destroying,
+    Destroyed,
+    Expired,
+}
+
+impl ComputerStatus {
+    pub const ALL: [Self; 10] = [
+        Self::Pending,
+        Self::Provisioning,
+        Self::Running,
+        Self::Stopping,
+        Self::Stopped,
+        Self::Resuming,
+        Self::Failed,
+        Self::Destroying,
+        Self::Destroyed,
+        Self::Expired,
+    ];
+
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Destroyed | Self::Expired | Self::Failed)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Provisioning => "provisioning",
+            Self::Running => "running",
+            Self::Stopping => "stopping",
+            Self::Stopped => "stopped",
+            Self::Resuming => "resuming",
+            Self::Failed => "failed",
+            Self::Destroying => "destroying",
+            Self::Destroyed => "destroyed",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+impl std::fmt::Display for ComputerStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Features of a target's machine that are not resources or session
+/// capabilities: what the hardware and host software offer.
+pub const TARGET_FEATURES: [&str; 5] =
+    ["containers", "kvm", "firecracker", "gpu", "virtualization"];
+
+/// Validate target feature names, so a typo is never read as "not required".
+pub fn validate_target_features(features: &[String]) -> crate::Result<()> {
+    for feature in features {
+        if !TARGET_FEATURES.contains(&feature.as_str()) {
+            return Err(crate::ComputeError::InvalidWorkload(format!(
+                "unknown target feature `{feature}`: expected one of {}",
+                TARGET_FEATURES.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// What an environment's computer must be. Provider identity is not part
+/// of it: placement finds a target that satisfies it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerRequirements {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
+    /// `x86_64`, `arm64`, ...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
+    #[serde(default)]
+    pub network: NetworkPolicy,
+    #[serde(default)]
+    pub isolation: IsolationProfile,
+    /// Session capabilities the computer must offer (`persistent_storage`,
+    /// `public_endpoint`, `terminal`, ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// Target features the machine must have (`kvm`, `firecracker`, ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+}
+
+impl ComputerRequirements {
+    pub fn validate(&self) -> crate::Result<()> {
+        SessionCapabilities::validate_names(&self.capabilities)?;
+        validate_target_features(&self.features)?;
+        if self.cpu_count == Some(0) {
+            return Err(crate::ComputeError::InvalidWorkload(
+                "a computer needs at least one CPU".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The computer an environment asks for: desired state, written by
+/// operators.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerSpec {
+    pub lifecycle: ComputerLifecycle,
+    pub requirements: ComputerRequirements,
+    /// Constrain placement to this target. Placement chooses when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// An ephemeral computer's lifetime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Increases when the requirements change. A computer running an older
+    /// generation is replaced: an explicit lifecycle operation, never an
+    /// ordinary change.
+    #[serde(default = "first_generation")]
+    pub generation: u64,
+    /// Set when an operator asked for the computer to be destroyed. The
+    /// environment's record stays as evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destroy_requested_at: Option<DateTime<Utc>>,
+}
+
+fn first_generation() -> u64 {
+    1
+}
+
+/// Whether a process should run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessDesired {
+    #[default]
+    Running,
+    Stopped,
+}
+
+/// What a process is for. Descriptive: every kind is a supervised process
+/// inside the computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessKind {
+    #[default]
+    Application,
+    Service,
+    Agent,
+    Process,
+}
+
+impl ProcessKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Application => "application",
+            Self::Service => "service",
+            Self::Agent => "agent",
+            Self::Process => "process",
+        }
+    }
+}
+
+/// A repository checked out in the computer at a revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositorySpec {
+    pub name: String,
+    pub url: String,
+    /// A branch, tag, or commit.
+    pub revision: String,
+}
+
+/// A package installed by running a command once per change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageSpec {
+    pub name: String,
+    pub install: Vec<String>,
+    /// Run inside this repository's checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+}
+
+/// A long-running process in the computer: an application, a service such
+/// as a database, or an agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessSpec {
+    pub name: String,
+    #[serde(default)]
+    pub kind: ProcessKind,
+    pub command: Vec<String>,
+    /// Run inside this repository's checkout, and restart when its
+    /// checkout moves to another commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub desired: ProcessDesired,
+}
+
+/// What an environment says belongs in its computer: desired state. Every
+/// change is an ordinary authorized operation; the reconciler makes the
+/// running computer match it, in place.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentContents {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<RepositorySpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<PackageSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processes: Vec<ProcessSpec>,
+    /// Increases with every change, so evidence can name the change it
+    /// applied.
+    #[serde(default)]
+    pub generation: u64,
+}
+
+fn valid_name(kind: &str, name: &str) -> crate::Result<()> {
+    if name.is_empty()
+        || name.len() > 63
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        || name.starts_with('.')
+    {
+        return Err(crate::ComputeError::InvalidWorkload(format!(
+            "{kind} name {name:?} must be 1-63 letters, digits, '.', '-', or '_', not starting with '.'"
+        )));
+    }
+    Ok(())
+}
+
+fn valid_command(kind: &str, name: &str, command: &[String]) -> crate::Result<()> {
+    if command.is_empty() || command[0].is_empty() || command.iter().any(|part| part.contains('\0'))
+    {
+        return Err(crate::ComputeError::InvalidWorkload(format!(
+            "{kind} {name} needs a command without NUL"
+        )));
+    }
+    Ok(())
+}
+
+impl EnvironmentContents {
+    pub fn validate(&self) -> crate::Result<()> {
+        let invalid = |message: String| Err(crate::ComputeError::InvalidWorkload(message));
+        let mut seen = std::collections::BTreeSet::new();
+        for repository in &self.repositories {
+            valid_name("repository", &repository.name)?;
+            if !seen.insert(("repository", repository.name.as_str())) {
+                return invalid(format!("repository {} is listed twice", repository.name));
+            }
+            for (field, value) in [("url", &repository.url), ("revision", &repository.revision)] {
+                if value.is_empty()
+                    || value.starts_with('-')
+                    || value.bytes().any(|byte| byte.is_ascii_control())
+                {
+                    return invalid(format!(
+                        "repository {} has an invalid {field}",
+                        repository.name
+                    ));
+                }
+            }
+        }
+        let known = |repository: &Option<String>, owner: &str| match repository {
+            Some(name) if !self.repositories.iter().any(|spec| &spec.name == name) => invalid(
+                format!("{owner} names repository {name}, which the environment does not have"),
+            ),
+            _ => Ok(()),
+        };
+        for package in &self.packages {
+            valid_name("package", &package.name)?;
+            if !seen.insert(("package", package.name.as_str())) {
+                return invalid(format!("package {} is listed twice", package.name));
+            }
+            valid_command("package", &package.name, &package.install)?;
+            known(&package.repository, &format!("package {}", package.name))?;
+        }
+        for process in &self.processes {
+            valid_name("process", &process.name)?;
+            if !seen.insert(("process", process.name.as_str())) {
+                return invalid(format!("process {} is listed twice", process.name));
+            }
+            valid_command("process", &process.name, &process.command)?;
+            known(&process.repository, &format!("process {}", process.name))?;
+            for (key, value) in &process.env {
+                if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0')
+                {
+                    return invalid(format!(
+                        "process {} has an invalid environment variable {key:?}",
+                        process.name
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The digest of a desired item, so observed state can say which version of
+/// it the computer holds.
+pub fn fingerprint(value: &impl Serialize) -> String {
+    crate::sha256_identity(&serde_json::to_vec(value).expect("desired items serialize"))
+}
+
+/// Evidence of one operation run inside the computer: the durable job that
+/// did it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationEvidence {
+    pub job_id: String,
+    pub execution_id: String,
+    /// `succeeded`, `failed`, ...
+    pub outcome: String,
+    pub at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedRepository {
+    /// The revision it was asked for.
+    pub revision: String,
+    /// The commit that revision resolved to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    pub fingerprint: String,
+    pub evidence: OperationEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedPackage {
+    pub fingerprint: String,
+    pub evidence: OperationEvidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessState {
+    Running,
+    Stopped,
+    /// It was started and is no longer running.
+    Exited,
+    Failed,
+}
+
+impl ProcessState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Exited => "exited",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedProcess {
+    pub state: ProcessState,
+    /// The fingerprint of what runs: the process spec and the commit of
+    /// its repository.
+    pub fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    pub evidence: OperationEvidence,
+}
+
+/// What the computer holds, as Compute last observed it. Every entry names
+/// the durable job that produced it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedContents {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repositories: BTreeMap<String, ObservedRepository>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub packages: BTreeMap<String, ObservedPackage>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub processes: BTreeMap<String, ObservedProcess>,
+    /// The contents generation the computer last fully matched.
+    #[serde(default)]
+    pub converged_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+}
+
+/// Where a computer failure happened, and whose it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerFailure {
+    /// `placement`, `provisioning`, `reconciliation`, `stopping`,
+    /// `resuming`, `teardown`, `replacement`.
+    pub phase: String,
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
+/// A session this environment used before it was replaced, kept until its
+/// target confirms teardown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetiredSession {
+    pub target: String,
+    pub session_id: String,
+    pub spec_generation: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process(name: &str, repository: Option<&str>) -> ProcessSpec {
+        ProcessSpec {
+            name: name.into(),
+            kind: ProcessKind::Application,
+            command: vec!["./run".into()],
+            repository: repository.map(Into::into),
+            env: BTreeMap::new(),
+            desired: ProcessDesired::Running,
+        }
+    }
+
+    #[test]
+    fn contents_are_validated() {
+        let mut contents = EnvironmentContents {
+            repositories: vec![RepositorySpec {
+                name: "app".into(),
+                url: "https://example.invalid/app.git".into(),
+                revision: "main".into(),
+            }],
+            processes: vec![process("api", Some("app"))],
+            ..Default::default()
+        };
+        contents.validate().unwrap();
+        contents.processes.push(process("api", None));
+        assert!(contents.validate().is_err(), "duplicate process");
+        contents.processes.pop();
+        contents.processes.push(process("worker", Some("missing")));
+        assert!(contents.validate().is_err(), "unknown repository");
+        contents.processes.pop();
+        contents.repositories[0].revision = "--upload-pack=evil".into();
+        assert!(contents.validate().is_err(), "option injection");
+        contents.repositories[0].revision = "main".into();
+        contents.processes[0].name = "../x".into();
+        assert!(contents.validate().is_err(), "path in a name");
+    }
+
+    #[test]
+    fn requirements_reject_unknown_names() {
+        let mut requirements = ComputerRequirements {
+            features: vec!["kvm".into()],
+            capabilities: vec!["persistent_storage".into()],
+            ..Default::default()
+        };
+        requirements.validate().unwrap();
+        requirements.features.push("quantum".into());
+        assert!(requirements.validate().is_err());
+    }
+
+    #[test]
+    fn terminal_statuses_are_final() {
+        for status in ComputerStatus::ALL {
+            assert_eq!(
+                status.is_terminal(),
+                matches!(
+                    status,
+                    ComputerStatus::Destroyed | ComputerStatus::Expired | ComputerStatus::Failed
+                )
+            );
+        }
+    }
+}

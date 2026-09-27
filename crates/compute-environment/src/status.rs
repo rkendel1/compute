@@ -376,6 +376,53 @@ pub struct EnvironmentView {
     pub service_count: usize,
     pub projects: Vec<ProjectView>,
     pub disk_bytes: u64,
+    /// The environment's computer, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<ComputerView>,
+}
+
+/// An environment's computer: what was asked for, where it runs, and
+/// desired against observed contents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerView {
+    pub environment: String,
+    pub environment_id: String,
+    pub owner: String,
+    pub lifecycle: compute_core::ComputerLifecycle,
+    pub status: compute_core::ComputerStatus,
+    pub requirements: compute_core::ComputerRequirements,
+    /// The requirements' generation, and the one the computer runs.
+    pub spec_generation: u64,
+    pub running_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<compute_core::SessionCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<compute_core::SessionConnection>,
+    pub desired: compute_core::EnvironmentContents,
+    pub observed: compute_core::ObservedContents,
+    /// Whether the computer holds exactly what the environment asks for.
+    pub converged: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<compute_core::ComputerFailure>,
+    /// Transitions so far: every one is also an event.
+    pub generation: u64,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
 }
 
 /// Summary row for `compute environment list` and the UI's first screen.
@@ -390,6 +437,9 @@ pub struct EnvironmentSummary {
     pub workload_count: usize,
     pub service_count: usize,
     pub provider: String,
+    /// The status of the environment's computer, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<compute_core::ComputerStatus>,
 }
 
 /// A project in one environment, as listed from the project's side.
