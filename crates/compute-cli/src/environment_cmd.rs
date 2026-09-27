@@ -1864,6 +1864,39 @@ pub async fn deploy(command: DeployCommand) -> compute_core::Result<()> {
         .clone()
         .ok_or_else(|| ComputeError::Runtime("--environment or --from/--to is required".into()))?;
     let client = command.daemon.client()?;
+    // An environment with a computer is deployed to by releasing a revision
+    // of one of its projects: a change to desired state, reconciled in
+    // place on the same machine. No bundle, no second pipeline.
+    let target: EnvironmentView = client
+        .get(&format!("/environments/{environment}"))
+        .await
+        .map_err(error)?;
+    if target.computer.is_some() {
+        if command.source.is_some() || !command.env.is_empty() {
+            return Err(ComputeError::Runtime(format!(
+                "{environment} runs on its own computer: a deployment there releases a \
+                 revision of a project's repository (--revision); change its configuration with \
+                 `compute environment config {environment} --set KEY=VALUE`"
+            )));
+        }
+        let revision = command.revision.clone().ok_or_else(|| {
+            ComputeError::Runtime(format!(
+                "{environment} runs on its own computer: name the revision to release \
+                 (--revision BRANCH, TAG, or COMMIT)"
+            ))
+        })?;
+        return crate::computer_cmd::release(
+            &client,
+            &crate::computer_cmd::ReleaseArgs {
+                environment: environment.clone(),
+                project: command.project.clone(),
+                revision,
+                no_wait: false,
+                json: command.json,
+            },
+        )
+        .await;
+    }
     let mut config = None;
     let revision = match &command.source {
         Some(source) => {

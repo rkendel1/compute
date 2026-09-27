@@ -400,6 +400,7 @@ app compute {
     session_id: text?
     reference: text?
     provider_kind: text?
+    provider_resource: text?
     capabilities: json?
     connection: json?
     retired: json?
@@ -411,6 +412,23 @@ app compute {
     ended_at: datetime?
     expires_at: datetime?
     index environment_id using hash(environment_id)
+    record_id: text?
+    index record_id using hash(record_id)
+  }
+
+  collection WorkSession {
+    session_id: text
+    environment_id: text
+    environment: text
+    owner: text
+    kind: enum(attached, ephemeral)
+    status: enum(open, closed)
+    opened_at: datetime
+    closed_at: datetime?
+    expires_at: datetime?
+    close_reason: text?
+    index environment_id using hash(environment_id)
+    index owner using hash(owner)
     record_id: text?
     index record_id using hash(record_id)
   }
@@ -500,6 +518,10 @@ app compute {
     write: authenticated
   }
   policy Computer {
+    read: authenticated
+    write: authenticated
+  }
+  policy WorkSession {
     read: authenticated
     write: authenticated
   }

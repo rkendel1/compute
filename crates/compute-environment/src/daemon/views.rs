@@ -51,6 +51,10 @@ impl Daemon {
                 workload_count: view.workload_count,
                 service_count: view.service_count,
                 provider: view.provider.unwrap_or_else(|| "local".into()),
+                target: view
+                    .computer
+                    .as_ref()
+                    .and_then(|computer| computer.target.clone()),
                 computer: view.computer.map(|computer| computer.status),
             });
         }
@@ -90,6 +94,7 @@ impl Daemon {
                 .map(|project| (project.desired_state, project.actual_state)),
         );
         let health = combine_health(views.iter().map(|project| project.health));
+        let computer = self.computer_view_of(&record).await;
         Ok(EnvironmentView {
             version: ENVIRONMENT_VERSION.into(),
             environment_id: record.id.clone(),
@@ -108,7 +113,27 @@ impl Daemon {
                 &self.config.state_dir.join("logs").join(&record.value.name),
             ),
             projects: views,
-            computer: self.computer_view_of(&record).await,
+            machine: match &computer {
+                Some(computer) => MachineSummary {
+                    kind: "computer".into(),
+                    target: computer.target.clone(),
+                    status: Some(computer.status),
+                },
+                // An environment without a computer runs on this node,
+                // and says so.
+                None => MachineSummary {
+                    kind: "node".into(),
+                    target: Some(
+                        record
+                            .value
+                            .provider
+                            .clone()
+                            .unwrap_or_else(|| "local".into()),
+                    ),
+                    status: None,
+                },
+            },
+            computer,
         })
     }
 

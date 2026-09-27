@@ -28,6 +28,7 @@ mod policy_cmd;
 mod pool;
 mod receipt;
 mod session_cmd;
+mod work_cmd;
 
 #[derive(Parser, Debug)]
 #[command(

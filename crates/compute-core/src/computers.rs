@@ -251,6 +251,43 @@ pub struct ProcessSpec {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub desired: ProcessDesired,
+    /// The port it listens on, published as one of the environment's
+    /// endpoints. The process is told it in `$PORT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
+/// A project: software in one of the environment's repositories, with the
+/// commands that build, test, and operate it. All of them run inside the
+/// computer, in the repository's checkout.
+///
+/// The build is desired state: it runs whenever the checkout moves to
+/// another commit, the build command changes, or the configuration does,
+/// before the processes that run from the repository restart. That is a
+/// release: a new revision, reconciled in place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSpec {
+    pub name: String,
+    pub repository: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub build: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test: Vec<String>,
+    /// Named commands run on request: `migrate`, `lint`, `seed`, ...
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub commands: BTreeMap<String, Vec<String>>,
+}
+
+impl ProjectSpec {
+    /// A command by name: `build`, `test`, or one of `commands`.
+    pub fn command(&self, name: &str) -> Option<&Vec<String>> {
+        match name {
+            "build" => Some(&self.build).filter(|command| !command.is_empty()),
+            "test" => Some(&self.test).filter(|command| !command.is_empty()),
+            other => self.commands.get(other),
+        }
+    }
 }
 
 /// What an environment says belongs in its computer: desired state. Every
@@ -265,6 +302,8 @@ pub struct EnvironmentContents {
     pub packages: Vec<PackageSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub processes: Vec<ProcessSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<ProjectSpec>,
     /// Increases with every change, so evidence can name the change it
     /// applied.
     #[serde(default)]
@@ -338,6 +377,20 @@ impl EnvironmentContents {
             }
             valid_command("process", &process.name, &process.command)?;
             known(&process.repository, &format!("process {}", process.name))?;
+            if process.port == Some(0) {
+                return invalid(format!("process {} has port 0", process.name));
+            }
+            if let Some(port) = process.port
+                && let Some(other) = self
+                    .processes
+                    .iter()
+                    .find(|other| other.name != process.name && other.port == Some(port))
+            {
+                return invalid(format!(
+                    "processes {} and {} both listen on port {port}",
+                    process.name, other.name
+                ));
+            }
             for (key, value) in &process.env {
                 if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0')
                 {
@@ -346,6 +399,39 @@ impl EnvironmentContents {
                         process.name
                     ));
                 }
+            }
+        }
+        for project in &self.projects {
+            valid_name("project", &project.name)?;
+            if !seen.insert(("project", project.name.as_str())) {
+                return invalid(format!("project {} is listed twice", project.name));
+            }
+            known(
+                &Some(project.repository.clone()),
+                &format!("project {}", project.name),
+            )?;
+            for (command, argv) in [("build", &project.build), ("test", &project.test)]
+                .into_iter()
+                .filter(|(_, argv)| !argv.is_empty())
+                .chain(
+                    project
+                        .commands
+                        .iter()
+                        .map(|(name, argv)| (name.as_str(), argv)),
+                )
+            {
+                valid_name("command", command)?;
+                valid_command(
+                    "project command",
+                    &format!("{}/{command}", project.name),
+                    argv,
+                )?;
+            }
+            if project.commands.contains_key("build") || project.commands.contains_key("test") {
+                return invalid(format!(
+                    "project {}: `build` and `test` are fields, not named commands",
+                    project.name
+                ));
             }
         }
         Ok(())
@@ -426,6 +512,16 @@ pub struct ObservedProcess {
 
 /// What the computer holds, as Compute last observed it. Every entry names
 /// the durable job that produced it.
+/// A project's build as it last ran: at which commit, and its evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedBuild {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    pub fingerprint: String,
+    pub evidence: OperationEvidence,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservedContents {
@@ -435,6 +531,9 @@ pub struct ObservedContents {
     pub packages: BTreeMap<String, ObservedPackage>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub processes: BTreeMap<String, ObservedProcess>,
+    /// Each project's last build.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub builds: BTreeMap<String, ObservedBuild>,
     /// The contents generation the computer last fully matched.
     #[serde(default)]
     pub converged_generation: u64,
@@ -479,6 +578,7 @@ mod tests {
             repository: repository.map(Into::into),
             env: BTreeMap::new(),
             desired: ProcessDesired::Running,
+            port: None,
         }
     }
 
@@ -517,6 +617,46 @@ mod tests {
         requirements.validate().unwrap();
         requirements.features.push("quantum".into());
         assert!(requirements.validate().is_err());
+    }
+
+    #[test]
+    fn projects_and_ports_are_validated() {
+        let project = |name: &str, repository: &str| ProjectSpec {
+            name: name.into(),
+            repository: repository.into(),
+            build: vec!["make".into()],
+            test: vec![],
+            commands: BTreeMap::from([("migrate".into(), vec!["./migrate".into()])]),
+        };
+        let mut contents = EnvironmentContents {
+            repositories: vec![RepositorySpec {
+                name: "app".into(),
+                url: "https://example.invalid/app.git".into(),
+                revision: "main".into(),
+            }],
+            projects: vec![project("app", "app")],
+            processes: vec![process("api", Some("app"))],
+            ..Default::default()
+        };
+        contents.validate().unwrap();
+        assert_eq!(contents.projects[0].command("build").unwrap()[0], "make");
+        assert!(contents.projects[0].command("test").is_none());
+        assert!(contents.projects[0].command("migrate").is_some());
+        contents.projects.push(project("web", "missing"));
+        assert!(contents.validate().is_err(), "unknown repository");
+        contents.projects.pop();
+        contents.projects[0]
+            .commands
+            .insert("build".into(), vec!["x".into()]);
+        assert!(contents.validate().is_err(), "build is a field");
+        contents.projects[0].commands.remove("build");
+        contents.processes[0].port = Some(8080);
+        let mut other = process("worker", None);
+        other.port = Some(8080);
+        contents.processes.push(other);
+        assert!(contents.validate().is_err(), "one port, one process");
+        contents.processes[1].port = Some(0);
+        assert!(contents.validate().is_err(), "port 0");
     }
 
     #[test]

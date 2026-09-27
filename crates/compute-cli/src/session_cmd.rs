@@ -58,6 +58,14 @@ enum SessionCommands {
     Claim(TargetArgs),
     /// Tear the environment down. The record remains as evidence.
     Destroy(TargetArgs),
+    /// Start working, through the Compute daemon: enter an environment you
+    /// have (it keeps running when you close), or with no environment, get
+    /// a temporary one of your own (destroyed when you close or it expires).
+    Open(crate::work_cmd::OpenArgs),
+    /// Stop working. Only a session's own temporary environment goes with it.
+    Close(crate::work_cmd::CloseArgs),
+    /// Your work sessions, through the Compute daemon.
+    Opened(crate::work_cmd::OpenedArgs),
 }
 
 #[derive(Args, Debug)]
@@ -171,6 +179,9 @@ fn parse_endpoint(value: &str) -> Result<SessionEndpointRequest, String> {
 pub async fn session(command: SessionCommand) -> compute_core::Result<()> {
     let location = command.location;
     match command.command {
+        SessionCommands::Open(args) => crate::work_cmd::open(args).await,
+        SessionCommands::Close(args) => crate::work_cmd::close(args).await,
+        SessionCommands::Opened(args) => crate::work_cmd::opened(args).await,
         SessionCommands::Create(args) => create(&location, &command.policy, args).await,
         SessionCommands::List(args) => list(&location, args).await,
         SessionCommands::Info(args) => {

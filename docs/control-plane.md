@@ -180,6 +180,13 @@ production / attn
 
 ## Deployments
 
+These are the deployments of environments without a computer, whose
+projects run on the control-plane node. An environment with a computer is
+deployed to by releasing a revision of one of its projects, reconciled in
+place on its machine (`compute deploy app --environment myapp --revision
+v2`); see [environment-control-plane.md](environment-control-plane.md).
+The UI's Manage and Work modes act on the same environments.
+
 ```sh
 compute project push attn --source ./attn --revision abc123   # register an immutable revision
 compute deploy attn --environment preprod --revision abc123 --wait

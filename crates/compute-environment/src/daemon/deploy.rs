@@ -215,6 +215,21 @@ impl Daemon {
             .ok_or_else(|| {
                 EnvironmentError::NotFound(format!("environment {}", request.environment))
             })?;
+        // An environment with a computer runs its work there, never on this
+        // node: a deployment to it is a release of one of its projects,
+        // reconciled in place.
+        if environment.value.computer.is_some() {
+            return Err(EnvironmentError::Invalid(format!(
+                "environment {} runs on its own computer, so a bundle is never deployed to this \
+                 node for it: release a revision of one of its projects instead \
+                 (`compute deploy {} --environment {} --revision REVISION`, or \
+                 POST /environments/{}/release)",
+                environment.value.name,
+                request.project,
+                environment.value.name,
+                environment.value.name
+            )));
+        }
         let env_name = environment.value.name.clone();
         let project = &request.project;
         let project_id = ids::project(project);

@@ -675,6 +675,10 @@ export interface EnvironmentView {
   service_count: number;
   projects: ProjectView[];
   disk_bytes: number;
+  /** The environment's computer, when it has one: see `ComputerView` in computers.ts. */
+  computer?: Record<string, unknown>;
+  /** What runs the environment's work: its computer, or this control-plane node. */
+  machine?: { kind: "computer" | "node"; target?: string; status?: string };
 }
 
 export interface EnvironmentSummary {
@@ -689,6 +693,8 @@ export interface EnvironmentSummary {
   provider: string;
   /** The status of the environment's computer, when it has one. */
   computer?: string;
+  /** The target its computer runs on. */
+  target?: string;
 }
 
 export interface EnvironmentCreateInput {

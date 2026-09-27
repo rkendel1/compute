@@ -11,13 +11,14 @@ use std::time::Duration;
 use clap::{Args, Subcommand};
 use compute_core::{
     ComputeError, ComputerLifecycle, ComputerRequirements, EnvironmentContents, IsolationProfile,
-    NetworkPolicy, PackageSpec, ProcessDesired, ProcessKind, ProcessSpec, RepositorySpec,
-    SessionCommand,
+    NetworkPolicy, PackageSpec, ProcessDesired, ProcessKind, ProcessSpec, ProjectSpec,
+    RepositorySpec, SessionCommand,
 };
 use compute_environment::client::DaemonClient;
 use compute_environment::{
     ComputerEnvironmentDefinition, ComputerExec, ComputerJob, ComputerRequest, ComputerView,
-    ContentsUpdate, DesiredState, EnvironmentView,
+    ContentsUpdate, DesiredState, EnvironmentView, LifecycleChange, ProjectCommandRequest,
+    ReleaseRequest,
 };
 
 use crate::environment_cmd::{error, parse_pair, print_json};
@@ -200,6 +201,113 @@ pub enum ComputerCommands {
     /// Show or replace the computer's desired contents at once.
     #[command(subcommand)]
     Contents(ContentsCommands),
+    /// Projects: software in a repository, with the commands that build,
+    /// test, and operate it inside the computer.
+    #[command(subcommand)]
+    Project(ProjectCommands),
+    /// Build a project inside the environment's computer.
+    Build(ProjectRunArgs),
+    /// Test a project inside the environment's computer.
+    Test(ProjectRunArgs),
+    /// Run one of a project's named commands inside the environment's
+    /// computer.
+    Run {
+        environment: String,
+        project: String,
+        command: String,
+        #[arg(long = "env", value_parser = parse_pair)]
+        env: Vec<(String, String)>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Release a revision of a project: the computer checks it out, builds
+    /// it, and restarts what runs from it, in place. No redeployment.
+    Release(ReleaseArgs),
+    /// Show or change the configuration every process, build, and command
+    /// sees. What depends on it restarts in place.
+    Config {
+        environment: String,
+        /// Set KEY=VALUE (repeatable).
+        #[arg(long = "set", value_parser = parse_pair)]
+        set: Vec<(String, String)>,
+        /// Remove KEY (repeatable).
+        #[arg(long)]
+        unset: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change how long the environment lives, in place: kept until
+    /// destroyed, or temporary.
+    Lifetime {
+        environment: String,
+        /// Keep it until it is destroyed.
+        #[arg(long, conflicts_with = "temporary")]
+        keep: bool,
+        /// Let it expire, and its record remain, after --ttl (default 1h).
+        #[arg(long)]
+        temporary: bool,
+        #[arg(long, value_parser = crate::parse_retention, requires = "temporary")]
+        ttl: Option<Duration>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct ProjectRunArgs {
+    environment: String,
+    /// The project. Optional when only one project has the command.
+    project: Option<String>,
+    #[arg(long = "env", value_parser = parse_pair)]
+    env: Vec<(String, String)>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ReleaseArgs {
+    pub environment: String,
+    pub project: String,
+    #[arg(long)]
+    pub revision: String,
+    /// Return once the change is recorded, without waiting for the computer.
+    #[arg(long)]
+    pub no_wait: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProjectCommands {
+    /// Add (or change) a project in one of the environment's repositories.
+    Add {
+        environment: String,
+        name: String,
+        #[arg(long)]
+        repository: String,
+        /// The build, run by `sh -c` in the checkout whenever it changes.
+        #[arg(long)]
+        build: Option<String>,
+        /// The tests, run by `sh -c` on request.
+        #[arg(long)]
+        test: Option<String>,
+        /// A named command, NAME=COMMAND, run by `sh -c` on request
+        /// (repeatable).
+        #[arg(long = "command", value_parser = parse_pair)]
+        commands: Vec<(String, String)>,
+        #[arg(long)]
+        json: bool,
+    },
+    Remove {
+        environment: String,
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn shell(command: &str) -> Vec<String> {
+    vec!["sh".into(), "-c".into(), command.into()]
 }
 
 #[derive(Args, Debug)]
@@ -309,6 +417,10 @@ pub struct ProcessArgs {
     /// Add it stopped.
     #[arg(long)]
     stopped: bool,
+    /// The port it listens on: published as an endpoint, and given to it
+    /// as $PORT.
+    #[arg(long)]
+    port: Option<u16>,
     #[arg(long)]
     json: bool,
     #[arg(last = true, required = true)]
@@ -328,6 +440,7 @@ impl ProcessArgs {
             } else {
                 ProcessDesired::Running
             },
+            port: self.port,
         }
     }
 }
@@ -525,6 +638,8 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                         Some(&ContentsUpdate {
                             contents,
                             expected_generation,
+                            config: None,
+                            lifecycle: None,
                         }),
                     )
                     .await
@@ -532,6 +647,247 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                 print_computer(&view, json);
             }
         },
+        ComputerCommands::Project(command) => match command {
+            ProjectCommands::Add {
+                environment,
+                name,
+                repository,
+                build,
+                test,
+                commands,
+                json,
+            } => {
+                let view: ComputerView = client
+                    .post(
+                        &format!("/environments/{environment}/projects"),
+                        Some(&ProjectSpec {
+                            name,
+                            repository,
+                            build: build.as_deref().map(shell).unwrap_or_default(),
+                            test: test.as_deref().map(shell).unwrap_or_default(),
+                            commands: commands
+                                .iter()
+                                .map(|(name, command)| (name.clone(), shell(command)))
+                                .collect(),
+                        }),
+                    )
+                    .await
+                    .map_err(error)?;
+                print_computer(&view, json);
+            }
+            ProjectCommands::Remove {
+                environment,
+                name,
+                json,
+            } => remove(client, &environment, "projects", &name, json).await?,
+        },
+        ComputerCommands::Build(args) => project_command(client, args, "build").await?,
+        ComputerCommands::Test(args) => project_command(client, args, "test").await?,
+        ComputerCommands::Run {
+            environment,
+            project,
+            command,
+            env,
+            json,
+        } => {
+            let submitted: ComputerExec = client
+                .post(
+                    &format!("/environments/{environment}/run"),
+                    Some(&ProjectCommandRequest {
+                        project,
+                        command,
+                        env: env.into_iter().collect(),
+                        timeout: None,
+                    }),
+                )
+                .await
+                .map_err(error)?;
+            wait_job(client, &environment, &submitted, json).await?;
+        }
+        ComputerCommands::Release(args) => release(client, &args).await?,
+        ComputerCommands::Config {
+            environment,
+            set,
+            unset,
+            json,
+        } => {
+            let view: ComputerView = client
+                .get(&format!("/environments/{environment}/computer"))
+                .await
+                .map_err(error)?;
+            if set.is_empty() && unset.is_empty() {
+                if json {
+                    print_json(&view.config.keys().collect::<Vec<_>>());
+                } else {
+                    for key in view.config.keys() {
+                        println!("{key}");
+                    }
+                }
+                return Ok(());
+            }
+            let mut config = view.config.clone();
+            for key in &unset {
+                config.remove(key);
+            }
+            config.extend(set);
+            let view: ComputerView = client
+                .post(
+                    &format!("/environments/{environment}/config"),
+                    Some(&config),
+                )
+                .await
+                .map_err(error)?;
+            print_computer(&view, json);
+        }
+        ComputerCommands::Lifetime {
+            environment,
+            keep,
+            temporary,
+            ttl,
+            json,
+        } => {
+            if keep == temporary {
+                return Err(ComputeError::Runtime("choose --keep or --temporary".into()));
+            }
+            let view: ComputerView = client
+                .post(
+                    &format!("/environments/{environment}/lifecycle"),
+                    Some(&LifecycleChange {
+                        lifecycle: if keep {
+                            ComputerLifecycle::Persistent
+                        } else {
+                            ComputerLifecycle::Ephemeral
+                        },
+                        ttl_seconds: ttl.map(|ttl| ttl.as_secs().max(1)),
+                    }),
+                )
+                .await
+                .map_err(error)?;
+            print_computer(&view, json);
+        }
+    }
+    Ok(())
+}
+
+/// Build or test a project: the project named, or the only one that has
+/// the command.
+async fn project_command(
+    client: &DaemonClient,
+    args: ProjectRunArgs,
+    command: &str,
+) -> compute_core::Result<()> {
+    let project = match args.project {
+        Some(project) => project,
+        None => {
+            let view: ComputerView = client
+                .get(&format!("/environments/{}/computer", args.environment))
+                .await
+                .map_err(error)?;
+            let candidates = view
+                .desired
+                .projects
+                .iter()
+                .filter(|project| project.command(command).is_some())
+                .map(|project| project.name.clone())
+                .collect::<Vec<_>>();
+            match candidates.as_slice() {
+                [project] => project.clone(),
+                [] => {
+                    return Err(ComputeError::Runtime(format!(
+                        "no project in {} has a {command} command",
+                        args.environment
+                    )));
+                }
+                _ => {
+                    return Err(ComputeError::Runtime(format!(
+                        "more than one project can {command}: name one of {}",
+                        candidates.join(", ")
+                    )));
+                }
+            }
+        }
+    };
+    let submitted: ComputerExec = client
+        .post(
+            &format!("/environments/{}/run", args.environment),
+            Some(&ProjectCommandRequest {
+                project,
+                command: command.into(),
+                env: args.env.into_iter().collect(),
+                timeout: None,
+            }),
+        )
+        .await
+        .map_err(error)?;
+    wait_job(client, &args.environment, &submitted, args.json).await
+}
+
+/// Release a revision of a project, and follow the computer until it holds
+/// it: the same machine, changed in place.
+pub async fn release(client: &DaemonClient, args: &ReleaseArgs) -> compute_core::Result<()> {
+    let before: ComputerView = client
+        .get(&format!("/environments/{}/computer", args.environment))
+        .await
+        .map_err(error)?;
+    let view: ComputerView = client
+        .post(
+            &format!("/environments/{}/release", args.environment),
+            Some(&ReleaseRequest {
+                project: args.project.clone(),
+                revision: args.revision.clone(),
+                expected_generation: None,
+            }),
+        )
+        .await
+        .map_err(error)?;
+    if args.no_wait {
+        print_computer(&view, args.json);
+        return Ok(());
+    }
+    let generation = view.desired.generation;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60 * 60);
+    let view = loop {
+        let view: ComputerView = client
+            .get(&format!("/environments/{}/computer", args.environment))
+            .await
+            .map_err(error)?;
+        let settled = view.observed.converged_generation >= generation && view.converged;
+        let failed = view
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.phase == "reconciliation" || !failure.retryable);
+        if settled || failed || view.status.is_terminal() {
+            break view;
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(ComputeError::Runtime(format!(
+                "{} did not settle on the release",
+                args.environment
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    if args.json {
+        print_json(&view);
+    } else {
+        let same = before.machine.as_ref().map(|machine| &machine.session_id)
+            == view.machine.as_ref().map(|machine| &machine.session_id);
+        println!(
+            "Released {} {} to {}: {}{}",
+            args.project,
+            args.revision,
+            args.environment,
+            if view.converged { "running" } else { "failed" },
+            if same {
+                ", on the same machine (changed in place)"
+            } else {
+                ""
+            }
+        );
+        print_computer(&view, false);
+    }
+    if !view.converged {
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -600,10 +956,18 @@ async fn exec(client: &DaemonClient, args: ExecArgs) -> compute_core::Result<()>
         print_json(&submitted);
         return Ok(());
     }
-    let path = format!(
-        "/environments/{}/jobs/{}",
-        args.environment, submitted.job_id
-    );
+    wait_job(client, &args.environment, &submitted, args.json).await
+}
+
+/// Follow a job in the environment's computer to its end, print its
+/// output, and exit with its exit code.
+async fn wait_job(
+    client: &DaemonClient,
+    environment: &str,
+    submitted: &ComputerExec,
+    json: bool,
+) -> compute_core::Result<()> {
+    let path = format!("/environments/{environment}/jobs/{}", submitted.job_id);
     let mut delay = Duration::from_millis(50);
     let job = loop {
         let job: ComputerJob = client.get(&path).await.map_err(error)?;
@@ -621,7 +985,7 @@ async fn exec(client: &DaemonClient, args: ExecArgs) -> compute_core::Result<()>
             job.job.failure.unwrap_or_default()
         )));
     };
-    if args.json {
+    if json {
         print_json(&result);
     } else {
         print!("{}", result.result.stdout.text);
@@ -669,12 +1033,28 @@ pub fn print_computer(view: &ComputerView, json: bool) {
             .map(|target| format!(" on {target}"))
             .unwrap_or_default()
     );
+    println!(
+        "Environment: {} ({})",
+        view.environment, view.environment_id
+    );
     println!("Owner:       {}", view.owner);
-    if let Some(kind) = &view.provider_kind {
-        println!("Provider:    {kind}");
+    if let Some(machine) = &view.machine {
+        println!(
+            "Machine:     {}{}",
+            machine.resource.as_deref().unwrap_or(&machine.session_id),
+            machine
+                .provider_kind
+                .as_ref()
+                .map(|kind| format!(" ({kind} on {})", machine.target))
+                .unwrap_or_default()
+        );
+        println!("Session:     {}", machine.session_id);
     }
-    if let Some(session) = &view.session_id {
-        println!("Session:     {session}");
+    if view.requested_lifecycle != view.lifecycle {
+        println!(
+            "Lifetime:    becoming {}",
+            view.requested_lifecycle.as_str()
+        );
     }
     let requirements = &view.requirements;
     let mut needs = vec![];
@@ -743,6 +1123,34 @@ pub fn print_computer(view: &ComputerView, json: bool) {
             );
         }
     }
+    if !view.desired.projects.is_empty() {
+        println!("\nProjects");
+        for project in &view.desired.projects {
+            let built = view.observed.builds.get(&project.name);
+            let mut commands = vec![];
+            if !project.build.is_empty() {
+                commands.push("build".to_owned());
+            }
+            if !project.test.is_empty() {
+                commands.push("test".to_owned());
+            }
+            commands.extend(project.commands.keys().cloned());
+            println!(
+                "  {:<16} {:<12} {:<10} {}",
+                project.name,
+                project.repository,
+                built.map_or(
+                    if project.build.is_empty() {
+                        "-"
+                    } else {
+                        "pending"
+                    },
+                    |seen| seen.evidence.outcome.as_str()
+                ),
+                commands.join(", ")
+            );
+        }
+    }
     if !view.desired.processes.is_empty() {
         println!("\nProcesses");
         for process in &view.desired.processes {
@@ -759,6 +1167,24 @@ pub fn print_computer(view: &ComputerView, json: bool) {
                 process.command.join(" ")
             );
         }
+    }
+    if !view.endpoints.is_empty() {
+        println!("\nEndpoints");
+        for endpoint in &view.endpoints {
+            println!(
+                "  {:<16} {:<6} {} {}",
+                endpoint.process,
+                endpoint.port,
+                endpoint.url.as_deref().unwrap_or("-"),
+                if endpoint.serving { "serving" } else { "" }
+            );
+        }
+    }
+    if !view.config.is_empty() {
+        println!(
+            "\nConfiguration: {}",
+            view.config.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
     }
     if let Some(failure) = &view.failure {
         println!(
