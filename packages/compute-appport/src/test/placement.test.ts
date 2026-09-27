@@ -161,19 +161,30 @@ test("pool submit places durable jobs only on job-capable providers", async (t) 
   if (listener.error) return t.skip("no shell available");
   const port = 18000 + Math.floor(Math.random() * 1000);
   const { spawn } = await import("node:child_process");
+  // The target trusts one control plane: the pool presents its token.
+  const credentials = join(root, "target-credentials.json");
+  const tokenFile = join(root, "jobs.token");
+  const issued = spawnSync(computeBinary, [
+    "target", "credential", "issue", "--credentials", credentials,
+    "--control-plane", "appport-test", "--token-file", tokenFile,
+  ], { encoding: "utf8" });
+  assert.equal(issued.status, 0, issued.stderr);
+  const token = (await readFile(tokenFile, "utf8")).trim();
   const server = spawn(computeBinary, [
     "serve", "--listen", `127.0.0.1:${port}`, "--job-store", join(root, "jobs"),
+    "--credentials", credentials,
   ], { stdio: "ignore" });
   try {
     await writeFile(join(root, "compute-pool.toml"), [
       "[providers.local]", "kind = \"local\"", "priority = 100", "",
-      "[providers.jobs]", "kind = \"remote\"", `endpoint = "http://127.0.0.1:${port}"`, "priority = 1",
+      "[providers.jobs]", "kind = \"remote\"", `endpoint = "http://127.0.0.1:${port}"`,
+      `token_file = ${JSON.stringify(tokenFile)}`, "priority = 1",
     ].join("\n"));
     const app = application(root, "compute-pool.toml");
     for (let attempt = 0; attempt < 50; attempt += 1) {
       const probe = spawnSync(computeBinary, [
         "remote", "health", "--provider", `http://127.0.0.1:${port}`, "--json",
-      ]);
+      ], { env: { ...process.env, COMPUTE_TARGET_TOKEN: token } });
       if (probe.status === 0) break;
       await new Promise((done) => setTimeout(done, 100));
     }

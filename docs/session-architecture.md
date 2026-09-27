@@ -195,10 +195,18 @@ maps to a `ProviderOperation` (`SessionCreate`, `SessionInspect`,
 authorized before it reaches the manager. `SessionExpose` is authorized once
 per requested endpoint. The owner is `ProviderAuthorizer::owner(credential)`;
 the manager compares it with the session's recorded owner on every operation
-and answers a mismatch as `unauthorized`. The jobs a session runs belong to
-the same owner, so the job routes enforce the same boundary. Expiry teardown
-is authorized by `ProviderAuthorizer::authorize_expiry(owner)`; a refusal
-leaves the session `expiring` and nothing is torn down.
+and answers a mismatch as `unknown_session`, exactly as for a session that
+does not exist, so `unauthorized` always means the credential itself was
+refused. The jobs a session runs belong to the same owner, so the job routes
+enforce the same boundary. Expiry teardown is authorized by
+`ProviderAuthorizer::authorize_expiry(owner)`; a refusal leaves the session
+`expiring` and nothing is torn down.
+
+`compute serve` wires the `TargetAuthorizer`: every request must carry a
+credential from its trust file, and the owner is the control plane that
+credential names (`control-plane:<id>`), so ownership survives restarts and
+credential rotation
+([remote-execution.md](remote-execution.md#target-credentials)).
 
 ## Where state lives
 

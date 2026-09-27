@@ -11,8 +11,10 @@ import test from 'node:test';
 import { chromium } from 'playwright-core';
 
 const compute = resolve(process.cwd(), '../../target/debug/compute');
+// $CHROMIUM_PATH, a preinstalled Playwright Chromium, or the one
+// `npx playwright-core install chromium` put in Playwright's cache.
 const chromiumPath = process.env.CHROMIUM_PATH
-  ?? ['/opt/pw-browsers/chromium', '/opt/pw-browsers/chromium-1194/chrome-linux/chrome'].find(existsSync);
+  ?? ['/opt/pw-browsers/chromium', '/opt/pw-browsers/chromium-1194/chrome-linux/chrome', chromium.executablePath()].find((path) => path && existsSync(path));
 
 function freePort() {
   return new Promise((resolvePort, reject) => {
@@ -92,8 +94,10 @@ test('an operator runs Compute from the control-plane UI', { timeout: 180_000 },
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
 
-  // Environments first.
+  // Home is what an operator can do; environments are one click away.
   await page.goto(`${endpoint}/`);
+  await page.waitForSelector('[data-action="operate"]');
+  await page.goto(`${endpoint}/#/environments`);
   await page.waitForSelector('[data-environment="preprod"]');
   assert.match(await page.textContent('[data-environment="preprod"]'), /1 projects · 2 workloads/);
   assert.match(await page.textContent('[data-environment="preprod"]'), /Healthy|Running/);
@@ -169,8 +173,17 @@ test('an operator runs Compute from the control-plane UI', { timeout: 180_000 },
   assert.match(await page.textContent('dialog'), /A new release of v0\.11\.7 to preprod/);
   await page.click('dialog [data-confirm]');
   await page.waitForFunction((id) => location.hash.startsWith('#/deployments/') && !location.hash.includes(id), second.deployment_id);
+  // The previous release page may still be on screen for a moment: wait
+  // for the rollback's own page, then for it to complete.
+  const rollback = (await page.evaluate(() => location.hash)).split('/')[2];
+  await page.waitForSelector(`text=${rollback.slice(0, 12)}`, { timeout: 30_000 }).catch(() => {});
   await page.waitForSelector('.title .state:has-text("Complete")', { timeout: 60_000 });
-  assert.equal(cli(endpoint, 'project', 'status', 'feltdb', '--environment', 'preprod').revision, 'v0.11.7');
+  for (let attempt = 0; ; attempt += 1) {
+    const { revision } = cli(endpoint, 'project', 'status', 'feltdb', '--environment', 'preprod');
+    if (revision === 'v0.11.7') break;
+    assert.ok(attempt < 120, `the rollback never completed: preprod runs ${revision}`);
+    await new Promise((done) => setTimeout(done, 250));
+  }
 
   // Domains: add one to preprod, inspect it, remove it.
   await page.goto(`${endpoint}/#/domains`);

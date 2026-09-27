@@ -751,6 +751,38 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn the_daemon_provider_service_admits_only_what_the_api_authenticated() {
+        use compute_provider::{ProviderAuthorizer, ProviderOperation};
+        let authority = DaemonAuthorized;
+        // Anything reaching the service without passing the API is refused,
+        // whatever it presents.
+        for header in [None, Some("Bearer anything")] {
+            let error = authority
+                .authorize(ProviderOperation::SessionList, header)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.kind,
+                compute_provider::ProviderErrorKind::Unauthorized
+            );
+        }
+        let context = RequestContext {
+            request_id: "req_1".into(),
+            operator_id: "alice".into(),
+            credential_id: Some("cred_1".into()),
+        };
+        REQUEST
+            .scope(context, async {
+                authority
+                    .authorize(ProviderOperation::SessionList, Some("Bearer token"))
+                    .await
+                    .unwrap();
+            })
+            .await;
+        assert_eq!(authority.authentication(), "operator-credential");
+    }
+
     #[test]
     fn the_snapshot_holds_verifiers_only() {
         let (authority, dir) = authority(SecurityMode::Production);

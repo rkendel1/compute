@@ -105,12 +105,15 @@ UI usability findings (from the journey and the screenshots):
   environments) do not appear on it.
 - The create dialog offers options that cannot be placed (persistent
   storage, public endpoint) — G-PLACE-1.
-- A computer whose target is down, or whose machine is gone, is shown as
-  running (G-ARCH-4).
+- A computer whose target is down is shown as unreachable, and one whose
+  machine is gone as lost, each with what it means and what to do (Check
+  now; Replace machine…, Destroy); the home, Work, and Manage pages agree
+  with the CLI and the API (G-ARCH-4, closed).
 - Every event re-fetches and re-renders the whole page; fine at three
   computers (home ready in 83 ms), unmeasured at scale.
-- The browser certification package (`packages/compute-ui-e2e`) fails
-  since the home route changed and does not run in CI (G-UI-2).
+- The browser certification package (`packages/compute-ui-e2e`) is fixed for
+  the action home and runs in CI with Chromium, with a computer-reality
+  journey (G-UI-2, closed).
 
 ## CLI
 
@@ -142,7 +145,7 @@ UI usability findings (from the journey and the screenshots):
 | `compute jobs` | 1 | 0 | 1 | pool |
 | `compute placement` | 2 | 0 | 1 | pool |
 | `compute pool` | 2 | 0 | 0 | pool placement then provider |
-| `compute target` | 1 | 0 | 0 | daemon API /targets |
+| `compute target` | 4 | 0 | 0 | daemon API /targets, local |
 | `compute session` | 13 | 0 | 3 | daemon API /sessions, pool placement then target sessions directly, targets directly |
 | `compute policy` | 4 | 0 | 0 | local |
 | `compute explain` | 1 | 0 | 1 | local / pool |
@@ -194,7 +197,7 @@ Usability findings:
 <!-- audit:cli -->
 | Command | What it does (its help) | Help defect | Talks to | State | Authority | UI | Tests |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `compute up` | Launch the Compute control plane on this machine and open it: what `compute` alone does. Starts this machine's computer host and the daemon when they are not running | — | launcher: spawns compute serve + compute start | local processes, pool.toml | n/a (local) | the UI itself | `crates/compute-cli/tests/product_journey.rs` |
+| `compute up` | Launch the Compute control plane on this machine and open it: what `compute` alone does. Starts this machine's computer host and the daemon when they are not running | — | launcher: spawns compute serve + compute start | local processes, pool.toml, the target trust file and the control plane token | n/a (local) | the UI itself | `crates/compute-cli/tests/product_journey.rs`, `crates/compute-cli/tests/launcher.rs`, `packages/compute-ui-e2e/src/computer-reality.test.mjs` |
 | `compute down` | Stop the control plane `compute` launched, and this machine's computer host. Durable state is kept | — | launcher | stops processes | n/a (local) | none | `crates/compute-cli/tests/product_journey.rs` |
 | `compute versions publish` | Publish a version: build, tests, checks, and a source package, run in the environment the project is developed in | — | daemon API /software, /rollouts | durable (Version, Rollout) | daemon scopes + owner | Software pages: publish/deploy/promote/rollback, version and operation pages | — |
 | `compute versions list` | A project's versions, newest first, and where they run | — | daemon API /software, /rollouts | durable (Version, Rollout) | daemon scopes + owner | Software pages: publish/deploy/promote/rollback, version and operation pages | — |
@@ -211,7 +214,7 @@ Usability findings:
 | `compute application history` | Every version, newest first | — | daemon API /applications (auto-starts a daemon in ./.compute/daemon) | durable (applications environment) | daemon scopes (no owner) | partial: application project page (rollback, stop, logs); no deploy/pack | `crates/compute-cli/tests/product.rs`, `packages/compute-appport/src/application.ts` |
 | `compute application rollback` | Deploy an earlier version again, as the next version | — | daemon API /applications (auto-starts a daemon in ./.compute/daemon) | durable (applications environment) | daemon scopes (no owner) | partial: application project page (rollback, stop, logs); no deploy/pack | `packages/compute-appport/src/application.ts` |
 | `compute application stop` | Stop serving. Versions and evidence remain | — | daemon API /applications (auto-starts a daemon in ./.compute/daemon) | durable (applications environment) | daemon scopes (no owner) | partial: application project page (rollback, stop, logs); no deploy/pack | `packages/compute-appport/src/application.ts` |
-| `compute run` | — | describes itself as the pool location (a flattened doc comment) | local engine, or a provider chosen by pool placement | none (execution record + receipt) | local user; providers are AllowAll | none | `crates/compute-cli/tests/cli.rs`, `crates/compute-cli/tests/isolation.rs`, `crates/compute-cli/tests/remote_pool.rs`, `packages/compute-appport/src/provider.ts` |
+| `compute run` | — | describes itself as the pool location (a flattened doc comment) | local engine, or a provider chosen by pool placement | none (execution record + receipt) | local user; providers: the target credential its pool names | none | `crates/compute-cli/tests/cli.rs`, `crates/compute-cli/tests/isolation.rs`, `crates/compute-cli/tests/remote_pool.rs`, `packages/compute-appport/src/provider.ts` |
 | `compute bundle create` | — | no description | local | writes files | none | none | `crates/compute-cli/tests/cli.rs`, `packages/compute-appport/src/provider.ts`, `packages/compute-appport/src/test/conformance.test.ts`, `packages/compute-appport/src/test/environment.test.ts` |
 | `compute bundle inspect` | — | no description | local | writes files | none | none | `crates/compute-cli/tests/cli.rs` |
 | `compute bundle verify` | — | no description | local | writes files | none | none | `crates/compute-cli/tests/cli.rs` |
@@ -232,17 +235,17 @@ Usability findings:
 | `compute receipt inspect` | — | no description | local | none | none | Receipt dialog (project pages) | `crates/compute-cli/tests/cli.rs` |
 | `compute receipt verify` | — | no description | local | none | none | Receipt dialog (project pages) | `crates/compute-cli/tests/cli.rs`, `crates/compute-cli/tests/product.rs`, `crates/compute-cli/tests/sessions.rs` |
 | `compute version` | — | no description | local | none | none | none | `crates/compute-cli/tests/cli.rs`, `crates/compute-cli/tests/product.rs`, `crates/compute-cli/tests/upgrade.rs` |
-| `compute remote run` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: AllowAllAuthorizer on compute serve | none | `crates/compute-cli/tests/sessions.rs` |
-| `compute remote inspect` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: AllowAllAuthorizer on compute serve | none | — |
-| `compute remote submit` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: AllowAllAuthorizer on compute serve | none | `packages/compute-appport/src/provider.ts` |
-| `compute remote status` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: AllowAllAuthorizer on compute serve | none | `crates/compute-cli/tests/sessions.rs` |
-| `compute remote result` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: AllowAllAuthorizer on compute serve | none | — |
-| `compute remote wait` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: AllowAllAuthorizer on compute serve | none | — |
-| `compute remote receipt` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: AllowAllAuthorizer on compute serve | none | — |
-| `compute remote artifacts` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: AllowAllAuthorizer on compute serve | none | — |
-| `compute remote cancel` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: AllowAllAuthorizer on compute serve | none | — |
-| `compute remote capabilities` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: AllowAllAuthorizer on compute serve | none | `crates/compute-cli/tests/remote_pool.rs` |
-| `compute remote health` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: AllowAllAuthorizer on compute serve | none | `crates/compute-cli/tests/remote_pool.rs`, `packages/compute-appport/src/test/placement.test.ts` |
+| `compute remote run` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: the target credential its pool names on compute serve | none | `crates/compute-cli/tests/sessions.rs` |
+| `compute remote inspect` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: the target credential its pool names on compute serve | none | — |
+| `compute remote submit` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: the target credential its pool names on compute serve | none | `packages/compute-appport/src/provider.ts` |
+| `compute remote status` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: the target credential its pool names on compute serve | none | `crates/compute-cli/tests/sessions.rs` |
+| `compute remote result` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: the target credential its pool names on compute serve | none | — |
+| `compute remote wait` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: the target credential its pool names on compute serve | none | — |
+| `compute remote receipt` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: the target credential its pool names on compute serve | none | — |
+| `compute remote artifacts` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: the target credential its pool names on compute serve | none | — |
+| `compute remote cancel` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: the target credential its pool names on compute serve | none | — |
+| `compute remote capabilities` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: the target credential its pool names on compute serve | none | `crates/compute-cli/tests/remote_pool.rs` |
+| `compute remote health` | — | describes itself as the pool location (a flattened doc comment) | provider compute.remote@1 directly | provider job store | provider: the target credential its pool names on compute serve | none | `crates/compute-cli/tests/remote_pool.rs`, `packages/compute-appport/src/test/placement.test.ts` |
 | `compute provider list` | List configured providers with their discovery status and health | — | pool config + providers | capability cache | none | none | `packages/compute-appport/src/provider.ts` |
 | `compute provider inspect` | Show a provider's validated descriptor. A pool ID yields the canonical descriptor; `local` or an endpoint URL outside the pool yields the raw capability response | — | pool config + providers | capability cache | none | none | `packages/compute-appport/src/provider.ts` |
 | `compute provider capabilities` | Show a provider's raw capability response | — | pool config + providers | capability cache | none | none | `packages/compute-appport/src/provider.ts` |
@@ -252,19 +255,22 @@ Usability findings:
 | `compute jobs` | List durable jobs and their reservation state | — | pool | none | none | none | — |
 | `compute placement inspect` | Evaluate the pool for a workload. No execution occurs | — | pool (evaluation only) | none | none | none | `packages/compute-appport/src/provider.ts` |
 | `compute placement explain` | Explain what the workload requires and why each provider is or is not compatible. No execution occurs | — | pool (evaluation only) | none | none | none | — |
-| `compute pool run` | Place and execute synchronously on the selected provider | — | pool placement then provider | provider job store | provider: AllowAll | none | `crates/compute-cli/tests/product.rs`, `packages/compute-appport/src/provider.ts` |
-| `compute pool submit` | Place and submit a durable job to the selected provider | — | pool placement then provider | provider job store | provider: AllowAll | none | `crates/compute-cli/tests/product.rs`, `packages/compute-appport/src/provider.ts` |
-| `compute target list` | The computers and infrastructure the daemon can place environments on | — | daemon API /targets | none | daemon read scope | none (targets are not shown in the UI) | `crates/compute-cli/tests/computers.rs` |
-| `compute session create` | Create a session on a provider chosen by placement | — | pool placement then target sessions directly | target session store (not FeltDB) | target: AllowAll; owner = hash of the Authorization header | none | `crates/compute-cli/tests/sessions.rs`, `packages/compute-appport/src/sessions.ts`, `packages/compute-appport/src/test/sessions.test.ts` |
-| `compute session list` | List your sessions on every provider in the pool | — | targets directly | none | target: AllowAll | none | `crates/compute-cli/tests/sessions.rs`, `packages/compute-appport/src/sessions.ts` |
-| `compute session info` | Show a session's complete, authoritative state | — | targets directly | none | target: AllowAll | none | `crates/compute-cli/tests/sessions.rs`, `packages/compute-appport/src/sessions.ts` |
-| `compute session connect` | Get connection details for a session | — | targets directly | target session store | target: AllowAll | none | `packages/compute-appport/src/sessions.ts` |
-| `compute session exec` | Run a command in a session as a durable job | — | targets directly | target job store | target: AllowAll | none | `crates/compute-cli/tests/sessions.rs`, `packages/compute-appport/src/sessions.ts`, `packages/compute-appport/src/test/sessions.test.ts` |
-| `compute session logs` | Show the output of every execution in a session | — | targets directly | none | target: AllowAll | none | `crates/compute-cli/tests/sessions.rs`, `packages/compute-appport/src/sessions.ts` |
-| `compute session stop` | Stop active executions, keeping the environment and the record | — | targets directly | target session store | target: AllowAll | none | — |
-| `compute session resume` | Resume a stopped session's environment. Never creates a new one | — | targets directly | target session store | target: AllowAll | none | — |
-| `compute session claim` | Keep an ephemeral session until it is destroyed | — | targets directly | target session store | target: AllowAll | none | — |
-| `compute session destroy` | Tear the environment down. The record remains as evidence | — | targets directly | target session store | target: AllowAll | none | `crates/compute-cli/tests/sessions.rs` |
+| `compute pool run` | Place and execute synchronously on the selected provider | — | pool placement then provider | provider job store | provider: target credential | none | `crates/compute-cli/tests/product.rs`, `packages/compute-appport/src/provider.ts` |
+| `compute pool submit` | Place and submit a durable job to the selected provider | — | pool placement then provider | provider job store | provider: target credential | none | `crates/compute-cli/tests/product.rs`, `packages/compute-appport/src/provider.ts` |
+| `compute target credential issue` | Issue a credential that lets a control plane control this target. The token is shown (or written to --token-file) once; the target keeps only its verifier | — | local: the target's trust file (compute serve --credentials) | the target trust file (verifiers only) | n/a (local file on the target machine) | none | `crates/compute-cli/tests/sessions.rs`, `crates/compute-cli/tests/launcher.rs` |
+| `compute target credential list` | The credentials a target trusts: never a secret | — | local: the target's trust file (compute serve --credentials) | the target trust file (verifiers only) | n/a (local file on the target machine) | none | `crates/compute-cli/tests/sessions.rs`, `crates/compute-cli/tests/launcher.rs` |
+| `compute target credential revoke` | Revoke a credential: the target refuses it at the next request | — | local: the target's trust file (compute serve --credentials) | the target trust file (verifiers only) | n/a (local file on the target machine) | none | `crates/compute-cli/tests/sessions.rs`, `crates/compute-cli/tests/launcher.rs` |
+| `compute target list` | The computers and infrastructure the daemon can place environments on | — | daemon API /targets | none | daemon read scope | none (targets are not shown in the UI) | `crates/compute-cli/tests/computers.rs`, `crates/compute-cli/tests/launcher.rs` |
+| `compute session create` | Create a session on a provider chosen by placement | — | pool placement then target sessions directly | target session store (not FeltDB) | target: target credential; owner = hash of the Authorization header | none | `crates/compute-cli/tests/sessions.rs`, `packages/compute-appport/src/sessions.ts`, `packages/compute-appport/src/test/sessions.test.ts` |
+| `compute session list` | List your sessions on every provider in the pool | — | targets directly | none | target: target credential | none | `crates/compute-cli/tests/sessions.rs`, `packages/compute-appport/src/sessions.ts` |
+| `compute session info` | Show a session's complete, authoritative state | — | targets directly | none | target: target credential | none | `crates/compute-cli/tests/sessions.rs`, `packages/compute-appport/src/sessions.ts` |
+| `compute session connect` | Get connection details for a session | — | targets directly | target session store | target: target credential | none | `packages/compute-appport/src/sessions.ts` |
+| `compute session exec` | Run a command in a session as a durable job | — | targets directly | target job store | target: target credential | none | `crates/compute-cli/tests/sessions.rs`, `packages/compute-appport/src/sessions.ts`, `packages/compute-appport/src/test/sessions.test.ts` |
+| `compute session logs` | Show the output of every execution in a session | — | targets directly | none | target: target credential | none | `crates/compute-cli/tests/sessions.rs`, `packages/compute-appport/src/sessions.ts` |
+| `compute session stop` | Stop active executions, keeping the environment and the record | — | targets directly | target session store | target: target credential | none | — |
+| `compute session resume` | Resume a stopped session's environment. Never creates a new one | — | targets directly | target session store | target: target credential | none | — |
+| `compute session claim` | Keep an ephemeral session until it is destroyed | — | targets directly | target session store | target: target credential | none | — |
+| `compute session destroy` | Tear the environment down. The record remains as evidence | — | targets directly | target session store | target: target credential | none | `crates/compute-cli/tests/sessions.rs` |
 | `compute session open` | Start working, through the Compute daemon: enter an environment you have (it keeps running when you close), or with no environment, get a temporary one of your own (destroyed when you close or it expires) | — | daemon API /sessions | durable (WorkSession) | daemon scopes + owner | Work: Open session; Home: Try software / Temporary environment | `crates/compute-cli/tests/computers.rs` |
 | `compute session close` | Stop working. Only a session's own temporary environment goes with it | — | daemon API /sessions | durable | daemon scopes + owner | Work: Close | `crates/compute-cli/tests/computers.rs` |
 | `compute session opened` | Your work sessions, through the Compute daemon | — | daemon API /sessions | none | daemon scopes + owner | Work: Sessions table | `crates/compute-cli/tests/computers.rs` |
@@ -362,7 +368,7 @@ Usability findings:
 | `compute control-plane provision` | Install the Compute control model in Managed FeltDB. Idempotent: an existing tenant and Compute application are reused | — | FeltDB directly | FeltDB model | FeltDB API key | none | `crates/compute-cli/tests/recovery.rs` |
 | `compute control-plane upgrade` | Upgrade the configured Compute application to this build's model, before a controller that needs it runs: inspect the active model, refuse a downgrade, take and verify a FeltDB backup, apply the model, verify it, and smoke-test it | — | FeltDB directly | FeltDB model | FeltDB API key | none | — |
 | `compute control-plane inspect` | Compare the active Compute model with this build's. Read-only | — | FeltDB directly | FeltDB model | FeltDB API key | none | — |
-| `compute serve` | Serve compute.remote@1 with durable filesystem-backed jobs | — | runs a target (compute.remote@1) | job and session stores on disk | AllowAllAuthorizer: no authentication | none | `crates/compute-cli/tests/computers.rs`, `crates/compute-cli/tests/product.rs`, `crates/compute-cli/tests/remote_pool.rs`, `crates/compute-cli/tests/runtime_store.rs` |
+| `compute serve` | Serve compute.remote@1 with durable filesystem-backed jobs | — | runs a target (compute.remote@1) | job and session stores on disk | target credentials (--credentials; the named --insecure-unauthenticated is the only open mode) | none | `crates/compute-cli/tests/computers.rs`, `crates/compute-cli/tests/product.rs`, `crates/compute-cli/tests/remote_pool.rs`, `crates/compute-cli/tests/runtime_store.rs`, `crates/compute-cli/tests/sessions.rs` |
 | `compute auth create` | Issue a credential. Its token is printed once and never again | — | daemon API | durable credentials | admin | none | — |
 | `compute auth list` | List credentials: never their tokens | — | daemon API | durable credentials | admin | none | — |
 | `compute auth revoke` | Revoke a credential now | — | daemon API | durable credentials | admin | none | — |

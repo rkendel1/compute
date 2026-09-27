@@ -1,7 +1,14 @@
 # Runtime matrix
 
 Audited 2026-09-27 at `69b70d9` on Linux x86_64 (4 CPU, 16 GiB, no
-`/dev/kvm`, no GPU, a docker client with no engine). The machine-readable
+`/dev/kvm`, no GPU, a docker client with no engine); re-audited for the
+foundation the same day. The foundation added no runtime or substrate: what
+changed is that every computer substrate is now observed. A computer on a
+workspace (or container) target is confirmed with its target every 10 s;
+a target that does not answer makes it `unreachable`, and a substrate that
+no longer has the machine (the workspace directory, the container) makes it
+`lost` — verified for workspaces, unverified for containers against a real
+engine. The machine-readable
 form is the `runtimes` key of [audit.json](audit.json); the tables are
 generated from it.
 

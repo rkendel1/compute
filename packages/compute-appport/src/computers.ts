@@ -34,7 +34,36 @@ export type ComputerStatus =
   | "failed"
   | "destroying"
   | "destroyed"
-  | "expired";
+  | "expired"
+  /** Its target did not answer, or refused this control plane. */
+  | "unreachable"
+  /** Its target answered without the machine. Wanted still; replace it. */
+  | "lost";
+
+/**
+ * Desired and observed state, told apart: the one account every surface
+ * (API, CLI, UI, AppPort) gives of a computer.
+ */
+export interface ComputerReality {
+  desired: "running" | "stopped" | "destroyed";
+  observed:
+    | "starting"
+    | "running"
+    | "unverified"
+    | "reconciling"
+    | "unreachable"
+    | "lost"
+    | "stopping"
+    | "stopped"
+    | "failed"
+    | "destroyed"
+    | "expired";
+  /** When the target last confirmed the machine, while it runs. */
+  confirmed_at?: string;
+  /** When it became unreachable or lost. */
+  since?: string;
+  explanation: string;
+}
 
 export interface ComputerRequirements {
   cpu_count?: number;
@@ -138,6 +167,7 @@ export interface ComputerView {
   ready_at?: string;
   expires_at?: string;
   ended_at?: string;
+  reality: ComputerReality;
 }
 
 export interface ComputeEnvironmentDefinition {

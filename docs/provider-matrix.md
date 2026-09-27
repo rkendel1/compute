@@ -1,7 +1,9 @@
 # Provider matrix
 
-Audited 2026-09-27 at `69b70d9`. Machine-readable: the `capabilities`
-entries with area `provider` and `placement` in [audit.json](audit.json).
+Audited 2026-09-27 at `69b70d9`; re-audited for the foundation the same day
+(target authentication, target reality: [audit.md](audit.md)). Machine-readable:
+the `capabilities` entries with area `provider` and `placement` in
+[audit.json](audit.json).
 
 "Provider" names three things in Compute:
 
@@ -17,19 +19,24 @@ computers are placed on.
 
 ## Matrix
 
-| Provider | Kind | Hosts computers | Runs jobs | Provisioned by Compute | Authenticated | Verified here | Status |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `local` | pool member | no (`sessions_unsupported`) | yes | n/a (in process) | n/a | yes | IMPLEMENTED + VERIFIED |
-| `compute serve` | pool member / target | yes | yes | no — started by `compute up` locally, by hand elsewhere | **no** (`AllowAllAuthorizer`) | yes | IMPLEMENTED + VERIFIED (unauthenticated) |
-| daemon node (`/compute/*`) | pool member | no | yes | n/a | yes (daemon scopes) | tests | IMPLEMENTED + VERIFIED |
-| workspace | session provider | yes | yes (in session) | n/a | via its target | yes | IMPLEMENTED + VERIFIED |
-| container (docker/podman) | session provider | yes | yes (in session) | n/a | via its target | fake docker only | IMPLEMENTED |
-| Firecracker / KVM | session provider | — | — | — | — | — | MISSING |
-| Fly Machines | provisioning adapter | — | — | — | — | — | MISSING |
-| Railway | provisioning adapter | — | — | — | — | — | MISSING |
-| Render | provisioning adapter | — | — | — | — | — | MISSING |
-| Cloud VM / bare metal | provisioning adapter | — | — | — | — | — | MISSING |
-| DNS providers | network | n/a | n/a | n/a | provider credentials | tests | IMPLEMENTED + VERIFIED |
+| Provider | Kind | Hosts computers | Runs jobs | Provisioned by Compute | Authenticated | Loss observed | Verified here | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `local` | pool member | no (`sessions_unsupported`) | yes | n/a (in process) | n/a | n/a | yes | IMPLEMENTED + VERIFIED |
+| `compute serve` | pool member / target | yes | yes | no — started by `compute up` locally (with a credential for its control plane), by hand elsewhere | **yes**: a target credential on every request; the named `--insecure-unauthenticated` is the only open mode | yes: `unreachable` / `lost` within one liveness interval | yes | IMPLEMENTED + VERIFIED |
+| daemon node (`/compute/*`) | pool member | no | yes | n/a | yes (daemon scopes; `DaemonAuthorized`) | n/a | tests | IMPLEMENTED + VERIFIED |
+| workspace | session provider | yes | yes (in session) | n/a | via its target | yes: a missing workspace makes the session `environment_lost`, the computer `lost` | yes | IMPLEMENTED + VERIFIED |
+| container (docker/podman) | session provider | yes | yes (in session) | n/a | via its target | via `inspect` (unverified against an engine) | fake docker only | IMPLEMENTED |
+| Firecracker / KVM | session provider | — | — | — | — | — | — | MISSING |
+| Fly Machines | provisioning adapter | — | — | — | — | — | — | MISSING |
+| Railway | provisioning adapter | — | — | — | — | — | — | MISSING |
+| Render | provisioning adapter | — | — | — | — | — | — | MISSING |
+| Cloud VM / bare metal | provisioning adapter | — | — | — | — | — | — | MISSING |
+| DNS providers | network | n/a | n/a | n/a | provider credentials | n/a | tests | IMPLEMENTED + VERIFIED |
+
+A pool member authenticates to its target with `token_file` (a file holding
+the token, as the launcher writes) or `token_env`; `compute target list`
+shows how each target authenticates and whether this control plane presents
+a credential, never the credential.
 
 A target is any machine that already runs `compute serve` and is named in the
 pool file. Compute cannot create one: there is no provisioning interface.
@@ -40,7 +47,7 @@ pool file. Compute cannot create one: there is no provisioning interface.
 <!-- audit:capabilities area=provider,targets -->
 | ID | Capability | Status | User can use | In complete model | Notes | Evidence |
 | --- | --- | --- | --- | --- | --- | --- |
-| `target-inventory` | Targets listed with health, platform, resources, capabilities, features | **IMPLEMENTED + VERIFIED** | CLI/API only | yes | Not shown in the UI. | `crates/compute-cli/tests/computers.rs`<br>CLI `compute target list`<br>API `GET /targets` |
+| `target-inventory` | Targets listed with health, platform, resources, capabilities, features | **IMPLEMENTED + VERIFIED** | CLI/API only | yes | Includes how each target authenticates (`credential`, or `insecure-unauthenticated`) and whether this control plane presents a credential. Not shown in the UI. | `crates/compute-cli/tests/computers.rs`<br>`crates/compute-cli/tests/launcher.rs`<br>CLI `compute target list`<br>API `GET /targets` |
 | `provider-local` | Local provider (in-process engine) | **IMPLEMENTED + VERIFIED** | yes | yes | Runs workloads; does not host computers (sessions_unsupported). | `crates/compute-provider/src/lib.rs#LocalProvider`<br>`crates/compute-cli/tests/cli.rs` |
 | `provider-remote` | Remote provider (`compute serve`, compute.remote@1) | **IMPLEMENTED + VERIFIED** | yes | yes | The only kind of target that hosts computers. | `crates/compute-provider/src/lib.rs#RemoteProvider`<br>`crates/compute-provider/tests/remote.rs`<br>`crates/compute-cli/tests/remote_pool.rs` |
 | `provider-daemon-node` | A daemon node as a provider (deployments, /compute/*) | **IMPLEMENTED + VERIFIED** | yes | yes | — | `crates/compute-cli/tests/product.rs` |

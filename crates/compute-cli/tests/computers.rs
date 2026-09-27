@@ -289,7 +289,7 @@ fn a_computer_is_created_once_and_changed_in_place_from_the_cli() {
     );
     let info = cli.ok(&["environment", "info", "myapp"]);
     for line in [
-        "Computer:    running (persistent) on target-a",
+        "Computer:    running (desired running; persistent) on target-a",
         "Repositories",
         "Processes",
         "api",
@@ -508,4 +508,211 @@ fn deploy_is_a_release_and_work_runs_in_the_computer() {
         view["lifecycle"] == "ephemeral"
     });
     assert_eq!(temporary["machine"]["resource"], resource);
+}
+
+/// What the CLI says about a computer is what Compute last established
+/// with its target: `environment status` never says running because the
+/// environment wants it running. The target going away, coming back, and
+/// losing its sessions are each shown as they are.
+#[test]
+fn the_cli_reports_observed_reality_not_desired_state() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().to_path_buf();
+    let source = repository(&root);
+    let target_listen = format!("127.0.0.1:{}", free_port());
+    let credential = targets::issue(&root, "target-a", "control-plane");
+    let serve = || {
+        let mut serve = std::process::Command::new(env!("CARGO_BIN_EXE_compute"));
+        runtimes::with_fixture_runtimes(&mut serve);
+        let child = Serve(
+            serve
+                .args(["serve", "--listen", &target_listen, "--public-url"])
+                .arg(format!("http://{target_listen}"))
+                .arg("--job-store")
+                .arg(root.join("target-jobs"))
+                .arg("--session-store")
+                .arg(root.join("target-sessions"))
+                .arg("--credentials")
+                .arg(&credential.credentials)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        wait_for_port(&target_listen);
+        child
+    };
+    let mut target = Some(serve());
+    std::fs::write(
+        root.join("compute-pool.toml"),
+        format!(
+            "[providers.target-a]\nkind = \"remote\"\nendpoint = \"http://{target_listen}\"\n{}",
+            credential.pool_line()
+        ),
+    )
+    .unwrap();
+    let listen = format!("127.0.0.1:{}", free_port());
+    let cli = Cli {
+        daemon: format!("http://{listen}"),
+        root: root.clone(),
+    };
+    cli.start(&listen);
+    cli.json(&[
+        "environment",
+        "create",
+        "myapp",
+        "--cpu",
+        "1",
+        "--memory",
+        "64Mi",
+        "--persistent",
+        "--json",
+    ]);
+    let url = source.display().to_string();
+    cli.ok(&[
+        "environment",
+        "repo",
+        "add",
+        "myapp",
+        "app",
+        "--url",
+        &url,
+        "--revision",
+        "v1",
+    ]);
+    cli.ok(&[
+        "environment",
+        "process",
+        "add",
+        "myapp",
+        "api",
+        "--repository",
+        "app",
+        "--",
+        "sh",
+        "serve.sh",
+    ]);
+    let running = cli.computer_until("running", |view| {
+        view["converged"] == true && view["reality"]["observed"] == "running"
+    });
+    let session = running["session_id"].as_str().unwrap().to_owned();
+    let status = cli.ok(&["environment", "status", "myapp"]);
+    assert!(
+        status.contains("State: desired running, actual running, health healthy"),
+        "{status}"
+    );
+    assert!(
+        status.contains("Computer:    running (desired running;"),
+        "{status}"
+    );
+    assert!(status.contains("Confirmed:"), "{status}");
+
+    // The target goes away: unreachable, still wanted.
+    drop(target.take());
+    let unreachable = cli.computer_until("unreachable", |view| {
+        view["reality"]["observed"] == "unreachable"
+    });
+    assert_eq!(unreachable["reality"]["desired"], "running");
+    assert_eq!(unreachable["status"], "unreachable");
+    let status = cli.ok(&["environment", "status", "myapp"]);
+    assert!(
+        status.contains("actual degraded, health unhealthy"),
+        "{status}"
+    );
+    assert!(
+        status.contains("Computer:    unreachable (desired running;"),
+        "{status}"
+    );
+    assert!(status.contains("Compute keeps checking"), "{status}");
+    let listed = cli.json(&["environment", "list", "--json"]);
+    let row = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "myapp")
+        .unwrap();
+    assert_eq!(row["reality"]["observed"], "unreachable");
+    assert_eq!(row["computer"], "unreachable");
+    let refused = cli.run(&["environment", "exec", "myapp", "--", "true"]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("runtime unavailable") && stderr.contains("unreachable"),
+        "{stderr}"
+    );
+
+    // The target comes back with its stores: the same machine, running.
+    target = Some(serve());
+    let recovered =
+        cli.computer_until("recovered", |view| view["reality"]["observed"] == "running");
+    assert_eq!(recovered["session_id"], session.as_str());
+
+    // The target comes back without its sessions: lost, still wanted.
+    drop(target.take());
+    cli.computer_until("unreachable again", |view| {
+        view["reality"]["observed"] == "unreachable"
+    });
+    std::fs::remove_dir_all(root.join("target-sessions")).unwrap();
+    target = Some(serve());
+    let lost = cli.computer_until("lost", |view| view["reality"]["observed"] == "lost");
+    assert_eq!(lost["reality"]["desired"], "running");
+    assert_eq!(lost["failure"]["code"], "session_missing");
+    let status = cli.ok(&["environment", "status", "myapp"]);
+    assert!(
+        status.contains("actual failed, health unhealthy"),
+        "{status}"
+    );
+    assert!(
+        status.contains("Computer:    lost (desired running;"),
+        "{status}"
+    );
+    assert!(status.contains("replace the computer"), "{status}");
+    let refused = cli.run(&["environment", "exec", "myapp", "--", "true"]);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success() && stderr.contains("lost"),
+        "{stderr}"
+    );
+    // Reconcile asks again; the machine is still gone.
+    let reconciled = cli.json(&["environment", "reconcile", "myapp", "--json"]);
+    assert_eq!(reconciled["reality"]["observed"], "lost");
+
+    // Replace: a new machine with the same contents.
+    cli.json(&[
+        "environment",
+        "replace",
+        "myapp",
+        "--cpu",
+        "1",
+        "--memory",
+        "64Mi",
+        "--json",
+    ]);
+    let replaced = cli.computer_until("replaced", |view| {
+        view["reality"]["observed"] == "running"
+            && view["converged"] == true
+            && view["session_id"] != session.as_str()
+    });
+    assert_eq!(replaced["desired"]["repositories"][0]["revision"], "v1");
+    assert_eq!(
+        cli.ok(&[
+            "environment",
+            "exec",
+            "myapp",
+            "--",
+            "cat",
+            "running-version"
+        ]),
+        "v1"
+    );
+    let events = cli.ok(&["events", "--environment", "myapp"]);
+    for kind in [
+        "computer.unreachable",
+        "computer.recovered",
+        "computer.lost",
+        "computer.replacing",
+    ] {
+        assert!(events.contains(kind), "{kind} missing from\n{events}");
+    }
+    drop(target);
 }

@@ -1110,15 +1110,27 @@ pub fn print_computer(view: &ComputerView, json: bool) {
         print_json(view);
         return;
     }
+    // Observed reality first; what the environment asks for beside it.
+    let reality = &view.reality;
     println!(
-        "Computer:    {} ({}){}",
-        view.status,
+        "Computer:    {} (desired {}; {}){}",
+        reality.observed,
+        reality.desired,
         view.lifecycle.as_str(),
         view.target
             .as_ref()
             .map(|target| format!(" on {target}"))
             .unwrap_or_default()
     );
+    if !reality.explanation.is_empty() {
+        println!("             {}", reality.explanation);
+    }
+    if let Some(at) = reality.confirmed_at {
+        println!("Confirmed:   {} by its target", at.to_rfc3339());
+    }
+    if let Some(since) = reality.since {
+        println!("Since:       {}", since.to_rfc3339());
+    }
     println!(
         "Environment: {} ({})",
         view.environment, view.environment_id

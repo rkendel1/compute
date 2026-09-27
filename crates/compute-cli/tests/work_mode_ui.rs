@@ -63,6 +63,11 @@ fn chromium() -> Option<PathBuf> {
 #[test]
 fn manage_and_work_are_modes_of_one_environment() {
     let (Some(module), Some(browser)) = (playwright(), chromium()) else {
+        // CI certifies the UI in a browser: there, a missing browser fails.
+        assert!(
+            std::env::var_os("COMPUTE_REQUIRE_BROWSER").is_none(),
+            "COMPUTE_REQUIRE_BROWSER is set, but there is no Playwright or Chromium"
+        );
         eprintln!("skipped: no Playwright or Chromium here");
         return;
     };

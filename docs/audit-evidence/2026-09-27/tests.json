@@ -37,7 +37,7 @@
  },
  {
   "path": "crates/compute-cli/tests/computers.rs",
-  "tests": 2,
+  "tests": 3,
   "ignored_without_feltdb": 0,
   "kind": "rust-integration"
  },
@@ -50,6 +50,12 @@
  {
   "path": "crates/compute-cli/tests/isolation.rs",
   "tests": 4,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-integration"
+ },
+ {
+  "path": "crates/compute-cli/tests/launcher.rs",
+  "tests": 1,
   "ignored_without_feltdb": 0,
   "kind": "rust-integration"
  },
@@ -85,7 +91,7 @@
  },
  {
   "path": "crates/compute-cli/tests/sessions.rs",
-  "tests": 1,
+  "tests": 2,
   "ignored_without_feltdb": 0,
   "kind": "rust-integration"
  },
@@ -151,7 +157,7 @@
  },
  {
   "path": "crates/compute-environment/src/auth.rs",
-  "tests": 4,
+  "tests": 5,
   "ignored_without_feltdb": 0,
   "kind": "rust-unit"
  },
@@ -187,7 +193,7 @@
  },
  {
   "path": "crates/compute-environment/tests/computers.rs",
-  "tests": 12,
+  "tests": 15,
   "ignored_without_feltdb": 0,
   "kind": "rust-integration"
  },
@@ -306,6 +312,12 @@
   "kind": "rust-integration"
  },
  {
+  "path": "crates/compute-provider/src/credentials.rs",
+  "tests": 2,
+  "ignored_without_feltdb": 0,
+  "kind": "rust-unit"
+ },
+ {
   "path": "crates/compute-provider/src/runtime.rs",
   "tests": 9,
   "ignored_without_feltdb": 0,
@@ -331,7 +343,7 @@
  },
  {
   "path": "crates/compute-provider/tests/sessions.rs",
-  "tests": 15,
+  "tests": 17,
   "ignored_without_feltdb": 0,
   "kind": "rust-integration"
  },
@@ -448,6 +460,12 @@
   "tests": 2,
   "ignored_without_feltdb": 0,
   "kind": "typescript"
+ },
+ {
+  "path": "packages/compute-ui-e2e/src/computer-reality.test.mjs",
+  "tests": 1,
+  "ignored_without_feltdb": 0,
+  "kind": "browser"
  },
  {
   "path": "packages/compute-ui-e2e/src/control-plane.test.mjs",

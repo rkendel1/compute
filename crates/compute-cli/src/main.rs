@@ -2133,8 +2133,14 @@ async fn finish_remote_job(
     print_remote_execution_result(job_id, result.result, json, receipt_path)
 }
 
+/// A provider's failure, by its structured kind (`unauthorized`,
+/// `unknown_job`, ...), then what it said.
 fn provider_error(error: compute_provider::ProviderError) -> compute_core::ComputeError {
-    compute_core::ComputeError::Runtime(error.to_string())
+    let code = serde_json::to_value(error.kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    compute_core::ComputeError::Runtime(format!("{code}: {}", error.message))
 }
 
 fn print_provider_value(value: &impl serde::Serialize, _json: bool) {
