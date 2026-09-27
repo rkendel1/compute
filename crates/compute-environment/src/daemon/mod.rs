@@ -26,6 +26,7 @@ mod supervision;
 mod upgrades;
 
 pub use supervision::Recovery;
+mod software;
 mod views;
 mod work;
 
@@ -705,6 +706,11 @@ pub struct Daemon {
     computer_wake: Notify,
     /// When targets were last swept for orphaned computers.
     orphan_sweep: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Publishes and rollouts a task is driving: working state, rebuilt
+    /// from their durable records (an indexed equality on their status).
+    operation_drivers: std::sync::Mutex<BTreeSet<String>>,
+    /// When in-flight operations were last looked up.
+    operations_polled: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 pub(crate) enum Outcome {
@@ -982,6 +988,8 @@ impl Daemon {
             computer_drivers: std::sync::Mutex::new(BTreeSet::new()),
             computer_wake: Notify::new(),
             orphan_sweep: std::sync::Mutex::new(None),
+            operation_drivers: std::sync::Mutex::new(BTreeSet::new()),
+            operations_polled: std::sync::Mutex::new(None),
         });
         if let Some(error) = &degraded {
             let mut inner = daemon.inner.lock().await;

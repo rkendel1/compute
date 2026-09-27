@@ -37,10 +37,12 @@ pub enum Collection {
     Audit,
     Computer,
     WorkSession,
+    Version,
+    Rollout,
 }
 
 impl Collection {
-    pub const ALL: [Collection; 23] = [
+    pub const ALL: [Collection; 25] = [
         Self::Project,
         Self::ProjectRevision,
         Self::Environment,
@@ -64,6 +66,8 @@ impl Collection {
         Self::Audit,
         Self::Computer,
         Self::WorkSession,
+        Self::Version,
+        Self::Rollout,
     ];
 
     /// The collection's name in every backend, and in `compute.flow`.
@@ -92,6 +96,8 @@ impl Collection {
             Self::Audit => "Audit",
             Self::Computer => "Computer",
             Self::WorkSession => "WorkSession",
+            Self::Version => "Version",
+            Self::Rollout => "Rollout",
         }
     }
 

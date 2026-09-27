@@ -1826,6 +1826,9 @@ pub struct DeployCommand {
     /// first.
     #[arg(long)]
     pub source: Option<PathBuf>,
+    /// For an environment with a computer: deploy this published version.
+    #[arg(long, conflicts_with_all = ["revision", "source", "from"])]
+    pub version: Option<String>,
     /// Replace the project's configuration in this environment.
     #[arg(long = "set", value_parser = parse_pair)]
     pub env: Vec<(String, String)>,
@@ -1872,6 +1875,20 @@ pub async fn deploy(command: DeployCommand) -> compute_core::Result<()> {
         .await
         .map_err(error)?;
     if target.computer.is_some() {
+        if let Some(version) = &command.version {
+            let rollout: compute_state::RolloutRecord = client
+                .post(
+                    &format!("/software/{}/deploy", command.project),
+                    Some(&compute_environment::DeployVersionRequest {
+                        environment: environment.clone(),
+                        version: version.clone(),
+                        expected_generation: None,
+                    }),
+                )
+                .await
+                .map_err(error)?;
+            return crate::version_cmd::follow(&client, rollout, command.json).await;
+        }
         if command.source.is_some() || !command.env.is_empty() {
             return Err(ComputeError::Runtime(format!(
                 "{environment} runs on its own computer: a deployment there releases a \
@@ -1964,6 +1981,32 @@ pub struct PromoteCommand {
 
 pub async fn promote(command: PromoteCommand) -> compute_core::Result<()> {
     let client = command.daemon.client()?;
+    // Between environments with computers, a promotion moves a version.
+    let target: EnvironmentView = client
+        .get(&format!("/environments/{}", command.to))
+        .await
+        .map_err(error)?;
+    if target.computer.is_some() {
+        let plan: compute_environment::PromotionPlan = client
+            .get(&format!(
+                "/software/{}/promotion?from={}&to={}",
+                command.project, command.from, command.to
+            ))
+            .await
+            .map_err(error)?;
+        let rollout: compute_state::RolloutRecord = client
+            .post(
+                &format!("/software/{}/promote", command.project),
+                Some(&compute_environment::PromoteVersionRequest {
+                    from: command.from.clone(),
+                    to: command.to.clone(),
+                    expected_generation: Some(plan.expected_generation),
+                }),
+            )
+            .await
+            .map_err(error)?;
+        return crate::version_cmd::follow(&client, rollout, command.json).await;
+    }
     let request = PromoteRequest {
         project: command.project,
         from: command.from,

@@ -1625,6 +1625,202 @@
           "required": false
         }
       ]
+    },
+    {
+      "name": "Version",
+      "fields": [
+        {
+          "name": "version_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "version",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "commit",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "package_digest",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "assembly",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "config_keys",
+          "type": "json",
+          "required": false
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "publishing",
+            "published",
+            "failed"
+          ]
+        },
+        {
+          "name": "steps",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "completed_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "failure",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "Rollout",
+      "fields": [
+        {
+          "name": "rollout_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "deploy",
+            "promote",
+            "rollback"
+          ]
+        },
+        {
+          "name": "project",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "version_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "version",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "previous_version_id",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "previous_version",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "from_environment",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "applying",
+            "active",
+            "failed",
+            "superseded"
+          ]
+        },
+        {
+          "name": "steps",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "contents_generation",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "completed_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "failure",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
+        }
+      ]
     }
   ],
   "indexes": [
@@ -2131,6 +2327,62 @@
         "record_id"
       ],
       "unique": false
+    },
+    {
+      "name": "Version.project",
+      "collection": "Version",
+      "fields": [
+        "project"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Version.status",
+      "collection": "Version",
+      "fields": [
+        "status"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Version.record_id",
+      "collection": "Version",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Rollout.environment_id",
+      "collection": "Rollout",
+      "fields": [
+        "environment_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Rollout.project",
+      "collection": "Rollout",
+      "fields": [
+        "project"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Rollout.status",
+      "collection": "Rollout",
+      "fields": [
+        "status"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Rollout.record_id",
+      "collection": "Rollout",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
     }
   ],
   "references": [],
@@ -2301,6 +2553,20 @@
     {
       "name": "WorkSession",
       "resource": "WorkSession",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Version",
+      "resource": "Version",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Rollout",
+      "resource": "Rollout",
       "read": "authenticated",
       "write": "authenticated",
       "capabilities": []

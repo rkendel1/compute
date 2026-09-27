@@ -20,6 +20,7 @@ mod control_state;
 mod direct;
 mod distribution;
 mod environment_cmd;
+mod launch_cmd;
 mod network_cmd;
 mod node_cmd;
 mod placement_certification;
@@ -28,6 +29,7 @@ mod policy_cmd;
 mod pool;
 mod receipt;
 mod session_cmd;
+mod version_cmd;
 mod work_cmd;
 
 #[derive(Parser, Debug)]
@@ -43,6 +45,15 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Launch the Compute control plane on this machine and open it: what
+    /// `compute` alone does. Starts this machine's computer host and the
+    /// daemon when they are not running.
+    Up(launch_cmd::UpCommand),
+    /// Stop the control plane `compute` launched, and this machine's
+    /// computer host. Durable state is kept.
+    Down(launch_cmd::DownCommand),
+    /// Publish, deploy, promote, and roll back versions of a project.
+    Versions(version_cmd::VersionCommand),
     /// Create the smallest useful Compute application.
     Init(application::InitCommand),
     /// Describe, pack, deploy, and operate applications.
@@ -690,6 +701,10 @@ fn parse_cli() -> Cli {
     {
         arguments.insert(2, "inspect".into());
     }
+    // `compute` alone launches the control plane.
+    if arguments.len() == 1 {
+        arguments.push("up".into());
+    }
     if arguments.get(1).and_then(|value| value.to_str()) == Some("deployment")
         && !matches!(
             arguments.get(2).and_then(|value| value.to_str()),
@@ -703,6 +718,9 @@ fn parse_cli() -> Cli {
 
 async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
     match cli.command {
+        Commands::Up(command) => launch_cmd::up(command).await?,
+        Commands::Down(command) => launch_cmd::down(command).await?,
+        Commands::Versions(command) => version_cmd::version(command).await?,
         Commands::Init(command) => application::init(command)?,
         Commands::Application(command) => application::command(*command).await?,
         Commands::Run(command) => {

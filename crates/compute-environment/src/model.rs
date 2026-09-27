@@ -451,3 +451,61 @@ pub struct ApplicationRollbackRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<compute_state::PoolPlacement>,
 }
+
+/// Inspect a project's source in an environment's computer and propose
+/// how to run it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposeRequest {
+    /// A Git URL, or a folder the computer can read that is a Git
+    /// repository.
+    pub url: String,
+    /// A branch, tag, or commit. Defaults to the repository's default
+    /// branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// The project's name. Defaults to the repository's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Publish a version of a project from the environment it is developed in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishRequest {
+    pub environment: String,
+    /// The label. Defaults to the next patch version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// Deploy a published version to an environment: a change to its desired
+/// state, reconciled in place by its computer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeployVersionRequest {
+    pub environment: String,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_generation: Option<u64>,
+}
+
+/// Promote the version running in one environment to another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromoteVersionRequest {
+    pub from: String,
+    pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_generation: Option<u64>,
+}
+
+/// Roll an environment back to an earlier version (the one before the
+/// current, unless named).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RollbackRequest {
+    pub environment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}

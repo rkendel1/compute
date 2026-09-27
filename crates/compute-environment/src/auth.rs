@@ -87,7 +87,11 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
         ("GET", ["audit", ..]) | ("GET", ["auth", "credentials", ..]) => Scope::Admin,
         ("GET", _) => Scope::Read,
         ("POST", ["environments", _, "projects", _, "workloads", _, "run"])
-        | ("POST", ["environments", _, "exec" | "connect" | "run"]) => Scope::Execute,
+        | ("POST", ["environments", _, "exec" | "connect" | "run" | "propose"]) => Scope::Execute,
+        // Versions and their rollouts are deployments.
+        ("POST", ["software", _, "versions" | "deploy" | "promote" | "rollback"]) => {
+            Scope::Deploy
+        }
         // A release is a deployment: a change to what the computer runs.
         ("POST", ["environments", _, "release"]) => Scope::Deploy,
         // What belongs in an environment's computer, and its computer.
@@ -99,7 +103,16 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
                 "contents" | "repositories" | "packages" | "processes",
             ],
         )
-        | ("POST", ["environments", _, "processes", _, "start" | "stop"])
+        | (
+            "POST",
+            [
+                "environments",
+                _,
+                "processes",
+                _,
+                "start" | "stop" | "restart",
+            ],
+        )
         | (
             "POST",
             [

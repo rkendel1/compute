@@ -113,7 +113,7 @@ pub fn validate_target_features(features: &[String]) -> crate::Result<()> {
 
 /// What an environment's computer must be. Provider identity is not part
 /// of it: placement finds a target that satisfies it.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComputerRequirements {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -125,7 +125,9 @@ pub struct ComputerRequirements {
     /// `x86_64`, `arm64`, ...
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub architecture: Option<String>,
-    #[serde(default)]
+    /// A computer is a machine to work on: it reaches the network unless
+    /// asked not to.
+    #[serde(default = "network_by_default")]
     pub network: NetworkPolicy,
     #[serde(default)]
     pub isolation: IsolationProfile,
@@ -136,6 +138,21 @@ pub struct ComputerRequirements {
     /// Target features the machine must have (`kvm`, `firecracker`, ...).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<String>,
+}
+
+impl Default for ComputerRequirements {
+    fn default() -> Self {
+        Self {
+            cpu_count: None,
+            memory_bytes: None,
+            disk_bytes: None,
+            architecture: None,
+            network: NetworkPolicy::Network,
+            isolation: Default::default(),
+            capabilities: vec![],
+            features: vec![],
+        }
+    }
 }
 
 impl ComputerRequirements {
@@ -175,6 +192,10 @@ pub struct ComputerSpec {
     /// environment's record stays as evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destroy_requested_at: Option<DateTime<Utc>>,
+}
+
+fn network_by_default() -> NetworkPolicy {
+    NetworkPolicy::Network
 }
 
 fn first_generation() -> u64 {
@@ -221,6 +242,10 @@ pub struct RepositorySpec {
     pub url: String,
     /// A branch, tag, or commit.
     pub revision: String,
+    /// Increases to fetch the revision again (a branch that moved), with
+    /// nothing else changed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub sync: u64,
 }
 
 /// A package installed by running a command once per change.
@@ -255,6 +280,13 @@ pub struct ProcessSpec {
     /// endpoints. The process is told it in `$PORT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Increases to restart it in place, with nothing else changed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub restart: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// A project: software in one of the environment's repositories, with the
@@ -277,6 +309,10 @@ pub struct ProjectSpec {
     /// Named commands run on request: `migrate`, `lint`, `seed`, ...
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub commands: BTreeMap<String, Vec<String>>,
+    /// Named commands that must pass to publish a version (`lint`,
+    /// `typecheck`, ...), after the build and the tests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<String>,
 }
 
 impl ProjectSpec {
@@ -427,6 +463,16 @@ impl EnvironmentContents {
                     argv,
                 )?;
             }
+            if let Some(check) = project
+                .checks
+                .iter()
+                .find(|check| !project.commands.contains_key(*check))
+            {
+                return invalid(format!(
+                    "project {}: check {check} is not one of its commands",
+                    project.name
+                ));
+            }
             if project.commands.contains_key("build") || project.commands.contains_key("test") {
                 return invalid(format!(
                     "project {}: `build` and `test` are fields, not named commands",
@@ -566,6 +612,103 @@ pub struct RetiredSession {
     pub spec_generation: u64,
 }
 
+/// One step of a durable operation (a publish, a deployment), as the
+/// controller records it: what it is, how it stands, and the job that did it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationStep {
+    pub name: String,
+    pub status: StepStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<DateTime<Utc>>,
+}
+
+impl OperationStep {
+    pub fn pending(name: &str) -> Self {
+        Self {
+            name: name.into(),
+            status: StepStatus::Pending,
+            detail: None,
+            job_id: None,
+            execution_id: None,
+            at: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
+impl StepStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    pub const fn is_done(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Skipped)
+    }
+}
+
+/// What a project needs in a computer, as a version records it: its
+/// repository, how it is built and checked, and what runs from it. A version
+/// deployed to an environment that lacks any of it brings it along.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectAssembly {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<RepositorySpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<PackageSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processes: Vec<ProcessSpec>,
+}
+
+/// What Compute proposes after inspecting a project's source in a computer:
+/// an assembly the user can accept, change, and submit with GO.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectProposal {
+    pub name: String,
+    /// `node`, `python`, `go`, `rust`, `make`, or none recognised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    pub assembly: ProjectAssembly,
+    /// Services the project appears to need (a database, a cache), proposed
+    /// but not required.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ProcessSpec>,
+    /// Configuration the project documents, with its documented defaults.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub config: BTreeMap<String, String>,
+    /// What Compute found, and what it could not decide.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// The files it looked at.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,6 +722,7 @@ mod tests {
             env: BTreeMap::new(),
             desired: ProcessDesired::Running,
             port: None,
+            restart: 0,
         }
     }
 
@@ -589,6 +733,7 @@ mod tests {
                 name: "app".into(),
                 url: "https://example.invalid/app.git".into(),
                 revision: "main".into(),
+                sync: 0,
             }],
             processes: vec![process("api", Some("app"))],
             ..Default::default()
@@ -627,12 +772,14 @@ mod tests {
             build: vec!["make".into()],
             test: vec![],
             commands: BTreeMap::from([("migrate".into(), vec!["./migrate".into()])]),
+            checks: vec![],
         };
         let mut contents = EnvironmentContents {
             repositories: vec![RepositorySpec {
                 name: "app".into(),
                 url: "https://example.invalid/app.git".into(),
                 revision: "main".into(),
+                sync: 0,
             }],
             projects: vec![project("app", "app")],
             processes: vec![process("api", Some("app"))],

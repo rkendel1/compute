@@ -236,6 +236,20 @@ pub enum ComputerCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect a project's source in the computer and propose how to run
+    /// it: runtime, dependencies, build, tests, start command, ports,
+    /// services, configuration. Nothing changes.
+    Propose {
+        environment: String,
+        /// A Git URL, or a folder the computer can read that is a Git
+        /// repository.
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        revision: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Change how long the environment lives, in place: kept until
     /// destroyed, or temporary.
     Lifetime {
@@ -295,6 +309,10 @@ pub enum ProjectCommands {
         /// (repeatable).
         #[arg(long = "command", value_parser = parse_pair)]
         commands: Vec<(String, String)>,
+        /// A named command that must pass to publish a version
+        /// (repeatable).
+        #[arg(long = "check")]
+        checks: Vec<String>,
         #[arg(long)]
         json: bool,
     },
@@ -332,6 +350,13 @@ pub enum RepoCommands {
     Add(RepoArgs),
     /// Move a repository to another revision (or URL).
     Update(RepoArgs),
+    /// Fetch a repository's revision again: a branch that moved.
+    Pull {
+        environment: String,
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
     Remove {
         environment: String,
         name: String,
@@ -390,6 +415,13 @@ pub enum ProcessCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Restart it in place.
+    Restart {
+        environment: String,
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
     Remove {
         environment: String,
         name: String,
@@ -441,6 +473,7 @@ impl ProcessArgs {
                 ProcessDesired::Running
             },
             port: self.port,
+            restart: 0,
         }
     }
 }
@@ -554,11 +587,38 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                             name: args.name.clone(),
                             url: args.url.clone(),
                             revision: args.revision.clone(),
+                            sync: 0,
                         }),
                     )
                     .await
                     .map_err(error)?;
                 print_computer(&view, args.json);
+            }
+            RepoCommands::Pull {
+                environment,
+                name,
+                json,
+            } => {
+                let view: ComputerView = client
+                    .get(&format!("/environments/{environment}/computer"))
+                    .await
+                    .map_err(error)?;
+                let mut repository = view
+                    .desired
+                    .repositories
+                    .iter()
+                    .find(|repository| repository.name == name)
+                    .cloned()
+                    .ok_or_else(|| ComputeError::Runtime(format!("no repository {name}")))?;
+                repository.sync += 1;
+                let view: ComputerView = client
+                    .post(
+                        &format!("/environments/{environment}/repositories"),
+                        Some(&repository),
+                    )
+                    .await
+                    .map_err(error)?;
+                print_computer(&view, json);
             }
             RepoCommands::Remove {
                 environment,
@@ -605,6 +665,11 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                 name,
                 json,
             } => process_action(client, &environment, &name, "stop", json).await?,
+            ProcessCommands::Restart {
+                environment,
+                name,
+                json,
+            } => process_action(client, &environment, &name, "restart", json).await?,
             ProcessCommands::Remove {
                 environment,
                 name,
@@ -655,6 +720,7 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                 build,
                 test,
                 commands,
+                checks,
                 json,
             } => {
                 let view: ComputerView = client
@@ -669,6 +735,7 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                                 .iter()
                                 .map(|(name, command)| (name.clone(), shell(command)))
                                 .collect(),
+                            checks,
                         }),
                     )
                     .await
@@ -738,6 +805,25 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                 .await
                 .map_err(error)?;
             print_computer(&view, json);
+        }
+        ComputerCommands::Propose {
+            environment,
+            url,
+            revision,
+            name,
+        } => {
+            let proposal: compute_core::ProjectProposal = client
+                .post(
+                    &format!("/environments/{environment}/propose"),
+                    Some(&compute_environment::ProposeRequest {
+                        url,
+                        revision,
+                        name,
+                    }),
+                )
+                .await
+                .map_err(error)?;
+            print_json(&proposal);
         }
         ComputerCommands::Lifetime {
             environment,

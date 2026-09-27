@@ -8,17 +8,20 @@
 </head>
 <body>
   <header class="bar">
-    <a class="brand" href="#/">COMPUTE</a>
+    <a class="brand" href="#/" data-home="true">COMPUTE</a>
     <div class="modes" role="tablist" aria-label="Mode">
-      <a href="#/" role="tab" data-mode-link="manage">Manage</a>
       <a href="#/work" role="tab" data-mode-link="work">Work</a>
+      <a href="#/environments" role="tab" data-mode-link="manage">Manage</a>
     </div>
-    <nav class="manage-only">
-      <a href="#/" data-nav="environments">Environments</a>
-      <a href="#/projects" data-nav="projects">Projects</a>
-      <a href="#/domains" data-nav="domains">Domains</a>
-      <a href="#/services" data-nav="services">Services</a>
-      <a href="#/events" data-nav="events">Events</a>
+    <nav>
+      <a href="#/" data-nav="home">Home</a>
+      <a href="#/software" data-nav="software">Software</a>
+      <a href="#/work" data-nav="work" class="work-only">Computers</a>
+      <a href="#/environments" data-nav="environments" class="manage-only">Environments</a>
+      <a href="#/projects" data-nav="projects" class="manage-only">Bundles</a>
+      <a href="#/domains" data-nav="domains" class="manage-only">Domains</a>
+      <a href="#/services" data-nav="services" class="manage-only">Services</a>
+      <a href="#/events" data-nav="events" class="manage-only">Events</a>
     </nav>
     <div class="daemon" id="daemon" aria-live="polite"></div>
     <button class="ghost" id="token" type="button" title="Bearer token for changes, when the daemon requires one">Token</button>

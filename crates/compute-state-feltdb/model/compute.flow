@@ -433,6 +433,53 @@ app compute {
     index record_id using hash(record_id)
   }
 
+  collection Version {
+    version_id: text
+    project: text
+    version: text
+    environment_id: text
+    environment: text
+    commit: text?
+    package_digest: text?
+    assembly: json
+    config_keys: json?
+    status: enum(publishing, published, failed)
+    steps: json
+    created_by: text
+    created_at: datetime
+    completed_at: datetime?
+    failure: text?
+    index project using hash(project)
+    index status using hash(status)
+    record_id: text?
+    index record_id using hash(record_id)
+  }
+
+  collection Rollout {
+    rollout_id: text
+    kind: enum(deploy, promote, rollback)
+    project: text
+    environment_id: text
+    environment: text
+    version_id: text
+    version: text
+    previous_version_id: text?
+    previous_version: text?
+    from_environment: text?
+    status: enum(applying, active, failed, superseded)
+    steps: json
+    contents_generation: integer
+    created_by: text
+    created_at: datetime
+    completed_at: datetime?
+    failure: text?
+    index environment_id using hash(environment_id)
+    index project using hash(project)
+    index status using hash(status)
+    record_id: text?
+    index record_id using hash(record_id)
+  }
+
   policy Project {
     read: authenticated
     write: authenticated
@@ -522,6 +569,14 @@ app compute {
     write: authenticated
   }
   policy WorkSession {
+    read: authenticated
+    write: authenticated
+  }
+  policy Version {
+    read: authenticated
+    write: authenticated
+  }
+  policy Rollout {
     read: authenticated
     write: authenticated
   }

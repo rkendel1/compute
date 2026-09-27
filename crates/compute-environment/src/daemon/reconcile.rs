@@ -163,6 +163,7 @@ impl Daemon {
         self.converge().await;
         lap(phases, "converge");
         self.drive_computers().await;
+        self.drive_operations().await;
         lap(phases, "computers");
         self.sync_endpoints().await;
         lap(phases, "endpoints");

@@ -435,3 +435,173 @@ export function listWorkSessions(client: ComputeDaemonClient, environment?: stri
 export function workModeUrl(endpoint: string, environment: string): string {
   return `${endpoint.replace(/\/$/, "")}/#/work/${encodeURIComponent(environment)}`;
 }
+
+// ---- Software: proposals, versions, and rollouts ------------------------------
+
+export interface OperationStep {
+  name: string;
+  status: "pending" | "running" | "succeeded" | "failed" | "skipped";
+  detail?: string;
+  job_id?: string;
+  execution_id?: string;
+  at?: string;
+}
+
+export interface ProjectAssembly {
+  repository?: RepositorySpec;
+  project?: ProjectSpec & { checks?: string[] };
+  packages?: PackageSpec[];
+  processes?: ProcessSpec[];
+}
+
+/** What Compute proposes after inspecting a project's source in a computer. */
+export interface ProjectProposal {
+  name: string;
+  runtime?: string;
+  assembly: ProjectAssembly;
+  services?: ProcessSpec[];
+  config?: Record<string, string>;
+  notes?: string[];
+  evidence?: string[];
+}
+
+export interface VersionRecord {
+  version_id: string;
+  project: string;
+  version: string;
+  environment: string;
+  environment_id: string;
+  commit?: string;
+  package_digest?: string;
+  assembly: ProjectAssembly;
+  config_keys?: string[];
+  status: "publishing" | "published" | "failed";
+  steps: OperationStep[];
+  created_by: string;
+  created_at: string;
+  completed_at?: string;
+  failure?: string;
+}
+
+export interface RolloutRecord {
+  rollout_id: string;
+  kind: "deploy" | "promote" | "rollback";
+  project: string;
+  environment: string;
+  environment_id: string;
+  version_id: string;
+  version: string;
+  previous_version?: string;
+  from_environment?: string;
+  status: "applying" | "active" | "failed" | "superseded";
+  steps: OperationStep[];
+  contents_generation: number;
+  created_by: string;
+  created_at: string;
+  completed_at?: string;
+  failure?: string;
+}
+
+export interface SoftwareSummary {
+  project: string;
+  latest_version?: string;
+  latest_status?: VersionRecord["status"];
+  environments: {
+    environment: string;
+    environment_id: string;
+    computer: ComputerStatus;
+    target?: string;
+    revision: string;
+    commit?: string;
+    version?: string;
+    rollout?: RolloutRecord["status"];
+    converged: boolean;
+    processes: [string, string][];
+  }[];
+}
+
+export interface PromotionPlan {
+  project: string;
+  from: string;
+  to: string;
+  version: string;
+  version_id: string;
+  from_healthy: boolean;
+  to_current?: string;
+  changes: string[];
+  config_only_in_from: string[];
+  config_only_in_to: string[];
+  config_different: string[];
+  authority: string;
+  approvals: string[];
+  expected_generation: number;
+}
+
+const software = (project: string, rest = "") => `/software/${encodeURIComponent(project)}${rest}`;
+
+/** Inspect a project's source inside the environment's computer and propose how to run it. Nothing changes. */
+export function proposeProject(client: ComputeDaemonClient, environment: string, url: string, options: { revision?: string; name?: string } = {}): Promise<ProjectProposal> {
+  return client.request("POST", path(environment, "/propose"), { url, ...options });
+}
+
+/** Every project, where it runs, and at which version. */
+export function listSoftware(client: ComputeDaemonClient): Promise<SoftwareSummary[]> {
+  return client.request("GET", "/software");
+}
+
+export function getSoftware(client: ComputeDaemonClient, project: string): Promise<SoftwareSummary & { versions: VersionRecord[]; rollouts: RolloutRecord[]; next_version: string }> {
+  return client.request("GET", software(project));
+}
+
+/** Publish a version: build, tests, checks, and a source package, in the environment it is developed in. */
+export function publishVersion(client: ComputeDaemonClient, project: string, environment: string, version?: string): Promise<VersionRecord> {
+  return client.request("POST", software(project, "/versions"), { environment, ...(version ? { version } : {}) });
+}
+
+export function getVersion(client: ComputeDaemonClient, project: string, version: string): Promise<VersionRecord> {
+  return client.request("GET", software(project, `/versions/${encodeURIComponent(version)}`));
+}
+
+export function deployVersion(client: ComputeDaemonClient, project: string, environment: string, version: string, expectedGeneration?: number): Promise<RolloutRecord> {
+  return client.request("POST", software(project, "/deploy"), {
+    environment, version, ...(expectedGeneration === undefined ? {} : { expected_generation: expectedGeneration }),
+  });
+}
+
+/** What promoting would change, for review before GO. */
+export function promotionPlan(client: ComputeDaemonClient, project: string, from: string, to: string): Promise<PromotionPlan> {
+  return client.request("GET", software(project, `/promotion?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`));
+}
+
+export function promoteVersion(client: ComputeDaemonClient, project: string, from: string, to: string, expectedGeneration?: number): Promise<RolloutRecord> {
+  return client.request("POST", software(project, "/promote"), {
+    from, to, ...(expectedGeneration === undefined ? {} : { expected_generation: expectedGeneration }),
+  });
+}
+
+export function rollbackVersion(client: ComputeDaemonClient, project: string, environment: string, version?: string): Promise<RolloutRecord> {
+  return client.request("POST", software(project, "/rollback"), { environment, ...(version ? { version } : {}) });
+}
+
+export function getRollout(client: ComputeDaemonClient, rollout: string): Promise<RolloutRecord> {
+  return client.request("GET", `/rollouts/${encodeURIComponent(rollout)}`);
+}
+
+export function restartProcess(client: ComputeDaemonClient, environment: string, process: string): Promise<ComputerView> {
+  return client.request("POST", path(environment, `/processes/${encodeURIComponent(process)}/restart`));
+}
+
+/** Follow a publish or a rollout until it is done; `onStep` sees each change. */
+export async function waitForOperation<T extends VersionRecord | RolloutRecord>(
+  read: () => Promise<T>,
+  options: { pollMs?: number; onUpdate?: (operation: T) => void } = {},
+): Promise<T> {
+  let last = "";
+  for (;;) {
+    const operation = await read();
+    const seen = JSON.stringify(operation.steps);
+    if (seen !== last) { last = seen; options.onUpdate?.(operation); }
+    if (!["publishing", "applying"].includes(operation.status)) return operation;
+    await new Promise((resolve) => setTimeout(resolve, options.pollMs ?? 250));
+  }
+}

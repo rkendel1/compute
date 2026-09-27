@@ -19,6 +19,16 @@ import {
   listWorkSessions,
   setComputeEnvironmentLifetime,
   workModeUrl,
+  proposeProject,
+  publishVersion,
+  deployVersion,
+  promotionPlan,
+  promoteVersion,
+  rollbackVersion,
+  getRollout,
+  listSoftware,
+  restartProcess,
+  waitForOperation,
 } from "../index.js";
 
 interface Seen {
@@ -88,6 +98,18 @@ async function daemon(): Promise<{ endpoint: string; seen: Seen[]; close: () => 
     if (route === "POST /sessions") return reply(201, { session_id: "wks_1", environment: "my-app", environment_id: "env_1", owner: "alice", kind: "attached", status: "open", opened_at: "2026-09-27T00:00:00Z" });
     if (route === "GET /sessions?environment=my-app") return reply(200, [{ session_id: "wks_1", kind: "attached", status: "open" }]);
     if (route === "DELETE /sessions/wks_1") return reply(200, { session_id: "wks_1", kind: "attached", status: "closed" });
+    if (route === "POST /environments/my-app/propose") return reply(200, { name: "web", runtime: "node", assembly: { processes: [{ name: "web", command: ["npm", "start"], port: 3000 }] } });
+    if (route === "POST /environments/my-app/processes/web/restart") return reply(200, view);
+    if (route === "GET /software") return reply(200, [{ project: "web", latest_version: "1.0.0", environments: [] }]);
+    if (route === "POST /software/web/versions") return reply(201, { project: "web", version: "1.0.0", status: "publishing", steps: [] });
+    if (route === "POST /software/web/deploy") return reply(201, { rollout_id: "rol_1", status: "applying", steps: [] });
+    if (route === "GET /software/web/promotion?from=test&to=production") return reply(200, { version: "1.0.0", expected_generation: 7, changes: [] });
+    if (route === "POST /software/web/promote") return reply(201, { rollout_id: "rol_2", kind: "promote", status: "applying", steps: [] });
+    if (route === "POST /software/web/rollback") return reply(201, { rollout_id: "rol_3", kind: "rollback", status: "applying", steps: [] });
+    if (route === "GET /rollouts/rol_2") {
+      polls += 1;
+      return reply(200, { rollout_id: "rol_2", status: polls > 1 ? "active" : "applying", steps: [{ name: "Checkout", status: polls > 1 ? "succeeded" : "running" }] });
+    }
     if (route === "DELETE /environments/my-app") return reply(200, { ...view, status: "destroying" });
     if (route === "GET /targets") return reply(200, [{ target_id: "railway-1", kind: "remote", health: "healthy", hosts_computers: true, features: ["containers"] }]);
     if (route === "GET /environments/other/computer") return reply(403, { kind: "authorization_denied", message: "environment other belongs to another principal" });
@@ -171,6 +193,32 @@ test("GO, releases, project commands, lifetimes, and work sessions are API reque
     assert.equal((await listWorkSessions(client, "my-app")).length, 1);
     assert.equal((await closeWorkSession(client, "wks_1")).status, "closed");
     assert.equal(workModeUrl("http://127.0.0.1:8787/", "my app"), "http://127.0.0.1:8787/#/work/my%20app");
+  } finally {
+    stub.close();
+  }
+});
+
+test("the software lifecycle is the same API the UI uses", async () => {
+  const stub = await daemon();
+  try {
+    const client = new ComputeDaemonClient({ endpoint: stub.endpoint, token: "secret" });
+    const proposal = await proposeProject(client, "my-app", "https://example.invalid/web.git", { revision: "main" });
+    assert.equal(proposal.assembly.processes?.[0]?.port, 3000);
+    assert.deepEqual(stub.seen.at(-1)?.body, { url: "https://example.invalid/web.git", revision: "main" });
+    await restartProcess(client, "my-app", "web");
+    assert.equal((await listSoftware(client))[0]?.latest_version, "1.0.0");
+    assert.equal((await publishVersion(client, "web", "dev")).status, "publishing");
+    assert.deepEqual(stub.seen.at(-1)?.body, { environment: "dev" });
+    await deployVersion(client, "web", "test", "1.0.0", 4);
+    assert.deepEqual(stub.seen.at(-1)?.body, { environment: "test", version: "1.0.0", expected_generation: 4 });
+    const plan = await promotionPlan(client, "web", "test", "production");
+    const promoted = await promoteVersion(client, "web", "test", "production", plan.expected_generation);
+    assert.deepEqual(stub.seen.at(-1)?.body, { from: "test", to: "production", expected_generation: 7 });
+    const seen: string[] = [];
+    const done = await waitForOperation(() => getRollout(client, promoted.rollout_id), { pollMs: 1, onUpdate: (rollout) => seen.push(rollout.steps[0]!.status) });
+    assert.equal(done.status, "active");
+    assert.deepEqual(seen, ["running", "succeeded"]);
+    assert.equal((await rollbackVersion(client, "web", "production")).kind, "rollback");
   } finally {
     stub.close();
   }

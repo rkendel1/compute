@@ -228,7 +228,7 @@ dialog label.check { display: flex; align-items: center; gap: 8px; color: inheri
 dialog label.check input { width: auto; }
 
 /* Manage and Work: two modes of one control plane. */
-.modes { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-right: 8px; }
+.modes { flex-shrink: 0; white-space: nowrap; display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-right: 8px; }
 .modes a { padding: 5px 14px; color: var(--muted); font-weight: 600; font-size: 13px; }
 .modes a.active { background: var(--accent); color: #fff; text-decoration: none; }
 body[data-mode="work"] .manage-only { display: none; }
@@ -249,3 +249,45 @@ a.button.primary { background: var(--accent); border-color: var(--accent); color
 label.check { display: flex; align-items: center; gap: 8px; }
 label.inline { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; margin-left: 24px; }
 .conflict { margin-bottom: 10px; padding: 10px 12px; border: 1px solid var(--warn); border-radius: 7px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* Home: what do you want to do? */
+.actions-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; margin: 18px 0 8px; }
+.action-tile {
+  text-align: left; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-height: 92px;
+}
+.action-tile strong { font-size: 14.5px; }
+.action-tile span { color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+.action-tile:hover { border-color: var(--accent); }
+.card .placement { margin-top: 6px; }
+
+/* Run a project */
+.wizard-step { padding: 16px 18px; margin-bottom: 14px; }
+.wizard-step h3 { margin: 0 0 10px; font-size: 15px; }
+.wizard-step label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12.5px; }
+.wizard-step label.check { display: flex; color: var(--text); font-size: 13.5px; }
+.wizard-step input:not([type="radio"]):not([type="checkbox"]), .wizard-step select {
+  width: 100%; font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text);
+}
+.wizard-step .row { display: flex; gap: 12px; flex-wrap: wrap; }
+.wizard-step .row > div { flex: 1 1 180px; min-width: 0; }
+.wizard-step .row > div.narrow { flex: 0 0 110px; }
+.wizard-step ul { margin: 6px 0 10px; padding-left: 20px; }
+
+/* Operations: what Compute is doing */
+.steps-list { list-style: none; padding: 0; margin: 8px 0 14px; }
+.steps-list .step { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.steps-list .step .glyph { width: 18px; text-align: center; font-weight: 700; }
+.steps-list .step.ok .glyph { color: var(--ok); }
+.steps-list .step.warn .glyph { color: var(--warn); }
+.steps-list .step.bad .glyph { color: var(--bad); }
+.steps-list .step.idle .glyph { color: var(--idle); }
+.steps-list .step .meta { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.progress-strip { padding: 10px 14px; margin: 12px 0; }
+.progress-strip .steps-list { margin: 4px 0 0; }
+.promotion { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
+.promotion .fact { flex: 1; }
+.promotion .arrow { font-size: 22px; color: var(--muted); }
+body[data-mode="manage"] .work-only { display: none; }
+
+.wizard-step h3 + ul, .wizard-step .row + h3, .wizard-step h3:not(:first-child) { margin-top: 18px; }

@@ -22,10 +22,67 @@ Environment  myapp  (env_…)                    one durable record in FeltDB
 └── Work sessions  who is working in it
 ```
 
+## Start here: `compute`
+
+```sh
+compute
+```
+
+launches the control plane on this machine and opens it
+(`http://127.0.0.1:8787/`). It starts this machine's **computer host** — a
+`compute serve` target on `127.0.0.1:8788`, where computers run as private
+workspaces (`compute up --containers` for containers) — and the control
+plane (`compute start`), with a pool naming that host. Running it again
+reuses what runs; `compute down` stops both and keeps the state
+(`$COMPUTE_HOME`, default `~/.compute`). The control plane never runs
+software itself: the computer host does, like any other target.
+
+After that, everything is in the UI: every screen of the journey from
+`compute` to rollback is in [product-surface](product-surface/README.md),
+captured by the acceptance test that walks it.
+
 The machine is the computer; everything else says what that computer
 should contain or do. It is the same record, the same API, and the same
 authority (the environment's owner) whether it is changed by a deployment,
 from the UI, by an agent through `@compute/appport`, or from the CLI.
+
+## Home: what do you want to do?
+
+The control plane opens on actions, not infrastructure — run a project,
+work on one, add another project, build and test, publish a new version,
+deploy, move test → production, roll back, run an agent, try software,
+operate production, create a computer — with the software (where each
+project runs, at which version) and the computers under them.
+
+## Run a project
+
+Source → computer → proposal → GO:
+
+1. **Source**: a Git URL, or a folder the computer can read that is a Git
+   repository.
+2. **Computer**: one you have, or a new one (what it needs, and whether it
+   is kept or temporary).
+3. **Inspect**: a durable job in that computer clones the source to a
+   scratch directory, reads what is there, and removes it. Compute
+   proposes an assembly from what it found:
+
+   | Found | Proposed |
+   | --- | --- |
+   | `package.json` | node; `npm ci`/`npm install`; its `build`, `test`, `lint`/`typecheck` (as checks), `dev`, `start` scripts; port 3000 |
+   | `requirements.txt` / `pyproject.toml` | python; `pip install`; `pytest` when there are tests; `app.py`/`main.py`/`manage.py`; port 8000 |
+   | `go.mod` / `Cargo.toml` | go or rust; build, test, vet (a check), run |
+   | `Makefile` | its `build`, `test`, `lint`/`typecheck`/`check`, `run` targets (they win over guesses) |
+   | `Procfile` | each process; `web` is the application, with a port |
+   | `.env.example` | configuration keys, with their documented defaults |
+   | PostgreSQL or Redis in compose files or configuration | a database or Redis service, proposed but not selected |
+
+   Ports are chosen so that no environment on the same host already uses
+   them. What Compute could not decide is said (no start command, an
+   unrecognised language).
+4. **What will happen** lists every change; **GO** submits them as one
+   fenced change, and Work shows the computer converging item by item.
+
+A published version is run by deploying it (below).
 
 ## Manage and Work
 
@@ -69,6 +126,47 @@ Environment changed since you loaded it.   [ Refresh ]
 Nothing is silently overwritten. The CLI (`compute environment contents
 apply --expected-generation`) and AppPort (`submitComputeEnvironment`) use
 the same fence.
+
+## Versions: publish, deploy, promote, roll back
+
+**Publishing** records an immutable version of a project, from the
+environment it is developed in (`POST /software/{project}/versions`):
+
+```text
+✓ Source    the exact commit the computer has checked out
+✓ Build     the project's build, in that computer
+✓ Tests     its tests
+✓ Checks    its named checks (lint, typecheck, …)
+✓ Package   git archive of the commit → sha256 digest (refused if the checkout is not exactly that commit, or has uncommitted changes)
+✓ Version   1.8.4, with the assembly it runs with and the evidence of every step
+```
+
+**Deploying** a version to an environment, **promoting** the version
+running in one environment to another, and **rolling back** to an earlier
+version are all one operation — a **rollout** — which changes the
+environment's desired state (the repository at the version's commit, the
+project as the version built it, and what runs from it, if the environment
+lacks it) and follows the computer until it is real:
+
+```text
+✓ Desired state          generation 7
+✓ Checkout               web-app at 07f5aae7729b
+✓ Build                  built 07f5aae7729b
+● Restart applications
+○ Health check           every process running, every endpoint answering
+```
+
+A failed step stops the rollout with its evidence (the job that failed);
+what ran before keeps running. A rollout that becomes active supersedes
+the one before it, which stays in the history. Promotion is reviewed
+first (`GET /software/{project}/promotion?from=&to=`): what runs in each
+environment, what will change, configuration keys that differ (names
+only), the source's health, the authority it takes, and the approvals the
+target requires. Every rollout records who started it, and is resumed by
+a restarted controller.
+
+Versions and rollouts are durable records in FeltDB (`Version`,
+`Rollout`, model generation 6), read by indexed equalities.
 
 ## Deployment is reconciliation
 
@@ -274,6 +372,35 @@ lacks or the UI anything it lacks:
 | connect / sessions | `connectComputeEnvironment`, `openWorkSession`, `closeWorkSession`, `listWorkSessions` |
 | reconcile / replace / destroy | `reconcileComputeEnvironment`, `replaceComputeEnvironment`, `destroyComputeEnvironment` |
 
+## Everything the UI does, the CLI and API do
+
+| In the UI | CLI | API |
+| --- | --- | --- |
+| `compute` opens it | `compute` / `compute up`, `compute down` | — |
+| Run a project: inspect | `compute environment propose ENV --url URL` | `POST /environments/{e}/propose` |
+| … GO | `compute environment contents apply ENV FILE --expected-generation N` | `POST /environments/{e}/contents` |
+| Pull a moved branch | `compute environment repo pull ENV NAME` | `POST /environments/{e}/repositories` (`sync` + 1) |
+| Build, test, a command | `compute environment build\|test\|run` | `POST /environments/{e}/run` |
+| Terminal, files | `compute environment exec ENV -- …` | `POST /environments/{e}/exec` |
+| Logs | `compute environment logs ENV --process P` | `GET /environments/{e}/logs` |
+| Restart | `compute environment process restart ENV P` | `POST /environments/{e}/processes/{p}/restart` |
+| Publish | `compute versions publish P --environment E` | `POST /software/{p}/versions` |
+| Versions, history | `compute versions list P`, `show P V` | `GET /software/{p}`, `/versions/{v}` |
+| Deploy | `compute versions deploy P V --environment E`, `compute deploy P --environment E --version V` | `POST /software/{p}/deploy` |
+| Promote | `compute versions promote P --from --to`, `compute promote P --from --to` | `GET /software/{p}/promotion`, `POST /software/{p}/promote` |
+| Roll back | `compute versions rollback P --environment E [--to V]` | `POST /software/{p}/rollback` |
+| An operation's progress | (followed by every command above) | `GET /rollouts/{id}`, `GET /software/{p}/versions/{v}` |
+| Create, stop, resume, replace, destroy a computer | `compute environment create\|stop\|start\|replace\|destroy` | as before |
+| Lifetime, configuration | `compute environment lifetime\|config` | `POST /environments/{e}/lifecycle\|config` |
+| Temporary computer | `compute session open --cpu 2` | `POST /sessions` |
+
+`@compute/appport` has a function for each (`proposeProject`,
+`publishVersion`, `deployVersion`, `promotionPlan`, `promoteVersion`,
+`rollbackVersion`, `getRollout`, `waitForOperation`, `restartProcess`,
+`listSoftware`, …). Agents use them with an operator credential: what an
+agent builds, publishes, deploys, or promotes appears in the UI exactly as
+a person's would, under its operator's name.
+
 ## Limitations
 
 - A release restarts what runs from the repository: there is no traffic
@@ -284,6 +411,17 @@ lacks or the UI anything it lacks:
 - Endpoints are the target's host and the process's port. The container
   provider does not publish ports yet.
 - The Work terminal runs each command as a durable job; it is not an
-  interactive PTY.
+  interactive PTY. Files are listed and read through the same jobs; there
+  is no in-browser editor.
+- A local folder must be a Git repository the computer can read; changes
+  reach the computer as commits (Pull, or a new revision).
+- Approvals: promotion shows the authority it takes; there is no separate
+  approval workflow yet (`approvals` is empty).
+- Inspection recognises common layouts (above); anything else is proposed
+  empty, to be filled in before GO.
+- A rollout's health check connects to each endpoint from the control
+  plane. A target whose ports the control plane cannot reach fails the
+  check after a minute, even when the processes run; give such processes
+  no port, or make the target's host reachable.
 - Attn and Try This Software are not in this repository; their integration
   is the API above.
