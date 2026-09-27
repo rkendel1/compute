@@ -40,7 +40,11 @@ pub const STATE_VERSION: &str = "compute.state@1";
 /// - 4: environments on a computer: `Environment.owner`,
 ///   `Environment.computer`, `Environment.contents`, and the `Computer`
 ///   collection (the computer's lifecycle and observed contents).
-pub const MODEL_GENERATION: u32 = 4;
+/// - 5: work sessions: the `WorkSession` collection (who is working in
+///   which environment, and whether the session owns an ephemeral one).
+///   `Computer.provider_resource`; `Environment.contents` gains projects
+///   and endpoints, and `Computer.observed` builds (inside their JSON).
+pub const MODEL_GENERATION: u32 = 5;
 
 /// A typed document of one collection.
 pub trait Document: Serialize + DeserializeOwned + Clone + Send + Sync {
@@ -291,6 +295,10 @@ pub struct ComputerRecord {
     pub reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_kind: Option<String>,
+    /// The provider's own handle for the machine (a container, a VM, a
+    /// workspace): the resource ordinary changes never replace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_resource: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<compute_core::SessionCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -312,6 +320,55 @@ pub struct ComputerRecord {
     pub expires_at: Option<DateTime<Utc>>,
 }
 document!(ComputerRecord, Computer);
+
+/// How a work session relates to its environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkSessionKind {
+    /// Entered an existing environment. Closing it leaves the environment,
+    /// and its computer, as they are.
+    Attached,
+    /// Created an ephemeral environment for itself. Closing it destroys
+    /// that environment's computer; the records stay as evidence.
+    Ephemeral,
+}
+
+impl WorkSessionKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Attached => "attached",
+            Self::Ephemeral => "ephemeral",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkSessionStatus {
+    Open,
+    Closed,
+}
+
+/// Someone working in an environment: a way in, never the environment
+/// itself. The environment, its computer, and its evidence outlive it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkSessionRecord {
+    pub session_id: String,
+    pub environment_id: String,
+    pub environment: String,
+    pub owner: String,
+    pub kind: WorkSessionKind,
+    pub status: WorkSessionStatus,
+    pub opened_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<DateTime<Utc>>,
+    /// An ephemeral session ends with its environment's TTL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
+}
+document!(WorkSessionRecord, WorkSession);
 
 /// A project's membership in an environment: its desired state there, its
 /// configuration there, and which deployment is current.
@@ -1084,6 +1141,11 @@ pub mod events {
     pub const ENVIRONMENT_EXEC: &str = "environment.exec";
     pub const ENVIRONMENT_CONNECTED: &str = "environment.connected";
     pub const ENVIRONMENT_RECONCILE_REQUESTED: &str = "environment.reconcile_requested";
+    pub const ENVIRONMENT_COMMAND: &str = "environment.command";
+    pub const ENVIRONMENT_RELEASE: &str = "environment.release";
+    pub const COMPUTER_LIFECYCLE_CHANGED: &str = "computer.lifecycle_changed";
+    pub const WORK_SESSION_OPENED: &str = "work_session.opened";
+    pub const WORK_SESSION_CLOSED: &str = "work_session.closed";
 }
 
 /// A 24-hex-digit digest of length-prefixed parts.
@@ -1140,6 +1202,11 @@ pub mod ids {
     /// An environment has at most one computer record.
     pub fn computer(environment_id: &str) -> String {
         format!("cmp_{}", short_digest(&[environment_id]))
+    }
+
+    /// A work session: unique per opening.
+    pub fn work_session(environment_id: &str, owner: &str, nonce: &str) -> String {
+        format!("wks_{}", short_digest(&[environment_id, owner, nonce]))
     }
 
     pub fn workload_status(workload_id: &str) -> String {
@@ -1231,5 +1298,6 @@ pub fn decode_document(
         C::OperatorCredential => decode::<OperatorCredentialRecord>(value),
         C::Audit => decode::<AuditRecord>(value),
         C::Computer => decode::<ComputerRecord>(value),
+        C::WorkSession => decode::<WorkSessionRecord>(value),
     }
 }

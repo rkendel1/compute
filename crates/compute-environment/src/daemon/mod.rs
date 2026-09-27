@@ -27,6 +27,7 @@ mod upgrades;
 
 pub use supervision::Recovery;
 mod views;
+mod work;
 
 pub use applications::{APPLICATION_WORKLOAD, APPLICATIONS_ENVIRONMENT};
 pub use computers::{ComputerExec, ComputerJob};
@@ -2079,7 +2080,8 @@ impl Daemon {
     /// Act on a change this controller just made to desired state, which
     /// it read in full before making it.
     pub(crate) async fn changed(self: &Arc<Self>) {
-        self.reconcile_targeted().await;
+        // Boxed: a reconcile pass is a deep future, and callers are deep too.
+        Box::pin(self.reconcile_targeted()).await;
         // Computers act on desired state too: their drivers look again.
         self.computer_wake.notify_waiters();
     }

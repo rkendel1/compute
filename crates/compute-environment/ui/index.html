@@ -9,7 +9,11 @@
 <body>
   <header class="bar">
     <a class="brand" href="#/">COMPUTE</a>
-    <nav>
+    <div class="modes" role="tablist" aria-label="Mode">
+      <a href="#/" role="tab" data-mode-link="manage">Manage</a>
+      <a href="#/work" role="tab" data-mode-link="work">Work</a>
+    </div>
+    <nav class="manage-only">
       <a href="#/" data-nav="environments">Environments</a>
       <a href="#/projects" data-nav="projects">Projects</a>
       <a href="#/domains" data-nav="domains">Domains</a>

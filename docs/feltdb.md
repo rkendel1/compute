@@ -93,6 +93,10 @@ not index `_id`, `In`, ranges, or orderings. So:
 - **Views.** `Execution.project_id`, `Receipt.project_id`,
   `Event.environment`, `Event.project`, and `Event.deployment_id` are indexed so that the views that filter by
   them are.
+- **Work sessions** (generation 5). `WorkSession.environment_id` and
+  `WorkSession.owner` are indexed: an environment's sessions, and an
+  operator's, are one indexed equality, newest first and limited by
+  FeltDB.
 
 What FeltDB executed is counted: queries answered by index and by scan,
 rows scanned and returned, and the *shape* (collection, fields, ordering;
@@ -234,7 +238,7 @@ Recovery, in order, before a mutation is accepted:
 
 ## The model and upgrades
 
-The model is `compute.flow` (`compute.state@1`), at **generation 4**
+The model is `compute.flow` (`compute.state@1`), at **generation 5**
 (`compute_state::MODEL_GENERATION`). Each generation only adds collections,
 optional fields, and indexes.
 

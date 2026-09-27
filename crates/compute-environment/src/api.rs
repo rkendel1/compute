@@ -129,7 +129,16 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/environments/{environment}/connect"),
     ("GET", "/environments/{environment}/jobs/{job}"),
     ("GET", "/environments/{environment}/logs"),
+    ("POST", "/environments/{environment}/run"),
+    ("POST", "/environments/{environment}/release"),
+    ("POST", "/environments/{environment}/config"),
+    ("POST", "/environments/{environment}/lifecycle"),
     ("GET", "/targets"),
+    // Work sessions: ways into an environment.
+    ("GET", "/sessions"),
+    ("POST", "/sessions"),
+    ("GET", "/sessions/{session}"),
+    ("DELETE", "/sessions/{session}"),
     ("GET", "/projects"),
     ("GET", "/projects/{project}"),
     ("GET", "/projects/{project}/status"),
@@ -643,7 +652,10 @@ async fn dispatch(
         credential_id: principal.credential_id.clone(),
     };
     let result = crate::auth::REQUEST
-        .scope(context, route(daemon, &principal, request, &segments))
+        .scope(
+            context,
+            Box::pin(route(daemon, &principal, request, &segments)),
+        )
         .await;
     if mutation {
         let record = match &result {
@@ -1037,7 +1049,35 @@ async fn route(
             limit(200),
         ))
         .await?),
+        ("POST", ["environments", id, "run"]) => created(to_value(
+            Box::pin(daemon.project_command(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "release"]) => ok(to_value(
+            Box::pin(daemon.release_project(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "config"]) => ok(to_value(
+            Box::pin(daemon.set_config(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "lifecycle"]) => ok(to_value(
+            Box::pin(daemon.set_lifecycle(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
         ("GET", ["targets"]) => ok(to_value(Box::pin(daemon.targets()).await)?),
+        ("GET", ["sessions"]) => ok(to_value(
+            Box::pin(daemon.work_sessions(
+                &principal.operator_id,
+                query.get("environment").map(String::as_str),
+            ))
+            .await?,
+        )?),
+        ("POST", ["sessions"]) => created(to_value(
+            Box::pin(daemon.open_session(&principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("GET", ["sessions", session]) => ok(to_value(
+            Box::pin(daemon.work_session(&principal.operator_id, session)).await?,
+        )?),
+        ("DELETE", ["sessions", session]) => ok(to_value(
+            Box::pin(daemon.close_session(&principal.operator_id, session)).await?,
+        )?),
         ("GET", ["environments", id]) | ("GET", ["environments", id, "status"]) => {
             ok(to_value(Box::pin(daemon.environment(id)).await?)?)
         }
@@ -1064,14 +1104,36 @@ async fn route(
         ("GET", ["environments", id, "projects"]) => {
             ok(to_value(Box::pin(daemon.environment(id)).await?.projects)?)
         }
-        ("POST", ["environments", id, "projects"]) => created(to_value(
-            Box::pin(daemon.add_project(id, parse(body)?)).await?,
-        )?),
+        ("POST", ["environments", id, "projects"]) => {
+            if Box::pin(daemon.has_computer(id)).await? {
+                // A project in an environment with a computer is software
+                // in one of its repositories, built and run there.
+                ok(to_value(
+                    Box::pin(daemon.upsert_project(id, &principal.operator_id, parse(body)?))
+                        .await?,
+                )?)
+            } else {
+                created(to_value(
+                    Box::pin(daemon.add_project(id, parse(body)?)).await?,
+                )?)
+            }
+        }
         ("GET", ["environments", id, "projects", project])
         | ("GET", ["environments", id, "projects", project, "status"]) => {
             ok(to_value(Box::pin(daemon.project(id, project)).await?)?)
         }
         ("DELETE", ["environments", id, "projects", project]) => {
+            if Box::pin(daemon.has_computer(id)).await? {
+                return ok(to_value(
+                    Box::pin(daemon.remove_content(
+                        id,
+                        &principal.operator_id,
+                        "projects",
+                        project,
+                    ))
+                    .await?,
+                )?);
+            }
             Box::pin(daemon.remove_project(id, project)).await?;
             ok(serde_json::json!({ "removed": project }))
         }

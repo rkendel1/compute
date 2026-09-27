@@ -379,6 +379,67 @@ pub struct EnvironmentView {
     /// The environment's computer, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer: Option<ComputerView>,
+    /// What runs the environment's work.
+    pub machine: MachineSummary,
+}
+
+/// The machine behind an environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineView {
+    pub target: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_kind: Option<String>,
+    /// The provider's handle for the machine: a container, a VM, a
+    /// workspace. Metadata, never an identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+}
+
+/// A process's endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessEndpoint {
+    pub process: String,
+    pub port: u16,
+    /// `http://host:port` on the target, when the target's address is
+    /// known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub serving: bool,
+}
+
+/// A work session: someone working in an environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkSessionView {
+    pub session_id: String,
+    pub environment: String,
+    pub environment_id: String,
+    pub owner: String,
+    pub kind: compute_state::WorkSessionKind,
+    pub status: compute_state::WorkSessionStatus,
+    pub opened_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
+    /// How to reach the computer, while the session is open and the
+    /// computer runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<compute_core::SessionConnectionGrant>,
+}
+
+/// What runs an environment's work: its own computer, or (for an
+/// environment without one) this control-plane node, said explicitly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineSummary {
+    /// `computer` or `node`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<compute_core::ComputerStatus>,
 }
 
 /// An environment's computer: what was asked for, where it runs, and
@@ -388,7 +449,10 @@ pub struct ComputerView {
     pub environment: String,
     pub environment_id: String,
     pub owner: String,
+    /// The lifecycle the machine has, and the one asked for (they differ
+    /// only while a change is applied).
     pub lifecycle: compute_core::ComputerLifecycle,
+    pub requested_lifecycle: compute_core::ComputerLifecycle,
     pub status: compute_core::ComputerStatus,
     pub requirements: compute_core::ComputerRequirements,
     /// The requirements' generation, and the one the computer runs.
@@ -408,8 +472,18 @@ pub struct ComputerView {
     pub capabilities: Option<compute_core::SessionCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<compute_core::SessionConnection>,
+    /// The machine backing the environment: the provider's resource.
+    /// Ordinary changes never replace it; `replace` does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<MachineView>,
+    /// What every process, build, and command sees.
+    #[serde(default)]
+    pub config: BTreeMap<String, String>,
     pub desired: compute_core::EnvironmentContents,
     pub observed: compute_core::ObservedContents,
+    /// Where the environment's processes listen.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<ProcessEndpoint>,
     /// Whether the computer holds exactly what the environment asks for.
     pub converged: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -440,6 +514,9 @@ pub struct EnvironmentSummary {
     /// The status of the environment's computer, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer: Option<compute_core::ComputerStatus>,
+    /// Where the environment's computer runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 /// A project in one environment, as listed from the project's side.

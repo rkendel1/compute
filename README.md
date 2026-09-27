@@ -89,13 +89,18 @@ compute session destroy ses_...
 An environment can be a durable computer: placed on a target by what it
 needs, then changed in place — repositories, packages, applications,
 services, and agents are desired state, reconciled by durable jobs, with
-no redeployment. See [docs/computers.md](docs/computers.md).
+no redeployment. Deployment is a release of a project's revision,
+reconciled on the same machine; the control plane's Manage and Work modes
+act on the same environment. See [docs/computers.md](docs/computers.md) and
+[docs/environment-control-plane.md](docs/environment-control-plane.md).
 
 ```sh
 compute environment create myapp --cpu 4 --memory 8Gi --persistent
 compute environment repo add myapp app --url https://git.example/app.git --revision v2
 compute environment service add myapp api --repository app -- npm start
 compute environment exec myapp -- npm test
+compute deploy app --environment myapp --revision v3   # a release, in place
+compute session open myapp                             # work in it; it keeps running after
 ```
 
 Providers can be grouped into a caller-owned pool. Placement selects the

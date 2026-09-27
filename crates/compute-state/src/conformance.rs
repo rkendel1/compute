@@ -535,8 +535,16 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             kind: compute_core::ProcessKind::Application,
             command: vec!["./serve".into()],
             repository: Some("app".into()),
-            env: BTreeMap::from([("PORT".into(), "8080".into())]),
+            env: BTreeMap::new(),
             desired: compute_core::ProcessDesired::Running,
+            port: Some(8080),
+        }],
+        projects: vec![compute_core::ProjectSpec {
+            name: "app".into(),
+            repository: "app".into(),
+            build: vec!["make".into()],
+            test: vec!["make".into(), "test".into()],
+            commands: BTreeMap::from([("migrate".into(), vec!["./migrate".into()])]),
         }],
         generation: 3,
     };
@@ -587,6 +595,7 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             session_id: Some("ses_1".into()),
             reference: Some("cmp_1:1".into()),
             provider_kind: Some("workspace".into()),
+            provider_resource: Some("/var/lib/compute/sessions/ses_1".into()),
             capabilities: Some(compute_core::SessionCapabilities {
                 exec: true,
                 ..Default::default()
@@ -610,6 +619,14 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
                         state: compute_core::ProcessState::Running,
                         fingerprint: "sha256:p".into(),
                         pid: Some(42),
+                        evidence: evidence.clone(),
+                    },
+                )]),
+                builds: BTreeMap::from([(
+                    "api".into(),
+                    compute_core::ObservedBuild {
+                        commit: Some("abc123".into()),
+                        fingerprint: "sha256:b".into(),
                         evidence,
                     },
                 )]),
@@ -622,6 +639,23 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             ready_at: Some(now),
             ended_at: None,
             expires_at: None,
+        },
+    )
+    .await;
+    round_trip(
+        state,
+        &ids::work_session(&format!("env_computer{run}"), "operator-1", "1"),
+        WorkSessionRecord {
+            session_id: ids::work_session(&format!("env_computer{run}"), "operator-1", "1"),
+            environment_id: format!("env_computer{run}"),
+            environment: format!("computer{run}"),
+            owner: "operator-1".into(),
+            kind: WorkSessionKind::Ephemeral,
+            status: WorkSessionStatus::Closed,
+            opened_at: now,
+            closed_at: Some(now),
+            expires_at: Some(now),
+            close_reason: Some("closed by operator-1".into()),
         },
     )
     .await;

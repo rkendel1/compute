@@ -87,7 +87,9 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
         ("GET", ["audit", ..]) | ("GET", ["auth", "credentials", ..]) => Scope::Admin,
         ("GET", _) => Scope::Read,
         ("POST", ["environments", _, "projects", _, "workloads", _, "run"])
-        | ("POST", ["environments", _, "exec" | "connect"]) => Scope::Execute,
+        | ("POST", ["environments", _, "exec" | "connect" | "run"]) => Scope::Execute,
+        // A release is a deployment: a change to what the computer runs.
+        ("POST", ["environments", _, "release"]) => Scope::Deploy,
         // What belongs in an environment's computer, and its computer.
         (
             "POST",
@@ -98,7 +100,17 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
             ],
         )
         | ("POST", ["environments", _, "processes", _, "start" | "stop"])
-        | ("POST", ["environments", _, "reconcile" | "replace"])
+        | (
+            "POST",
+            [
+                "environments",
+                _,
+                "reconcile" | "replace" | "config" | "lifecycle",
+            ],
+        )
+        // Work sessions: a way into an environment, or a temporary one.
+        | ("POST", ["sessions"])
+        | ("DELETE", ["sessions", _])
         | (
             "DELETE",
             [
@@ -347,11 +359,11 @@ fn verifier(secret: &str) -> String {
     format!("{:x}", Sha256::digest(secret.as_bytes()))
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn random<const N: usize>() -> Result<[u8; N], EnvironmentError> {
+pub(crate) fn random<const N: usize>() -> Result<[u8; N], EnvironmentError> {
     use std::io::Read;
     let mut bytes = [0_u8; N];
     std::fs::File::open("/dev/urandom")

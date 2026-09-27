@@ -55,7 +55,10 @@ provisions as a persistent session, and keeps holding what the environment
 asks for — repositories, packages, applications, services, agents —
 changed in place by durable jobs. The `Computer` record in FeltDB is the
 authority; the target and its provider only answer, fenced by generation.
-See [computers.md](computers.md).
+Its builds, tests, releases, and processes run there; the daemon
+coordinates and records, and never runs them on its own node. See
+[computers.md](computers.md) and
+[environment-control-plane.md](environment-control-plane.md).
 
 ## Invariants
 

@@ -11,6 +11,14 @@ import {
   listComputeEnvironments,
   listComputeTargets,
   updateComputeEnvironment,
+  submitComputeEnvironment,
+  releaseComputeEnvironment,
+  runComputeProjectCommand,
+  openWorkSession,
+  closeWorkSession,
+  listWorkSessions,
+  setComputeEnvironmentLifetime,
+  workModeUrl,
 } from "../index.js";
 
 interface Seen {
@@ -69,6 +77,17 @@ async function daemon(): Promise<{ endpoint: string; seen: Seen[]; close: () => 
       if (polls < 2) return reply(200, { job: { status: "running" } });
       return reply(200, { job: { status: "failed" }, result: { result: { exit_code: 3, status: "completed", stdout: { text: "out" }, stderr: { text: "err" } } } });
     }
+    if (route === "POST /environments/my-app/release") return reply(200, { ...view, desired: { ...view.desired, generation: 4 } });
+    if (route === "POST /environments/my-app/run") {
+      return reply(201, { environment: "my-app", target: "railway-1", session_id: "ses_1", job_id: "job_2", execution_id: "exec_2", status: "queued" });
+    }
+    if (route === "GET /environments/my-app/jobs/job_2") {
+      return reply(200, { job: { status: "succeeded" }, result: { result: { exit_code: 0, status: "completed", stdout: { text: "built" }, stderr: { text: "" } } } });
+    }
+    if (route === "POST /environments/my-app/lifecycle") return reply(200, { ...view, requested_lifecycle: "ephemeral" });
+    if (route === "POST /sessions") return reply(201, { session_id: "wks_1", environment: "my-app", environment_id: "env_1", owner: "alice", kind: "attached", status: "open", opened_at: "2026-09-27T00:00:00Z" });
+    if (route === "GET /sessions?environment=my-app") return reply(200, [{ session_id: "wks_1", kind: "attached", status: "open" }]);
+    if (route === "DELETE /sessions/wks_1") return reply(200, { session_id: "wks_1", kind: "attached", status: "closed" });
     if (route === "DELETE /environments/my-app") return reply(200, { ...view, status: "destroying" });
     if (route === "GET /targets") return reply(200, [{ target_id: "railway-1", kind: "remote", health: "healthy", hosts_computers: true, features: ["containers"] }]);
     if (route === "GET /environments/other/computer") return reply(403, { kind: "authorization_denied", message: "environment other belongs to another principal" });
@@ -120,6 +139,38 @@ test("environment operations are thin requests to the Compute API", async () => 
     // Refusals keep their meaning.
     await assert.rejects(getComputeEnvironment(client, "other"), (error: Error & { kind?: string; status?: number }) =>
       error.kind === "authorization_denied" && error.status === 403);
+  } finally {
+    stub.close();
+  }
+});
+
+test("GO, releases, project commands, lifetimes, and work sessions are API requests too", async () => {
+  const stub = await daemon();
+  try {
+    const client = new ComputeDaemonClient({ endpoint: stub.endpoint, token: "secret" });
+    await submitComputeEnvironment(client, "my-app", { repositories: [] }, 3, {
+      config: { MODE: "x" },
+      lifecycle: { lifecycle: "ephemeral", ttl_seconds: 600 },
+    });
+    assert.deepEqual(stub.seen.at(-1)?.body, {
+      contents: { repositories: [] },
+      expected_generation: 3,
+      config: { MODE: "x" },
+      lifecycle: { lifecycle: "ephemeral", ttl_seconds: 600 },
+    });
+    const released = await releaseComputeEnvironment(client, "my-app", "app", "v2", 3);
+    assert.equal(released.desired.generation, 4);
+    assert.deepEqual(stub.seen.at(-1)?.body, { project: "app", revision: "v2", expected_generation: 3 });
+    const built = await runComputeProjectCommand(client, "my-app", "app", "build", { pollMs: 1 });
+    assert.equal(built.stdout, "built");
+    assert.equal(built.exit_code, 0);
+    await setComputeEnvironmentLifetime(client, "my-app", { lifecycle: "ephemeral", ttl_seconds: 60 });
+    const session = await openWorkSession(client, { environment: "my-app" });
+    assert.equal(session.kind, "attached");
+    assert.deepEqual(stub.seen.at(-1)?.body, { environment: "my-app" });
+    assert.equal((await listWorkSessions(client, "my-app")).length, 1);
+    assert.equal((await closeWorkSession(client, "wks_1")).status, "closed");
+    assert.equal(workModeUrl("http://127.0.0.1:8787/", "my app"), "http://127.0.0.1:8787/#/work/my%20app");
   } finally {
     stub.close();
   }

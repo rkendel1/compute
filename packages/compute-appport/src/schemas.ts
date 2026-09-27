@@ -647,6 +647,14 @@ export const environmentViewSchema = s.object({
   service_count: s.integer({ minimum: 0 }),
   projects: s.array(projectViewSchema),
   disk_bytes: s.integer({ minimum: 0 }),
+  /** The environment's computer, when it has one (see computers.ts). */
+  computer: s.optional(s.object({}, { additionalProperties: true })),
+  /** What runs the environment's work: its computer, or this control-plane node. */
+  machine: s.optional(s.object({
+    kind: s.union([s.literal("computer"), s.literal("node")] as const),
+    target: s.optional(s.string()),
+    status: s.optional(s.string()),
+  })),
 });
 
 export const environmentListInputSchema = s.object({});
@@ -660,6 +668,8 @@ export const environmentListResultSchema = s.array(s.object({
   workload_count: s.integer({ minimum: 0 }),
   service_count: s.integer({ minimum: 0 }),
   provider: s.string(),
+  computer: s.optional(s.string()),
+  target: s.optional(s.string()),
 }));
 
 /** An environment name or ID. */

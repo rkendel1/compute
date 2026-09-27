@@ -1497,6 +1497,11 @@
           "required": false
         },
         {
+          "name": "provider_resource",
+          "type": "text",
+          "required": false
+        },
+        {
           "name": "capabilities",
           "type": "json",
           "required": false
@@ -1544,6 +1549,74 @@
         {
           "name": "expires_at",
           "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "WorkSession",
+      "fields": [
+        {
+          "name": "session_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "environment",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "owner",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "attached",
+            "ephemeral"
+          ]
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "open",
+            "closed"
+          ]
+        },
+        {
+          "name": "opened_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "closed_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "expires_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "close_reason",
+          "type": "text",
           "required": false
         },
         {
@@ -2034,6 +2107,30 @@
         "record_id"
       ],
       "unique": false
+    },
+    {
+      "name": "WorkSession.environment_id",
+      "collection": "WorkSession",
+      "fields": [
+        "environment_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "WorkSession.owner",
+      "collection": "WorkSession",
+      "fields": [
+        "owner"
+      ],
+      "unique": false
+    },
+    {
+      "name": "WorkSession.record_id",
+      "collection": "WorkSession",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
     }
   ],
   "references": [],
@@ -2197,6 +2294,13 @@
     {
       "name": "Computer",
       "resource": "Computer",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "WorkSession",
+      "resource": "WorkSession",
       "read": "authenticated",
       "write": "authenticated",
       "capabilities": []

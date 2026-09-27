@@ -321,3 +321,177 @@ fn a_computer_is_created_once_and_changed_in_place_from_the_cli() {
     let refused = cli.run(&["environment", "process", "stop", "myapp", "api"]);
     assert!(!refused.status.success());
 }
+
+/// Deployment and interactive work through the CLI, against the same
+/// environment: `compute deploy` on an environment with a computer is a
+/// release, reconciled in place; build, test, and project commands run in
+/// the computer; a work session enters and leaves it.
+#[test]
+fn deploy_is_a_release_and_work_runs_in_the_computer() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().to_path_buf();
+    let source = repository(&root);
+    let target_listen = format!("127.0.0.1:{}", free_port());
+    let mut serve = std::process::Command::new(env!("CARGO_BIN_EXE_compute"));
+    runtimes::with_fixture_runtimes(&mut serve);
+    let _target = Serve(
+        serve
+            .args(["serve", "--listen", &target_listen, "--public-url"])
+            .arg(format!("http://{target_listen}"))
+            .arg("--job-store")
+            .arg(root.join("target-jobs"))
+            .arg("--session-store")
+            .arg(root.join("target-sessions"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for_port(&target_listen);
+    std::fs::write(
+        root.join("compute-pool.toml"),
+        format!("[providers.target-a]\nkind = \"remote\"\nendpoint = \"http://{target_listen}\"\n"),
+    )
+    .unwrap();
+    let listen = format!("127.0.0.1:{}", free_port());
+    let cli = Cli {
+        daemon: format!("http://{listen}"),
+        root: root.clone(),
+    };
+    cli.start(&listen);
+
+    cli.json(&[
+        "environment",
+        "create",
+        "myapp",
+        "--cpu",
+        "1",
+        "--memory",
+        "64Mi",
+        "--persistent",
+        "--json",
+    ]);
+    let url = source.display().to_string();
+    cli.ok(&[
+        "environment",
+        "repo",
+        "add",
+        "myapp",
+        "app",
+        "--url",
+        &url,
+        "--revision",
+        "v1",
+    ]);
+    cli.ok(&[
+        "environment",
+        "project",
+        "add",
+        "myapp",
+        "app",
+        "--repository",
+        "app",
+        "--build",
+        "cat VERSION > BUILT",
+        "--test",
+        "grep -q v BUILT",
+        "--command",
+        "where=pwd",
+    ]);
+    cli.ok(&[
+        "environment",
+        "service",
+        "add",
+        "myapp",
+        "api",
+        "--repository",
+        "app",
+        "--port",
+        "18556",
+        "--",
+        "sh",
+        "serve.sh",
+    ]);
+    let running = cli.computer_until("the first build", |view| {
+        view["converged"] == true
+            && view["observed"]["builds"]["app"]["evidence"]["outcome"] == "succeeded"
+    });
+    let resource = running["machine"]["resource"].clone();
+    assert!(resource.is_string());
+
+    // Work runs inside the computer: the target's session store.
+    let built = cli.ok(&["environment", "build", "myapp"]);
+    assert!(built.is_empty(), "{built}");
+    cli.ok(&["environment", "test", "myapp", "app"]);
+    let directory = cli.ok(&["environment", "run", "myapp", "app", "where"]);
+    assert!(
+        directory
+            .trim()
+            .starts_with(&root.join("target-sessions").display().to_string()),
+        "{directory}"
+    );
+    assert_eq!(
+        cli.ok(&[
+            "environment",
+            "exec",
+            "myapp",
+            "--",
+            "cat",
+            "repos/app/BUILT"
+        ]),
+        "v1"
+    );
+
+    // `compute deploy` to this environment is a release: the same machine.
+    let deployed = cli.ok(&[
+        "deploy",
+        "app",
+        "--environment",
+        "myapp",
+        "--revision",
+        "v2",
+    ]);
+    assert!(deployed.contains("on the same machine"), "{deployed}");
+    assert_eq!(
+        cli.ok(&[
+            "environment",
+            "exec",
+            "myapp",
+            "--",
+            "cat",
+            "running-version"
+        ]),
+        "v2"
+    );
+    let after = cli.computer_until("the release", |view| view["converged"] == true);
+    assert_eq!(after["machine"]["resource"], resource);
+    let refused = cli.run(&["deploy", "app", "--environment", "myapp"]);
+    assert!(!refused.status.success(), "a release names its revision");
+
+    // A work session enters the environment and leaves it running.
+    let session = cli.json(&["session", "open", "myapp", "--json"]);
+    assert_eq!(session["kind"], "attached");
+    let id = session["session_id"].as_str().unwrap().to_owned();
+    let listed = cli.json(&["session", "opened", "--environment", "myapp", "--json"]);
+    assert_eq!(listed[0]["session_id"], id.as_str());
+    let closed = cli.json(&["session", "close", &id, "--json"]);
+    assert_eq!(closed["status"], "closed");
+    let still = cli.computer_until("the environment after the session", |view| {
+        view["status"] == "running"
+    });
+    assert_eq!(still["machine"]["resource"], resource);
+
+    // The lifetime changes in place.
+    cli.ok(&[
+        "environment",
+        "lifetime",
+        "myapp",
+        "--temporary",
+        "--ttl",
+        "1h",
+    ]);
+    let temporary = cli.computer_until("a temporary lifetime", |view| {
+        view["lifecycle"] == "ephemeral"
+    });
+    assert_eq!(temporary["machine"]["resource"], resource);
+}

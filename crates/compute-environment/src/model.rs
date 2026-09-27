@@ -181,6 +181,67 @@ pub struct ContentsUpdate {
     pub contents: compute_core::EnvironmentContents,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_generation: Option<u64>,
+    /// Replace the environment's configuration (what every process, build,
+    /// and command sees) in the same change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<BTreeMap<String, String>>,
+    /// Change how long the environment lives, in the same change. In place:
+    /// never a replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<LifecycleChange>,
+}
+
+/// How long an environment lives: kept until destroyed, or temporary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleChange {
+    pub lifecycle: compute_core::ComputerLifecycle,
+    /// A temporary environment's lifetime from now. Defaults to an hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u64>,
+}
+
+/// Run one of a project's commands inside the environment's computer:
+/// `build`, `test`, or a named command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCommandRequest {
+    pub project: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+}
+
+/// Release a revision of a project: a change to desired state, reconciled
+/// in place by the environment's computer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseRequest {
+    pub project: String,
+    pub revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_generation: Option<u64>,
+}
+
+/// Open a work session: enter an existing environment, or have a temporary
+/// one made for the session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct OpenSessionRequest {
+    /// Enter this environment. Its lifecycle is untouched by the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    /// Without `environment`: the temporary computer to make. Always
+    /// ephemeral; the session owns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<ComputerRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contents: Option<compute_core::EnvironmentContents>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 /// Deploy a registered revision of a project to an environment.

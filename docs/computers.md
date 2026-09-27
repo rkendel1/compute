@@ -6,6 +6,10 @@
 > applications, services, and agents start and stop — without provisioning
 > a new machine. Only a change to the machine itself (its CPU, memory,
 > architecture, features) replaces it, and only when asked.
+>
+> How deployment, the UI's Manage and Work modes, work sessions, and
+> embedding applications all act on this one environment is
+> [environment-control-plane.md](environment-control-plane.md).
 
 ```text
 Compute daemon (compute start)          the authority
@@ -234,8 +238,12 @@ with `resume_unsupported`, rather than replacing it silently).
 | `POST` | `/environments` | With a `computer` object: create an environment on a computer |
 | `GET` | `/environments/{environment}/computer` | The computer: status, target, desired and observed contents, failure |
 | `POST` | `/environments/{environment}/contents` | Replace the contents (`{ contents, expected_generation }`) |
-| `POST` | `/environments/{environment}/repositories` \| `packages` \| `processes` | Add or change one item |
-| `DELETE` | `/environments/{environment}/repositories/{name}` \| `packages/{name}` \| `processes/{name}` | Remove one item |
+| `POST` | `/environments/{environment}/repositories` \| `packages` \| `processes` \| `projects` | Add or change one item |
+| `DELETE` | `/environments/{environment}/repositories/{name}` \| `packages/{name}` \| `processes/{name}` \| `projects/{name}` | Remove one item |
+| `POST` | `/environments/{environment}/release` | Release a revision of a project (`{ project, revision }`), in place |
+| `POST` | `/environments/{environment}/run` | Run a project's `build`, `test`, or named command as a durable job |
+| `POST` | `/environments/{environment}/config` | Replace the configuration every process sees |
+| `POST` | `/environments/{environment}/lifecycle` | Keep it, or make it temporary (`{ lifecycle, ttl_seconds }`), in place |
 | `POST` | `/environments/{environment}/processes/{process}/start` \| `stop` | Set one process's desired state |
 | `POST` | `/environments/{environment}/reconcile` | Retry failed items and probe now |
 | `POST` | `/environments/{environment}/replace` | New requirements: a new machine |
@@ -246,17 +254,26 @@ with `resume_unsupported`, rather than replacing it silently).
 | `POST` | `/environments/{environment}/stop` \| `start` | Stop or resume the computer |
 | `DELETE` | `/environments/{environment}` | Destroy the computer |
 | `GET` | `/targets` | The targets and what they offer |
+| `GET` `POST` | `/sessions` | Your work sessions; open one ([environment-control-plane.md](environment-control-plane.md#work-sessions)) |
+| `GET` `DELETE` | `/sessions/{session}` | One work session; close it |
+
+The contents body of `POST /environments/{environment}/contents` also
+takes `config` and `lifecycle`, applied in the same fenced change.
 
 ## Embedding (Attn, Try This Software)
 
 An embedding application is a client of this API, holding an operator
 credential with the scopes it needs. It never talks to targets or
-providers directly, and keeps no state of its own about computers.
+providers directly, and keeps no state of its own about computers. Attn
+opens the control plane in Work mode for an environment; Try This
+Software is an ephemeral environment opened by a work session. Both are
+described in
+[environment-control-plane.md](environment-control-plane.md#attn).
 
 ```ts
 import {
   computeClient, createComputeEnvironment, updateComputeEnvironment,
-  executeComputeEnvironment, getComputeEnvironment, destroyComputeEnvironment,
+  executeComputeEnvironment, releaseComputeEnvironment,
 } from "@compute/appport";
 
 const compute = computeClient({ endpoint: "https://compute.example", token });
@@ -266,8 +283,10 @@ await createComputeEnvironment(compute, {
 });
 await updateComputeEnvironment(compute, "workspace-42", (contents) => {
   contents.repositories = [{ name: "app", url, revision: "main" }];
-  contents.processes = [{ name: "dev", kind: "application", command: ["npm", "run", "dev"], repository: "app" }];
+  contents.projects = [{ name: "app", repository: "app", build: ["npm", "ci"], test: ["npm", "test"] }];
+  contents.processes = [{ name: "dev", kind: "application", command: ["npm", "run", "dev"], repository: "app", port: 3000 }];
 });
+await releaseComputeEnvironment(compute, "workspace-42", "app", "v2");
 const { exit_code, stdout } = await executeComputeEnvironment(compute, "workspace-42", ["npm", "test"]);
 ```
 
@@ -276,19 +295,13 @@ to a copy, and submits it fenced by the generation it read — the same GO
 the UI performs. A concurrent change fails with `conflict`; read and try
 again.
 
-**Try This Software** maps onto an ephemeral computer: create it with
-`lifecycle: "ephemeral"` and `ttl_seconds`, add the repository and the
-application process, and hand the user `connectComputeEnvironment`'s
-grant. When the TTL passes Compute tears the machine down and keeps the
-record; nothing needs to remember to clean up. To keep a trial, create a
-persistent environment from the same contents
-(`getComputeEnvironment(…).desired`).
-
 ## Limitations
 
-- Projects and releases in an environment still run on the daemon's own
-  node, not on its computer; the computer holds contents.
-- Changing a process's command restarts it; there is no rolling restart
-  within one computer.
+- Projects, builds, tests, and releases of an environment with a computer
+  run in its computer. An environment created without one still runs its
+  bundle projects on the control-plane node, and says so
+  (`machine.kind = node`).
+- Changing a process's command, configuration, or build restarts it;
+  there is no rolling restart within one computer.
 - Hosted machine services (Fly, Railway, Render, cloud VMs) have no
   adapter in this repository; they plug in as session providers.

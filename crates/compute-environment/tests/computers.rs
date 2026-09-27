@@ -273,7 +273,9 @@ fn contents(url: &Path, revision: &str) -> EnvironmentContents {
             repository: Some("app".into()),
             env: BTreeMap::new(),
             desired: ProcessDesired::Running,
+            port: None,
         }],
+        projects: vec![],
         generation: 0,
     }
 }
@@ -654,6 +656,7 @@ async fn only_the_owner_changes_or_uses_a_computer() {
                     repository: None,
                     env: BTreeMap::new(),
                     desired: ProcessDesired::Running,
+                    port: None,
                 },
             )
             .await
@@ -1187,6 +1190,7 @@ async fn drift_is_reconciled_and_processes_follow_their_desired_state() {
                 repository: None,
                 env: BTreeMap::new(),
                 desired: ProcessDesired::Running,
+                port: None,
             },
         )
         .await
@@ -1250,6 +1254,631 @@ async fn drift_is_reconciled_and_processes_follow_their_desired_state() {
         target.provider.provisions.load(Ordering::SeqCst),
         1,
         "all of it in place"
+    );
+    daemon.shutdown().await;
+}
+
+// ---- One environment, one computer: deployment and work are the same thing --
+
+/// Wait for a job in the environment's computer and return it.
+async fn job_of(
+    daemon: &Arc<Daemon>,
+    name: &str,
+    operator: &str,
+    exec: &ComputerExec,
+) -> ComputerJob {
+    eventually("the job", async || {
+        daemon
+            .computer_job(name, operator, &exec.job_id)
+            .await
+            .ok()
+            .filter(|job| job.result.is_some())
+    })
+    .await
+}
+
+fn project_contents(url: &Path, revision: &str) -> EnvironmentContents {
+    let shell = |command: &str| vec!["sh".to_owned(), "-c".into(), command.into()];
+    EnvironmentContents {
+        repositories: vec![RepositorySpec {
+            name: "app".into(),
+            url: url.display().to_string(),
+            revision: revision.into(),
+        }],
+        packages: vec![],
+        projects: vec![compute_core::ProjectSpec {
+            name: "app".into(),
+            repository: "app".into(),
+            build: shell("cat VERSION > BUILT"),
+            test: shell("grep -q '^v' BUILT"),
+            commands: BTreeMap::from([("where".into(), shell("pwd"))]),
+        }],
+        processes: vec![ProcessSpec {
+            name: "api".into(),
+            kind: ProcessKind::Application,
+            command: shell(
+                "cat BUILT > \"$COMPUTE_SESSION_WORKSPACE/running-build\"; \
+                 echo \"$PORT\" > \"$COMPUTE_SESSION_WORKSPACE/port\"; exec sleep 600",
+            ),
+            repository: Some("app".into()),
+            env: BTreeMap::new(),
+            desired: ProcessDesired::Running,
+            port: Some(18_555),
+        }],
+        generation: 0,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deployment_is_reconciliation_of_the_same_computer() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, node) = start_daemon(store.clone(), pool(&[("target-a", &target)])).await;
+
+    daemon
+        .create_computer_environment(
+            definition(
+                "myapp",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                project_contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    let first = computer_where(&daemon, "myapp", "the first build and start", |view| {
+        view.converged
+    })
+    .await;
+    assert_eq!(first.observed.builds["app"].evidence.outcome, "succeeded");
+    let machine = first.machine.clone().expect("a machine");
+    let resource = machine.resource.clone().expect("the provider's resource");
+    assert_eq!(first.endpoints[0].port, 18_555);
+    assert!(first.endpoints[0].url.as_deref() == Some("http://127.0.0.1:18555"));
+    assert_eq!(
+        run(&daemon, "myapp", "alice", &["cat", "running-build"])
+            .await
+            .0,
+        "v1"
+    );
+    assert_eq!(
+        run(&daemon, "myapp", "alice", &["cat", "port"]).await.0,
+        "18555\n"
+    );
+
+    // Build, test, and project commands run inside the environment's
+    // computer — the target's workspace — never on the daemon's node.
+    for command in ["build", "test", "where"] {
+        let exec = daemon
+            .project_command(
+                "myapp",
+                "alice",
+                ProjectCommandRequest {
+                    project: "app".into(),
+                    command: command.into(),
+                    env: BTreeMap::new(),
+                    timeout: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(exec.session_id, machine.session_id);
+        let job = job_of(&daemon, "myapp", "alice", &exec).await;
+        let result = job.result.unwrap();
+        assert_eq!(result.result.exit_code, Some(0), "{command}: {result:?}");
+        if command == "where" {
+            let directory = result.result.stdout.text.trim().to_owned();
+            assert!(
+                directory.starts_with(&workspaces.path().display().to_string())
+                    && directory.ends_with("repos/app"),
+                "{directory} is not the computer's checkout"
+            );
+            assert!(!directory.starts_with(&node.path().display().to_string()));
+        }
+    }
+    let unknown = daemon
+        .project_command(
+            "myapp",
+            "alice",
+            ProjectCommandRequest {
+                project: "app".into(),
+                command: "deploy-to-prod".into(),
+                env: BTreeMap::new(),
+                timeout: None,
+            },
+        )
+        .await;
+    assert!(matches!(unknown, Err(EnvironmentError::NotFound(_))));
+
+    // A bundle is never deployed to the daemon's node for this environment.
+    let refused = daemon
+        .deploy(DeployRequest {
+            project: "app".into(),
+            environment: "myapp".into(),
+            ..DeployRequest::default()
+        })
+        .await;
+    assert!(
+        matches!(&refused, Err(EnvironmentError::Invalid(message)) if message.contains("own computer")),
+        "{refused:?}"
+    );
+
+    // A release is a change of desired state: the same machine checks out
+    // v2, builds it, and restarts the application. No redeployment.
+    let released = daemon
+        .release_project(
+            "myapp",
+            "alice",
+            ReleaseRequest {
+                project: "app".into(),
+                revision: "v2".into(),
+                expected_generation: Some(first.desired.generation),
+            },
+        )
+        .await
+        .unwrap();
+    let generation = released.desired.generation;
+    let second = computer_where(&daemon, "myapp", "the release", |view| {
+        view.converged && view.observed.converged_generation == generation
+    })
+    .await;
+    assert_eq!(
+        run(&daemon, "myapp", "alice", &["cat", "running-build"])
+            .await
+            .0,
+        "v2"
+    );
+    let after = second.machine.clone().unwrap();
+    assert_eq!(
+        after.resource.as_deref(),
+        Some(resource.as_str()),
+        "the same provider resource"
+    );
+    assert_eq!(after.session_id, machine.session_id);
+    assert_eq!(target.provider.provisions.load(Ordering::SeqCst), 1);
+    let kinds = events(&daemon, "myapp").await;
+    assert!(
+        kinds
+            .iter()
+            .any(|(kind, data)| kind == "environment.release"
+                && data["from"] == "v1"
+                && data["to"] == "v2")
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|(kind, data)| kind == "environment.contents_applied"
+                && data["kind"] == "build"
+                && data["session_id"] == machine.session_id.as_str())
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|(kind, data)| kind == "environment.command"
+                && data["command"] == "test"
+                && data["machine"] == resource.as_str())
+    );
+    // A stale release is refused, never applied over someone else's change.
+    let stale = daemon
+        .release_project(
+            "myapp",
+            "alice",
+            ReleaseRequest {
+                project: "app".into(),
+                revision: "v1".into(),
+                expected_generation: Some(first.desired.generation),
+            },
+        )
+        .await;
+    assert!(matches!(stale, Err(EnvironmentError::Conflict(_))));
+
+    // Configuration is in place too: what depends on it restarts.
+    let pid = second.observed.processes["api"].pid;
+    let configured = daemon
+        .set_config(
+            "myapp",
+            "alice",
+            BTreeMap::from([("GREETING".into(), "hi".into())]),
+        )
+        .await
+        .unwrap();
+    let generation = configured.desired.generation;
+    let third = computer_where(&daemon, "myapp", "the new configuration", |view| {
+        view.converged && view.observed.converged_generation == generation
+    })
+    .await;
+    assert_ne!(third.observed.processes["api"].pid, pid, "restarted");
+    assert_eq!(
+        third.machine.as_ref().unwrap().session_id,
+        machine.session_id
+    );
+    assert_eq!(
+        run(&daemon, "myapp", "alice", &["printenv", "GREETING"])
+            .await
+            .0,
+        "hi\n"
+    );
+
+    // A broken build leaves what runs from the repository running.
+    let pid = third.observed.processes["api"].pid;
+    let mut broken = third.desired.projects[0].clone();
+    broken.build = vec!["false".into()];
+    daemon
+        .upsert_project("myapp", "alice", broken)
+        .await
+        .unwrap();
+    let failed = computer_where(&daemon, "myapp", "the failed build", |view| {
+        view.observed
+            .builds
+            .get("app")
+            .is_some_and(|build| build.evidence.outcome == "failed")
+    })
+    .await;
+    assert_eq!(failed.observed.processes["api"].pid, pid);
+    assert_eq!(
+        failed.observed.processes["api"].state,
+        ProcessState::Running
+    );
+    let fixed = third.desired.projects[0].clone();
+    daemon
+        .upsert_project("myapp", "alice", fixed)
+        .await
+        .unwrap();
+    computer_where(&daemon, "myapp", "the fixed build", |view| view.converged).await;
+
+    // The controller restarts: same environment, same computer, same
+    // desired state, and reconciliation resumes.
+    daemon.shutdown().await;
+    let (daemon, _node) = start_daemon(store.clone(), pool(&[("target-a", &target)])).await;
+    let restarted = computer_where(&daemon, "myapp", "the restarted controller", |view| {
+        view.converged
+    })
+    .await;
+    assert_eq!(
+        restarted.machine.as_ref().unwrap().resource.as_deref(),
+        Some(resource.as_str())
+    );
+    assert_eq!(restarted.desired.repositories[0].revision, "v2");
+    assert_eq!(
+        restarted.config.get("GREETING").map(String::as_str),
+        Some("hi")
+    );
+    let released = daemon
+        .release_project(
+            "myapp",
+            "alice",
+            ReleaseRequest {
+                project: "app".into(),
+                revision: "v1".into(),
+                expected_generation: None,
+            },
+        )
+        .await
+        .unwrap();
+    let generation = released.desired.generation;
+    computer_where(&daemon, "myapp", "a release after the restart", |view| {
+        view.converged && view.observed.converged_generation == generation
+    })
+    .await;
+    assert_eq!(
+        run(&daemon, "myapp", "alice", &["cat", "running-build"])
+            .await
+            .0,
+        "v1"
+    );
+    assert_eq!(target.provider.provisions.load(Ordering::SeqCst), 1);
+
+    // Only an explicit replacement changes the backing machine.
+    daemon
+        .replace_computer(
+            "myapp",
+            "alice",
+            ComputerRequirements {
+                cpu_count: Some(2),
+                ..requirements()
+            },
+        )
+        .await
+        .unwrap();
+    let replaced = computer_where(&daemon, "myapp", "the replacement", |view| {
+        view.converged
+            && view.running_generation == 2
+            && view
+                .machine
+                .as_ref()
+                .is_some_and(|machine| machine.session_id != after.session_id)
+    })
+    .await;
+    assert_ne!(
+        replaced.machine.as_ref().unwrap().resource.as_deref(),
+        Some(resource.as_str())
+    );
+    assert_eq!(target.provider.provisions.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        run(&daemon, "myapp", "alice", &["cat", "running-build"])
+            .await
+            .0,
+        "v1"
+    );
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn work_sessions_enter_environments_and_temporary_ones_end_with_them() {
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let (daemon, _node) =
+        start_daemon(Arc::new(MemoryState::new()), pool(&[("target-a", &target)])).await;
+
+    // A persistent environment: sessions come and go, it stays.
+    daemon
+        .create_computer_environment(
+            definition(
+                "keep",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                EnvironmentContents::default(),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    let running = computer_where(&daemon, "keep", "the computer", |view| {
+        view.status == ComputerStatus::Running
+    })
+    .await;
+    let session = daemon
+        .open_session(
+            "alice",
+            OpenSessionRequest {
+                environment: Some("keep".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(session.kind, compute_state::WorkSessionKind::Attached);
+    assert_eq!(session.status, compute_state::WorkSessionStatus::Open);
+    assert!(session.connection.is_some(), "a way in");
+    // Someone else can neither enter nor end it.
+    let intruder = daemon
+        .open_session(
+            "mallory",
+            OpenSessionRequest {
+                environment: Some("keep".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(matches!(intruder, Err(EnvironmentError::Forbidden(_))));
+    assert!(matches!(
+        daemon.close_session("mallory", &session.session_id).await,
+        Err(EnvironmentError::Forbidden(_))
+    ));
+    assert!(matches!(
+        daemon.work_session("mallory", &session.session_id).await,
+        Err(EnvironmentError::Forbidden(_))
+    ));
+    let closed = daemon
+        .close_session("alice", &session.session_id)
+        .await
+        .unwrap();
+    assert_eq!(closed.status, compute_state::WorkSessionStatus::Closed);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let still = daemon.computer("keep").await.unwrap();
+    assert_eq!(
+        still.status,
+        ComputerStatus::Running,
+        "the environment outlives its session"
+    );
+    assert_eq!(still.session_id, running.session_id);
+    // Enter it again: the same computer.
+    let again = daemon
+        .open_session(
+            "alice",
+            OpenSessionRequest {
+                environment: Some("keep".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_ne!(again.session_id, session.session_id);
+    assert_eq!(again.environment_id, session.environment_id);
+    let listed = daemon.work_sessions("alice", Some("keep")).await.unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].session_id, again.session_id, "newest first");
+    assert!(
+        daemon
+            .work_sessions("mallory", None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // A temporary environment of the session's own ends with it.
+    let temporary = daemon
+        .open_session(
+            "alice",
+            OpenSessionRequest {
+                computer: Some(ComputerRequest {
+                    lifecycle: ComputerLifecycle::Ephemeral,
+                    requirements: requirements(),
+                    target: None,
+                    ttl_seconds: Some(3600),
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(temporary.kind, compute_state::WorkSessionKind::Ephemeral);
+    assert!(temporary.expires_at.is_some());
+    let name = temporary.environment.clone();
+    computer_where(&daemon, &name, "the temporary computer", |view| {
+        view.status == ComputerStatus::Running && view.lifecycle == ComputerLifecycle::Ephemeral
+    })
+    .await;
+    run(&daemon, &name, "alice", &["true"]).await;
+    daemon
+        .close_session("alice", &temporary.session_id)
+        .await
+        .unwrap();
+    let ended = computer_where(&daemon, &name, "the temporary computer's end", |view| {
+        view.status == ComputerStatus::Destroyed
+    })
+    .await;
+    assert!(ended.ended_at.is_some(), "the record remains as evidence");
+
+    // One that expires ends its session too.
+    let short = daemon
+        .open_session(
+            "alice",
+            OpenSessionRequest {
+                computer: Some(ComputerRequest {
+                    lifecycle: ComputerLifecycle::Ephemeral,
+                    requirements: requirements(),
+                    target: None,
+                    ttl_seconds: Some(3),
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    computer_where(&daemon, &short.environment, "expiry", |view| {
+        view.status == ComputerStatus::Expired
+    })
+    .await;
+    let expired = eventually("the session to end", async || {
+        daemon
+            .work_session("alice", &short.session_id)
+            .await
+            .ok()
+            .filter(|view| view.status == compute_state::WorkSessionStatus::Closed)
+    })
+    .await;
+    assert!(expired.close_reason.unwrap().contains("expired"));
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn go_changes_lifetime_and_configuration_in_place_and_refuses_stale_views() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let (daemon, _node) =
+        start_daemon(Arc::new(MemoryState::new()), pool(&[("target-a", &target)])).await;
+    let mut definition = definition(
+        "trial",
+        ComputerLifecycle::Ephemeral,
+        requirements(),
+        contents(&source, "v1"),
+    );
+    definition.computer.ttl_seconds = Some(600);
+    daemon
+        .create_computer_environment(definition, "alice")
+        .await
+        .unwrap();
+    let loaded = computer_where(&daemon, "trial", "the temporary computer", |view| {
+        view.converged
+    })
+    .await;
+    let session_id = loaded.machine.as_ref().unwrap().session_id.clone();
+    let owned = target.client().session(&session_id).await.unwrap();
+    assert_eq!(owned.ownership, compute_core::SessionOwnership::Ephemeral);
+
+    // GO: contents, configuration, and lifetime in one fenced change.
+    let mut contents = loaded.desired.clone();
+    contents.repositories[0].revision = "v2".into();
+    let went = daemon
+        .set_contents(
+            "trial",
+            "alice",
+            ContentsUpdate {
+                contents: contents.clone(),
+                expected_generation: Some(loaded.desired.generation),
+                config: Some(BTreeMap::from([("MODE".into(), "kept".into())])),
+                lifecycle: Some(LifecycleChange {
+                    lifecycle: ComputerLifecycle::Persistent,
+                    ttl_seconds: None,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(went.requested_lifecycle, ComputerLifecycle::Persistent);
+    let kept = computer_where(&daemon, "trial", "the kept computer", |view| {
+        view.converged && view.lifecycle == ComputerLifecycle::Persistent
+    })
+    .await;
+    assert!(kept.expires_at.is_none());
+    assert_eq!(
+        kept.machine.as_ref().unwrap().session_id,
+        session_id,
+        "in place"
+    );
+    let claimed = target.client().session(&session_id).await.unwrap();
+    assert_eq!(claimed.ownership, compute_core::SessionOwnership::Claimed);
+    assert!(claimed.expires_at.is_none());
+    assert_eq!(
+        run(&daemon, "trial", "alice", &["cat", "running-version"])
+            .await
+            .0,
+        "v2"
+    );
+    assert_eq!(
+        run(&daemon, "trial", "alice", &["printenv", "MODE"])
+            .await
+            .0,
+        "kept\n"
+    );
+
+    // Someone else's change in between: the stale GO is refused, and
+    // nothing of it is applied.
+    let stale = daemon
+        .set_contents(
+            "trial",
+            "alice",
+            ContentsUpdate {
+                contents: loaded.desired.clone(),
+                expected_generation: Some(loaded.desired.generation),
+                config: None,
+                lifecycle: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(&stale, Err(EnvironmentError::Conflict(message)) if message.contains("changed since you loaded it"))
+    );
+    assert_eq!(
+        daemon.computer("trial").await.unwrap().desired.repositories[0].revision,
+        "v2"
+    );
+
+    // And temporary again: Compute, not the target, ends it.
+    let temporary = daemon
+        .set_lifecycle(
+            "trial",
+            "alice",
+            LifecycleChange {
+                lifecycle: ComputerLifecycle::Ephemeral,
+                ttl_seconds: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(temporary.expires_at.is_some());
+    let expired = computer_where(&daemon, "trial", "expiry", |view| {
+        view.status == ComputerStatus::Expired
+    })
+    .await;
+    assert_eq!(
+        expired.observed.repositories["app"].revision, "v2",
+        "evidence kept"
     );
     daemon.shutdown().await;
 }

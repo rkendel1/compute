@@ -68,6 +68,18 @@ export interface ProcessSpec {
   repository?: string;
   env?: Record<string, string>;
   desired?: "running" | "stopped";
+  /** Published as an endpoint, and given to the process as `$PORT`. */
+  port?: number;
+}
+
+/** Software in one of the environment's repositories, built and operated inside the computer. */
+export interface ProjectSpec {
+  name: string;
+  repository: string;
+  /** Runs whenever the checkout, the command, or the configuration changes. */
+  build?: string[];
+  test?: string[];
+  commands?: Record<string, string[]>;
 }
 
 /** What belongs in the computer: desired state. */
@@ -75,6 +87,7 @@ export interface EnvironmentContents {
   repositories?: RepositorySpec[];
   packages?: PackageSpec[];
   processes?: ProcessSpec[];
+  projects?: ProjectSpec[];
   generation?: number;
 }
 
@@ -90,6 +103,7 @@ export interface ObservedContents {
   repositories?: Record<string, { revision: string; commit?: string; fingerprint: string; evidence: OperationEvidence }>;
   packages?: Record<string, { fingerprint: string; evidence: OperationEvidence }>;
   processes?: Record<string, { state: "running" | "stopped" | "exited" | "failed"; fingerprint: string; pid?: number; evidence: OperationEvidence }>;
+  builds?: Record<string, { commit?: string; fingerprint: string; evidence: OperationEvidence }>;
   converged_generation: number;
   observed_at?: string;
 }
@@ -99,7 +113,12 @@ export interface ComputerView {
   environment_id: string;
   owner: string;
   lifecycle: ComputerLifecycle;
+  requested_lifecycle: ComputerLifecycle;
   status: ComputerStatus;
+  /** The machine behind the environment. Ordinary changes never replace it. */
+  machine?: { target: string; session_id: string; provider_kind?: string; resource?: string };
+  config: Record<string, string>;
+  endpoints?: { process: string; port: number; url?: string; serving: boolean }[];
   requirements: ComputerRequirements;
   spec_generation: number;
   running_generation: number;
@@ -227,24 +246,7 @@ export async function executeComputeEnvironment(
     path(environment, "/exec"),
     { command, ...(options.env ? { env: options.env } : {}), ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}) },
   );
-  for (;;) {
-    const job = await client.request<{ job: { status: string; failure?: string }; result?: { result: { exit_code?: number; stdout: { text: string }; stderr: { text: string }; status: string } } }>(
-      "GET",
-      path(environment, `/jobs/${encodeURIComponent(submitted.job_id)}`),
-    );
-    if (job.result || ["succeeded", "failed", "cancelled", "timed_out", "rejected"].includes(job.job.status)) {
-      const result = job.result?.result;
-      return {
-        ...submitted,
-        status: job.job.status,
-        exit_code: result?.exit_code ?? null,
-        stdout: result?.stdout.text ?? "",
-        stderr: result?.stderr.text ?? job.job.failure ?? "",
-        job: job as unknown as ComputerExecResult["job"],
-      };
-    }
-    await new Promise((resolve) => setTimeout(resolve, options.pollMs ?? 100));
-  }
+  return waitForJob(client, environment, submitted, options.pollMs);
 }
 
 export function connectComputeEnvironment(client: ComputeDaemonClient, environment: string): Promise<{
@@ -273,4 +275,163 @@ export function replaceComputeEnvironment(client: ComputeDaemonClient, environme
 
 export function listComputeTargets(client: ComputeDaemonClient): Promise<ComputeTarget[]> {
   return client.request("GET", "/targets");
+}
+
+export interface LifecycleChange {
+  lifecycle: ComputerLifecycle;
+  ttl_seconds?: number;
+}
+
+export interface UpdateOptions {
+  /** Replace the configuration in the same change. */
+  config?: Record<string, string>;
+  /** Change how long the environment lives, in the same change. */
+  lifecycle?: LifecycleChange;
+}
+
+/**
+ * GO: submit contents, configuration, and lifetime as one change, only if
+ * the environment is still at `expectedGeneration`. A stale view is refused
+ * with `conflict` ("the environment changed since you loaded it").
+ */
+export function submitComputeEnvironment(
+  client: ComputeDaemonClient,
+  environment: string,
+  contents: EnvironmentContents,
+  expectedGeneration: number,
+  options: UpdateOptions = {},
+): Promise<ComputerView> {
+  return client.request("POST", path(environment, "/contents"), {
+    contents,
+    expected_generation: expectedGeneration,
+    ...(options.config ? { config: options.config } : {}),
+    ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
+  });
+}
+
+/** Release a revision of a project: the same computer checks it out, builds it, and restarts what runs from it. */
+export function releaseComputeEnvironment(
+  client: ComputeDaemonClient,
+  environment: string,
+  project: string,
+  revision: string,
+  expectedGeneration?: number,
+): Promise<ComputerView> {
+  return client.request("POST", path(environment, "/release"), {
+    project,
+    revision,
+    ...(expectedGeneration === undefined ? {} : { expected_generation: expectedGeneration }),
+  });
+}
+
+/** Wait until the computer holds generation `generation` of the contents (or failed trying). */
+export async function waitForComputeEnvironment(
+  client: ComputeDaemonClient,
+  environment: string,
+  generation: number,
+  options: { timeoutMs?: number; pollMs?: number } = {},
+): Promise<ComputerView> {
+  const deadline = Date.now() + (options.timeoutMs ?? 10 * 60_000);
+  for (;;) {
+    const view = await getComputeEnvironment(client, environment);
+    const settled = view.converged && view.observed.converged_generation >= generation;
+    if (settled || view.failure?.phase === "reconciliation" || ["failed", "destroyed", "expired"].includes(view.status)) {
+      return view;
+    }
+    if (Date.now() > deadline) throw new Error(`${environment} did not reach generation ${generation}`);
+    await new Promise((resolve) => setTimeout(resolve, options.pollMs ?? 250));
+  }
+}
+
+/** Run a project's `build`, `test`, or named command inside the environment's computer, and wait for it. */
+export async function runComputeProjectCommand(
+  client: ComputeDaemonClient,
+  environment: string,
+  project: string,
+  command: string,
+  options: { env?: Record<string, string>; pollMs?: number } = {},
+): Promise<ComputerExecResult> {
+  const submitted = await client.request<{ environment: string; target: string; session_id: string; job_id: string; execution_id: string; status: string }>(
+    "POST",
+    path(environment, "/run"),
+    { project, command, ...(options.env ? { env: options.env } : {}) },
+  );
+  return waitForJob(client, environment, submitted, options.pollMs);
+}
+
+async function waitForJob(
+  client: ComputeDaemonClient,
+  environment: string,
+  submitted: { environment: string; target: string; session_id: string; job_id: string; execution_id: string; status: string },
+  pollMs = 100,
+): Promise<ComputerExecResult> {
+  for (;;) {
+    const job = await client.request<{ job: { status: string; failure?: string }; result?: { result: { exit_code?: number; stdout: { text: string }; stderr: { text: string } } } }>(
+      "GET",
+      path(environment, `/jobs/${encodeURIComponent(submitted.job_id)}`),
+    );
+    if (job.result || ["succeeded", "failed", "cancelled", "timed_out", "rejected"].includes(job.job.status)) {
+      const result = job.result?.result;
+      return {
+        ...submitted,
+        status: job.job.status,
+        exit_code: result?.exit_code ?? null,
+        stdout: result?.stdout.text ?? "",
+        stderr: result?.stderr.text ?? job.job.failure ?? "",
+        job: job as unknown as ComputerExecResult["job"],
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+}
+
+export function setComputeEnvironmentLifetime(client: ComputeDaemonClient, environment: string, lifecycle: LifecycleChange): Promise<ComputerView> {
+  return client.request("POST", path(environment, "/lifecycle"), lifecycle);
+}
+
+export function setComputeEnvironmentConfig(client: ComputeDaemonClient, environment: string, config: Record<string, string>): Promise<ComputerView> {
+  return client.request("POST", path(environment, "/config"), config);
+}
+
+export interface WorkSession {
+  session_id: string;
+  environment: string;
+  environment_id: string;
+  owner: string;
+  /** `attached`: the environment outlives the session. `ephemeral`: the session's own temporary environment ends with it. */
+  kind: "attached" | "ephemeral";
+  status: "open" | "closed";
+  opened_at: string;
+  closed_at?: string;
+  expires_at?: string;
+  close_reason?: string;
+  connection?: { connection: { mode: string; address?: string; port?: number }; command?: string[] };
+}
+
+/**
+ * Open a work session: `{ environment }` enters one you have (closing it
+ * leaves the environment running); `{ computer }` makes a temporary
+ * environment for the session (closing it, or its TTL, destroys it).
+ */
+export function openWorkSession(
+  client: ComputeDaemonClient,
+  request: { environment: string } | { computer?: Omit<ComputeEnvironmentDefinition["computer"], "lifecycle">; contents?: EnvironmentContents; env?: Record<string, string> },
+): Promise<WorkSession> {
+  const body = "environment" in request
+    ? request
+    : { ...request, computer: { ...(request.computer ?? {}), lifecycle: "ephemeral" } };
+  return client.request("POST", "/sessions", body);
+}
+
+export function closeWorkSession(client: ComputeDaemonClient, session: string): Promise<WorkSession> {
+  return client.request("DELETE", `/sessions/${encodeURIComponent(session)}`);
+}
+
+export function listWorkSessions(client: ComputeDaemonClient, environment?: string): Promise<WorkSession[]> {
+  return client.request("GET", environment ? `/sessions?environment=${encodeURIComponent(environment)}` : "/sessions");
+}
+
+/** The address of the Compute control plane in Work mode for an environment: what Attn opens for "Work on this". */
+export function workModeUrl(endpoint: string, environment: string): string {
+  return `${endpoint.replace(/\/$/, "")}/#/work/${encodeURIComponent(environment)}`;
 }

@@ -26,7 +26,10 @@ built bundles to operate. It does not say how to build them.
 An environment can instead be **a computer**: a durable machine placed on
 a target by requirements (`compute environment create myapp --cpu 4
 --memory 8Gi --persistent`), whose repositories, packages, and processes
-are desired state changed in place. See [computers.md](computers.md).
+are desired state changed in place. See [computers.md](computers.md), and
+[environment-control-plane.md](environment-control-plane.md) for how
+deployment, the UI's Manage and Work modes, and work sessions all act on
+the same environment.
 
 ## Quick start
 

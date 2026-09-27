@@ -393,40 +393,49 @@ async function environmentsView() {
 }
 
 function createEnvironment() {
-  const name = h('input', { id: 'environment-name', placeholder: 'production', autocomplete: 'off' });
-  const computer = h('input', { id: 'environment-computer', type: 'checkbox' });
+  const name = h('input', { id: 'environment-name', placeholder: 'my-app', autocomplete: 'off' });
   const cpu = h('input', { id: 'environment-cpu', type: 'number', min: '1', value: '2' });
   const memory = h('input', { id: 'environment-memory', type: 'number', min: '1', value: '4' });
-  const lifecycle = h('select', { id: 'environment-lifecycle' },
-    h('option', { value: 'persistent' }, 'Persistent: kept until destroyed'),
-    h('option', { value: 'ephemeral' }, 'Ephemeral: expires'));
-  const features = h('input', { id: 'environment-features', placeholder: 'kvm, gpu', autocomplete: 'off' });
-  const target = h('input', { id: 'environment-target', placeholder: 'any', autocomplete: 'off' });
+  const storage = h('input', { id: 'environment-storage', type: 'checkbox' });
+  const endpoint = h('input', { id: 'environment-public', type: 'checkbox' });
+  const features = h('input', { id: 'environment-features', placeholder: 'containers, kvm, gpu', autocomplete: 'off' });
+  const keep = h('input', { type: 'radio', name: 'environment-lifetime', value: 'persistent', checked: true });
+  const temporary = h('input', { type: 'radio', name: 'environment-lifetime', value: 'ephemeral' });
+  const target = h('input', { id: 'environment-target', placeholder: 'placement chooses', autocomplete: 'off' });
+  const node = h('input', { id: 'environment-node', type: 'checkbox' });
   modal('New environment', h('div', {},
     h('label', { for: 'environment-name' }, 'Name'), name,
-    h('label', { class: 'check' }, computer, ' On its own computer (placement chooses the target)'),
+    h('p', {}, h('strong', {}, 'What kind of computer do you need?'), ' Compute places it on a target that can provide it.'),
     h('label', { for: 'environment-cpu' }, 'CPUs'), cpu,
     h('label', { for: 'environment-memory' }, 'Memory (GiB)'), memory,
-    h('label', { for: 'environment-lifecycle' }, 'Lifecycle'), lifecycle,
-    h('label', { for: 'environment-features' }, 'Target features'), features,
-    h('label', { for: 'environment-target' }, 'Target'), target), [
+    h('label', { class: 'check' }, storage, ' Persistent storage'),
+    h('label', { class: 'check' }, endpoint, ' Public endpoint'),
+    h('label', { for: 'environment-features' }, 'Machine features'), features,
+    h('label', {}, 'Lifetime'),
+    h('label', { class: 'check' }, keep, ' Keep running, until destroyed'),
+    h('label', { class: 'check' }, temporary, ' Temporary (1 hour), its evidence kept'),
+    h('label', { for: 'environment-target' }, 'Target (optional)'), target,
+    h('label', { class: 'check' }, node, ' No computer: run projects on this control-plane node')), [
     h('button', { onclick: close }, 'Cancel'),
     h('button', { class: 'primary', onclick: async () => {
       close();
       const definition = { name: name.value };
-      if (computer.checked) {
+      if (!node.checked) {
+        const capabilities = [storage.checked ? 'persistent_storage' : null, endpoint.checked ? 'public_endpoint' : null].filter(Boolean);
         definition.computer = {
-          lifecycle: lifecycle.value,
+          lifecycle: temporary.checked ? 'ephemeral' : 'persistent',
           requirements: {
             cpu_count: Number(cpu.value) || undefined,
             memory_bytes: Number(memory.value) ? Math.round(Number(memory.value) * 2 ** 30) : undefined,
+            capabilities,
             features: features.value.split(',').map((item) => item.trim()).filter(Boolean),
           },
           target: target.value.trim() || undefined,
         };
-        if (lifecycle.value === 'ephemeral') definition.computer.ttl_seconds = 3600;
+        if (temporary.checked) definition.computer.ttl_seconds = 3600;
       }
-      await act(`Environment ${name.value} created`, () => api('POST', '/environments', definition));
+      const created = await act(`Environment ${name.value} created`, () => api('POST', '/environments', definition));
+      if (created && definition.computer && document.body.dataset.mode === 'work') location.hash = `#/work/${enc(name.value)}`;
     } }, 'Create'),
   ]);
   name.focus();
@@ -434,6 +443,53 @@ function createEnvironment() {
 
 async function environmentView(name) {
   const environment = await api('GET', `/environments/${enc(name)}`);
+  const computer = environment.computer;
+  const header = [
+    h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Environments'), ' / ', name),
+    h('div', { class: 'title', 'data-view': 'manage', 'data-environment-id': environment.environment_id },
+      h('h1', {}, name.toUpperCase()), computer ? state(computer.status) : status(environment),
+      h('span', { class: 'chip mono', title: 'Environment ID' }, environment.environment_id),
+      h('div', { class: 'actions' },
+        computer
+          ? h('a', { class: 'button', href: `#/work/${enc(name)}` }, 'Work')
+          : h('button', { onclick: () => deployWizard({ environment: name }) }, 'Add project'),
+        h('button', { onclick: () => environmentLifecycle(name, 'start') }, 'Start'),
+        h('button', { onclick: () => environmentLifecycle(name, 'restart') }, 'Restart'),
+        h('button', { class: 'danger', onclick: () => environmentLifecycle(name, 'stop') }, 'Stop'))),
+  ];
+  if (computer) {
+    // An environment with a computer: its projects are software in its
+    // repositories, built and run there. Deployment is a release of one,
+    // reconciled in place.
+    const observed = computer.observed || {};
+    const rows = (computer.desired.projects || []).map((project) => {
+      const repository = (computer.desired.repositories || []).find((item) => item.name === project.repository) || {};
+      const seen = observed.repositories && observed.repositories[project.repository];
+      const built = observed.builds && observed.builds[project.name];
+      return h('tr', { class: 'link', 'data-project': project.name, onclick: () => { location.hash = `#/work/${enc(name)}`; } },
+        h('td', {}, h('strong', {}, project.name)),
+        h('td', { class: 'mono' }, repository.revision || '—'),
+        h('td', { class: 'mono' }, seen ? short(seen.commit) : '—'),
+        h('td', {}, built ? state(built.evidence.outcome === 'succeeded' ? 'complete' : 'failed', built.evidence.outcome) : '—'));
+    });
+    const processes = (computer.desired.processes || []).map((process) => {
+      const seen = observed.processes && observed.processes[process.name];
+      return h('tr', { 'data-process': process.name },
+        h('td', {}, h('strong', {}, process.name)),
+        h('td', {}, process.kind || 'application'),
+        h('td', {}, process.desired || 'running'),
+        h('td', {}, seen ? state(seen.state) : '—'));
+    });
+    return [
+      header,
+      h('div', { class: 'subtitle' }, `${(computer.desired.projects || []).length} projects · ${(computer.desired.processes || []).length} processes · desired ${environment.desired_state} · policy ${short(environment.policy_id)}`),
+      machineSection(name, environment),
+      h('h2', {}, 'Projects'),
+      table(['Project', 'Revision', 'Commit', 'Build'], rows, 'No projects. Add one in Work.'),
+      h('h2', {}, 'Applications, services, and agents'),
+      table(['Name', 'Kind', 'Desired', 'Observed'], processes, 'Nothing runs yet. Add it in Work.'),
+    ];
+  }
   const rows = environment.projects.map((project) => h('tr', {
     class: 'link', 'data-project': project.name,
     onclick: () => { location.hash = `#/environments/${enc(name)}/projects/${enc(project.name)}`; },
@@ -446,92 +502,292 @@ async function environmentView(name) {
   h('td', {}, project.provider),
   h('td', {}, project.deployment ? [state(project.deployment.status), ' ', h('span', { class: 'chip' }, ago(project.deployment.created_at))] : '—')));
   return [
-    h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Environments'), ' / ', name),
-    h('div', { class: 'title' }, h('h1', {}, name.toUpperCase()), status(environment),
-      h('div', { class: 'actions' },
-        h('button', { onclick: () => deployWizard({ environment: name }) }, 'Add project'),
-        h('button', { onclick: () => environmentLifecycle(name, 'start') }, 'Start'),
-        h('button', { onclick: () => environmentLifecycle(name, 'restart') }, 'Restart'),
-        h('button', { class: 'danger', onclick: () => environmentLifecycle(name, 'stop') }, 'Stop'))),
+    header,
     h('div', { class: 'subtitle' }, `${environment.project_count} projects · ${environment.workload_count} workloads · desired ${environment.desired_state} · policy ${short(environment.policy_id)}`),
-    environment.computer ? computerSection(name, environment.computer) : null,
+    machineSection(name, environment),
     h('h2', {}, 'Projects'),
     table(['Project', 'Revision', 'Desired', 'Status', 'Workloads', 'Provider', 'Last deployment'], rows, 'No projects in this environment. Add one.'),
   ];
 }
 
-// ---- An environment's computer ----------------------------------------------------
+// ---- One environment, two modes ------------------------------------------------------
 //
-// Not a remote terminal with buttons. The operator edits what belongs in
-// the computer locally (a draft of its desired contents); nothing changes
-// until GO submits the whole draft as one durable, generation-fenced
-// change, which Compute reconciles in place on the running computer.
+// Manage controls which computer exists and how it is operated: placement,
+// requirements, lifetime, replacement. Work controls what is inside that
+// computer and what it is doing. Both are views of the same environment
+// (the same ID, the same API, the same authority); neither holds state of
+// its own.
+//
+// Work is not a remote terminal with buttons. The operator edits a local
+// draft of what the environment should hold; nothing changes until GO
+// submits the whole draft as one durable, authorized, generation-fenced
+// change, which the environment's computer reconciles in place.
 
-/// Local drafts of desired contents, by environment. Only the page holds
-/// them; they are discarded on GO or Discard.
+/// Local drafts, by environment. Only this page holds them; GO, Discard,
+/// or Refresh ends them.
 const DRAFTS = new Map();
+/// The last command run from Work, by environment: its output on screen.
+const OUTPUT = new Map();
+
+const LIST_FIELDS = ['repositories', 'packages', 'processes', 'projects'];
 
 function draftOf(name, computer) {
   let draft = DRAFTS.get(name);
   if (!draft) {
-    draft = { base: computer.desired.generation || 0, contents: structuredClone(computer.desired) };
-    for (const field of ['repositories', 'packages', 'processes']) draft.contents[field] = draft.contents[field] || [];
+    const contents = structuredClone(computer.desired);
+    for (const field of LIST_FIELDS) contents[field] = contents[field] || [];
+    draft = {
+      base: computer.desired.generation || 0,
+      contents,
+      config: { ...(computer.config || {}) },
+      lifecycle: { lifecycle: computer.requested_lifecycle || computer.lifecycle, ttl_seconds: 3600 },
+      conflict: null,
+    };
   }
   return draft;
 }
 
 function edit(name, draft, change) {
-  change(draft.contents);
+  change(draft);
   DRAFTS.set(name, draft);
   render();
 }
 
-/// The individual changes a draft makes, as the operator would say them.
-function changes(desired, contents) {
+/// The changes a draft makes, as the operator would say them.
+function changes(computer, draft) {
   const out = [];
-  for (const field of ['repositories', 'packages', 'processes']) {
-    const before = new Map((desired[field] || []).map((item) => [item.name, JSON.stringify(item)]));
-    const after = new Map(contents[field].map((item) => [item.name, JSON.stringify(item)]));
-    const noun = field.replace(/ies$/, 'y').replace(/s$/, '');
+  const nouns = { repositories: 'repository', packages: 'package', processes: 'process', projects: 'project' };
+  for (const field of LIST_FIELDS) {
+    const before = new Map((computer.desired[field] || []).map((item) => [item.name, JSON.stringify(item)]));
+    const after = new Map(draft.contents[field].map((item) => [item.name, JSON.stringify(item)]));
     for (const [item, value] of after) {
-      if (!before.has(item)) out.push(`Add ${noun} ${item}`);
-      else if (before.get(item) !== value) out.push(`Change ${noun} ${item}`);
+      if (!before.has(item)) out.push(`Add ${nouns[field]} ${item}`);
+      else if (before.get(item) !== value) out.push(`Change ${nouns[field]} ${item}`);
     }
-    for (const item of before.keys()) if (!after.has(item)) out.push(`Remove ${noun} ${item}`);
+    for (const item of before.keys()) if (!after.has(item)) out.push(`Remove ${nouns[field]} ${item}`);
   }
+  const config = computer.config || {};
+  for (const key of new Set([...Object.keys(config), ...Object.keys(draft.config)])) {
+    if (!(key in draft.config)) out.push(`Unset ${key}`);
+    else if (!(key in config)) out.push(`Set ${key}`);
+    else if (config[key] !== draft.config[key]) out.push(`Change ${key}`);
+  }
+  if (lifecycleChanged(computer, draft)) out.push(draft.lifecycle.lifecycle === 'persistent' ? 'Keep running until destroyed' : `Make temporary (${draft.lifecycle.ttl_seconds}s)`);
   return out;
 }
 
-function computerSection(name, computer) {
+function configChanged(computer, draft) {
+  return JSON.stringify(Object.entries(computer.config || {}).sort()) !== JSON.stringify(Object.entries(draft.config).sort());
+}
+
+function lifecycleChanged(computer, draft) {
+  return draft.lifecycle.lifecycle !== (computer.requested_lifecycle || computer.lifecycle) || draft.lifecycle.touched === true;
+}
+
+/// GO: the whole draft as one authorized change, refused if the
+/// environment changed since it was loaded.
+async function go(name, computer, draft) {
+  const body = { contents: draft.contents, expected_generation: draft.base };
+  if (configChanged(computer, draft)) body.config = draft.config;
+  if (lifecycleChanged(computer, draft)) {
+    body.lifecycle = { lifecycle: draft.lifecycle.lifecycle };
+    if (draft.lifecycle.lifecycle === 'ephemeral') body.lifecycle.ttl_seconds = Number(draft.lifecycle.ttl_seconds) || 3600;
+  }
+  try {
+    await api('POST', `/environments/${enc(name)}/contents`, body);
+    DRAFTS.delete(name);
+    toast(`GO: ${name} is changing in place`);
+  } catch (error) {
+    if (error.kind === 'conflict') {
+      draft.conflict = error.message;
+      DRAFTS.set(name, draft);
+    } else {
+      toast(`GO failed: ${error.message}`, true);
+    }
+  }
+  await render();
+}
+
+function lifetimeText(computer) {
+  if (computer.lifecycle === 'persistent') return 'Keep running (until destroyed)';
+  return computer.expires_at ? `Temporary · expires ${new Date(computer.expires_at).toLocaleString()}` : 'Temporary';
+}
+
+function machineFacts(computer) {
+  const requirements = computer.requirements || {};
+  const machine = computer.machine || {};
+  return [
+    fact('Status', state(computer.status)),
+    fact('Resources', [requirements.cpu_count ? `${requirements.cpu_count} CPU` : null, requirements.memory_bytes ? bytes(requirements.memory_bytes) : null, requirements.architecture]
+      .filter(Boolean).join(' · ') || 'Any'),
+    fact('Target', computer.target
+      ? `${computer.target}${machine.provider_kind ? ` · ${machine.provider_kind}` : ''}`
+      : (computer.requested_target ? `${computer.requested_target} (requested)` : 'placing…'), true),
+    fact('Lifetime', lifetimeText(computer)),
+    fact('Machine', machine.resource || machine.session_id || '—', true),
+  ];
+}
+
+// ---- Manage: the machine ------------------------------------------------------------
+
+function machineSection(name, environment) {
+  const computer = environment.computer;
+  if (!computer) {
+    return [
+      h('h2', {}, 'Machine'),
+      h('div', { class: 'panel note', 'data-machine': 'node' },
+        'This environment has no computer of its own: its projects run on this control-plane node (',
+        h('span', { class: 'mono' }, environment.machine ? environment.machine.target : 'local'),
+        '). Create an environment with a computer to work in it and to change it in place.'),
+    ];
+  }
+  const live = !['destroying', 'destroyed', 'expired'].includes(computer.status);
+  return [
+    h('h2', {}, 'Machine'),
+    h('div', { class: 'grid', 'data-machine': 'computer' }, machineFacts(computer),
+      fact('Placement', short(computer.placement_id), true),
+      fact('Contents', computer.converged ? state('running', `Converged · generation ${computer.desired.generation || 0}`)
+        : state('pending', `Reconciling · ${computer.observed.converged_generation || 0} of ${computer.desired.generation || 0}`))),
+    computer.failure ? h('div', { class: 'panel error' }, `${computer.failure.phase}: ${computer.failure.code} — ${computer.failure.message}`) : null,
+    h('div', { class: 'actions row' },
+      h('a', { class: 'button primary', href: `#/work/${enc(name)}`, 'data-work': 'true' }, 'Work on this →'),
+      h('button', { disabled: !live, onclick: () => replaceDialog(name, computer) }, 'Replace machine…'),
+      h('button', { class: 'danger', disabled: !live, onclick: () => destroyComputer(name) }, 'Destroy')),
+  ];
+}
+
+function replaceDialog(name, computer) {
+  const requirements = computer.requirements || {};
+  const cpu = h('input', { id: 'replace-cpu', type: 'number', min: '1', value: String(requirements.cpu_count || 1) });
+  const memory = h('input', { id: 'replace-memory', type: 'number', min: '1', value: String(Math.max(1, Math.round((requirements.memory_bytes || 2 ** 30) / 2 ** 30))) });
+  modal(`Replace ${name}'s machine`, h('div', {},
+    h('p', {}, 'Replacement provisions a new machine that meets these requirements and moves the environment\'s contents onto it. Ordinary changes never need this: they happen in place, from Work.'),
+    h('label', { for: 'replace-cpu' }, 'CPUs'), cpu,
+    h('label', { for: 'replace-memory' }, 'Memory (GiB)'), memory), [
+    h('button', { onclick: close }, 'Cancel'),
+    h('button', { class: 'primary danger', onclick: async () => {
+      close();
+      await act(`Replacing ${name}'s machine`, () => api('POST', `/environments/${enc(name)}/replace`, {
+        ...requirements,
+        cpu_count: Number(cpu.value) || undefined,
+        memory_bytes: Number(memory.value) ? Math.round(Number(memory.value) * 2 ** 30) : undefined,
+      }));
+    } }, 'Replace'),
+  ]);
+}
+
+async function destroyComputer(name) {
+  if (await confirmImpact(`Destroy ${name}'s machine?`, ['The machine, its workspace, and everything running on it'], ['The environment\'s record, desired contents, and evidence'], 'danger')) {
+    DRAFTS.delete(name);
+    await act(`Destroying ${name}`, () => api('DELETE', `/environments/${enc(name)}`));
+  }
+}
+
+// ---- Work ----------------------------------------------------------------------------
+
+async function workHomeView() {
+  const environments = await api('GET', '/environments');
+  const computers = environments.filter((environment) => environment.computer);
+  return [
+    h('div', { class: 'title' }, h('h1', {}, 'Work'),
+      h('div', { class: 'actions' },
+        h('button', { onclick: temporaryDialog }, 'Temporary environment'),
+        h('button', { class: 'primary', onclick: createEnvironment }, 'New environment'))),
+    h('div', { class: 'subtitle' }, 'What do you want to work on?'),
+    computers.length ? h('div', { class: 'cards' }, computers.map((environment) =>
+      h('div', { class: 'panel card', role: 'link', tabindex: '0', 'data-environment': environment.name,
+        onclick: () => { location.hash = `#/work/${enc(environment.name)}`; },
+        onkeydown: (event) => { if (event.key === 'Enter') location.hash = `#/work/${enc(environment.name)}`; } },
+      h('div', { class: 'name' }, environment.name),
+      h('div', { class: 'meta' }, environment.target ? `on ${environment.target}` : 'placing…'),
+      state(environment.computer))))
+      : h('div', { class: 'panel empty' }, 'No environment has a computer yet. Create one, or start a temporary one.'),
+  ];
+}
+
+function temporaryDialog() {
+  const cpu = h('input', { id: 'temporary-cpu', type: 'number', min: '1', value: '2' });
+  const memory = h('input', { id: 'temporary-memory', type: 'number', min: '1', value: '4' });
+  const hours = h('input', { id: 'temporary-hours', type: 'number', min: '1', value: '1' });
+  modal('Temporary environment', h('div', {},
+    h('p', {}, 'A computer for this piece of work. It expires, and its record and evidence remain; close the session to end it sooner.'),
+    h('label', { for: 'temporary-cpu' }, 'CPUs'), cpu,
+    h('label', { for: 'temporary-memory' }, 'Memory (GiB)'), memory,
+    h('label', { for: 'temporary-hours' }, 'Lifetime (hours)'), hours), [
+    h('button', { onclick: close }, 'Cancel'),
+    h('button', { class: 'primary', onclick: async () => {
+      close();
+      const session = await act('Temporary environment requested', () => api('POST', '/sessions', {
+        computer: {
+          lifecycle: 'ephemeral',
+          requirements: {
+            cpu_count: Number(cpu.value) || undefined,
+            memory_bytes: Number(memory.value) ? Math.round(Number(memory.value) * 2 ** 30) : undefined,
+          },
+          ttl_seconds: Math.max(1, Number(hours.value) || 1) * 3600,
+        },
+      }));
+      if (session) location.hash = `#/work/${enc(session.environment)}`;
+    } }, 'Start'),
+  ]);
+}
+
+async function workView(name) {
+  const environment = await api('GET', `/environments/${enc(name)}`);
+  if (!environment.computer) {
+    return [
+      h('div', { class: 'crumbs' }, h('a', { href: '#/work' }, 'Work'), ' / ', name),
+      h('div', { class: 'panel empty' }, `${name} runs on this control-plane node and has no computer to work in. Manage it instead, or create an environment with a computer.`),
+    ];
+  }
+  const computer = environment.computer;
+  const sessions = await api('GET', `/sessions?environment=${enc(name)}`).catch(() => []);
   const draft = draftOf(name, computer);
+  const live = !['destroying', 'destroyed', 'expired'].includes(computer.status);
+  const running = computer.status === 'running';
+  const pending = changes(computer, draft);
+  const stale = draft.conflict || (DRAFTS.has(name) && draft.base !== (computer.desired.generation || 0));
   const { contents } = draft;
   const observed = computer.observed || {};
-  const live = !['destroying', 'destroyed', 'expired'].includes(computer.status);
-  const pending = changes(computer.desired, contents);
-  const stale = DRAFTS.has(name) && draft.base !== (computer.desired.generation || 0);
-  const field = (value, onchange, attributes) => h('input', { value, autocomplete: 'off', disabled: !live, onchange: (event) => edit(name, draft, () => onchange(event.target.value)), ...attributes });
-  const remove = (list, item) => h('button', { class: 'danger', disabled: !live, onclick: () => edit(name, draft, (next) => { next[list] = next[list].filter((entry) => entry.name !== item); }) }, 'Remove');
+  const input = (value, onchange, attributes) => h('input', { value: value === undefined ? '' : value, autocomplete: 'off', disabled: !live, onchange: (event) => edit(name, draft, () => onchange(event.target.value)), ...attributes });
+  const remove = (list, item) => h('button', { class: 'danger', disabled: !live, onclick: () => edit(name, draft, (next) => { next.contents[list] = next.contents[list].filter((entry) => entry.name !== item); }) }, 'Remove');
   const evidence = (item) => item ? h('span', { class: 'chip', title: item.evidence ? `job ${item.evidence.job_id}` : '' }, item.evidence && item.evidence.error ? h('span', { class: 'error' }, item.evidence.error) : ago(item.evidence && item.evidence.at)) : '—';
 
   const repositories = contents.repositories.map((repository) => h('tr', { 'data-repository': repository.name },
     h('td', {}, h('strong', {}, repository.name)),
     h('td', { class: 'mono' }, repository.url),
-    h('td', {}, field(repository.revision, (value) => { repository.revision = value; }, { 'aria-label': `${repository.name} revision` })),
+    h('td', {}, input(repository.revision, (value) => { repository.revision = value; }, { 'aria-label': `${repository.name} revision` })),
     h('td', { class: 'mono' }, observed.repositories && observed.repositories[repository.name]
       ? `${observed.repositories[repository.name].revision} ${short(observed.repositories[repository.name].commit)}` : '—'),
     h('td', {}, evidence(observed.repositories && observed.repositories[repository.name])),
     h('td', {}, remove('repositories', repository.name))));
-  const processes = contents.processes.map((process) => {
+
+  const projects = contents.projects.map((project) => {
+    const commands = [project.build && project.build.length ? 'build' : null, project.test && project.test.length ? 'test' : null, ...Object.keys(project.commands || {})].filter(Boolean);
+    const built = observed.builds && observed.builds[project.name];
+    return h('tr', { 'data-project': project.name },
+      h('td', {}, h('strong', {}, project.name)),
+      h('td', {}, project.repository),
+      h('td', {}, built ? state(built.evidence.outcome === 'succeeded' ? 'complete' : 'failed', `${built.evidence.outcome === 'succeeded' ? 'Built' : 'Build failed'} ${short(built.commit)}`) : (project.build && project.build.length ? state('pending', 'Not built') : '—')),
+      h('td', {}, commands.map((command) => h('button', { disabled: !running, 'data-command': `${project.name}/${command}`, onclick: () => runProjectCommand(name, project.name, command) }, command))),
+      h('td', {}, remove('projects', project.name)));
+  });
+
+  const byKind = (kinds) => contents.processes.filter((process) => kinds.includes(process.kind || 'application'));
+  const processRows = (list) => list.map((process) => {
     const seen = observed.processes && observed.processes[process.name];
     return h('tr', { 'data-process': process.name },
-      h('td', {}, h('strong', {}, process.name), ' ', h('span', { class: 'chip' }, process.kind || 'process')),
+      h('td', {}, h('strong', {}, process.name)),
       h('td', { class: 'mono' }, process.command.join(' ')),
       h('td', {}, process.repository || '—'),
+      h('td', {}, process.port ? String(process.port) : '—'),
       h('td', {}, h('select', { disabled: !live, 'aria-label': `${process.name} desired`, onchange: (event) => edit(name, draft, () => { process.desired = event.target.value; }) },
         ['running', 'stopped'].map((value) => h('option', { value, selected: (process.desired || 'running') === value }, value)))),
       h('td', {}, seen ? state(seen.state, `${STATES[seen.state] ? STATES[seen.state][2] : seen.state}${seen.pid ? ` · pid ${seen.pid}` : ''}`) : '—'),
-      h('td', {}, remove('processes', process.name)));
+      h('td', {}, h('button', { disabled: !running, onclick: () => showLog(name, process.name) }, 'Log'), ' ', remove('processes', process.name)));
   });
+  const processHeaders = ['Name', 'Command', 'Repository', 'Port', 'Desired', 'Observed', ''];
+
   const packages = contents.packages.map((item) => h('tr', { 'data-package': item.name },
     h('td', {}, h('strong', {}, item.name)),
     h('td', { class: 'mono' }, item.install.join(' ')),
@@ -539,51 +795,168 @@ function computerSection(name, computer) {
     h('td', {}, evidence(observed.packages && observed.packages[item.name])),
     h('td', {}, remove('packages', item.name))));
 
-  return h('div', { class: 'computer draft', 'data-computer': computer.status },
-    h('h2', {}, 'Computer'),
-    h('div', { class: 'grid' },
-      fact('Status', state(computer.status)),
-      fact('Target', computer.target || (computer.requested_target ? `${computer.requested_target} (requested)` : 'placing…'), true),
-      fact('Lifecycle', computer.lifecycle + (computer.expires_at ? ` · expires ${new Date(computer.expires_at).toLocaleString()}` : '')),
-      fact('Resources', [computer.requirements.cpu_count ? `${computer.requirements.cpu_count} CPU` : null, bytes(computer.requirements.memory_bytes)].filter((item) => item && item !== '—').join(' · ') || '—'),
-      fact('Contents', computer.converged ? state('running', `Converged · generation ${computer.desired.generation || 0}`) : state('pending', `Reconciling · ${observed.converged_generation || 0} of ${computer.desired.generation || 0}`)),
-      fact('Session', short(computer.session_id), true)),
+  const config = Object.keys(draft.config).sort().map((key) => h('tr', { 'data-config': key },
+    h('td', { class: 'mono' }, key),
+    h('td', {}, input(draft.config[key], (value) => { draft.config[key] = value; }, { type: 'password', 'aria-label': `${key} value` })),
+    h('td', {}, h('button', { class: 'danger', disabled: !live, onclick: () => edit(name, draft, (next) => { delete next.config[key]; }) }, 'Unset'))));
+
+  const endpoints = (computer.endpoints || []).map((endpoint) => h('tr', { 'data-endpoint': endpoint.process },
+    h('td', {}, endpoint.process),
+    h('td', {}, String(endpoint.port)),
+    h('td', { class: 'mono' }, endpoint.url ? h('a', { href: endpoint.url, target: '_blank', rel: 'noopener' }, endpoint.url) : '—'),
+    h('td', {}, state(endpoint.serving ? 'serving' : 'stopped'))));
+
+  const output = OUTPUT.get(name);
+  const terminal = h('input', { id: 'work-command', placeholder: 'make test', autocomplete: 'off', disabled: !running, 'aria-label': 'Command to run in the computer',
+    onkeydown: (event) => { if (event.key === 'Enter' && event.target.value.trim()) runCommand(name, event.target.value.trim()); } });
+
+  const radio = (value, label) => h('label', { class: 'check' },
+    h('input', { type: 'radio', name: 'lifetime', value, disabled: !live, checked: draft.lifecycle.lifecycle === value,
+      onchange: () => edit(name, draft, (next) => { next.lifecycle.lifecycle = value; next.lifecycle.touched = value === 'ephemeral'; }) }), ' ', label);
+
+  return h('div', { class: 'work draft', 'data-view': 'work', 'data-environment-id': environment.environment_id },
+    h('div', { class: 'crumbs' }, h('a', { href: '#/work' }, 'Work'), ' / ', name),
+    h('div', { class: 'title' }, h('h1', {}, name), state(computer.status),
+      h('span', { class: 'chip mono', title: 'Environment ID' }, environment.environment_id),
+      h('div', { class: 'actions' },
+        h('a', { class: 'button', href: `#/environments/${enc(name)}` }, 'Manage'),
+        h('button', { disabled: !live, onclick: () => act(`Reconciling ${name}`, () => api('POST', `/environments/${enc(name)}/reconcile`)) }, 'Reconcile'))),
+    h('div', { class: 'subtitle' }, 'What do you want to do?'),
     computer.failure ? h('div', { class: 'panel error' }, `${computer.failure.phase}: ${computer.failure.code} — ${computer.failure.message}`) : null,
+
     h('h3', {}, 'Repositories'),
     table(['Repository', 'URL', 'Revision', 'Checked out', 'Last synced', ''], repositories, 'No repositories.'),
     live ? addRow(['name', 'url', 'revision'], 'Add repository', (value) => edit(name, draft, (next) => {
-      next.repositories.push({ name: value.name, url: value.url, revision: value.revision || 'main' });
+      next.contents.repositories.push({ name: value.name, url: value.url, revision: value.revision || 'main' });
     })) : null,
-    h('h3', {}, 'Applications, services, and processes'),
-    table(['Process', 'Command', 'Repository', 'Desired', 'Observed', ''], processes, 'Nothing runs yet.'),
-    live ? addRow(['name', 'command', 'repository', 'kind'], 'Add process', (value) => edit(name, draft, (next) => {
-      next.processes.push({
+
+    h('h3', {}, 'Projects'),
+    table(['Project', 'Repository', 'Build', 'Run', ''], projects, 'No projects. A project names a repository and how to build and test it.'),
+    live ? addRow(['name', 'repository', 'build', 'test'], 'Add project', (value) => edit(name, draft, (next) => {
+      const sh = (command) => command ? ['sh', '-c', command] : undefined;
+      next.contents.projects.push({ name: value.name, repository: value.repository, build: sh(value.build), test: sh(value.test) });
+    })) : null,
+
+    h('h3', {}, 'Applications'),
+    table(processHeaders, processRows(byKind(['application'])), 'No applications.'),
+    h('h3', {}, 'Services'),
+    table(processHeaders, processRows(byKind(['service'])), 'No services.'),
+    h('h3', {}, 'Agents'),
+    table(processHeaders, processRows(byKind(['agent'])), 'No agents.'),
+    byKind(['process']).length ? [h('h3', {}, 'Processes'), table(processHeaders, processRows(byKind(['process'])))] : null,
+    live ? addRow(['name', 'command', 'repository', 'port', 'kind'], 'Add', (value) => edit(name, draft, (next) => {
+      next.contents.processes.push({
         name: value.name,
-        kind: ['application', 'service', 'agent'].includes(value.kind) ? value.kind : 'process',
+        kind: ['service', 'agent', 'process'].includes(value.kind) ? value.kind : 'application',
         command: value.command.split(/\s+/).filter(Boolean),
         repository: value.repository || undefined,
+        port: Number(value.port) || undefined,
         desired: 'running',
       });
     })) : null,
+
     h('h3', {}, 'Packages'),
     table(['Package', 'Install', 'Repository', 'Installed', ''], packages, 'No packages.'),
     live ? addRow(['name', 'install', 'repository'], 'Add package', (value) => edit(name, draft, (next) => {
-      next.packages.push({ name: value.name, install: value.install.split(/\s+/).filter(Boolean), repository: value.repository || undefined });
+      next.contents.packages.push({ name: value.name, install: value.install.split(/\s+/).filter(Boolean), repository: value.repository || undefined });
     })) : null,
+
+    h('h3', {}, 'Configuration'),
+    table(['Key', 'Value', ''], config, 'No configuration.'),
+    live ? addRow(['name', 'value'], 'Set', (value) => edit(name, draft, (next) => { next.config[value.name] = value.value; })) : null,
+
+    h('h3', {}, 'Endpoints'),
+    table(['Process', 'Port', 'Address', ''], endpoints, 'No endpoints. Give a process a port to publish one.'),
+
+    h('h3', {}, 'Terminal'),
+    h('div', { class: 'panel terminal' },
+      h('div', { class: 'add-row' }, terminal, h('button', { disabled: !running, onclick: () => terminal.value.trim() && runCommand(name, terminal.value.trim()) }, 'Run')),
+      output ? h('div', { 'data-output': output.status },
+        h('div', { class: 'meta' }, `${output.title} · ${output.status}${output.job ? ` · job ${output.job}` : ''}`),
+        h('pre', { class: 'mono' }, output.text || '')) : h('div', { class: 'meta' }, 'Commands run inside the computer as durable jobs, with receipts.')),
+
+    h('h3', {}, 'Sessions'),
+    table(['Session', 'Kind', 'Status', 'Opened', ''], sessions.map((session) => h('tr', { 'data-session': session.session_id },
+      h('td', { class: 'mono' }, session.session_id),
+      h('td', {}, session.kind === 'ephemeral' ? 'temporary (owns this environment)' : 'attached'),
+      h('td', {}, state(session.status === 'open' ? 'active' : 'stopped', session.status)),
+      h('td', {}, ago(session.opened_at)),
+      h('td', {}, session.status === 'open' ? h('button', { onclick: () => closeSession(name, session) }, 'Close') : null))), 'No sessions.'),
+    h('div', { class: 'actions row' }, h('button', { disabled: !running, onclick: () => act(`Session opened in ${name}`, () => api('POST', '/sessions', { environment: name })) }, 'Open session')),
+
+    h('h3', {}, 'Computer'),
+    h('div', { class: 'grid' }, machineFacts(computer)),
+    h('h3', {}, 'Environment lifetime'),
+    h('div', { class: 'panel lifetime' },
+      radio('ephemeral', 'Temporary: expires, and its evidence remains'),
+      draft.lifecycle.lifecycle === 'ephemeral' ? h('label', { class: 'inline' }, 'Lifetime (seconds) ',
+        input(draft.lifecycle.ttl_seconds, (value) => { draft.lifecycle.ttl_seconds = Number(value) || 3600; draft.lifecycle.touched = true; }, { type: 'number', min: '60', 'aria-label': 'Lifetime in seconds' })) : null,
+      radio('persistent', 'Keep running: until destroyed')),
+
     h('div', { class: 'panel go' },
+      stale ? h('div', { class: 'conflict', 'data-conflict': 'true' },
+        h('strong', {}, 'Environment changed since you loaded it.'), ' ', draft.conflict ? h('span', { class: 'meta' }, draft.conflict) : null, ' ',
+        h('button', { onclick: () => { DRAFTS.delete(name); render(); } }, 'Refresh')) : null,
       pending.length ? h('ul', {}, pending.map((item) => h('li', {}, item))) : h('div', {}, 'No local changes.'),
-      stale ? h('div', { class: 'error' }, 'Someone changed this computer after you started editing; GO will be refused. Discard and edit again.') : null,
       h('div', { class: 'actions' },
         h('button', { disabled: !pending.length, onclick: () => { DRAFTS.delete(name); render(); } }, 'Discard'),
-        h('button', { disabled: !live, onclick: () => act(`Reconciling ${name}`, () => api('POST', `/environments/${enc(name)}/reconcile`)) }, 'Reconcile'),
-        h('button', { class: 'danger', disabled: !live, onclick: () => destroyComputer(name) }, 'Destroy'),
-        h('button', { class: 'primary go', disabled: !pending.length || !live, 'data-go': 'true', onclick: async () => {
-          const result = await act(`GO: ${pending.length} change${pending.length === 1 ? '' : 's'} to ${name}`, () => {
-            DRAFTS.delete(name);
-            return api('POST', `/environments/${enc(name)}/contents`, { contents, expected_generation: draft.base });
-          });
-          if (!result) DRAFTS.set(name, draft);
-        } }, 'GO'))));
+        h('button', { class: 'primary go', disabled: !pending.length || !live || Boolean(stale), 'data-go': 'true', onclick: () => go(name, computer, draft) }, 'GO'))));
+}
+
+/// Follow a job in the environment's computer, showing its output.
+async function followJob(name, title, submitted) {
+  OUTPUT.set(name, { title, status: 'running', job: submitted.job_id, text: '' });
+  render();
+  let delay = 100;
+  for (;;) {
+    const job = await api('GET', `/environments/${enc(name)}/jobs/${enc(submitted.job_id)}`);
+    if (job.result || ['succeeded', 'failed', 'cancelled', 'timed_out', 'rejected'].includes(job.job.status)) {
+      const result = job.result && job.result.result;
+      OUTPUT.set(name, {
+        title,
+        status: job.job.status,
+        job: submitted.job_id,
+        text: result ? `${result.stdout.text}${result.stderr.text}` : (job.job.failure || ''),
+      });
+      render();
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(delay * 2, 1000);
+  }
+}
+
+async function runCommand(name, line) {
+  try {
+    const submitted = await api('POST', `/environments/${enc(name)}/exec`, { command: ['sh', '-c', line] });
+    await followJob(name, `$ ${line}`, submitted);
+  } catch (error) {
+    toast(`Run failed: ${error.message}`, true);
+  }
+}
+
+async function runProjectCommand(name, project, command) {
+  try {
+    const submitted = await api('POST', `/environments/${enc(name)}/run`, { project, command });
+    await followJob(name, `${project} ${command}`, submitted);
+  } catch (error) {
+    toast(`${project} ${command} failed: ${error.message}`, true);
+  }
+}
+
+async function showLog(name, process) {
+  try {
+    const logs = await api('GET', `/environments/${enc(name)}/logs?process=${enc(process)}&limit=200`);
+    OUTPUT.set(name, { title: `${process} log`, status: 'succeeded', text: logs.log || '' });
+    render();
+  } catch (error) {
+    toast(`Log failed: ${error.message}`, true);
+  }
+}
+
+async function closeSession(name, session) {
+  if (session.kind === 'ephemeral' && !await confirmImpact('Close this session?', [`Its temporary environment ${name} and its machine`], ['The records and evidence'], 'danger')) return;
+  await act('Session closed', () => api('DELETE', `/sessions/${enc(session.session_id)}`));
 }
 
 /// A row of inputs that adds one item to a draft.
@@ -594,13 +967,6 @@ function addRow(fields, label, add) {
     if (!value.name) { toast(`${label}: a name is required`, true); return; }
     add(value);
   } }, label));
-}
-
-async function destroyComputer(name) {
-  if (await confirmImpact(`Destroy ${name}'s computer?`, ['The machine, its workspace, and everything running on it'], ['The environment\'s record, desired contents, and evidence'], 'danger')) {
-    DRAFTS.delete(name);
-    await act(`Destroying ${name}`, () => api('DELETE', `/environments/${enc(name)}`));
-  }
 }
 
 const TABS = ['Overview', 'Workloads', 'Deployments', 'Logs', 'Resources', 'Configuration', 'Receipts', 'Events'];
@@ -1080,6 +1446,9 @@ async function domainView(name) {
 
 function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === 'work' && parts[1]) return { mode: 'work', environment: parts[1], nav: 'work', render: () => workView(parts[1]) };
+  if (parts[0] === 'work') return { mode: 'work', nav: 'work', render: workHomeView };
+  if (parts[0] === 'environments' && parts[1] && !parts[2]) return { mode: 'manage', environment: parts[1], nav: 'environments', render: () => environmentView(parts[1]) };
   if (parts[0] === 'environments' && parts[2] === 'projects' && parts[3]) {
     const tab = parts[4] ? parts[4][0].toUpperCase() + parts[4].slice(1) : 'Overview';
     return { nav: 'environments', render: () => projectView(parts[1], parts[3], tab) };
@@ -1097,15 +1466,25 @@ function route() {
 
 let rendering = null;
 async function render() {
-  const { nav, render: renderView } = route();
+  const { nav, render: renderView, mode = 'manage', environment } = route();
   for (const link of document.querySelectorAll('[data-nav]')) link.classList.toggle('active', link.dataset.nav === nav);
+  // One control plane, two modes of the same environment: switching keeps it.
+  document.body.dataset.mode = mode;
+  for (const link of document.querySelectorAll('[data-mode-link]')) {
+    const target = link.dataset.modeLink;
+    link.classList.toggle('active', target === mode);
+    link.setAttribute('aria-selected', String(target === mode));
+    link.setAttribute('href', target === 'work'
+      ? (environment ? `#/work/${enc(environment)}` : '#/work')
+      : (environment ? `#/environments/${enc(environment)}` : '#/'));
+  }
   const current = rendering = Symbol('render');
   try {
     const content = await renderView();
     if (current !== rendering) return;
     // Views may leave null placeholders for absent sections; they render
     // as nothing, never as the text "null".
-    view.replaceChildren(...[content].flat().filter((node) => node !== null && node !== undefined && node !== false));
+    view.replaceChildren(...[content].flat(Infinity).filter((node) => node !== null && node !== undefined && node !== false));
   } catch (error) {
     if (current !== rendering) return;
     view.replaceChildren(h('div', { class: 'panel empty error' }, error.kind === 'not_found' ? 'Not found.' : `The Compute API returned an error: ${error.message}`));

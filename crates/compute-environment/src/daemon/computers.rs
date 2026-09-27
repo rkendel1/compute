@@ -28,9 +28,9 @@ use std::time::Duration;
 use chrono::Utc;
 use compute_core::{
     ComputerFailure, ComputerLifecycle, ComputerRequirements, ComputerSpec, ComputerStatus,
-    EnvironmentContents, ObservedContents, ObservedPackage, ObservedProcess, ObservedRepository,
-    OperationEvidence, PackageSpec, ProcessDesired, ProcessSpec, ProcessState, RepositorySpec,
-    RetiredSession, SessionCommand, SessionStatus, fingerprint,
+    EnvironmentContents, ObservedBuild, ObservedContents, ObservedPackage, ObservedProcess,
+    ObservedRepository, OperationEvidence, PackageSpec, ProcessDesired, ProcessSpec, ProcessState,
+    ProjectSpec, RepositorySpec, RetiredSession, SessionCommand, SessionStatus, fingerprint,
 };
 use compute_placement::{
     AdmissionContext, DiscoveryMode, PlacementOutcome, PlacementPolicy, PlacementReport,
@@ -49,7 +49,7 @@ use crate::model::*;
 use crate::status::*;
 
 /// Ephemeral computers live an hour unless asked otherwise.
-const DEFAULT_TTL: u64 = 60 * 60;
+pub(crate) const DEFAULT_TTL: u64 = 60 * 60;
 /// A target keeps an ephemeral session this long past the computer's own
 /// expiry, so Compute, not the target, decides when it ends.
 const TARGET_GRACE: u64 = 5 * 60;
@@ -90,8 +90,46 @@ pub(crate) enum Action {
     RemoveRepository(String),
     InstallPackage(PackageSpec, String),
     ForgetPackage(String),
+    Build(ProjectSpec, String),
+    ForgetBuild(String),
     StopProcess { name: String, forget: bool },
     StartProcess(ProcessSpec, String),
+}
+
+fn commit_of(repository: &str, observed: &ObservedContents) -> Option<String> {
+    observed
+        .repositories
+        .get(repository)
+        .and_then(|repository| repository.commit.clone())
+}
+
+/// A project build's fingerprint: its command, its repository's commit,
+/// and the configuration it sees. Any of them changing builds again.
+fn build_fingerprint(
+    project: &ProjectSpec,
+    observed: &ObservedContents,
+    config: &BTreeMap<String, String>,
+) -> String {
+    fingerprint(&(
+        &project.build,
+        &project.repository,
+        commit_of(&project.repository, observed),
+        config,
+    ))
+}
+
+/// The environment a process, build, or command sees: the environment's
+/// configuration, then its own.
+pub(crate) fn process_env(
+    process: &ProcessSpec,
+    config: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut env = config.clone();
+    if let Some(port) = process.port {
+        env.insert("PORT".into(), port.to_string());
+    }
+    env.extend(process.env.clone());
+    env
 }
 
 /// The desired fingerprint of a process: its spec, the commit of the
@@ -99,15 +137,32 @@ pub(crate) enum Action {
 /// of them changing restarts it.
 fn process_fingerprint(
     process: &ProcessSpec,
+    contents: &EnvironmentContents,
     observed: &ObservedContents,
     config: &BTreeMap<String, String>,
 ) -> String {
     let commit = process
         .repository
         .as_ref()
-        .and_then(|name| observed.repositories.get(name))
-        .and_then(|repository| repository.commit.clone());
-    fingerprint(&(process, commit, config))
+        .and_then(|name| commit_of(name, observed));
+    // A new build of the repository it runs from restarts it too.
+    let builds = process
+        .repository
+        .as_ref()
+        .map(|repository| {
+            contents
+                .projects
+                .iter()
+                .filter(|project| &project.repository == repository && !project.build.is_empty())
+                .map(|project| build_fingerprint(project, observed, config))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if builds.is_empty() {
+        fingerprint(&(process, commit, config))
+    } else {
+        fingerprint(&(process, commit, config, builds))
+    }
 }
 
 fn package_fingerprint(package: &PackageSpec, observed: &ObservedContents) -> String {
@@ -157,6 +212,42 @@ pub(crate) fn plan(
             return Some(Action::ForgetPackage(name.clone()));
         }
     }
+    for project in contents
+        .projects
+        .iter()
+        .filter(|project| !project.build.is_empty())
+    {
+        let wanted = build_fingerprint(project, observed, config);
+        if observed
+            .builds
+            .get(&project.name)
+            .is_none_or(|seen| seen.fingerprint != wanted)
+        {
+            return Some(Action::Build(project.clone(), wanted));
+        }
+    }
+    for name in observed.builds.keys() {
+        if !contents
+            .projects
+            .iter()
+            .any(|spec| &spec.name == name && !spec.build.is_empty())
+        {
+            return Some(Action::ForgetBuild(name.clone()));
+        }
+    }
+    // A repository whose current build failed keeps what runs from it as
+    // it is: a failed release never takes down the running one.
+    let broken = |repository: &Option<String>| {
+        repository.as_ref().is_some_and(|repository| {
+            contents.projects.iter().any(|project| {
+                &project.repository == repository
+                    && observed
+                        .builds
+                        .get(&project.name)
+                        .is_some_and(|seen| seen.evidence.outcome != "succeeded")
+            })
+        })
+    };
     for (name, seen) in &observed.processes {
         match contents.processes.iter().find(|spec| &spec.name == name) {
             None => {
@@ -181,8 +272,11 @@ pub(crate) fn plan(
         if process.desired != ProcessDesired::Running {
             continue;
         }
-        let wanted = process_fingerprint(process, observed, config);
+        let wanted = process_fingerprint(process, contents, observed, config);
         let current = observed.processes.get(&process.name);
+        if broken(&process.repository) {
+            continue;
+        }
         let settled = current.is_some_and(|seen| {
             seen.fingerprint == wanted
                 && matches!(seen.state, ProcessState::Running | ProcessState::Failed)
@@ -219,7 +313,7 @@ git rev-parse HEAD
 
 const REMOVE_REPOSITORY: &str = r#"rm -rf "repos/$1""#;
 
-const INSTALL_PACKAGE: &str = r#"set -eu
+pub(crate) const INSTALL_PACKAGE: &str = r#"set -eu
 if [ -n "$1" ]; then cd "repos/$1"; fi
 shift
 exec "$@"
@@ -278,7 +372,7 @@ done
 
 const PROCESS_LOG: &str = r#"tail -n "$2" ".compute/processes/$1.log" 2>/dev/null || true"#;
 
-fn script(script: &str, arguments: impl IntoIterator<Item = String>) -> SessionCommand {
+pub(crate) fn script(script: &str, arguments: impl IntoIterator<Item = String>) -> SessionCommand {
     let mut command = vec![
         "sh".to_owned(),
         "-c".into(),
@@ -399,6 +493,7 @@ impl Daemon {
             session_id: None,
             reference: None,
             provider_kind: None,
+            provider_resource: None,
             capabilities: None,
             connection: None,
             retired: vec![],
@@ -479,11 +574,46 @@ impl Daemon {
             && value.spec_generation == spec.generation
             && value.observed.converged_generation == desired.generation
             && plan(&desired, &value.observed, &record.value.config).is_none();
+        let machine = match (&value.target, &value.session_id) {
+            (Some(target), Some(session_id)) => Some(MachineView {
+                target: target.clone(),
+                session_id: session_id.clone(),
+                provider_kind: value.provider_kind.clone(),
+                resource: value.provider_resource.clone(),
+            }),
+            _ => None,
+        };
+        let host = value
+            .target
+            .as_ref()
+            .and_then(|target| self.target_host(target));
+        let endpoints = desired
+            .processes
+            .iter()
+            .filter_map(|process| {
+                let port = process.port?;
+                Some(ProcessEndpoint {
+                    process: process.name.clone(),
+                    port,
+                    url: host.as_ref().map(|host| format!("http://{host}:{port}")),
+                    serving: value.status == ComputerStatus::Running
+                        && value
+                            .observed
+                            .processes
+                            .get(&process.name)
+                            .is_some_and(|seen| seen.state == ProcessState::Running),
+                })
+            })
+            .collect();
         Some(ComputerView {
             environment: record.value.name.clone(),
             environment_id: record.id.clone(),
             owner: value.owner,
             lifecycle: value.lifecycle,
+            requested_lifecycle: spec.lifecycle,
+            machine,
+            config: record.value.config.clone(),
+            endpoints,
             status: value.status,
             requirements: spec.requirements,
             spec_generation: spec.generation,
@@ -565,7 +695,7 @@ impl Daemon {
 
     /// Whether the environment's computer has ended, so it can no longer be
     /// changed.
-    async fn require_live(
+    pub(crate) async fn require_live(
         &self,
         record: &Stored<EnvironmentRecord>,
     ) -> Result<(), EnvironmentError> {
@@ -601,18 +731,44 @@ impl Daemon {
         description: String,
         change: impl Fn(&mut EnvironmentContents) -> Result<(), EnvironmentError>,
     ) -> Result<ComputerView, EnvironmentError> {
+        self.change_environment(environment, operator, description, None, |value| {
+            let mut contents = value.contents.clone().unwrap_or_default();
+            change(&mut contents)?;
+            value.contents = Some(contents);
+            Ok(())
+        })
+        .await
+    }
+
+    /// Change what an environment asks of its computer: its contents, its
+    /// configuration, or how long it lives. One fenced write, with the
+    /// event that records it; every change is a new contents generation,
+    /// so a change made from a stale view is refused. Never a replacement.
+    pub(crate) async fn change_environment(
+        self: &Arc<Self>,
+        environment: &str,
+        operator: &str,
+        description: String,
+        event: Option<(&'static str, serde_json::Value)>,
+        change: impl Fn(&mut EnvironmentRecord) -> Result<(), EnvironmentError>,
+    ) -> Result<ComputerView, EnvironmentError> {
         // A computer's controller writes its own record, never this one;
         // a lost race with another operator is retried on fresh state.
         for attempt in 0.. {
             let record = self.owned_environment(environment, operator).await?;
             self.require_live(&record).await?;
-            let mut contents = record.value.contents.clone().unwrap_or_default();
-            let before = contents.clone();
-            change(&mut contents)?;
+            let before = record.value.contents.clone().unwrap_or_default();
+            let mut value = record.value.clone();
+            change(&mut value)?;
+            let mut contents = value.contents.clone().unwrap_or_default();
             contents.generation = before.generation + 1;
             contents.validate()?;
-            let mut value = record.value.clone();
+            validate_env("environment", &value.config)?;
             value.contents = Some(contents.clone());
+            let lifecycle = value
+                .computer
+                .as_ref()
+                .map(|spec| json!({ "lifecycle": spec.lifecycle, "expires_at": spec.expires_at }));
             let batch_change = Change::new().with(|batch| batch.replace(&record, &value));
             let batch_change = self.event(
                 batch_change,
@@ -621,11 +777,25 @@ impl Daemon {
                 format!("{}: {description}", record.value.name),
                 json!({
                     "environment_id": record.id,
+                    "operator": operator,
                     "generation": contents.generation,
                     "description": description,
                     "contents": contents,
+                    // Configuration values stay out of events.
+                    "config_keys": value.config.keys().collect::<Vec<_>>(),
+                    "lifecycle": lifecycle,
                 }),
             );
+            let batch_change = match &event {
+                Some((kind, data)) => self.event(
+                    batch_change,
+                    kind,
+                    Scope::environment(&record.value.name),
+                    format!("{}: {description}", record.value.name),
+                    data.clone(),
+                ),
+                None => batch_change,
+            };
             match self.apply(batch_change).await {
                 Ok(()) => break,
                 Err(EnvironmentError::Conflict(_)) if attempt < 4 => continue,
@@ -637,8 +807,9 @@ impl Daemon {
         self.computer(environment).await
     }
 
-    /// Replace the desired contents at once, optionally only if they are
-    /// still at the generation the caller saw.
+    /// Replace the desired contents at once (what GO sends), optionally
+    /// only if they are still at the generation the caller saw, with the
+    /// configuration and lifetime in the same change.
     pub async fn set_contents(
         self: &Arc<Self>,
         environment: &str,
@@ -646,28 +817,122 @@ impl Daemon {
         update: ContentsUpdate,
     ) -> Result<ComputerView, EnvironmentError> {
         update.contents.validate()?;
+        if let Some(config) = &update.config {
+            validate_env("environment", config)?;
+        }
+        if let Some(lifecycle) = &update.lifecycle {
+            self.check_lifecycle(environment, operator, lifecycle)
+                .await?;
+        }
         let expected = update.expected_generation;
-        let contents = update.contents;
-        self.change_contents(
+        let mut changed = vec!["contents".to_owned()];
+        if update.config.is_some() {
+            changed.push("configuration".into());
+        }
+        if let Some(lifecycle) = &update.lifecycle {
+            changed.push(format!("lifetime {}", lifecycle_label(lifecycle)));
+        }
+        self.change_environment(
             environment,
             operator,
-            "contents replaced".into(),
-            move |current| {
+            format!("{} replaced", changed.join(", ")),
+            None,
+            move |value| {
+                let current = value.contents.clone().unwrap_or_default();
                 if let Some(expected) = expected
                     && expected != current.generation
                 {
                     return Err(EnvironmentError::Conflict(format!(
-                        "the contents changed since generation {expected} (now {})",
+                        "the environment changed since you loaded it (generation {expected}, now {})",
                         current.generation
                     )));
                 }
-                let generation = current.generation;
-                *current = contents.clone();
-                current.generation = generation;
+                value.contents = Some(update.contents.clone());
+                if let Some(config) = &update.config {
+                    value.config = config.clone();
+                }
+                if let Some(lifecycle) = &update.lifecycle {
+                    let spec = value
+                        .computer
+                        .as_mut()
+                        .expect("owned environments have a computer");
+                    apply_lifecycle(spec, lifecycle);
+                }
                 Ok(())
             },
         )
         .await
+    }
+
+    /// Change how long an environment lives, in place.
+    pub async fn set_lifecycle(
+        self: &Arc<Self>,
+        environment: &str,
+        operator: &str,
+        lifecycle: LifecycleChange,
+    ) -> Result<ComputerView, EnvironmentError> {
+        self.check_lifecycle(environment, operator, &lifecycle)
+            .await?;
+        self.change_environment(
+            environment,
+            operator,
+            format!("lifetime {}", lifecycle_label(&lifecycle)),
+            None,
+            move |value| {
+                apply_lifecycle(
+                    value
+                        .computer
+                        .as_mut()
+                        .expect("owned environments have a computer"),
+                    &lifecycle,
+                );
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// A lifetime the environment's machine can have: keeping or extending
+    /// one past its target's own expiry needs a target that can claim it.
+    async fn check_lifecycle(
+        &self,
+        environment: &str,
+        operator: &str,
+        lifecycle: &LifecycleChange,
+    ) -> Result<(), EnvironmentError> {
+        if lifecycle.ttl_seconds == Some(0) {
+            return Err(EnvironmentError::Invalid(
+                "a temporary environment's TTL must be greater than zero".into(),
+            ));
+        }
+        if lifecycle.lifecycle == ComputerLifecycle::Persistent && lifecycle.ttl_seconds.is_some() {
+            return Err(EnvironmentError::Invalid(
+                "an environment that is kept has no TTL".into(),
+            ));
+        }
+        let record = self.owned_environment(environment, operator).await?;
+        let spec = record
+            .value
+            .computer
+            .as_ref()
+            .expect("owned environments have a computer");
+        let unchanged = spec.lifecycle == lifecycle.lifecycle
+            && lifecycle.lifecycle == ComputerLifecycle::Persistent;
+        if unchanged {
+            return Ok(());
+        }
+        let claim = self
+            .stored_computer(&record.id)
+            .await
+            .and_then(|computer| computer.value.capabilities)
+            .is_none_or(|capabilities| capabilities.claim);
+        if !claim {
+            return Err(EnvironmentError::Invalid(format!(
+                "environment {environment}'s target cannot claim its machine, so Compute cannot \
+                 change how long it lives; replace it on a target that can"
+            )));
+        }
+        Ok(())
     }
 
     pub async fn upsert_repository(
@@ -730,6 +995,7 @@ impl Daemon {
                 "repositories" => remove(&mut contents.repositories, &name, |spec| &spec.name),
                 "packages" => remove(&mut contents.packages, &name, |spec| &spec.name),
                 "processes" => remove(&mut contents.processes, &name, |spec| &spec.name),
+                "projects" => remove(&mut contents.projects, &name, |spec| &spec.name),
                 _ => return Err(EnvironmentError::NoRoute(kind.clone())),
             };
             if removed {
@@ -794,6 +1060,10 @@ impl Daemon {
             value
                 .observed
                 .packages
+                .retain(|_, seen| seen.evidence.outcome == "succeeded");
+            value
+                .observed
+                .builds
                 .retain(|_, seen| seen.evidence.outcome == "succeeded");
             value
                 .observed
@@ -889,7 +1159,7 @@ impl Daemon {
     }
 
     /// The target client and session of a running computer.
-    async fn running(
+    pub(crate) async fn running(
         &self,
         record: &Stored<EnvironmentRecord>,
     ) -> Result<(ComputerRecord, Arc<RemoteProvider>, String), EnvironmentError> {
@@ -927,8 +1197,34 @@ impl Daemon {
     ) -> Result<ComputerExec, EnvironmentError> {
         command.validate()?;
         let record = self.owned_environment(environment, operator).await?;
-        let (computer, client, session_id) = self.running(&record).await?;
-        let mut command = command;
+        let summary = format!(
+            "{operator} ran {} in {}",
+            command.command.first().cloned().unwrap_or_default(),
+            record.value.name
+        );
+        self.exec_in(
+            &record,
+            command,
+            events::ENVIRONMENT_EXEC,
+            summary,
+            json!({}),
+        )
+        .await
+    }
+
+    /// Submit a command to the environment's running computer as a durable
+    /// job, with the environment's configuration, and record who ran what.
+    /// Every piece of environment work goes through here: never the
+    /// daemon's own node.
+    pub(crate) async fn exec_in(
+        self: &Arc<Self>,
+        record: &Stored<EnvironmentRecord>,
+        mut command: SessionCommand,
+        kind: &str,
+        summary: String,
+        detail: serde_json::Value,
+    ) -> Result<ComputerExec, EnvironmentError> {
+        let (computer, client, session_id) = self.running(record).await?;
         for (key, value) in &record.value.config {
             command
                 .env
@@ -939,23 +1235,23 @@ impl Daemon {
             .session_exec(&session_id, &command)
             .await
             .map_err(target_error)?;
+        let mut data = json!({
+            "environment_id": record.id,
+            "target": computer.target,
+            "session_id": session_id,
+            "machine": computer.provider_resource,
+            "job_id": submission.job_id,
+            "execution_id": submission.execution_id,
+        });
+        if let (Some(data), serde_json::Value::Object(detail)) = (data.as_object_mut(), detail) {
+            data.extend(detail);
+        }
         let change = self.event(
             Change::new(),
-            events::ENVIRONMENT_EXEC,
+            kind,
             Scope::environment(&record.value.name).execution(&submission.execution_id),
-            format!(
-                "{} ran {} in {}",
-                operator,
-                command.command.first().cloned().unwrap_or_default(),
-                record.value.name
-            ),
-            json!({
-                "environment_id": record.id,
-                "target": computer.target,
-                "session_id": session_id,
-                "job_id": submission.job_id,
-                "execution_id": submission.execution_id,
-            }),
+            summary,
+            data,
         );
         self.apply(change).await?;
         Ok(ComputerExec {
@@ -1149,6 +1445,21 @@ impl Daemon {
         Ok((report, create))
     }
 
+    /// The host a target's endpoint names: where its computers' endpoints
+    /// listen.
+    fn target_host(&self, target: &str) -> Option<String> {
+        let endpoint = self.pool.configs().get(target)?.endpoint.clone()?;
+        let rest = endpoint
+            .split_once("://")
+            .map_or(endpoint.as_str(), |(_, rest)| rest);
+        let authority = rest.split('/').next()?;
+        let host = match authority.rsplit_once(':') {
+            Some((host, port)) if port.bytes().all(|byte| byte.is_ascii_digit()) => host,
+            _ => authority,
+        };
+        (!host.is_empty()).then(|| host.to_owned())
+    }
+
     fn target_client(&self, target: &str) -> Result<Arc<RemoteProvider>, EnvironmentError> {
         self.pool
             .member(target)
@@ -1168,7 +1479,10 @@ impl Daemon {
         self.stored_computer(environment_id).await
     }
 
-    async fn stored_computer(&self, environment_id: &str) -> Option<Stored<ComputerRecord>> {
+    pub(crate) async fn stored_computer(
+        &self,
+        environment_id: &str,
+    ) -> Option<Stored<ComputerRecord>> {
         self.inner
             .lock()
             .await
@@ -1309,6 +1623,8 @@ impl Daemon {
         };
         let computer = stored.value.clone();
         if computer.status.is_terminal() {
+            // Work sessions in it end with it.
+            self.end_sessions_of(&record, computer.status).await?;
             // Earlier sessions of a failed or ended computer are still torn
             // down.
             return if self.retire(&stored, &name).await? {
@@ -1450,6 +1766,7 @@ impl Daemon {
                     let mut value = computer.clone();
                     value.session_id = Some(placed.session.session_id.0.clone());
                     value.provider_kind = Some(placed.session.provider_kind.clone());
+                    value.provider_resource = placed.session.provider_session_id.clone();
                     value.failure = None;
                     self.advance(
                         stored,
@@ -1500,6 +1817,7 @@ impl Daemon {
                     value.capabilities = Some(session.capabilities);
                     value.connection = session.connection.clone();
                     value.provider_kind = Some(session.provider_kind.clone());
+                    value.provider_resource = session.provider_session_id.clone();
                     value.ready_at = Some(Utc::now());
                     value.failure = None;
                     self.advance(
@@ -1623,6 +1941,64 @@ impl Daemon {
             .clone()
             .expect("a running computer has a session");
         let client = self.target_client(&target)?;
+        // A new lifetime is applied in place: Compute takes over the
+        // machine's expiry from the target (a claim), then keeps or ends it
+        // itself.
+        // Compared to the second: a datetime field and the spec's JSON may
+        // keep different precision.
+        let seconds = |at: Option<chrono::DateTime<Utc>>| at.map(|at| at.timestamp());
+        if computer.lifecycle != spec.lifecycle
+            || seconds(computer.expires_at) != seconds(spec.expires_at)
+        {
+            let claimed = match client.session(&session_id).await {
+                Ok(session) => session.ownership == compute_core::SessionOwnership::Claimed,
+                Err(error) => return self.target_unreachable(stored, name, &target, error).await,
+            };
+            if !claimed && let Err(error) = client.claim_session(&session_id).await {
+                self.record_failure(
+                    stored,
+                    name,
+                    "lifecycle",
+                    "claim_failed",
+                    &error.message,
+                    true,
+                    Some(&target),
+                )
+                .await?;
+                return Ok(Step::Wait(BACKOFF));
+            }
+            let mut value = computer.clone();
+            value.lifecycle = spec.lifecycle;
+            value.expires_at = spec.expires_at;
+            self.advance(
+                stored,
+                name,
+                value,
+                Some((
+                    events::COMPUTER_LIFECYCLE_CHANGED,
+                    format!(
+                        "{name}'s machine is {}, in place",
+                        match spec.lifecycle {
+                            ComputerLifecycle::Persistent => "kept until destroyed".to_owned(),
+                            ComputerLifecycle::Ephemeral => format!(
+                                "temporary until {}",
+                                spec.expires_at
+                                    .map(|at| at.to_rfc3339())
+                                    .unwrap_or_default()
+                            ),
+                        }
+                    ),
+                    json!({
+                        "environment_id": record.id,
+                        "lifecycle": spec.lifecycle,
+                        "expires_at": spec.expires_at,
+                        "session_id": session_id,
+                    }),
+                )),
+            )
+            .await?;
+            return Ok(Step::Continue);
+        }
         let contents = record.value.contents.clone().unwrap_or_default();
         let config = &record.value.config;
         if let Some(action) = plan(&contents, &computer.observed, config) {
@@ -1795,6 +2171,45 @@ impl Daemon {
                 self.advance(stored, name, value, None).await?;
                 return Ok(());
             }
+            Action::Build(project, wanted) => {
+                let mut arguments = vec![project.repository.clone()];
+                arguments.extend(project.build.iter().cloned());
+                let mut command = script(INSTALL_PACKAGE, arguments);
+                command.env = record.value.config.clone();
+                let (evidence, _) = self
+                    .run_in_computer_command(
+                        client,
+                        session_id,
+                        command,
+                        Duration::from_secs(60 * 60),
+                    )
+                    .await;
+                let commit = commit_of(&project.repository, &value.observed);
+                value.observed.builds.insert(
+                    project.name.clone(),
+                    ObservedBuild {
+                        commit: commit.clone(),
+                        fingerprint: wanted,
+                        evidence: evidence.clone(),
+                    },
+                );
+                (
+                    format!(
+                        "project {} built{}",
+                        project.name,
+                        commit
+                            .map(|commit| format!(" at {}", &commit[..commit.len().min(12)]))
+                            .unwrap_or_default()
+                    ),
+                    "build",
+                    evidence,
+                )
+            }
+            Action::ForgetBuild(project) => {
+                value.observed.builds.remove(&project);
+                self.advance(stored, name, value, None).await?;
+                return Ok(());
+            }
             Action::StopProcess {
                 name: process,
                 forget,
@@ -1825,8 +2240,7 @@ impl Daemon {
                 ];
                 arguments.extend(process.command.iter().cloned());
                 let mut command = script(START_PROCESS, arguments);
-                command.env = record.value.config.clone();
-                command.env.extend(process.env.clone());
+                command.env = process_env(&process, &record.value.config);
                 let (evidence, output) = self
                     .run_in_computer_command(client, session_id, command, Duration::from_secs(60))
                     .await;
@@ -2454,6 +2868,31 @@ impl Daemon {
     }
 }
 
+fn lifecycle_label(lifecycle: &LifecycleChange) -> String {
+    match lifecycle.lifecycle {
+        ComputerLifecycle::Persistent => "kept until destroyed".into(),
+        ComputerLifecycle::Ephemeral => format!(
+            "temporary ({}s)",
+            lifecycle.ttl_seconds.unwrap_or(DEFAULT_TTL)
+        ),
+    }
+}
+
+fn apply_lifecycle(spec: &mut ComputerSpec, lifecycle: &LifecycleChange) {
+    spec.lifecycle = lifecycle.lifecycle;
+    match lifecycle.lifecycle {
+        ComputerLifecycle::Persistent => {
+            spec.ttl_seconds = None;
+            spec.expires_at = None;
+        }
+        ComputerLifecycle::Ephemeral => {
+            let ttl = lifecycle.ttl_seconds.unwrap_or(DEFAULT_TTL);
+            spec.ttl_seconds = Some(ttl);
+            spec.expires_at = Some(Utc::now() + chrono::Duration::seconds(ttl as i64));
+        }
+    }
+}
+
 fn upsert<T>(items: &mut Vec<T>, item: T, name: impl Fn(&T) -> &String) {
     match items
         .iter_mut()
@@ -2548,7 +2987,9 @@ mod tests {
                 repository: Some("app".into()),
                 env: BTreeMap::new(),
                 desired: ProcessDesired::Running,
+                port: None,
             }],
+            projects: vec![],
             generation: 1,
         }
     }
@@ -2614,7 +3055,7 @@ mod tests {
             },
         );
         // A failed attempt at an unchanged item is not retried by itself.
-        let fingerprint = process_fingerprint(&desired.processes[0], &observed, &config);
+        let fingerprint = process_fingerprint(&desired.processes[0], &desired, &observed, &config);
         observed.processes.insert(
             "api".into(),
             ObservedProcess {
@@ -2648,5 +3089,77 @@ mod tests {
             plan(&desired, &observed, &config),
             Some(Action::RemoveRepository("app".into()))
         );
+    }
+
+    #[test]
+    fn a_project_build_runs_before_what_runs_from_its_repository() {
+        let mut desired = contents();
+        desired.projects.push(ProjectSpec {
+            name: "app".into(),
+            repository: "app".into(),
+            build: vec!["make".into()],
+            test: vec![],
+            commands: BTreeMap::new(),
+        });
+        let config = BTreeMap::new();
+        let mut observed = ObservedContents::default();
+        let Some(Action::SyncRepository(_, wanted)) = plan(&desired, &observed, &config) else {
+            panic!("the repository first");
+        };
+        observed.repositories.insert(
+            "app".into(),
+            ObservedRepository {
+                revision: "main".into(),
+                commit: Some("aaa".into()),
+                fingerprint: wanted,
+                evidence: evidence(),
+            },
+        );
+        let Some(Action::Build(project, built)) = plan(&desired, &observed, &config) else {
+            panic!("then the build");
+        };
+        assert_eq!(project.name, "app");
+        let mut failed = evidence();
+        failed.outcome = "failed".into();
+        observed.builds.insert(
+            "app".into(),
+            ObservedBuild {
+                commit: Some("aaa".into()),
+                fingerprint: built.clone(),
+                evidence: failed,
+            },
+        );
+        // A failed build starts nothing from its repository, and is not
+        // retried until something changes.
+        assert_eq!(plan(&desired, &observed, &config), None);
+        observed.builds.get_mut("app").unwrap().evidence = evidence();
+        let Some(Action::StartProcess(process, started)) = plan(&desired, &observed, &config)
+        else {
+            panic!("then the application");
+        };
+        assert_eq!(process.name, "api");
+        observed.processes.insert(
+            "api".into(),
+            ObservedProcess {
+                state: ProcessState::Running,
+                fingerprint: started,
+                pid: Some(1),
+                evidence: evidence(),
+            },
+        );
+        assert_eq!(plan(&desired, &observed, &config), None);
+        // New configuration: build again, then restart.
+        let config = BTreeMap::from([("MODE".to_owned(), "x".to_owned())]);
+        assert!(matches!(
+            plan(&desired, &observed, &config),
+            Some(Action::Build(..))
+        ));
+        // The process sees the configuration, its port, and its own env.
+        let mut process = desired.processes[0].clone();
+        process.port = Some(8080);
+        process.env.insert("MODE".into(), "own".into());
+        let env = process_env(&process, &config);
+        assert_eq!(env["PORT"], "8080");
+        assert_eq!(env["MODE"], "own");
     }
 }
