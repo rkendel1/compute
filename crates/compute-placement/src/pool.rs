@@ -273,6 +273,7 @@ impl ProviderPool {
                                 run: true,
                                 jobs: false,
                                 deployments: true,
+                                sessions: false,
                             },
                         )),
                     )?;

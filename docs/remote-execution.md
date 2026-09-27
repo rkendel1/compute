@@ -57,6 +57,11 @@ server container must run from the pinned output of `compute distribution build`
 
 ## Durable asynchronous jobs
 
+A server that offers `sessions` also serves `/compute/sessions`: create,
+list, inspect, events, connect, exec, logs, stop, resume, claim, and destroy.
+Each command a session runs is a durable job below `/compute/jobs`. See
+[sessions.md](sessions.md).
+
 The same protocol also supports `POST /compute/jobs` plus status, result,
 receipt, artifact, cancellation, and optional event endpoints below
 `/compute/jobs/{job_id}`. Jobs use a minimal bounded queue and filesystem

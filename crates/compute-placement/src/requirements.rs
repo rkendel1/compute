@@ -96,6 +96,8 @@ pub enum SubmissionMode {
     /// `compute deploy`: a durable application deployment, owned by the
     /// provider's Compute daemon (revisions, releases, endpoint, evidence).
     Deployment,
+    /// `compute session create`: a durable session environment.
+    Session,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +136,9 @@ pub struct PlacementRequirements {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub architecture: Option<String>,
     pub artifact: ArtifactRequirement,
+    /// Session capabilities the environment must offer, for a session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_capabilities: Vec<String>,
 }
 
 /// Caller-supplied bindings that are not part of the workload itself.
@@ -144,6 +149,32 @@ pub struct RequirementOptions {
     pub distribution_id: Option<String>,
     pub runtime_artifact_id: Option<String>,
     pub platform: Option<PlatformIdentity>,
+}
+
+impl PlacementRequirements {
+    /// Requirements for a session environment: the environment's contract
+    /// bundle, handed over as a session, plus the capabilities the caller
+    /// needs from the environment. Network access is itself a capability of
+    /// a session that asks for a network.
+    pub fn for_session(
+        bundle: &WorkloadBundle,
+        request_bytes: u64,
+        options: &RequirementOptions,
+        capabilities: &[String],
+    ) -> Result<Self, PlacementError> {
+        compute_core::SessionCapabilities::validate_names(capabilities)
+            .map_err(|error| PlacementError::InvalidRequirements(error.to_string()))?;
+        let mut requirements =
+            Self::from_bundle(bundle, request_bytes, SubmissionMode::Session, options)?;
+        let mut capabilities = capabilities.to_vec();
+        if bundle.workload.network != NetworkPolicy::None {
+            capabilities.push("network".into());
+        }
+        capabilities.sort();
+        capabilities.dedup();
+        requirements.session_capabilities = capabilities;
+        Ok(requirements)
+    }
 }
 
 impl PlacementRequirements {
@@ -284,6 +315,7 @@ impl PlacementRequirements {
                 output_bytes,
                 submission,
             },
+            session_capabilities: vec![],
         })
     }
 }

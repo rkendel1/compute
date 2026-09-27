@@ -145,6 +145,9 @@ pub struct ArtifactLimits {
     /// Whether the provider hosts durable application deployments.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deployments: bool,
+    /// Whether the provider hosts durable sessions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sessions: bool,
 }
 
 /// Descriptors cached before `run` was recorded described providers that
@@ -190,6 +193,10 @@ pub struct ProviderDescriptor {
     /// The provider's advertised execution policy, validated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<compute_policy::Policy>,
+    /// What the provider's session environments support, when it hosts
+    /// sessions. Reported by the provider, never inferred from its kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<compute_core::SessionCapabilities>,
     pub availability: Availability,
 }
 
@@ -501,11 +508,17 @@ impl ProviderDescriptor {
                 run: capabilities.execution_modes().run,
                 jobs: capabilities.execution_modes().jobs,
                 deployments: capabilities.execution_modes().deployments,
+                sessions: capabilities.execution_modes().sessions,
             },
             policy: capabilities
                 .policy
                 .clone()
                 .map(compute_policy::Policy::canonical),
+            sessions: capabilities
+                .execution_modes()
+                .sessions
+                .then_some(capabilities.sessions)
+                .flatten(),
             availability,
         };
         descriptor.capability_version = descriptor.compute_capability_version();
@@ -533,6 +546,8 @@ impl ProviderDescriptor {
             artifact_limits: &'a ArtifactLimits,
             #[serde(skip_serializing_if = "Option::is_none")]
             policy: &'a Option<compute_policy::Policy>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            sessions: &'a Option<compute_core::SessionCapabilities>,
         }
         canonical_identity(&Body {
             descriptor_version: &self.descriptor_version,
@@ -550,6 +565,7 @@ impl ProviderDescriptor {
             dependency_capsules: &self.dependency_capsules,
             artifact_limits: &self.artifact_limits,
             policy: &self.policy,
+            sessions: &self.sessions,
         })
     }
 

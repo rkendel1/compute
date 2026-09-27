@@ -73,6 +73,19 @@ compute remote wait --provider dev job_... --timeout 60s
 
 Durable jobs are documented in [docs/jobs.md](docs/jobs.md).
 
+A session is a temporary computer as one Compute operation: placed like any
+workload, authorized on every operation, durable across restarts, and
+destroyed (or expired) with its record kept as evidence. Every command in it
+is a durable job with a receipt. See [docs/sessions.md](docs/sessions.md) and
+[docs/session-architecture.md](docs/session-architecture.md).
+
+```sh
+compute session create --cpu 2 --memory 2Gi --ttl 1h
+compute session exec ses_... -- make test
+compute session info ses_...
+compute session destroy ses_...
+```
+
 Providers can be grouped into a caller-owned pool. Placement selects the
 provider that can prove it satisfies the workload contract. Compatibility
 comes first, then priority, then provider ID. It never substitutes runtimes,

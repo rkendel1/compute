@@ -533,7 +533,9 @@ impl ProcessRuntime {
     ) -> Result<ExecutionResult> {
         self.capabilities().validate(self.kind, workload)?;
 
-        let execution_id = new_execution_id();
+        let execution_id = control
+            .and_then(ExecutionControl::execution_id)
+            .map_or_else(new_execution_id, str::to_owned);
         let staged = match stage_workload(workload) {
             Ok(staged) => staged,
             Err(error) => {

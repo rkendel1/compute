@@ -281,6 +281,9 @@ pub struct ExecutionJob {
     pub cancellation: JobCancellation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+    /// The session this job executes in, when it runs inside one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<crate::SessionId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

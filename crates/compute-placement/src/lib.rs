@@ -26,7 +26,7 @@ pub use descriptor::{
     DistributionOffer, Health, ProviderDescriptor, ProviderKind, ResourceCapabilities,
     RuntimeOffer, parse_platform,
 };
-pub use dispatch::{DispatchError, DispatchErrorCode, PlacedSubmission};
+pub use dispatch::{DispatchError, DispatchErrorCode, PlacedSession, PlacedSubmission};
 pub use matching::{
     CapabilityMatch, IncompatibilityReason, ReasonCode, match_provider, runtime_version_matches,
 };

@@ -157,6 +157,7 @@ impl DaemonConfig {
                 run: true,
                 jobs: true,
                 deployments: true,
+                sessions: false,
             },
         }
     }

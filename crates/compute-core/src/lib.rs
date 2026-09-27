@@ -21,6 +21,8 @@ pub use host::{HostEnforcement, HostProfile};
 mod dependencies;
 pub use dependencies::*;
 mod jobs;
+mod sessions;
+pub use sessions::*;
 
 pub mod application_artifact;
 pub use application_artifact::{
@@ -1631,6 +1633,18 @@ pub struct ExecutionError {
 
 static NEXT_EXECUTION_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Whether `value` has the shape of an execution identity: `exec_` and
+/// then letters, digits, and underscores.
+pub fn is_execution_id(value: &str) -> bool {
+    value.strip_prefix("exec_").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest.len() <= 128
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
+}
+
 pub fn new_execution_id() -> String {
     format!(
         "exec_{}_{}",
@@ -2653,6 +2667,9 @@ pub struct ExecutionControl {
     log_directory: Option<PathBuf>,
     /// The workload's process (and process group) once spawned; 0 before.
     process: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Execution identity reserved when the execution was accepted, so a
+    /// durable job can report it before the workload starts.
+    execution_id: Option<String>,
 }
 
 impl ExecutionControl {
@@ -2669,6 +2686,17 @@ impl ExecutionControl {
 
     pub fn log_directory(&self) -> Option<&Path> {
         self.log_directory.as_deref()
+    }
+
+    /// Use this execution identity instead of generating one. Adapters that
+    /// honour control record it in the result and the receipt.
+    pub fn with_execution_id(mut self, execution_id: impl Into<String>) -> Self {
+        self.execution_id = Some(execution_id.into());
+        self
+    }
+
+    pub fn execution_id(&self) -> Option<&str> {
+        self.execution_id.as_deref()
     }
 
     /// Request cancellation. The adapter terminates the workload's process

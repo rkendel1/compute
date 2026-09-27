@@ -52,6 +52,15 @@ owner. Artifact paths are never accepted from clients: retrieval maps the job
 to digest-addressed bytes and verifies each digest against receipt evidence.
 Receipts remain independently verifiable without the server.
 
+A job that runs a command in a session ([sessions.md](sessions.md)) is an
+ordinary job with one addition: its record carries `session_id`, and its
+`job_id` and `execution_id` were reserved by the session before the job was
+accepted, so `execution_id` is present from the start instead of appearing
+with the result. The runtime records that reserved identity in the result
+and the receipt; a result under any other identity is rejected as
+`evidence_invalid`. `compute remote run` and `compute session exec` are
+accepted through the same `JobManager` path and end the same way.
+
 On restart, accepted and queued jobs are recovered. A running job with valid
 terminal evidence is reconciled; otherwise it becomes a structured
 `provider_interrupted` failure. Compute never fabricates success after a

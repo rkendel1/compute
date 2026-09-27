@@ -91,7 +91,24 @@ impl RuntimeAdapter for WasmRuntime {
         self.capabilities().validate(RuntimeKind::Wasm, workload)?;
 
         let workload = workload.clone();
-        tokio::task::spawn_blocking(move || execute_blocking(&workload))
+        tokio::task::spawn_blocking(move || execute_blocking(&workload, None))
+            .await
+            .map_err(|error| ComputeError::Runtime(error.to_string()))?
+    }
+
+    /// WASM executions are bounded by their own limits; control contributes
+    /// only a reserved execution identity.
+    async fn execute_controlled(
+        &self,
+        workload: &Workload,
+        _runtime: &ResolvedRuntime,
+        control: &compute_core::ExecutionControl,
+    ) -> Result<ExecutionResult> {
+        self.capabilities().validate(RuntimeKind::Wasm, workload)?;
+
+        let workload = workload.clone();
+        let execution_id = control.execution_id().map(str::to_owned);
+        tokio::task::spawn_blocking(move || execute_blocking(&workload, execution_id))
             .await
             .map_err(|error| ComputeError::Runtime(error.to_string()))?
     }
@@ -107,8 +124,8 @@ fn locked_wasm_version() -> String {
         .to_owned()
 }
 
-fn execute_blocking(workload: &Workload) -> Result<ExecutionResult> {
-    let execution_id = new_execution_id();
+fn execute_blocking(workload: &Workload, reserved: Option<String>) -> Result<ExecutionResult> {
+    let execution_id = reserved.unwrap_or_else(new_execution_id);
     let staged = match stage_workload(workload) {
         Ok(staged) => staged,
         Err(error) => {
