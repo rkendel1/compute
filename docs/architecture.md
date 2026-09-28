@@ -131,10 +131,11 @@ marked "the daemon host" are the exception, and they are the older model.
 
 ### Application deployment trace
 
-The application acceptance journey confirms that `compute deploy` is still
-the older node-environment path, not the canonical Computer path. A deploy
-creates or updates the reserved `applications` environment, registers a
-`ProjectRevisionRecord`, and creates a `DeploymentRecord`. The release
+The application acceptance journey now creates a deterministic,
+application-owned Computer environment (`application-<name>`) instead of the
+reserved `applications` environment. A deploy registers a
+`ProjectRevisionRecord` and creates a `DeploymentRecord` in that environment.
+The release
 controller starts a supervisor workload on the provider node; readiness and
 traffic switching update that deployment. Startup and probe work may create
 `ExecutionRecord` and `ReceiptRecord` evidence, with the deployment retaining
@@ -146,9 +147,9 @@ The records and authority for one application deployment are therefore:
 
 | Step | Durable record / ID | Target and controller | Restart and authorization |
 | --- | --- | --- | --- |
-| Application / project | `EnvironmentRecord` (`applications`) and `ProjectRecord` | Provider node; daemon release controller | Reconciled from control state; application scope, without Computer ownership |
+| Application / project | `EnvironmentRecord` (`application-<name>`) and `ProjectRecord` | Provider node; daemon release controller | Reconciled from control state; application-owned Computer environment |
 | Version | `ProjectRevisionRecord.revision_id` plus the deployment's monotonic `version` | Provider node; revision registration | Revision is immutable; deploy scope |
-| Computer | **None** | No Computer target or Computer driver | No Computer lifecycle to resume |
+| Computer | `ComputerRecord` owned by the application caller | Placement is performed during environment creation | Computer placement and target recovery are durable |
 | Deployment | `DeploymentRecord.deployment_id` | Provider node; release controller and supervisor | Durable status resumes; deploy scope |
 | Execution | `ExecutionRecord.execution_id` | Provider node; supervisor/provider job path | Durable evidence is retained; execute/deploy scope |
 | Endpoint | `DeploymentWorkload` port binding | Provider node; supervisor traffic switch | Rebuilt by node reconciliation; deployment authority |
@@ -157,12 +158,11 @@ The records and authority for one application deployment are therefore:
 | Rollback | A new `DeploymentRecord` using the old revision | Provider node; release controller | History is append-only; deploy scope |
 | Authorization | Application route scopes | Daemon API / provider node | No owner-bound Computer authorization |
 
-This differs from the Computer path: a Computer has an environment-owned
-`ComputerRecord`, a target session, generation-fenced desired contents, and a
-Computer driver that resumes placement and reconciliation after restart.
-Application deployment has the same release, execution, and receipt concepts
-only inside the node-environment model; it does not share the Computer record,
-target session, owner binding, or Computer state transitions.
+The application view now has the same environment-owned Computer record and
+owner binding as a normal Computer environment. The release, execution, and
+receipt compatibility views remain backed by the existing deployment records;
+the bundle-to-project materialization and target-session execution migration
+remain the next convergence step.
 
 The smallest migration is an adapter, not a new provider or runtime:
 materialize an application's artifact as a project in a
