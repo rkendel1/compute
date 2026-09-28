@@ -443,6 +443,18 @@ fn an_application_moves_from_source_to_a_placed_versioned_verifiable_deployment(
     let endpoint = v1["endpoint"].as_str().unwrap().to_owned();
     assert!(endpoint.starts_with("http://127.0.0.1:"), "{endpoint}");
     assert_eq!(v1["deployment"]["runtime"], "python");
+    // Application compatibility deploys use their deterministic Computer
+    // environment rather than the old shared applications environment.
+    let applications_environment: Value =
+        serde_json::from_slice(&pool.api(0, "/environments/application-hello-api")).unwrap();
+    assert!(
+        !applications_environment["computer"].is_null(),
+        "{applications_environment:#}"
+    );
+    assert_eq!(
+        applications_environment["projects"][0]["deployments"][0]["deployment_id"],
+        v1["deployment_id"]
+    );
     // Placement evidence: the jobs-only provider was rejected for this
     // deployment, and provider-a proved it can host it.
     let placement = &v1["deployment"]["placement"];

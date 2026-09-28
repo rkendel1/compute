@@ -1,5 +1,5 @@
-//! Applications: the product view of a project in this node's
-//! `applications` environment.
+//! Applications: a product view over one owned Computer environment per
+//! application.
 //!
 //! ```text
 //! application ── deployments (v1, v2, …) ── executions ── receipts
@@ -14,30 +14,35 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use compute_core::{ApplicationIdentity, WorkloadBundle};
+use compute_core::{ApplicationIdentity, ComputerLifecycle, WorkloadBundle};
 
 use super::Daemon;
 use crate::EnvironmentError;
 use crate::model::*;
 use crate::status::*;
 
-/// The environment applications are released to on every node.
+/// Kept for clients that used the old product environment. New applications
+/// use an owned, deterministic Computer environment instead.
 pub const APPLICATIONS_ENVIRONMENT: &str = "applications";
 /// An application's one service.
 pub const APPLICATION_WORKLOAD: &str = "app";
 const HISTORY: usize = 50;
 
+fn application_environment(name: &str) -> String {
+    format!("application-{name}")
+}
+
 impl Daemon {
     /// Every application on this node.
     pub async fn applications(&self) -> Result<Vec<ApplicationView>, EnvironmentError> {
-        let environment = match self.environment(APPLICATIONS_ENVIRONMENT).await {
-            Ok(environment) => environment,
-            Err(EnvironmentError::NotFound(_)) => return Ok(vec![]),
-            Err(error) => return Err(error),
-        };
         let mut applications = vec![];
-        for project in environment.projects {
-            applications.push(self.application(&project.name).await?);
+        for environment in self.environments().await? {
+            let Some(name) = environment.name.strip_prefix("application-") else {
+                continue;
+            };
+            if let Ok(application) = self.application(name).await {
+                applications.push(application);
+            }
         }
         Ok(applications)
     }
@@ -45,7 +50,8 @@ impl Daemon {
     /// One application: its status, stable endpoint, and versions.
     pub async fn application(&self, name: &str) -> Result<ApplicationView, EnvironmentError> {
         let identity = ApplicationIdentity::new(name, None)?;
-        let project = match self.project(APPLICATIONS_ENVIRONMENT, name).await {
+        let environment = application_environment(name);
+        let project = match self.project(&environment, name).await {
             Ok(project) => project,
             Err(EnvironmentError::NotFound(_)) => {
                 return Err(EnvironmentError::NotFound(format!(
@@ -95,11 +101,11 @@ impl Daemon {
     ) -> Result<Vec<ApplicationDeploymentView>, EnvironmentError> {
         let project = match project {
             Some(project) => project.clone(),
-            None => self.project(APPLICATIONS_ENVIRONMENT, name).await?,
+            None => self.project(&application_environment(name), name).await?,
         };
         let records = self
             .deployments(
-                Some(APPLICATIONS_ENVIRONMENT.into()),
+                Some(application_environment(name)),
                 Some(name.into()),
                 Some(HISTORY),
             )
@@ -210,7 +216,8 @@ impl Daemon {
         let resolved = resolve_application(name, &request).await?;
         let bundle = WorkloadBundle::from_bytes(&resolved.bundle)?;
         let bundle_id = bundle.bundle_id()?;
-        self.ensure_applications_environment().await?;
+        let environment = application_environment(name);
+        self.ensure_application_environment(name).await?;
         let definition = RevisionDefinition {
             revision: format!("artifact-{}", bundle_id.trim_start_matches("sha256:")),
             source: request.source.clone(),
@@ -241,7 +248,7 @@ impl Daemon {
                 .await?;
         self.release(DeployRequest {
             project: name.into(),
-            environment: APPLICATIONS_ENVIRONMENT.into(),
+            environment,
             revision: Some(revision.revision_id),
             config: request.env,
             desired_state: Some(DesiredState::Running),
@@ -274,7 +281,7 @@ impl Daemon {
     ) -> Result<ApplicationDeploymentView, EnvironmentError> {
         let deployments = self
             .deployments(
-                Some(APPLICATIONS_ENVIRONMENT.into()),
+                Some(application_environment(name)),
                 Some(name.into()),
                 Some(HISTORY),
             )
@@ -299,7 +306,7 @@ impl Daemon {
         }
         self.release(DeployRequest {
             project: name.into(),
-            environment: APPLICATIONS_ENVIRONMENT.into(),
+            environment: application_environment(name),
             revision: Some(target.record.revision_id.clone()),
             config: Some(target.record.config.clone()),
             desired_state: Some(DesiredState::Running),
@@ -323,14 +330,10 @@ impl Daemon {
     ) -> Result<ApplicationView, EnvironmentError> {
         let daemon = self.clone();
         let project = name.to_owned();
+        let environment = application_environment(name);
         on_own_task(async move {
             daemon
-                .set_project_state(
-                    APPLICATIONS_ENVIRONMENT,
-                    &project,
-                    DesiredState::Stopped,
-                    false,
-                )
+                .set_project_state(&environment, &project, DesiredState::Stopped, false)
                 .await
         })
         .await?;
@@ -339,22 +342,38 @@ impl Daemon {
 
     /// The application's current output.
     pub async fn application_logs(&self, name: &str) -> Result<(String, String), EnvironmentError> {
-        self.logs(APPLICATIONS_ENVIRONMENT, name, APPLICATION_WORKLOAD)
+        self.logs(&application_environment(name), name, APPLICATION_WORKLOAD)
             .await
     }
 
-    async fn ensure_applications_environment(self: &Arc<Self>) -> Result<(), EnvironmentError> {
-        match self.environment(APPLICATIONS_ENVIRONMENT).await {
+    async fn ensure_application_environment(
+        self: &Arc<Self>,
+        name: &str,
+    ) -> Result<(), EnvironmentError> {
+        let environment = application_environment(name);
+        match self.environment(&environment).await {
             Ok(_) => Ok(()),
             Err(EnvironmentError::NotFound(_)) => {
+                let operator = crate::auth::RequestContext::current()
+                    .map(|context| context.operator_id)
+                    .unwrap_or_else(|| format!("application:{name}"));
                 match self
-                    .create_environment(EnvironmentDefinition {
-                        name: APPLICATIONS_ENVIRONMENT.into(),
-                        desired_state: DesiredState::Running,
-                        env: Default::default(),
-                        policy: None,
-                        provider: None,
-                    })
+                    .create_computer_environment(
+                        ComputerEnvironmentDefinition {
+                            name: environment,
+                            desired_state: DesiredState::Running,
+                            env: Default::default(),
+                            policy: None,
+                            computer: ComputerRequest {
+                                lifecycle: ComputerLifecycle::Persistent,
+                                requirements: Default::default(),
+                                target: None,
+                                ttl_seconds: None,
+                            },
+                            contents: Default::default(),
+                        },
+                        &operator,
+                    )
                     .await
                 {
                     Ok(_) | Err(EnvironmentError::Conflict(_)) => Ok(()),
