@@ -49,7 +49,7 @@ pub const COMPUTE_MANIFEST: &str = include_str!("../model/compute.manifest.json"
 /// compiled with it (`packages/compute-state-model`), CI builds the
 /// `feltdb-server` its package ships, and `scripts/feltdb/verify-version.mjs`
 /// fails if anything else is resolved.
-pub const CERTIFIED_FELTDB_VERSION: &str = "0.11.8";
+pub const CERTIFIED_FELTDB_VERSION: &str = "0.11.9";
 
 /// FeltDB caps a query page at 1000 records, and re-executes a query for
 /// every page, so pages are as large as it allows.
