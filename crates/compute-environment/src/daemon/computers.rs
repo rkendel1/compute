@@ -1123,6 +1123,13 @@ impl Daemon {
     /// The computer's view, for any operator that may read environments.
     pub async fn computer(&self, environment: &str) -> Result<ComputerView, EnvironmentError> {
         self.refresh_for_read().await?;
+        self.computer_from_desired(environment).await
+    }
+
+    async fn computer_from_desired(
+        &self,
+        environment: &str,
+    ) -> Result<ComputerView, EnvironmentError> {
         let record = self
             .inner
             .lock()
@@ -1134,6 +1141,14 @@ impl Daemon {
         self.computer_view_of(&record).await.ok_or_else(|| {
             EnvironmentError::NotFound(format!("environment {environment} has no computer"))
         })
+    }
+
+    async fn fresh_computer_view(
+        &self,
+        environment: &str,
+    ) -> Result<ComputerView, EnvironmentError> {
+        self.refresh().await?;
+        self.computer_from_desired(environment).await
     }
 
     pub(crate) async fn computer_view_of(
@@ -1529,7 +1544,7 @@ impl Daemon {
         }
         self.computer_wake.notify_waiters();
         self.changed().await;
-        self.computer(environment).await
+        self.fresh_computer_view(environment).await
     }
 
     /// Replace the desired contents at once (what GO sends), optionally
@@ -1833,7 +1848,7 @@ impl Daemon {
         }
         self.computer_wake.notify_waiters();
         self.changed().await;
-        self.computer(environment).await
+        self.fresh_computer_view(environment).await
     }
 
     /// Replace the computer with one that meets new requirements. This is
@@ -1874,7 +1889,7 @@ impl Daemon {
         self.apply(change).await?;
         self.computer_wake.notify_waiters();
         self.changed().await;
-        self.computer(environment).await
+        self.fresh_computer_view(environment).await
     }
 
     /// Destroy the computer. The environment and the computer's record stay
@@ -1909,7 +1924,7 @@ impl Daemon {
         }
         self.computer_wake.notify_waiters();
         self.changed().await;
-        self.computer(environment).await
+        self.fresh_computer_view(environment).await
     }
 
     /// The target client and session of a running computer.
