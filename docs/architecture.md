@@ -129,6 +129,49 @@ never runs their work on its own node: every build, test, process, and
 publish step is a durable job on the computer's target. The three paths
 marked "the daemon host" are the exception, and they are the older model.
 
+### Application deployment trace
+
+The application acceptance journey confirms that `compute deploy` is still
+the older node-environment path, not the canonical Computer path. A deploy
+creates or updates the reserved `applications` environment, registers a
+`ProjectRevisionRecord`, and creates a `DeploymentRecord`. The release
+controller starts a supervisor workload on the provider node; readiness and
+traffic switching update that deployment. Startup and probe work may create
+`ExecutionRecord` and `ReceiptRecord` evidence, with the deployment retaining
+the receipt IDs. The endpoint is a supervisor port binding, logs are read from
+the daemon's node logs, and the deployment receipt is served from the
+deployment's stored receipt artifact.
+
+The records and authority for one application deployment are therefore:
+
+| Step | Durable record / ID | Target and controller | Restart and authorization |
+| --- | --- | --- | --- |
+| Application / project | `EnvironmentRecord` (`applications`) and `ProjectRecord` | Provider node; daemon release controller | Reconciled from control state; application scope, without Computer ownership |
+| Version | `ProjectRevisionRecord.revision_id` plus the deployment's monotonic `version` | Provider node; revision registration | Revision is immutable; deploy scope |
+| Computer | **None** | No Computer target or Computer driver | No Computer lifecycle to resume |
+| Deployment | `DeploymentRecord.deployment_id` | Provider node; release controller and supervisor | Durable status resumes; deploy scope |
+| Execution | `ExecutionRecord.execution_id` | Provider node; supervisor/provider job path | Durable evidence is retained; execute/deploy scope |
+| Endpoint | `DeploymentWorkload` port binding | Provider node; supervisor traffic switch | Rebuilt by node reconciliation; deployment authority |
+| Logs | Node log files joined by the application view | Provider node; daemon log reader | Available while node logs remain; read scope |
+| Receipt | `ReceiptRecord.receipt_id` and stored receipt artifact | Provider node; daemon receipt service | Exact bytes survive restart; read scope |
+| Rollback | A new `DeploymentRecord` using the old revision | Provider node; release controller | History is append-only; deploy scope |
+| Authorization | Application route scopes | Daemon API / provider node | No owner-bound Computer authorization |
+
+This differs from the Computer path: a Computer has an environment-owned
+`ComputerRecord`, a target session, generation-fenced desired contents, and a
+Computer driver that resumes placement and reconciliation after restart.
+Application deployment has the same release, execution, and receipt concepts
+only inside the node-environment model; it does not share the Computer record,
+target session, owner binding, or Computer state transitions.
+
+The smallest migration is an adapter, not a new provider or runtime:
+materialize an application's artifact as a project in a
+`ComputerEnvironmentDefinition`, use the existing `publish_version` and
+Computer release flow for deploy and rollback, and expose its target-backed
+endpoint, logs, and receipt IDs through the application view. Until that
+adapter exists, application deployment must remain documented and tested as a
+parallel model rather than being described as Computer-backed.
+
 ## Durable state
 
 <!-- audit:state -->
