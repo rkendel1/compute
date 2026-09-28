@@ -44,6 +44,72 @@ pub fn inspect(path: &Path, json: bool) -> Result<()> {
                 placement.selection_reason.selection_priority
             );
         }
+        if let Some(project) = &receipt.project {
+            let (binding, verified) = (&project.binding, &project.verified);
+            println!("Project");
+            println!(
+                "  Name:        {} ({})",
+                binding.identity.name, binding.identity.source
+            );
+            println!("  Requirements: {}", binding.requirements_id);
+            println!(
+                "  Command:     {} {}",
+                binding
+                    .resolved
+                    .command
+                    .name
+                    .as_deref()
+                    .unwrap_or("(entrypoint)"),
+                binding.resolved.command.entrypoint
+            );
+            for (label, check) in [
+                ("Runtime", &verified.runtime),
+                ("Platform", &verified.platform),
+                ("Dependencies", &verified.dependencies),
+                ("Command", &verified.command),
+            ] {
+                println!("  {label:<12} {:?}: {}", check.status, check.evidence);
+            }
+            for tool in &verified.tools {
+                println!(
+                    "  Tool {:<7} {:?}: {}",
+                    tool.name, tool.verification.status, tool.verification.evidence
+                );
+            }
+        }
+        if let Some(stack) = &receipt.stack {
+            let identity = &stack.binding.identity;
+            println!("Stack");
+            println!("  Name:        {} {}", identity.name, identity.version);
+            println!("  Fingerprint: {}", identity.fingerprint);
+            for (component, evidence) in stack.binding.components.iter().zip(&stack.components) {
+                println!(
+                    "  {:<18} {}",
+                    component.declared.name,
+                    evidence.state(&component.declared).label()
+                );
+                for gate in &evidence.gates {
+                    println!(
+                        "      {}: {:?}: {}",
+                        gate.check, gate.verification.status, gate.verification.evidence
+                    );
+                }
+            }
+        }
+        if let Some(app) = &receipt.app_bundle {
+            println!("Application bundle");
+            println!(
+                "  Application: {} ({})",
+                app.binding.declared.application,
+                app.state().label()
+            );
+            for gate in &app.gates {
+                println!(
+                    "      {}: {:?}: {}",
+                    gate.check, gate.verification.status, gate.verification.evidence
+                );
+            }
+        }
         println!("Distribution");
         println!("  ID:          {}", receipt.distribution.id);
         println!("  Platform:    {}", receipt.distribution.platform);

@@ -1,0 +1,20 @@
+# The smallest useful stack: a Node runtime and one component. It exists to
+# show that a stack is only data, and to exercise the mechanism without any
+# of the Randy components.
+
+schema = "compute.stack@1"
+
+[stack]
+name = "minimal-node"
+version = "1.0.0"
+description = "Node with AppPort's capability runtime."
+
+[requirements]
+runtime = "node"
+version = ">=20"
+
+[[component]]
+name = "appport"
+kind = "package"
+source = "npm:@appport/core"
+version = "^1.0.0"

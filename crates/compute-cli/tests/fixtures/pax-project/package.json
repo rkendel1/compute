@@ -1,0 +1,17 @@
+{
+  "name": "pax-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js --greeting hello",
+    "check": "node check.js",
+    "build": "tsc -p ."
+  },
+  "dependencies": {
+    "left-pad": "1.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

@@ -1,0 +1,67 @@
+# The Randy reference stack: a declarative description of the software a
+# Randy-configured Computer holds. It is data. Compute reads it exactly as it
+# reads any other stack; nothing in Compute knows the name "randy".
+#
+# The stack lists *artifacts by identity*:
+#
+#   kind = "package"  a published npm package at a version constraint. Compute
+#                     obtains it from the dependency capsule the target
+#                     materializes (docs/dependencies.md).
+#
+# A stack configures a Computer; applications run on it and are not stack
+# components. It contains no commands and no secrets. Versions are the current published
+# releases (`npm view`), except @feltdb/core and @appport/core, which are the
+# versions this repository certifies (docs/feltdb.md) and builds against
+# (packages/compute-appport/package.json).
+
+schema = "compute.stack@1"
+
+[stack]
+name = "randy"
+version = "0.3.0"
+description = "FeltDB, AppPort (core, sdk, services), the AppBoundry platform package, and AuthBoundry."
+
+[requirements]
+runtime = "node"
+version = ">=20"      # the highest engines floor among the packages
+
+[[component]]
+name = "feltdb"
+kind = "package"
+source = "npm:@feltdb/core"
+version = "0.11.9"
+
+[[component]]
+name = "appport-core"
+kind = "package"
+source = "npm:@appport/core"
+version = "1.0.3"
+
+[[component]]
+name = "appport-sdk"
+kind = "package"
+source = "npm:@appport/sdk"
+version = "1.1.22"
+
+[[component]]
+name = "appport-services"
+kind = "package"
+source = "npm:@appport/services"
+version = "0.4.6"
+
+[[component]]
+name = "authboundry"
+kind = "package"
+source = "npm:@authboundry/core"
+version = "1.15.3"
+
+# The AppBoundry platform package: the runtime/platform capability that
+# applications built for AppBoundry run on. The application itself
+# (`AppBoundry.app`: a manifest and `application.wasm`) is not part of this
+# stack. It runs *on* the environment the stack configures, and a project
+# declares it (see stacks/README.md).
+[[component]]
+name = "appboundry"
+kind = "package"
+source = "npm:@appport/appboundry"
+version = "1.1.1"

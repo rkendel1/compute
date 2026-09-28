@@ -568,5 +568,13 @@ remains a standalone Rust project; PAX detects the workspace and delegates
 Rust operations to Cargo. Cargo remains authoritative for Rust semantics,
 and PAX is not a Compute runtime dependency.
 
+PAX is also the project and environment layer for the software Compute runs:
+PAX describes what a project requires, and Compute decides where and how it
+can run. In a PAX project, `compute run` discovers the project, resolves its
+requirements, finds a target that satisfies them, and executes it with a
+receipt that proves what happened. See [docs/pax.md](docs/pax.md). A **stack**
+(`stacks/`, [docs/stacks.md](docs/stacks.md)) is a versioned, declarative
+environment a Computer is configured with; applications then run on it.
+
 See [DEVELOPMENT.md](DEVELOPMENT.md) for the complete inspection workflow
 and the direct Cargo escape hatch.

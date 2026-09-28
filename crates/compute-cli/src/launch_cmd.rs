@@ -53,6 +53,18 @@ pub struct UpCommand {
     /// The control plane's durable state; see `compute start --help`.
     #[command(flatten)]
     pub state: crate::control_state::StateOptions,
+    /// Also configure a Computer with this stack (a name in ./stacks, or a
+    /// path) and report which components are actually verified. Applications
+    /// then run on it (`compute run --project`).
+    #[arg(long)]
+    pub stack: Option<String>,
+    /// The dependency capsule that supplies the stack's packages.
+    #[arg(long, requires = "stack")]
+    pub deps: Option<PathBuf>,
+    /// Reference the capsule by identity instead of embedding it; the target
+    /// must hold it in its $COMPUTE_DEPENDENCY_CACHE as `<digest>.deps`.
+    #[arg(long, requires = "deps")]
+    pub deps_by_reference: bool,
 }
 
 #[derive(Args, Debug)]
@@ -202,6 +214,26 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
     println!("  control state: {}", durability_note(&command.state));
     println!("  state: {}", home.display());
     println!("  stop it with `compute down`");
+    if let Some(selection) = command.stack.clone() {
+        println!();
+        let location = crate::pool::PoolLocation {
+            pool_config: Some(pool.clone()),
+            capability_cache: Some(home.join("provider-capabilities.json")),
+        };
+        let ready = crate::stack_run::up(
+            crate::stack_run::UpStack {
+                selection,
+                deps: command.deps.clone(),
+                by_reference: command.deps_by_reference,
+            },
+            &location,
+            &crate::admission::PolicyLocation::default(),
+        )
+        .await?;
+        if !ready {
+            std::process::exit(crate::pool::PLACEMENT_FAILED_EXIT);
+        }
+    }
     if !no_browser {
         for opener in ["xdg-open", "open"] {
             if std::process::Command::new(opener)

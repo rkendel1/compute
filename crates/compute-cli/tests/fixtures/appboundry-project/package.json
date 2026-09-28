@@ -1,0 +1,14 @@
+{
+  "name": "appboundry-app",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@appport/appboundry": "1.1.1",
+    "@appport/core": "1.0.3",
+    "@feltdb/core": "0.11.9"
+  }
+}

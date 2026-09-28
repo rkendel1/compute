@@ -1,0 +1,11 @@
+[network]
+mode = "network"
+
+# The application that runs on the stack's environment. It is the project's,
+# not the stack's.
+[artifact]
+application = "dev.appboundry.portal"
+version = "1.0.0"
+runtime = "wasm"
+abi = "wasm/1"
+artifact = "sha256:fef9a8b0ef770d37fcfe41f1547bff26e173e42bef767b3936ccd3ef8c2eb3ad"

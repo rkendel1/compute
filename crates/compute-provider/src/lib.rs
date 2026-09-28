@@ -224,6 +224,20 @@ pub struct ExecutionOptions {
     /// portable request hash and sealed into jobs and receipts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application: Option<compute_core::ApplicationIdentity>,
+    /// The project this execution runs and what was declared and resolved
+    /// for it. Metadata: excluded from the portable request hash. The
+    /// executing provider verifies it against its own observations and seals
+    /// the result into the receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<compute_core::ProjectBinding>,
+    /// The stack this execution realizes; sealed into the receipt the same
+    /// way. Metadata: excluded from the portable request hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<compute_core::StackBinding>,
+    /// The application bundle this execution runs; sealed into the receipt.
+    /// Metadata: excluded from the portable request hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_bundle: Option<compute_core::AppBundleBinding>,
     /// Runtime resolved by this target for a Computer process launched by
     /// the otherwise-shell session job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1256,6 +1270,21 @@ impl LocalProvider {
             receipt.placement = request.execution.placement.clone();
             receipt.scope = request.execution.scope.clone();
             receipt.application = request.execution.application.clone();
+            receipt.project = request
+                .execution
+                .project
+                .as_ref()
+                .map(|binding| compute_core::ReceiptProject::attest(binding, receipt));
+            receipt.stack = request
+                .execution
+                .stack
+                .as_ref()
+                .map(|binding| compute_core::ReceiptStack::attest(binding, receipt));
+            receipt.app_bundle = request
+                .execution
+                .app_bundle
+                .as_ref()
+                .map(|binding| compute_core::ReceiptAppBundle::attest(binding, receipt));
             receipt.process_runtime = request.execution.process_runtime.clone();
             receipt.bind_admission(&summary);
             receipt.seal().map_err(classify_compute_error)?;
