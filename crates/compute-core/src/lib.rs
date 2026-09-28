@@ -21,6 +21,8 @@ pub mod host;
 pub use host::{HostEnforcement, HostProfile};
 mod dependencies;
 pub use dependencies::*;
+mod project;
+pub use project::*;
 mod jobs;
 mod sessions;
 pub use sessions::*;

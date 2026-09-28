@@ -19,6 +19,7 @@ toml.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+compute-project = { path = "../compute-project" }
 compute-runtime = { path = "../compute-runtime" }
 tempfile.workspace = true
 tokio.workspace = true

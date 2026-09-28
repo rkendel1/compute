@@ -65,6 +65,9 @@ modified referenced outputs. Extra files do not invalidate the receipt.
 - declared, selected, and observed runtime plus payload/executable identities
 - sanitized request summary and effective execution policy
 - requested/effective isolation profile and concrete boundary evidence
+- an optional `project` block: the PAX project executed, with its requirements
+  declared, resolved, and verified against this receipt's own evidence (see
+  [pax.md](pax.md))
 - sorted input and output identity records
 - terminal lifecycle status, exit code, and typed failure classification
 - start/finish timestamps and compact immutable provenance references

@@ -240,6 +240,7 @@ legacy deployment model:
 | Path | Durable? | Authority | Execution host | Target session | Job | Endpoint | Receipt | Restart semantics | Disposition |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `compute run` / `compute exec`, local | no: nothing is written but a requested `--receipt` file | none (the local user) | the caller's machine, a child of the CLI | none | none | none by Compute (the workload may listen itself while it runs) | `compute.receipt@1`, `compute.local@1`, no scope | none: it ends with the CLI; a SIGKILLed CLI leaves it orphaned (G-EXEC-3) | **B** ephemeral |
+| `compute run` in a PAX project (`--project`, or no path) | no: as the rows above and below, placed like `compute run PATH` | none | the placed provider | none | none | none | as the placed provider's, plus the `project` block ([pax.md](pax.md)) | none | **B** ephemeral |
 | `compute run` / `compute pool run`, remote provider | no | the pool's credential for that provider | the placed provider, one synchronous `Execute` request | none | none (not in a job store) | none | returned with the result | none | **B** ephemeral |
 | `compute pool submit`, `compute remote *` | the job record, until it ends | target credential (serve) or the daemon API's execute scope | the placed provider | none | a one-shot job in that provider's job store | none | the provider's receipt for the job | a job is not restarted; its record survives a provider restart (`durable_jobs_are_idempotent_owned_verifiable_and_restart_safe`) | **B** one-shot job primitive |
 | `compute session create/exec` (raw target sessions) | the session and its jobs, until destroyed or expired | target credential; owner = the credential's control plane | the target | yes | yes | session endpoints, if exposed | the target's, per job | none: no desired state, no reconciliation; a TTL unless claimed | **B** the substrate a Computer is built from; not a deployment |
@@ -252,8 +253,9 @@ legacy deployment model:
 
 Everything else that starts a process starts Compute itself (the daemon,
 the target, the supervisor, an upgraded controller) or a tool (curl, npm,
-compilers, the FeltDB verifier, runtime acquisition, container engines
-behind a target's container sessions); none runs a workload.
+compilers, the FeltDB verifier, the read-only `pax` project observer,
+runtime acquisition, container engines behind a target's container
+sessions); none runs a workload.
 
 ### Two execution models, one legacy model
 

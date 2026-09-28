@@ -211,6 +211,11 @@ pub struct ExecutionReceipt {
     /// it ran inside a Compute environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ReceiptScope>,
+    /// The project this execution ran, with its requirements declared,
+    /// resolved, and verified against this receipt's own evidence. Absent
+    /// for executions that were not described by a project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<crate::ReceiptProject>,
     /// Identity of the exact policy snapshot admission evaluated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_id: Option<String>,
@@ -411,6 +416,8 @@ struct ReceiptBody<'a> {
     reservation: &'a Option<ReceiptReservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: &'a Option<ReceiptScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: &'a Option<crate::ReceiptProject>,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_id: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -628,6 +635,9 @@ impl ExecutionReceipt {
         if let Some(scope) = &self.scope {
             scope.validate()?;
         }
+        if let Some(project) = &self.project {
+            project.verify(self)?;
+        }
         match (&self.policy_id, &self.admission_id, &self.admission_status) {
             (None, None, None) => {}
             (Some(policy), Some(admission), Some(status)) => {
@@ -717,6 +727,7 @@ impl ExecutionReceipt {
             placement: &self.placement,
             reservation: &self.reservation,
             scope: &self.scope,
+            project: &self.project,
             policy_id: &self.policy_id,
             admission_id: &self.admission_id,
             admission_status: &self.admission_status,
@@ -844,6 +855,7 @@ pub fn create_execution_receipt(
         placement: None,
         reservation: None,
         scope: None,
+        project: None,
         policy_id: None,
         admission_id: None,
         admission_status: None,

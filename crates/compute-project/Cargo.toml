@@ -1,0 +1,17 @@
+[package]
+name = "compute-project"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The boundary between project tools and Compute. It depends on Compute's own
+# types and on no project tool: PAX is observed through its versioned JSON
+# output, never linked.
+[dependencies]
+compute-core = { path = "../compute-core" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

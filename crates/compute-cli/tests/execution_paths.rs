@@ -271,6 +271,11 @@ fn every_execution_site_is_classified() {
                 count: 1,
                 why: "the FeltDB backup verifier",
             },
+            Allowed {
+                file: "crates/compute-project/src/pax.rs",
+                count: 1,
+                why: "observing a project with the external, read-only `pax` executable; never a workload",
+            },
         ],
     );
     // Supervised workloads on the daemon host: only the node model.
