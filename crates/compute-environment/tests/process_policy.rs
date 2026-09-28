@@ -390,7 +390,13 @@ async fn never_leaves_an_exited_process_and_always_restarts_it() {
     let view = web_where(&daemon, "always", "a restart", 60, |web| web.restarts >= 1).await;
     let failure = view.reality.processes["web"].last_failure.clone().unwrap();
     assert_eq!(failure.exit_code, Some(0));
-    assert!(starts(&daemon, "always").await >= 2);
+    // A restart is counted when it is recorded, before its start job runs:
+    // wait for the job to have started it again.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while starts(&daemon, "always").await < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "never restarted");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     daemon.shutdown().await;
 }
 
