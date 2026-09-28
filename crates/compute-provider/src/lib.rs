@@ -909,6 +909,11 @@ impl LocalProvider {
                 }
             }
             None => {
+                if resolution.requirement.version.is_some() {
+                    return Err(invalid(
+                        "a pinned Computer process runtime cannot use a host executable",
+                    ));
+                }
                 let actual = <Self as ComputeProvider>::resolve_runtime(
                     self,
                     resolution.requirement.clone(),

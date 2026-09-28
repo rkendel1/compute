@@ -26,10 +26,10 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@appport/authorization": "1.0.1",
-    "@appport/core": "1.0.2",
-    "@appport/protocol": "1.0.1",
-    "@appport/schema": "1.0.1"
+    "@appport/authorization": "1.0.2",
+    "@appport/core": "1.0.3",
+    "@appport/protocol": "1.0.2",
+    "@appport/schema": "1.0.2"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -253,6 +253,21 @@ impl PlacementRequirements {
         placed
             .additional_runtimes
             .dedup_by(|left, right| left.kind == right.kind && left.version == right.version);
+        for runtime in &requirements.runtimes {
+            let Some(candidate) = runtime.platform.clone().map(strip_abi) else {
+                continue;
+            };
+            match &placed.platform {
+                Some(existing) if existing != &candidate => {
+                    return Err(PlacementError::InvalidRequirements(format!(
+                        "process runtime requires platform {}, which conflicts with {}",
+                        candidate.label(),
+                        existing.label()
+                    )));
+                }
+                _ => placed.platform = Some(candidate),
+            }
+        }
         Ok((placed, create))
     }
 }

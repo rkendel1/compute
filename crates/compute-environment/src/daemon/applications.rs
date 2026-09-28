@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use compute_core::{
     ApplicationIdentity, ComputerLifecycle, ComputerRequirements, ComputerStatus, InputSource,
-    PlatformIdentity, ProcessDesired, ProcessKind, ProcessSpec, ProcessState, ProjectSpec,
+    ProcessDesired, ProcessKind, ProcessSpec, ProcessState, ProjectSpec,
     ProviderRuntimeRequirement, RepositorySpec, RuntimeKind, WorkloadBundle,
 };
 use compute_state::{RolloutKind, RolloutRecord, RolloutStatus, VersionRecord, VersionStatus};
@@ -740,14 +740,9 @@ fn runtime_requirement(bundle: &WorkloadBundle) -> ProviderRuntimeRequirement {
     ProviderRuntimeRequirement {
         runtime: workload.runtime,
         version: workload.runtime_version.clone(),
-        platform: workload
-            .architecture
-            .as_ref()
-            .map(|architecture| PlatformIdentity {
-                architecture: architecture.clone(),
-                runtime_abi: None,
-                ..PlatformIdentity::current()
-            }),
+        // Architecture is a Computer placement constraint. The target, not
+        // this controller, supplies the OS when it resolves the runtime.
+        platform: None,
     }
 }
 

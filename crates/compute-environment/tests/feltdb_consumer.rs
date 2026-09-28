@@ -255,7 +255,10 @@ async fn the_controller_keeps_authority_in_feltdb_through_an_outage() {
     let run = daemon.run_task("prod", "jobs", "job").await.unwrap();
     let view = authority_view(&daemon.info().await);
     assert_eq!(view.state, "healthy");
-    assert_eq!(view.certified_feltdb.as_deref(), Some("0.11.8"));
+    assert_eq!(
+        view.certified_feltdb.as_deref(),
+        Some(compute_state_feltdb::CERTIFIED_FELTDB_VERSION)
+    );
     assert_eq!(view.model_generation, compute_state::MODEL_GENERATION);
     assert!(view.last_durable_read.is_some() && view.last_durable_mutation.is_some());
     assert!(!view.snapshots.is_empty());

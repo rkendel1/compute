@@ -777,22 +777,38 @@ async fn scheduler_is_oldest_fitting_without_head_of_line_blocking() {
         .await
         .unwrap();
 
-    let small = wait_for_terminal(&client, &younger_small.job_id.0).await;
+    let mut observed_large_wait_while_first_active = false;
+    let small = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let first_status = client.job_status(&first.job_id.0).await.unwrap();
+            let large_status = client.job_status(&older_large.job_id.0).await.unwrap();
+            let small_status = client.job_status(&younger_small.job_id.0).await.unwrap();
+            if !first_status.status.is_terminal()
+                && large_status.status == compute_core::JobStatus::WaitingForCapacity
+            {
+                observed_large_wait_while_first_active = true;
+                assert!(large_status.capacity_wait.as_ref().is_some_and(|wait| {
+                    wait.reasons
+                        .iter()
+                        .any(|reason| reason == "insufficient_cpu")
+                }));
+            }
+            if small_status.status.is_terminal() {
+                assert!(
+                    !first_status.status.is_terminal(),
+                    "smaller fitting job should complete before the blocked older job can reserve after the first job finishes"
+                );
+                break small_status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("smaller fitting job should complete promptly while the first job is still active");
     assert_eq!(small.status, compute_core::JobStatus::Succeeded);
-    let large_while_first_runs = client.job_status(&older_large.job_id.0).await.unwrap();
-    assert_eq!(
-        large_while_first_runs.status,
-        compute_core::JobStatus::WaitingForCapacity
-    );
     assert!(
-        large_while_first_runs
-            .capacity_wait
-            .as_ref()
-            .is_some_and(|wait| {
-                wait.reasons
-                    .iter()
-                    .any(|reason| reason == "insufficient_cpu")
-            })
+        observed_large_wait_while_first_active,
+        "older oversized job should wait for capacity while the younger fitting job runs"
     );
 
     assert_eq!(
