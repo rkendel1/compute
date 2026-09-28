@@ -11,7 +11,9 @@ use compute_provider::{
 use serde::{Deserialize, Serialize};
 
 use crate::PlacementError;
-use crate::descriptor::{Availability, DescriptorError, Health, ProviderDescriptor, ProviderKind};
+use crate::descriptor::{
+    Availability, CapabilityViolation, DescriptorError, Health, ProviderDescriptor, ProviderKind,
+};
 
 pub const DEFAULT_CAPABILITY_TTL_SECONDS: u64 = 300;
 pub const CAPABILITY_CACHE_VERSION: &str = "compute.provider.cache@1";
@@ -497,11 +499,7 @@ impl ProviderPool {
                 return if malformed {
                     DiscoveryRecord::invalid(
                         &member.id,
-                        DescriptorError {
-                            code: "provider_capabilities_invalid".into(),
-                            field: "response".into(),
-                            message: error.message,
-                        },
+                        crate::descriptor::invalid("response", error.message),
                     )
                 } else {
                     DiscoveryRecord {
@@ -511,6 +509,7 @@ impl ProviderPool {
                         error: Some(DiscoveryError {
                             code: "provider_unavailable".into(),
                             message: error.to_string(),
+                            violations: vec![],
                         }),
                     }
                 };
@@ -588,6 +587,10 @@ pub enum DiscoveryStatus {
 pub struct DiscoveryError {
     pub code: String,
     pub message: String,
+    /// For `provider_capabilities_invalid`: every capability field that
+    /// failed validation, with what was expected and why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub violations: Vec<CapabilityViolation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -608,7 +611,13 @@ impl DiscoveryRecord {
             descriptor: None,
             error: Some(DiscoveryError {
                 code: error.code.clone(),
-                message: format!("{}: {}", error.field, error.message),
+                message: error
+                    .violations()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                violations: error.violations(),
             }),
         }
     }

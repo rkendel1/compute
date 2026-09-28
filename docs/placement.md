@@ -332,6 +332,27 @@ A provider whose descriptor fails validation is
 `provider_capabilities_invalid` and excluded. It cannot claim compatibility
 through malformed or contradictory data.
 
+Validation checks every field and reports every violation, not only the
+first. The provider's evaluation error carries each one as
+`{field, reason, expected, actual}`: `field` is the capability path
+(`inventory.runtimes.dotnet.detected_version`), and `actual` is a summary
+of the value. Short, single-line values are shown quoted. Anything longer,
+multi-line, or path-like is shown only by its shape (`1771 bytes over 21
+line(s)`), so a host's raw output, install paths, or environment never
+reach the report. A JSON placement report carries them in the provider's
+`error.violations`. `compute run` and `compute pool run|submit` print each
+violation under the provider:
+
+```text
+provider local: provider_capabilities_invalid
+  provider_capabilities_invalid: inventory.runtimes.dotnet.detected_version: detected version is malformed
+    expected: non-empty text of at most 1024 bytes, no control characters but line breaks and tabs
+    actual: 1771 bytes over 21 line(s)
+```
+
+The fix for such a report belongs where the value was produced (the
+provider's discovery), never in the validator.
+
 ## Library use
 
 ```rust

@@ -207,7 +207,37 @@ pub struct ProviderDescriptor {
     pub availability: Availability,
 }
 
-/// Why a capability response could not be turned into a descriptor.
+/// One way a capability response breaks the descriptor contract: which
+/// field, what it held, what was expected, and why it matters. `actual` is
+/// a summary, never a host's raw output (no paths, no secrets).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityViolation {
+    pub field: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
+}
+
+impl std::fmt::Display for CapabilityViolation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.field, self.reason)?;
+        match (&self.expected, &self.actual) {
+            (Some(expected), Some(actual)) => {
+                write!(formatter, " (expected {expected}; actual {actual})")
+            }
+            (Some(expected), None) => write!(formatter, " (expected {expected})"),
+            (None, Some(actual)) => write!(formatter, " (actual {actual})"),
+            (None, None) => Ok(()),
+        }
+    }
+}
+
+/// Why a capability response could not be turned into a descriptor: every
+/// violation found, not only the first. `field` and `message` repeat the
+/// first, for readers of the earlier shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DescriptorError {
@@ -215,25 +245,119 @@ pub struct DescriptorError {
     pub code: String,
     pub field: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub violations: Vec<CapabilityViolation>,
 }
 
 impl DescriptorError {
-    fn new(field: impl Into<String>, message: impl Into<String>) -> Self {
+    fn from_violations(violations: Vec<CapabilityViolation>) -> Self {
+        let first = violations.first().cloned().unwrap_or(CapabilityViolation {
+            field: "response".into(),
+            reason: "invalid".into(),
+            expected: None,
+            actual: None,
+        });
         Self {
             code: "provider_capabilities_invalid".into(),
-            field: field.into(),
-            message: message.into(),
+            field: first.field,
+            message: first.reason,
+            violations,
+        }
+    }
+
+    /// Every violation, in the order they were found.
+    pub fn violations(&self) -> Vec<CapabilityViolation> {
+        if self.violations.is_empty() {
+            vec![CapabilityViolation {
+                field: self.field.clone(),
+                reason: self.message.clone(),
+                expected: None,
+                actual: None,
+            }]
+        } else {
+            self.violations.clone()
         }
     }
 }
 
-fn invalid(field: impl Into<String>, message: impl Into<String>) -> DescriptorError {
-    DescriptorError::new(field, message)
+pub(crate) fn invalid(field: impl Into<String>, message: impl Into<String>) -> DescriptorError {
+    DescriptorError::from_violations(vec![CapabilityViolation {
+        field: field.into(),
+        reason: message.into(),
+        expected: None,
+        actual: None,
+    }])
+}
+
+/// A value as a diagnostic may show it: short single-line values as they
+/// are; anything longer, multi-line, or path-like only by its shape.
+fn summarize(value: &str) -> String {
+    if value.len() <= 80 && !value.contains(['\n', '\r', '/', '\\']) {
+        format!("{value:?}")
+    } else {
+        format!(
+            "{} bytes over {} line(s)",
+            value.len(),
+            value.lines().count().max(1)
+        )
+    }
+}
+
+/// The violations of one capability response, collected so a report names
+/// all of them.
+#[derive(Default)]
+struct Checks {
+    violations: Vec<CapabilityViolation>,
+}
+
+impl Checks {
+    fn fail(&mut self, field: impl Into<String>, reason: impl Into<String>) {
+        self.violations.push(CapabilityViolation {
+            field: field.into(),
+            reason: reason.into(),
+            expected: None,
+            actual: None,
+        });
+    }
+
+    fn fail_with(
+        &mut self,
+        field: impl Into<String>,
+        reason: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) {
+        self.violations.push(CapabilityViolation {
+            field: field.into(),
+            reason: reason.into(),
+            expected: Some(expected.into()),
+            actual: Some(actual.into()),
+        });
+    }
+
+    fn absorb(&mut self, error: DescriptorError) {
+        self.violations.extend(error.violations());
+    }
+
+    fn finish(self) -> Result<(), DescriptorError> {
+        if self.violations.is_empty() {
+            Ok(())
+        } else {
+            Err(DescriptorError::from_violations(self.violations))
+        }
+    }
 }
 
 impl std::fmt::Display for DescriptorError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}: {}: {}", self.code, self.field, self.message)
+        write!(formatter, "{}: ", self.code)?;
+        for (index, violation) in self.violations().iter().enumerate() {
+            if index > 0 {
+                write!(formatter, "; ")?;
+            }
+            write!(formatter, "{violation}")?;
+        }
+        Ok(())
     }
 }
 
@@ -247,34 +371,65 @@ impl ProviderDescriptor {
         capabilities: &ProviderCapabilities,
         availability: Availability,
     ) -> Result<Self, DescriptorError> {
+        let mut checks = Checks::default();
         if capabilities.protocol != kind.protocol() {
-            return Err(invalid(
+            checks.fail_with(
                 "protocol",
-                format!(
-                    "{kind} provider must speak {}, reported {:?}",
-                    kind.protocol(),
-                    capabilities.protocol
-                ),
-            ));
+                format!("a {kind} provider speaks {}", kind.protocol()),
+                kind.protocol(),
+                summarize(&capabilities.protocol),
+            );
         }
-        validate_identity(kind, &capabilities.provider)?;
+        if let Err(error) = validate_identity(kind, &capabilities.provider) {
+            checks.absorb(error);
+        }
         if capabilities.inventory.compute_version.trim().is_empty() {
-            return Err(invalid(
+            checks.fail_with(
                 "inventory.compute_version",
                 "Compute version is empty",
-            ));
+                "a Compute version",
+                "empty",
+            );
         }
-        let platform = parse_platform(&capabilities.inventory.platform)
-            .ok_or_else(|| invalid("inventory.platform", "platform must be <os>-<architecture>"))?;
-        if let Some(id) = &capabilities.distribution_id {
-            compute_core::validate_sha256_identity(id)
-                .map_err(|error| invalid("distribution_id", error.to_string()))?;
+        let platform = match parse_platform(&capabilities.inventory.platform) {
+            Some(platform) => platform,
+            None => {
+                checks.fail_with(
+                    "inventory.platform",
+                    "platform must be <os>-<architecture>",
+                    "<os>-<architecture>",
+                    summarize(&capabilities.inventory.platform),
+                );
+                PlatformIdentity::current()
+            }
+        };
+        if let Some(id) = &capabilities.distribution_id
+            && let Err(error) = compute_core::validate_sha256_identity(id)
+        {
+            checks.fail_with(
+                "distribution_id",
+                error.to_string(),
+                "sha256:<64 hex>",
+                summarize(id),
+            );
         }
 
         let isolation_profiles =
-            unique_sorted(&capabilities.isolation_profiles, "isolation_profiles")?;
+            match unique_sorted(&capabilities.isolation_profiles, "isolation_profiles") {
+                Ok(values) => values,
+                Err(error) => {
+                    checks.absorb(error);
+                    vec![]
+                }
+            };
         let network_capabilities =
-            unique_sorted(&capabilities.network_policies, "network_policies")?;
+            match unique_sorted(&capabilities.network_policies, "network_policies") {
+                Ok(values) => values,
+                Err(error) => {
+                    checks.absorb(error);
+                    vec![]
+                }
+            };
 
         for (field, values) in [
             ("artifact_modes", &capabilities.artifact_modes),
@@ -284,10 +439,10 @@ impl ProviderDescriptor {
             ),
         ] {
             if values.iter().any(|value| !is_token(value)) {
-                return Err(invalid(field, "contains a malformed value"));
+                checks.fail(field, "contains a malformed value");
             }
             if values.iter().collect::<BTreeSet<_>>().len() != values.len() {
-                return Err(invalid(field, "contains duplicate values"));
+                checks.fail(field, "contains duplicate values");
             }
         }
         if !capabilities
@@ -295,22 +450,31 @@ impl ProviderDescriptor {
             .iter()
             .any(|mode| mode == "bundle")
         {
-            return Err(invalid(
+            checks.fail_with(
                 "artifact_modes",
                 "provider must accept portable bundles",
-            ));
+                "includes \"bundle\"",
+                format!("{:?}", capabilities.artifact_modes),
+            );
         }
         if capabilities.max_request_bytes == 0 || capabilities.max_output_bytes == 0 {
-            return Err(invalid(
+            checks.fail_with(
                 "artifact_limits",
                 "artifact limits must be positive",
-            ));
+                "> 0",
+                format!(
+                    "max_request_bytes {}, max_output_bytes {}",
+                    capabilities.max_request_bytes, capabilities.max_output_bytes
+                ),
+            );
         }
         if capabilities.max_timeout_ms == Some(0) || capabilities.max_memory_bytes == Some(0) {
-            return Err(invalid(
+            checks.fail_with(
                 "resource_capabilities",
                 "resource limits must be positive when present",
-            ));
+                "> 0 or absent",
+                "0",
+            );
         }
         for (name, available, capacity) in [
             (
@@ -330,21 +494,31 @@ impl ProviderDescriptor {
             ),
         ] {
             if available > capacity {
-                return Err(invalid(
+                checks.fail_with(
                     format!("resources.available.{name}"),
-                    format!("available {available} exceeds capacity {capacity}"),
-                ));
+                    "available exceeds capacity",
+                    format!("<= {capacity}"),
+                    available.to_string(),
+                );
             }
         }
         if capabilities.max_concurrent_jobs == Some(0) {
-            return Err(invalid(
+            checks.fail_with(
                 "max_concurrent_jobs",
                 "job concurrency must be positive when present",
-            ));
+                "> 0 or absent",
+                "0",
+            );
         }
         for capsule in &capabilities.dependency_capsules {
-            compute_core::validate_sha256_identity(capsule)
-                .map_err(|error| invalid("dependency_capsules", error.to_string()))?;
+            if let Err(error) = compute_core::validate_sha256_identity(capsule) {
+                checks.fail_with(
+                    "dependency_capsules",
+                    error.to_string(),
+                    "sha256:<64 hex>",
+                    summarize(capsule),
+                );
+            }
         }
         let resident = capabilities
             .dependency_capsules
@@ -352,7 +526,7 @@ impl ProviderDescriptor {
             .cloned()
             .collect::<BTreeSet<_>>();
         if resident.len() != capabilities.dependency_capsules.len() {
-            return Err(invalid("dependency_capsules", "contains duplicate values"));
+            checks.fail("dependency_capsules", "contains duplicate values");
         }
 
         let mut seen = BTreeSet::new();
@@ -360,55 +534,80 @@ impl ProviderDescriptor {
         let mut unavailable_runtimes = vec![];
         for entry in &capabilities.inventory.runtimes {
             let field = format!("inventory.runtimes.{}", entry.id);
+            let before = checks.violations.len();
             if !seen.insert(entry.id) {
-                return Err(invalid(field, "runtime is listed more than once"));
+                checks.fail(field.clone(), "runtime is listed more than once");
             }
             if !is_version(&entry.version) {
-                return Err(invalid(field, "pinned version is malformed"));
+                checks.fail_with(
+                    format!("{field}.version"),
+                    "pinned version is malformed",
+                    VERSION_CONSTRAINT,
+                    summarize(&entry.version),
+                );
             }
             if let Some(version) = &entry.detected_version
                 && !is_version(version)
             {
-                return Err(invalid(field, "detected version is malformed"));
+                checks.fail_with(
+                    format!("{field}.detected_version"),
+                    "detected version is malformed",
+                    VERSION_CONSTRAINT,
+                    summarize(version),
+                );
             }
             if !entry.platform.is_empty() && entry.platform != capabilities.inventory.platform {
-                return Err(invalid(
-                    field,
+                checks.fail_with(
+                    format!("{field}.platform"),
                     "runtime platform differs from the inventory platform",
-                ));
+                    summarize(&capabilities.inventory.platform),
+                    summarize(&entry.platform),
+                );
             }
-            if !entry.distribution_id.is_empty() {
-                compute_core::validate_sha256_identity(&entry.distribution_id)
-                    .map_err(|error| invalid(field.clone(), error.to_string()))?;
-            }
-            if !entry.distribution_runtime_id.is_empty() {
-                compute_core::validate_sha256_identity(&entry.distribution_runtime_id)
-                    .map_err(|error| invalid(field.clone(), error.to_string()))?;
-            }
-            if let Some(executable) = &entry.executable_identity {
-                compute_core::validate_sha256_identity(executable)
-                    .map_err(|error| invalid(field.clone(), error.to_string()))?;
+            for (name, identity) in [
+                ("distribution_id", Some(&entry.distribution_id)),
+                (
+                    "distribution_runtime_id",
+                    Some(&entry.distribution_runtime_id),
+                ),
+                ("executable_identity", entry.executable_identity.as_ref()),
+            ] {
+                if let Some(identity) = identity.filter(|identity| !identity.is_empty())
+                    && let Err(error) = compute_core::validate_sha256_identity(identity)
+                {
+                    checks.fail_with(
+                        format!("{field}.{name}"),
+                        error.to_string(),
+                        "sha256:<64 hex>",
+                        summarize(identity),
+                    );
+                }
             }
             if let Some(distribution) = &capabilities.distribution_id
                 && !entry.distribution_id.is_empty()
                 && distribution != &entry.distribution_id
             {
-                return Err(invalid(
-                    field,
+                checks.fail_with(
+                    format!("{field}.distribution_id"),
                     "runtime distribution differs from the provider distribution",
-                ));
+                    summarize(distribution),
+                    summarize(&entry.distribution_id),
+                );
             }
             if let Some(artifact) = capabilities.runtime_artifacts.get(&entry.id)
                 && !entry.distribution_runtime_id.is_empty()
                 && artifact != &entry.distribution_runtime_id
             {
-                return Err(invalid(
-                    field,
+                checks.fail_with(
+                    format!("{field}.distribution_runtime_id"),
                     "runtime distribution identity contradicts runtime_artifacts",
-                ));
+                    summarize(artifact),
+                    summarize(&entry.distribution_runtime_id),
+                );
             }
-            validate_runtime_capabilities(&entry.capabilities)
-                .map_err(|message| invalid(field.clone(), message))?;
+            if let Err(message) = validate_runtime_capabilities(&entry.capabilities) {
+                checks.fail(format!("{field}.capabilities"), message);
+            }
             let lifecycle = entry
                 .lifecycle
                 .unwrap_or(if entry.available && entry.compatible {
@@ -417,19 +616,23 @@ impl ProviderDescriptor {
                     compute_core::RuntimeLifecycleStatus::Unavailable
                 });
             if let Some(distribution) = &entry.distribution {
-                distribution
-                    .validate()
-                    .map_err(|error| invalid(field.clone(), error.to_string()))?;
+                if let Err(error) = distribution.validate() {
+                    checks.fail(format!("{field}.distribution"), error.to_string());
+                }
                 if distribution.runtime != entry.id
                     || distribution.version != entry.version
                     || distribution.platform.label() != capabilities.inventory.platform
                     || distribution.capabilities != entry.capabilities
                 {
-                    return Err(invalid(
-                        field.clone(),
+                    checks.fail(
+                        format!("{field}.distribution"),
                         "runtime distribution contradicts the inventory entry",
-                    ));
+                    );
                 }
+            }
+            if checks.violations.len() > before {
+                // Reported; an invalid entry is never offered.
+                continue;
             }
             if lifecycle.can_satisfy() && entry.compatible {
                 let artifact_id = if entry.distribution_runtime_id.is_empty() {
@@ -460,22 +663,37 @@ impl ProviderDescriptor {
         }
         for (runtime, artifact) in &capabilities.runtime_artifacts {
             if !seen.contains(runtime) {
-                return Err(invalid(
-                    "runtime_artifacts",
-                    format!("artifact identity for unlisted runtime {runtime}"),
-                ));
+                checks.fail(
+                    format!("runtime_artifacts.{runtime}"),
+                    "artifact identity for a runtime the inventory does not list",
+                );
             }
-            compute_core::validate_sha256_identity(artifact)
-                .map_err(|error| invalid("runtime_artifacts", error.to_string()))?;
+            if let Err(error) = compute_core::validate_sha256_identity(artifact) {
+                checks.fail_with(
+                    format!("runtime_artifacts.{runtime}"),
+                    error.to_string(),
+                    "sha256:<64 hex>",
+                    summarize(artifact),
+                );
+            }
         }
         runtimes.sort_by_key(|runtime| runtime.kind);
         unavailable_runtimes.sort();
 
-        if let Some(policy) = &capabilities.policy {
-            policy
-                .validate()
-                .map_err(|error| invalid("policy", error.to_string()))?;
+        if let Some(policy) = &capabilities.policy
+            && let Err(error) = policy.validate()
+        {
+            checks.fail("policy", error.to_string());
         }
+        if let Err(error) = compute_core::validate_target_features(&capabilities.target_features) {
+            checks.fail_with(
+                "target_features",
+                error.to_string(),
+                compute_core::TARGET_FEATURES.join(", "),
+                format!("{:?}", capabilities.target_features),
+            );
+        }
+        checks.finish()?;
         let formats = capabilities.dependency_capsule_formats.clone();
         let mut descriptor = Self {
             descriptor_version: DESCRIPTOR_VERSION.into(),
@@ -528,8 +746,6 @@ impl ProviderDescriptor {
                 .flatten(),
             target_features: {
                 let mut features = capabilities.target_features.clone();
-                compute_core::validate_target_features(&features)
-                    .map_err(|error| invalid("target_features", error.to_string()))?;
                 features.sort();
                 features.dedup();
                 features
@@ -741,10 +957,10 @@ pub(crate) fn probe_on_host(
 fn unique_sorted<T: Ord + Clone>(values: &[T], field: &str) -> Result<Vec<T>, DescriptorError> {
     let set = values.iter().cloned().collect::<BTreeSet<_>>();
     if set.len() != values.len() {
-        return Err(DescriptorError::new(field, "contains duplicate values"));
+        return Err(invalid(field, "contains duplicate values"));
     }
     if set.is_empty() {
-        return Err(DescriptorError::new(field, "must not be empty"));
+        return Err(invalid(field, "must not be empty"));
     }
     Ok(set.into_iter().collect())
 }
@@ -760,6 +976,10 @@ fn is_token(value: &str) -> bool {
 /// Runtime-reported versions are free text (some runtimes print several
 /// lines), so only emptiness, size, and non-whitespace control characters
 /// are rejected.
+/// What a runtime version must be.
+const VERSION_CONSTRAINT: &str =
+    "non-empty text of at most 1024 bytes, no control characters but line breaks and tabs";
+
 fn is_version(value: &str) -> bool {
     !value.trim().is_empty()
         && value.len() <= 1024

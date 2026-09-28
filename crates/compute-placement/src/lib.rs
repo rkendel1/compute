@@ -23,9 +23,9 @@ pub mod requirements;
 pub mod targets;
 
 pub use descriptor::{
-    ArtifactLimits, Availability, DESCRIPTOR_VERSION, DependencyCapsuleSupport, DescriptorError,
-    DistributionOffer, Health, ProviderDescriptor, ProviderKind, ResourceCapabilities,
-    RuntimeOffer, parse_platform,
+    ArtifactLimits, Availability, CapabilityViolation, DESCRIPTOR_VERSION,
+    DependencyCapsuleSupport, DescriptorError, DistributionOffer, Health, ProviderDescriptor,
+    ProviderKind, ResourceCapabilities, RuntimeOffer, parse_platform,
 };
 pub use dispatch::{DispatchError, DispatchErrorCode, PlacedSession, PlacedSubmission};
 pub use matching::{

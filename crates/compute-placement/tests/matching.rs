@@ -741,3 +741,70 @@ fn a_target_is_described_by_what_it_can_host() {
             .hosts_computers
     );
 }
+
+/// A capability response with several invalid fields is rejected with every
+/// violation named: field, what was expected, a summary of what was there,
+/// and why. A long host listing is summarized by its shape, so no install
+/// path from the host reaches the report.
+#[test]
+fn every_capability_violation_is_reported_with_its_field_and_no_host_paths() {
+    let mut capabilities =
+        Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Python]).capabilities("python");
+    capabilities.protocol = "compute.unknown@9".into();
+    let listing = (0..40)
+        .map(|index| {
+            format!(
+                "Microsoft.NETCore.App 8.0.{index} [/usr/share/dotnet/shared/Microsoft.NETCore.App]"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    capabilities.inventory.runtimes[0].detected_version = Some(listing.clone());
+    let error = ProviderDescriptor::from_capabilities(
+        "python",
+        ProviderKind::Remote,
+        &capabilities,
+        availability(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "provider_capabilities_invalid");
+    let violations = error.violations();
+    assert_eq!(violations.len(), 2, "{violations:#?}");
+    assert_eq!(violations[0].field, "protocol");
+    assert_eq!(
+        violations[0].actual.as_deref(),
+        Some("\"compute.unknown@9\"")
+    );
+    assert!(violations[0].expected.is_some());
+    assert_eq!(
+        violations[1].field,
+        "inventory.runtimes.python.detected_version"
+    );
+    assert_eq!(violations[1].reason, "detected version is malformed");
+    assert!(
+        violations[1]
+            .expected
+            .as_deref()
+            .is_some_and(|expected| expected.contains("1024 bytes")),
+        "{violations:#?}"
+    );
+    assert_eq!(
+        violations[1].actual.as_deref(),
+        Some(format!("{} bytes over 40 line(s)", listing.len()).as_str())
+    );
+    let report = error.to_string();
+    assert!(
+        report.starts_with("provider_capabilities_invalid: protocol"),
+        "{report}"
+    );
+    assert!(
+        report.contains("inventory.runtimes.python.detected_version"),
+        "{report}"
+    );
+    assert!(!report.contains("/usr/share"), "{report}");
+    assert!(
+        !serde_json::to_string(&error)
+            .unwrap()
+            .contains("/usr/share")
+    );
+}
