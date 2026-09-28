@@ -540,6 +540,9 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             desired: compute_core::ProcessDesired::Running,
             port: Some(8080),
             restart: 0,
+            readiness: None,
+            restart_policy: Default::default(),
+            max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
         }],
         projects: vec![compute_core::ProjectSpec {
             name: "app".into(),
@@ -623,6 +626,12 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
                         fingerprint: "sha256:p".into(),
                         pid: Some(42),
                         evidence: evidence.clone(),
+                        started_at: None,
+                        readiness: None,
+                        restarts: 0,
+                        attempts: 0,
+                        retry_at: None,
+                        last_failure: None,
                     },
                 )]),
                 builds: BTreeMap::from([(

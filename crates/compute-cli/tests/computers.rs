@@ -716,3 +716,155 @@ fn the_cli_reports_observed_reality_not_desired_state() {
     }
     drop(target);
 }
+
+/// A target and a controller whose pool names it, both separate processes.
+fn controller_with_target(root: &Path) -> (Serve, Cli, String) {
+    let target_listen = format!("127.0.0.1:{}", free_port());
+    let credential = targets::issue(root, "target-a", "control-plane");
+    let mut serve = std::process::Command::new(env!("CARGO_BIN_EXE_compute"));
+    runtimes::with_fixture_runtimes(&mut serve);
+    let target = Serve(
+        serve
+            .args(["serve", "--listen", &target_listen, "--public-url"])
+            .arg(format!("http://{target_listen}"))
+            .arg("--job-store")
+            .arg(root.join("target-jobs"))
+            .arg("--session-store")
+            .arg(root.join("target-sessions"))
+            .arg("--credentials")
+            .arg(&credential.credentials)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for_port(&target_listen);
+    std::fs::write(
+        root.join("compute-pool.toml"),
+        format!(
+            "[providers.target-a]\nkind = \"remote\"\nendpoint = \"http://{target_listen}\"\n{}",
+            credential.pool_line()
+        ),
+    )
+    .unwrap();
+    let listen = format!("127.0.0.1:{}", free_port());
+    let cli = Cli {
+        daemon: format!("http://{listen}"),
+        root: root.to_path_buf(),
+    };
+    cli.start(&listen);
+    (target, cli, listen)
+}
+
+/// Serves `/health` as ready, and records every start in `starts.log`.
+const READY_SERVICE: &str = r#"
+import http.server, os
+with open("starts.log", "a") as log:
+    log.write(f"{os.getpid()}\n")
+class Health(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), Health).serve_forever()
+"#;
+
+/// Readiness and restarts through the CLI, with the controller a process
+/// of its own that is stopped and started: what one controller process
+/// decided, the next reads back from control state.
+#[test]
+fn readiness_and_restarts_are_shown_and_survive_controller_process_restarts() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().to_path_buf();
+    let (_target, cli, listen) = controller_with_target(&root);
+    cli.ok(&[
+        "environment",
+        "create",
+        "myapp",
+        "--cpu",
+        "1",
+        "--memory",
+        "64Mi",
+        "--persistent",
+    ]);
+    let port = free_port().to_string();
+    cli.ok(&[
+        "environment",
+        "process",
+        "add",
+        "myapp",
+        "web",
+        "--port",
+        &port,
+        "--ready-path",
+        "/health",
+        "--ready-deadline",
+        "30",
+        "--restart",
+        "on-failure",
+        "--",
+        "python3",
+        "-c",
+        READY_SERVICE,
+    ]);
+    let web = |view: &Value| view["reality"]["processes"]["web"].clone();
+    let ready = cli.computer_until("ready", |view| web(view)["process"] == "ready");
+    assert_eq!(web(&ready)["desired"], "running");
+    assert_eq!(web(&ready)["readiness"], "ready");
+    assert_eq!(web(&ready)["restart_policy"], "on_failure");
+    assert_eq!(web(&ready)["restarts"], 0);
+    let pid = web(&ready)["pid"].as_u64().unwrap().to_string();
+
+    // Killed behind Compute's back: a failure, restarted, shown.
+    cli.ok(&["environment", "exec", "myapp", "--", "kill", &pid]);
+    let restarted = cli.computer_until("the restart", |view| {
+        web(view)["restarts"] == 1 && web(view)["process"] == "ready"
+    });
+    assert_eq!(web(&restarted)["last_failure"]["exit_code"], 143);
+    let info = cli.ok(&["environment", "info", "myapp"]);
+    for line in [
+        "readiness: ready (GET /health expects 2xx; last: HTTP 200)",
+        "restart: on_failure (0 in a row of at most 5)",
+        "last failure: web exited with status 143 (exited,",
+    ] {
+        assert!(info.contains(line), "{line:?} missing from\n{info}");
+    }
+    let pid = web(&restarted)["pid"].as_u64().unwrap().to_string();
+
+    // The controller process stops; the service exits while none runs.
+    cli.stop();
+    let killed = std::process::Command::new("kill")
+        .arg(&pid)
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    // A new controller process recovers it from the record: the count goes
+    // on from where the last one left it.
+    cli.start(&listen);
+    let recovered = cli.computer_until("the recovery", |view| {
+        web(view)["restarts"] == 2 && web(view)["process"] == "ready"
+    });
+    assert_ne!(web(&recovered)["pid"].as_u64().unwrap().to_string(), pid);
+    let starts = cli.ok(&["environment", "exec", "myapp", "--", "cat", "starts.log"]);
+    assert_eq!(
+        starts.lines().count(),
+        3,
+        "one start per restart, no duplicate"
+    );
+
+    // Stopped on purpose: stays stopped across a controller restart.
+    cli.ok(&["environment", "process", "stop", "myapp", "web"]);
+    cli.computer_until("stopped", |view| web(view)["process"] == "stopped");
+    cli.stop();
+    cli.start(&listen);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let view = cli.computer_until("the record", |_| true);
+        assert_eq!(web(&view)["process"], "stopped", "{view:#}");
+        assert_eq!(web(&view)["restarts"], 2);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let starts = cli.ok(&["environment", "exec", "myapp", "--", "cat", "starts.log"]);
+    assert_eq!(starts.lines().count(), 3);
+}

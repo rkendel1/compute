@@ -29,8 +29,9 @@ use chrono::Utc;
 use compute_core::{
     ComputerFailure, ComputerLifecycle, ComputerRequirements, ComputerSpec, ComputerStatus,
     EnvironmentContents, ObservedBuild, ObservedContents, ObservedPackage, ObservedProcess,
-    ObservedRepository, OperationEvidence, PackageSpec, ProcessDesired, ProcessSpec, ProcessState,
-    ProjectSpec, RepositorySpec, RetiredSession, SessionCommand, SessionStatus, fingerprint,
+    ObservedReadiness, ObservedRepository, OperationEvidence, PackageSpec, ProcessDesired,
+    ProcessFailure, ProcessRestartPolicy, ProcessSpec, ProcessState, ProjectSpec, ReadinessState,
+    RepositorySpec, RetiredSession, SessionCommand, SessionStatus, fingerprint,
 };
 use compute_placement::{
     AdmissionContext, DiscoveryMode, PlacementOutcome, PlacementPolicy, PlacementReport,
@@ -183,6 +184,10 @@ fn process_fingerprint(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // The restart policy applies in place: changing it restarts nothing.
+    let mut process = process.clone();
+    process.restart_policy = Default::default();
+    process.max_restarts = compute_core::DEFAULT_MAX_RESTARTS;
     if builds.is_empty() {
         fingerprint(&(process, commit, config))
     } else {
@@ -201,11 +206,14 @@ fn package_fingerprint(package: &PackageSpec, observed: &ObservedContents) -> St
 
 /// Plan the next action, in order: repositories, packages, processes to
 /// stop, processes to start. A failed attempt at an unchanged item is not
-/// retried until the item changes or a reconcile is requested.
+/// retried until the item changes or a reconcile is requested; a process
+/// is restarted automatically only when its restart policy scheduled a
+/// restart (`retry_at`) that is due at `now`.
 pub(crate) fn plan(
     contents: &EnvironmentContents,
     observed: &ObservedContents,
     config: &BTreeMap<String, String>,
+    now: chrono::DateTime<Utc>,
 ) -> Option<Action> {
     for repository in &contents.repositories {
         let wanted = fingerprint(repository);
@@ -283,7 +291,8 @@ pub(crate) fn plan(
             }
             Some(spec)
                 if spec.desired == ProcessDesired::Stopped
-                    && seen.state == ProcessState::Running =>
+                    && (matches!(seen.state, ProcessState::Running | ProcessState::Starting)
+                        || (seen.state == ProcessState::Failed && seen.pid.is_some())) =>
             {
                 return Some(Action::StopProcess {
                     name: name.clone(),
@@ -304,13 +313,392 @@ pub(crate) fn plan(
         }
         let settled = current.is_some_and(|seen| {
             seen.fingerprint == wanted
-                && matches!(seen.state, ProcessState::Running | ProcessState::Failed)
+                && match seen.state {
+                    ProcessState::Running => true,
+                    // A start recorded and not yet run: run it.
+                    ProcessState::Starting | ProcessState::Stopped => false,
+                    // Only when its restart policy asked, and it is due.
+                    ProcessState::Exited | ProcessState::Failed => {
+                        seen.retry_at.is_none_or(|at| at > now)
+                            || process.restart_policy == ProcessRestartPolicy::Never
+                            || seen.attempts >= process.max_restarts
+                    }
+                }
         });
         if !settled {
             return Some(Action::StartProcess(process.clone(), wanted));
         }
     }
     None
+}
+
+/// A process that runs this long without readiness to check has recovered:
+/// its restarts in a row start again from zero.
+const STABLE: Duration = Duration::from_secs(30);
+/// How often readiness is checked while a process is not yet (or no longer)
+/// ready.
+const READINESS_POLL: Duration = Duration::from_secs(1);
+
+/// How long before the next automatic restart: doubling from a second, at
+/// most a minute.
+fn restart_backoff(attempts: u32) -> chrono::Duration {
+    chrono::Duration::seconds((1i64 << attempts.min(6)).min(60))
+}
+
+/// Evidence for a start recorded before its job runs.
+fn pending(now: chrono::DateTime<Utc>) -> OperationEvidence {
+    OperationEvidence {
+        job_id: String::new(),
+        execution_id: String::new(),
+        outcome: "pending".into(),
+        at: now,
+        error: None,
+    }
+}
+
+/// Record that a desired-running process failed, and apply its restart
+/// policy: when to restart it, if at all, and why.
+pub(crate) fn fail_process(
+    spec: &ProcessSpec,
+    seen: &mut ObservedProcess,
+    reason: &str,
+    message: String,
+    exit_code: Option<i32>,
+    evidence: OperationEvidence,
+    now: chrono::DateTime<Utc>,
+) {
+    let failed = reason != "exited" || exit_code != Some(0);
+    let restart = match spec.restart_policy {
+        ProcessRestartPolicy::Never => false,
+        ProcessRestartPolicy::OnFailure => failed,
+        ProcessRestartPolicy::Always => true,
+    };
+    let (retry_at, decision) = if spec.desired != ProcessDesired::Running {
+        (None, "not restarted: it is wanted stopped".to_owned())
+    } else if !restart {
+        (
+            None,
+            format!(
+                "not restarted: restart policy {}{}",
+                spec.restart_policy.as_str(),
+                if failed {
+                    ""
+                } else {
+                    ", and it exited cleanly"
+                }
+            ),
+        )
+    } else if seen.attempts >= spec.max_restarts {
+        (
+            None,
+            format!(
+                "not restarted: {} restarts in a row did not recover it (max_restarts {}); change it or reconcile to try again",
+                seen.attempts, spec.max_restarts
+            ),
+        )
+    } else {
+        let at = now + restart_backoff(seen.attempts);
+        (
+            Some(at),
+            format!(
+                "restart {} of {} at {}",
+                seen.attempts + 1,
+                spec.max_restarts,
+                at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            ),
+        )
+    };
+    seen.retry_at = retry_at;
+    seen.last_failure = Some(ProcessFailure {
+        reason: reason.into(),
+        message,
+        exit_code,
+        decision,
+        at: now,
+        evidence,
+    });
+}
+
+/// Record a start before it runs: the claim a controller that restarts
+/// finds, and runs, without deciding it again. An automatic restart (the
+/// same process, exited or failed) is counted here, once.
+fn claim_start(
+    current: Option<&ObservedProcess>,
+    wanted: &str,
+    now: chrono::DateTime<Utc>,
+) -> (ObservedProcess, bool) {
+    let automatic = current.is_some_and(|seen| {
+        seen.fingerprint == wanted
+            && matches!(seen.state, ProcessState::Exited | ProcessState::Failed)
+    });
+    let mut claim = current.cloned().unwrap_or(ObservedProcess {
+        state: ProcessState::Starting,
+        fingerprint: wanted.to_owned(),
+        pid: None,
+        evidence: pending(now),
+        started_at: None,
+        readiness: None,
+        restarts: 0,
+        attempts: 0,
+        retry_at: None,
+        last_failure: None,
+    });
+    claim.state = ProcessState::Starting;
+    claim.fingerprint = wanted.to_owned();
+    claim.retry_at = None;
+    claim.readiness = None;
+    if automatic {
+        claim.restarts += 1;
+        claim.attempts += 1;
+    } else {
+        claim.attempts = 0;
+    }
+    (claim, automatic)
+}
+
+/// What one probe job found.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Probe {
+    /// Running processes and their pid; exited ones and their status.
+    running: BTreeMap<String, u32>,
+    exited: BTreeMap<String, Option<i32>>,
+    /// Each readiness request's answer: an HTTP status, `000` for none,
+    /// `none` for no HTTP client in the computer.
+    http: BTreeMap<String, String>,
+}
+
+pub(crate) fn parse_probe(output: &str) -> Probe {
+    let mut probe = Probe::default();
+    for line in output.lines() {
+        let mut parts = line.split_whitespace();
+        match (parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some("process"), Some(name), Some("running"), Some(pid)) => {
+                if let Ok(pid) = pid.parse() {
+                    probe.running.insert(name.to_owned(), pid);
+                }
+            }
+            (Some("process"), Some(name), Some("exited"), code) => {
+                probe
+                    .exited
+                    .insert(name.to_owned(), code.and_then(|code| code.parse().ok()));
+            }
+            (Some("http"), Some(name), Some(status), None) => {
+                probe.http.insert(name.to_owned(), status.to_owned());
+            }
+            _ => {}
+        }
+    }
+    probe
+}
+
+/// A process event to record with the observation that produced it.
+type ProcessEvent = (&'static str, String, serde_json::Value);
+
+/// Apply one probe to what the computer is observed to run: exits,
+/// readiness, missed deadlines, and what each restart policy decides.
+/// Returns the events to record with it.
+pub(crate) fn apply_probe(
+    contents: &EnvironmentContents,
+    observed: &mut ObservedContents,
+    probe: &Probe,
+    evidence: &OperationEvidence,
+    now: chrono::DateTime<Utc>,
+) -> Vec<ProcessEvent> {
+    let mut events = vec![];
+    for (name, seen) in observed.processes.iter_mut() {
+        let spec = contents.processes.iter().find(|spec| &spec.name == name);
+        let running = probe.running.contains_key(name);
+        match seen.state {
+            ProcessState::Running if !running => {
+                let exit_code = probe.exited.get(name).copied().flatten();
+                seen.state = ProcessState::Exited;
+                seen.pid = None;
+                seen.evidence = evidence.clone();
+                if let Some(readiness) = &mut seen.readiness {
+                    readiness.state = ReadinessState::Unready;
+                    readiness.since = now;
+                    readiness.detail = Some("not running".into());
+                }
+                let message = match exit_code {
+                    Some(code) => format!("{name} exited with status {code}"),
+                    None => format!("{name} stopped running without an exit status"),
+                };
+                if let Some(spec) = spec {
+                    fail_process(
+                        spec,
+                        seen,
+                        "exited",
+                        message.clone(),
+                        exit_code,
+                        evidence.clone(),
+                        now,
+                    );
+                    events.push(failed_event(name, seen));
+                }
+            }
+            ProcessState::Running => {
+                let Some(spec) = spec else { continue };
+                match (&spec.readiness, &mut seen.readiness) {
+                    (Some(check), Some(readiness)) => {
+                        let Some(answer) = probe.http.get(name) else {
+                            continue;
+                        };
+                        let status = answer.parse::<u16>().ok().filter(|status| *status > 0);
+                        let ready = status.is_some_and(|status| check.accepts(status));
+                        readiness.detail = Some(match (status, answer.as_str()) {
+                            (Some(status), _) => format!("HTTP {status}"),
+                            (None, "none") => {
+                                "no HTTP client in the computer (curl, python3, or wget)".into()
+                            }
+                            (None, _) => "no answer".into(),
+                        });
+                        readiness.evidence = Some(evidence.clone());
+                        match (readiness.state, ready) {
+                            (ReadinessState::Starting | ReadinessState::Unready, true) => {
+                                readiness.state = ReadinessState::Ready;
+                                readiness.since = now;
+                                // Ready: the restarts that led here worked.
+                                seen.attempts = 0;
+                                events.push((
+                                    events::PROCESS_READY,
+                                    format!(
+                                        "{name} is ready ({})",
+                                        readiness.detail.clone().unwrap_or_default()
+                                    ),
+                                    json!({
+                                        "process": name,
+                                        "detail": readiness.detail,
+                                        "job_id": evidence.job_id,
+                                        "execution_id": evidence.execution_id,
+                                    }),
+                                ));
+                            }
+                            (ReadinessState::Ready, false) => {
+                                readiness.state = ReadinessState::Unready;
+                                readiness.since = now;
+                                events.push((
+                                    events::PROCESS_UNREADY,
+                                    format!(
+                                        "{name} is no longer ready ({})",
+                                        readiness.detail.clone().unwrap_or_default()
+                                    ),
+                                    json!({
+                                        "process": name,
+                                        "detail": readiness.detail,
+                                        "job_id": evidence.job_id,
+                                        "execution_id": evidence.execution_id,
+                                    }),
+                                ));
+                            }
+                            _ => {}
+                        }
+                        let waited = (now - readiness.since).to_std().unwrap_or_default();
+                        if readiness.state != ReadinessState::Ready
+                            && waited >= Duration::from_secs(check.deadline_seconds)
+                        {
+                            let message = format!(
+                                "{name} was not ready within {}s of {} ({}; expected {} from {})",
+                                check.deadline_seconds,
+                                if readiness.state == ReadinessState::Starting {
+                                    "starting"
+                                } else {
+                                    "becoming unready"
+                                },
+                                readiness.detail.clone().unwrap_or_default(),
+                                check.expect,
+                                check.path
+                            );
+                            readiness.state = ReadinessState::Unready;
+                            seen.state = ProcessState::Failed;
+                            seen.evidence = evidence.clone();
+                            fail_process(
+                                spec,
+                                seen,
+                                "readiness_timeout",
+                                message,
+                                None,
+                                evidence.clone(),
+                                now,
+                            );
+                            events.push(failed_event(name, seen));
+                        }
+                    }
+                    _ => {
+                        // No readiness to check: running long enough is
+                        // recovered.
+                        if seen.attempts > 0
+                            && seen
+                                .started_at
+                                .is_some_and(|at| (now - at).to_std().unwrap_or_default() >= STABLE)
+                        {
+                            seen.attempts = 0;
+                        }
+                    }
+                }
+            }
+            // It missed its readiness deadline and was left running: note
+            // when it stops.
+            ProcessState::Failed if seen.pid.is_some() && !running => {
+                seen.pid = None;
+            }
+            _ => {}
+        }
+    }
+    events
+}
+
+fn failed_event(name: &str, seen: &ObservedProcess) -> ProcessEvent {
+    let failure = seen.last_failure.as_ref().expect("a failure was recorded");
+    (
+        events::PROCESS_FAILED,
+        format!("{}; {}", failure.message, failure.decision),
+        json!({
+            "process": name,
+            "reason": failure.reason,
+            "exit_code": failure.exit_code,
+            "decision": failure.decision,
+            "retry_at": seen.retry_at,
+            "restarts": seen.restarts,
+            "attempts": seen.attempts,
+            "job_id": failure.evidence.job_id,
+            "execution_id": failure.evidence.execution_id,
+        }),
+    )
+}
+
+/// The readiness requests the next probe makes: every running process that
+/// has one, as the probe script's arguments.
+fn readiness_requests(contents: &EnvironmentContents, observed: &ObservedContents) -> Vec<String> {
+    let mut arguments = vec![];
+    for (name, seen) in &observed.processes {
+        let Some(spec) = contents.processes.iter().find(|spec| &spec.name == name) else {
+            continue;
+        };
+        if let (ProcessState::Running, Some(check), Some(_)) =
+            (seen.state, &spec.readiness, &seen.readiness)
+            && let Some(port) = check.port.or(spec.port)
+        {
+            arguments.extend([
+                name.clone(),
+                port.to_string(),
+                check.path.clone(),
+                check.request_timeout_seconds.to_string(),
+            ]);
+        }
+    }
+    arguments
+}
+
+/// Whether a process is waiting to become ready (again): readiness is then
+/// checked every second, not every probe interval.
+fn readiness_pending(observed: &ObservedContents) -> bool {
+    observed.processes.values().any(|seen| {
+        seen.state == ProcessState::Running
+            && seen
+                .readiness
+                .as_ref()
+                .is_some_and(|readiness| readiness.state != ReadinessState::Ready)
+    })
 }
 
 // The commands a controller runs in a computer. Each runs from the
@@ -405,6 +793,7 @@ root="$PWD"
 mkdir -p .compute/processes
 pidfile="$root/.compute/processes/$name.pid"
 log="$root/.compute/processes/$name.log"
+exitfile="$root/.compute/processes/$name.exit"
 if [ -f "$pidfile" ]; then
   old="$(cat "$pidfile")"
   kill -TERM "-$old" 2>/dev/null || kill -TERM "$old" 2>/dev/null || true
@@ -413,15 +802,29 @@ if [ -f "$pidfile" ]; then
   kill -KILL "-$old" 2>/dev/null || true
   rm -f "$pidfile"
 fi
+rm -f "$exitfile"
 if [ -n "$repository" ]; then cd "repos/$repository"; fi
-setsid "$@" >"$log" 2>&1 </dev/null &
+# The process runs under a small shell that records its exit status (for
+# the restart policy) and passes signals on to it.
+setsid sh -c '
+exitfile="$0"
+trap "kill -TERM \$child 2>/dev/null" TERM INT HUP
+"$@" &
+child=$!
+while :; do
+  wait "$child"; code=$?
+  kill -0 "$child" 2>/dev/null || break
+done
+echo "$code" >"$exitfile"
+' "$exitfile" "$@" >"$log" 2>&1 </dev/null &
 echo "$!" >"$pidfile"
 sleep 0.3
 pid="$(cat "$pidfile")"
 if kill -0 "$pid" 2>/dev/null; then
   echo "$pid"
 else
-  echo "the process exited as it started:" >&2
+  sleep 0.1
+  echo "the process exited as it started (status $(cat "$exitfile" 2>/dev/null || echo unknown)):" >&2
   tail -n 20 "$log" >&2
   exit 1
 fi
@@ -438,15 +841,44 @@ if [ -f "$pidfile" ]; then
 fi
 "#;
 
+/// Report every process (`process <name> running <pid>` or `process <name>
+/// exited <status>|-`), then make each readiness request passed as
+/// arguments (name, port, path, timeout seconds) from inside the computer:
+/// `http <name> <status>`, `000` when nothing answered.
 const PROBE_PROCESSES: &str = r#"for pidfile in .compute/processes/*.pid; do
   [ -e "$pidfile" ] || continue
   name="$(basename "$pidfile" .pid)"
   pid="$(cat "$pidfile")"
   if kill -0 "$pid" 2>/dev/null && ! grep -q '^State:.*Z' "/proc/$pid/status" 2>/dev/null; then
-    echo "$name running $pid"
+    echo "process $name running $pid"
   else
-    echo "$name exited"
+    code="$(cat ".compute/processes/$name.exit" 2>/dev/null || true)"
+    echo "process $name exited ${code:--}"
   fi
+done
+while [ "$#" -ge 4 ]; do
+  name="$1"; url="http://127.0.0.1:$2$3"; seconds="$4"; shift 4
+  if command -v curl >/dev/null 2>&1; then
+    status="$(curl -s -o /dev/null -w '%{http_code}' --max-time "$seconds" "$url" 2>/dev/null || true)"
+  elif command -v python3 >/dev/null 2>&1; then
+    status="$(python3 -c '
+import sys, urllib.request, urllib.error
+class Stay(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None
+try:
+    print(urllib.request.build_opener(Stay).open(sys.argv[1], timeout=float(sys.argv[2])).status)
+except urllib.error.HTTPError as error:
+    print(error.code)
+except Exception:
+    print("000")
+' "$url" "$seconds" 2>/dev/null || true)"
+  elif command -v wget >/dev/null 2>&1; then
+    status="$(wget -S -q -O /dev/null --max-redirect=0 -T "$seconds" -t 1 "$url" 2>&1 | awk '/^  HTTP\//{code=$2} END{print code}')"
+  else
+    status="none"
+  fi
+  echo "http $name ${status:-000}"
 done
 "#;
 
@@ -653,7 +1085,14 @@ impl Daemon {
         let converged = value.status == ComputerStatus::Running
             && value.spec_generation == spec.generation
             && value.observed.converged_generation == desired.generation
-            && plan(&desired, &value.observed, &record.value.config).is_none();
+            // A restart its policy scheduled is work still to do.
+            && plan(
+                &desired,
+                &value.observed,
+                &record.value.config,
+                chrono::DateTime::<Utc>::MAX_UTC,
+            )
+            .is_none();
         let machine = match (&value.target, &value.session_id) {
             (Some(target), Some(session_id)) => Some(MachineView {
                 target: target.clone(),
@@ -780,12 +1219,51 @@ impl Daemon {
             ComputerStatus::Failed => ("failed", format!("The computer failed: {reason}.")),
             status => (status.observed(), String::new()),
         };
+        // A process is never more alive than the machine it runs on.
+        let machine = match observed {
+            "running" | "reconciling" => None,
+            other => Some(other),
+        };
+        let processes = environment
+            .contents
+            .iter()
+            .flat_map(|contents| &contents.processes)
+            .map(|spec| {
+                let seen = computer.observed.processes.get(&spec.name);
+                let reality = ProcessReality {
+                    desired: match spec.desired {
+                        ProcessDesired::Running => "running",
+                        ProcessDesired::Stopped => "stopped",
+                    }
+                    .into(),
+                    process: machine
+                        .or_else(|| seen.map(ObservedProcess::status))
+                        .unwrap_or("pending")
+                        .into(),
+                    readiness: seen
+                        .and_then(|seen| seen.readiness.as_ref())
+                        .map(|readiness| readiness.state.as_str().into()),
+                    readiness_detail: seen
+                        .and_then(|seen| seen.readiness.as_ref())
+                        .and_then(|readiness| readiness.detail.clone()),
+                    pid: seen.and_then(|seen| seen.pid),
+                    restart_policy: spec.restart_policy,
+                    restarts: seen.map_or(0, |seen| seen.restarts),
+                    attempts: seen.map_or(0, |seen| seen.attempts),
+                    max_restarts: spec.max_restarts,
+                    next_restart_at: seen.and_then(|seen| seen.retry_at),
+                    last_failure: seen.and_then(|seen| seen.last_failure.clone()),
+                };
+                (spec.name.clone(), reality)
+            })
+            .collect();
         ComputerReality {
             desired: desired.into(),
             observed: observed.into(),
             confirmed_at: confirmed_at.filter(|_| computer.status == ComputerStatus::Running),
             since,
             explanation,
+            processes,
         }
     }
 
@@ -1920,6 +2398,19 @@ impl Daemon {
         value: ComputerRecord,
         event: Option<(&str, String, serde_json::Value)>,
     ) -> Result<(), EnvironmentError> {
+        self.advance_all(stored, environment, value, event.into_iter().collect())
+            .await
+    }
+
+    /// `advance`, with every event the transition produced, in one fenced
+    /// write.
+    async fn advance_all(
+        &self,
+        stored: &Stored<ComputerRecord>,
+        environment: &str,
+        value: ComputerRecord,
+        events: Vec<(&str, String, serde_json::Value)>,
+    ) -> Result<(), EnvironmentError> {
         if self.is_shutting_down() {
             return Err(EnvironmentError::ControllerUnavailable(
                 "the controller is stopping".into(),
@@ -1929,7 +2420,7 @@ impl Daemon {
         value.generation = stored.value.generation + 1;
         value.updated_at = Utc::now();
         let mut change = Change::new().with(|batch| batch.replace(stored, &value));
-        if let Some((kind, message, data)) = event {
+        for (kind, message, data) in events {
             change = self.event(change, kind, Scope::environment(environment), message, data);
         }
         self.apply(change).await
@@ -2723,7 +3214,7 @@ impl Daemon {
         }
         let contents = record.value.contents.clone().unwrap_or_default();
         let config = &record.value.config;
-        if let Some(action) = plan(&contents, &computer.observed, config) {
+        if let Some(action) = plan(&contents, &computer.observed, config, Utc::now()) {
             self.apply_action(record, stored, &client, &session_id, action)
                 .await?;
             return Ok(Step::Continue);
@@ -2746,53 +3237,71 @@ impl Daemon {
                 }),
             ));
         }
-        // Processes are checked for drift now and then.
+        // Processes are checked for drift now and then, and readiness every
+        // second while a process is not ready.
+        let interval = if readiness_pending(&value.observed) {
+            self.config.computer_probe.min(READINESS_POLL)
+        } else {
+            self.config.computer_probe
+        };
         let probe_due = !value.observed.processes.is_empty()
-            && value.observed.observed_at.is_none_or(|at| {
-                (Utc::now() - at).to_std().unwrap_or_default() >= self.config.computer_probe
-            });
+            && value
+                .observed
+                .observed_at
+                .is_none_or(|at| (Utc::now() - at).to_std().unwrap_or_default() >= interval);
+        let mut process_events = vec![];
         if probe_due {
             let (evidence, output) = self
                 .run_in_computer(
                     &client,
                     &session_id,
-                    script(PROBE_PROCESSES, []),
+                    script(
+                        PROBE_PROCESSES,
+                        readiness_requests(&contents, &value.observed),
+                    ),
                     Duration::from_secs(30),
                 )
                 .await;
             if evidence.outcome == "succeeded" {
-                let seen = output
-                    .lines()
-                    .filter_map(|line| {
-                        let mut parts = line.split_whitespace();
-                        Some((parts.next()?.to_owned(), parts.next()? == "running"))
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                for (process, observed) in value.observed.processes.iter_mut() {
-                    if observed.state == ProcessState::Running
-                        && !seen.get(process).copied().unwrap_or(false)
-                    {
-                        observed.state = ProcessState::Exited;
-                        observed.evidence = evidence.clone();
-                    }
-                }
+                process_events = apply_probe(
+                    &contents,
+                    &mut value.observed,
+                    &parse_probe(&output),
+                    &evidence,
+                    Utc::now(),
+                );
             }
             value.observed.observed_at = Some(Utc::now());
         }
         if value != *computer {
-            self.advance(stored, name, value, event).await?;
+            let mut events = event.into_iter().collect::<Vec<_>>();
+            for (kind, message, mut data) in process_events {
+                data["environment_id"] = json!(record.id);
+                data["target"] = json!(target);
+                data["session_id"] = json!(session_id);
+                events.push((kind, format!("{name}: {message}"), data));
+            }
+            self.advance_all(stored, name, value, events).await?;
             return Ok(Step::Continue);
         }
-        let wait = value
+        let now = Utc::now();
+        let since_probe = value
             .observed
             .observed_at
-            .map(|at| {
-                self.config
-                    .computer_probe
-                    .saturating_sub((Utc::now() - at).to_std().unwrap_or_default())
-            })
-            .unwrap_or(self.config.computer_probe)
+            .map(|at| (now - at).to_std().unwrap_or_default())
+            .unwrap_or_default();
+        // The next automatic restart wakes the driver when it is due.
+        let restart = value
+            .observed
+            .processes
+            .values()
+            .filter_map(|seen| seen.retry_at)
+            .min()
+            .map(|at| (at - now).to_std().unwrap_or_default());
+        let wait = interval
+            .saturating_sub(since_probe)
             .min(self.config.computer_liveness)
+            .min(restart.unwrap_or(Duration::MAX))
             .max(POLL);
         Ok(Step::Wait(wait))
     }
@@ -2809,6 +3318,7 @@ impl Daemon {
     ) -> Result<(), EnvironmentError> {
         let name = &record.value.name;
         let mut value = stored.value.clone();
+        let mut extra = vec![];
         let (item, kind, evidence) = match action {
             Action::SyncRepository(repository, wanted) => {
                 let (evidence, output) = self
@@ -2949,14 +3459,54 @@ impl Daemon {
                     if forget {
                         value.observed.processes.remove(&process);
                     } else if let Some(observed) = value.observed.processes.get_mut(&process) {
+                        // Stopped as asked: nothing restarts it.
                         observed.state = ProcessState::Stopped;
                         observed.pid = None;
+                        observed.retry_at = None;
+                        observed.readiness = None;
                         observed.evidence = evidence.clone();
                     }
                 }
                 (format!("process {process} stopped"), "process", evidence)
             }
             Action::StartProcess(process, wanted) => {
+                let now = Utc::now();
+                let current = value.observed.processes.get(&process.name);
+                // A start is recorded before it runs, fenced on this record:
+                // a driver whose record moved on (a replaced machine, another
+                // controller) records nothing and so starts nothing.
+                if current.is_none_or(|seen| {
+                    seen.state != ProcessState::Starting || seen.fingerprint != wanted
+                }) {
+                    let (claim, automatic) = claim_start(current, &wanted, now);
+                    let event = automatic.then(|| {
+                        (
+                            events::PROCESS_RESTARTING,
+                            format!(
+                                "{name}: restarting {} {} (restart {}, attempt {} of {}, restart policy {})",
+                                process.kind.as_str(),
+                                process.name,
+                                claim.restarts,
+                                claim.attempts,
+                                process.max_restarts,
+                                process.restart_policy.as_str()
+                            ),
+                            json!({
+                                "environment_id": record.id,
+                                "process": process.name,
+                                "restarts": claim.restarts,
+                                "attempt": claim.attempts,
+                                "max_restarts": process.max_restarts,
+                                "restart_policy": process.restart_policy,
+                                "reason": claim.last_failure.as_ref().map(|failure| &failure.reason),
+                                "target": value.target,
+                                "session_id": session_id,
+                            }),
+                        )
+                    });
+                    value.observed.processes.insert(process.name.clone(), claim);
+                    return self.advance(stored, name, value, event).await;
+                }
                 let mut arguments = vec![
                     process.name.clone(),
                     process.repository.clone().unwrap_or_default(),
@@ -2967,27 +3517,58 @@ impl Daemon {
                 let (evidence, output) = self
                     .run_in_computer_command(client, session_id, command, Duration::from_secs(60))
                     .await;
-                let succeeded = evidence.outcome == "succeeded";
-                value.observed.processes.insert(
-                    process.name.clone(),
-                    ObservedProcess {
-                        state: if succeeded {
-                            ProcessState::Running
-                        } else {
-                            ProcessState::Failed
-                        },
-                        fingerprint: wanted,
-                        pid: succeeded
-                            .then(|| {
-                                output
-                                    .lines()
-                                    .last()
-                                    .and_then(|line| line.trim().parse().ok())
-                            })
-                            .flatten(),
-                        evidence: evidence.clone(),
-                    },
-                );
+                let now = Utc::now();
+                let mut seen = value
+                    .observed
+                    .processes
+                    .get(&process.name)
+                    .cloned()
+                    .expect("the start was claimed");
+                seen.evidence = evidence.clone();
+                if evidence.outcome == "succeeded" {
+                    seen.state = ProcessState::Running;
+                    seen.pid = output
+                        .lines()
+                        .last()
+                        .and_then(|line| line.trim().parse().ok());
+                    seen.started_at = Some(now);
+                    seen.readiness = process.readiness.as_ref().map(|_| ObservedReadiness {
+                        state: ReadinessState::Starting,
+                        since: now,
+                        detail: None,
+                        evidence: None,
+                    });
+                } else {
+                    let error = evidence.error.clone().unwrap_or_default();
+                    // `... exited as it started (status 3):`
+                    let exit_code = error
+                        .split("(status ")
+                        .nth(1)
+                        .and_then(|rest| rest.split(')').next())
+                        .and_then(|code| code.parse().ok());
+                    seen.state = ProcessState::Failed;
+                    seen.pid = None;
+                    seen.readiness = None;
+                    fail_process(
+                        &process,
+                        &mut seen,
+                        "start_failed",
+                        format!(
+                            "{} did not start: {}",
+                            process.name,
+                            error.lines().next().unwrap_or_default()
+                        ),
+                        exit_code,
+                        evidence.clone(),
+                        now,
+                    );
+                    let (kind, message, mut data) = failed_event(&process.name, &seen);
+                    data["environment_id"] = json!(record.id);
+                    data["target"] = json!(value.target);
+                    data["session_id"] = json!(session_id);
+                    extra.push((kind, format!("{name}: {message}"), data));
+                }
+                value.observed.processes.insert(process.name.clone(), seen);
                 (
                     format!("{} {} started", process.kind.as_str(), process.name),
                     "process",
@@ -3018,34 +3599,30 @@ impl Daemon {
         {
             value.failure = None;
         }
-        self.advance(
-            stored,
-            name,
-            value.clone(),
-            Some((
-                if succeeded {
-                    events::CONTENTS_APPLIED
-                } else {
-                    events::CONTENTS_FAILED
-                },
-                format!(
-                    "{name}: {item}{} in place",
-                    if succeeded { "" } else { " failed" }
-                ),
-                json!({
-                    "environment_id": record.id,
-                    "kind": kind,
-                    "item": item,
-                    "target": value.target,
-                    "session_id": session_id,
-                    "job_id": evidence.job_id,
-                    "execution_id": evidence.execution_id,
-                    "outcome": evidence.outcome,
-                    "error": evidence.error,
-                }),
-            )),
-        )
-        .await
+        let mut events = vec![(
+            if succeeded {
+                events::CONTENTS_APPLIED
+            } else {
+                events::CONTENTS_FAILED
+            },
+            format!(
+                "{name}: {item}{} in place",
+                if succeeded { "" } else { " failed" }
+            ),
+            json!({
+                "environment_id": record.id,
+                "kind": kind,
+                "item": item,
+                "target": value.target,
+                "session_id": session_id,
+                "job_id": evidence.job_id,
+                "execution_id": evidence.execution_id,
+                "outcome": evidence.outcome,
+                "error": evidence.error,
+            }),
+        )];
+        events.extend(extra);
+        self.advance_all(stored, name, value.clone(), events).await
     }
 
     async fn run_in_computer(
@@ -3185,7 +3762,11 @@ impl Daemon {
         // session: its active jobs are cancelled and its machine suspended.
         let mut value = computer.clone();
         for (process, observed) in value.observed.processes.iter_mut() {
-            if observed.state == ProcessState::Running {
+            if matches!(
+                observed.state,
+                ProcessState::Running | ProcessState::Starting
+            ) || observed.pid.is_some()
+            {
                 let (evidence, _) = self
                     .run_in_computer(
                         &client,
@@ -3198,6 +3779,9 @@ impl Daemon {
                 observed.pid = None;
                 observed.evidence = evidence;
             }
+            // A stopped computer restarts nothing by itself.
+            observed.retry_at = None;
+            observed.readiness = None;
         }
         match client.stop_session(&session_id).await {
             Ok(_) => {}
@@ -3643,7 +4227,9 @@ impl Daemon {
 }
 
 /// Forget failed attempts, so they are tried again, and check processes
-/// again now.
+/// again now. A process that failed, or exited and is not due to restart,
+/// is started again as a recorded start: its restart count stays, and its
+/// restarts in a row begin again.
 fn forget_failures(observed: &mut ObservedContents) {
     observed
         .repositories
@@ -3654,9 +4240,16 @@ fn forget_failures(observed: &mut ObservedContents) {
     observed
         .builds
         .retain(|_, seen| seen.evidence.outcome == "succeeded");
-    observed
-        .processes
-        .retain(|_, seen| seen.state != ProcessState::Failed);
+    for seen in observed.processes.values_mut() {
+        let given_up = seen.state == ProcessState::Failed
+            || (seen.state == ProcessState::Exited && seen.retry_at.is_none());
+        if given_up {
+            seen.state = ProcessState::Starting;
+            seen.attempts = 0;
+            seen.retry_at = None;
+            seen.readiness = None;
+        }
+    }
     observed.observed_at = None;
 }
 
@@ -3785,6 +4378,9 @@ mod tests {
                 desired: ProcessDesired::Running,
                 port: None,
                 restart: 0,
+                readiness: None,
+                restart_policy: Default::default(),
+                max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
             }],
             projects: vec![],
             generation: 1,
@@ -3797,7 +4393,7 @@ mod tests {
         let config = BTreeMap::new();
         let mut observed = ObservedContents::default();
         let Some(Action::SyncRepository(repository, fingerprint)) =
-            plan(&desired, &observed, &config)
+            plan(&desired, &observed, &config, Utc::now())
         else {
             panic!("repositories first");
         };
@@ -3810,7 +4406,8 @@ mod tests {
                 evidence: evidence(),
             },
         );
-        let Some(Action::StartProcess(process, started)) = plan(&desired, &observed, &config)
+        let Some(Action::StartProcess(process, started)) =
+            plan(&desired, &observed, &config, Utc::now())
         else {
             panic!("then processes");
         };
@@ -3821,13 +4418,23 @@ mod tests {
                 fingerprint: started.clone(),
                 pid: Some(1),
                 evidence: evidence(),
+                started_at: None,
+                readiness: None,
+                restarts: 0,
+                attempts: 0,
+                retry_at: None,
+                last_failure: None,
             },
         );
-        assert_eq!(plan(&desired, &observed, &config), None, "converged");
+        assert_eq!(
+            plan(&desired, &observed, &config, Utc::now()),
+            None,
+            "converged"
+        );
         // The repository moves to another commit: the process restarts, in
         // place.
         observed.repositories.get_mut("app").unwrap().commit = Some("bbb".into());
-        match plan(&desired, &observed, &config) {
+        match plan(&desired, &observed, &config, Utc::now()) {
             Some(Action::StartProcess(_, fingerprint)) => assert_ne!(fingerprint, started),
             other => panic!("expected a restart, planned {other:?}"),
         }
@@ -3860,13 +4467,19 @@ mod tests {
                 fingerprint,
                 pid: None,
                 evidence: evidence(),
+                started_at: None,
+                readiness: None,
+                restarts: 0,
+                attempts: 0,
+                retry_at: None,
+                last_failure: None,
             },
         );
-        assert_eq!(plan(&desired, &observed, &config), None);
+        assert_eq!(plan(&desired, &observed, &config, Utc::now()), None);
         observed.processes.get_mut("api").unwrap().state = ProcessState::Running;
         desired.processes[0].desired = ProcessDesired::Stopped;
         assert_eq!(
-            plan(&desired, &observed, &config),
+            plan(&desired, &observed, &config, Utc::now()),
             Some(Action::StopProcess {
                 name: "api".into(),
                 forget: false
@@ -3874,7 +4487,7 @@ mod tests {
         );
         desired.processes.clear();
         assert_eq!(
-            plan(&desired, &observed, &config),
+            plan(&desired, &observed, &config, Utc::now()),
             Some(Action::StopProcess {
                 name: "api".into(),
                 forget: true
@@ -3883,7 +4496,7 @@ mod tests {
         observed.processes.clear();
         desired.repositories.clear();
         assert_eq!(
-            plan(&desired, &observed, &config),
+            plan(&desired, &observed, &config, Utc::now()),
             Some(Action::RemoveRepository("app".into()))
         );
     }
@@ -3901,7 +4514,9 @@ mod tests {
         });
         let config = BTreeMap::new();
         let mut observed = ObservedContents::default();
-        let Some(Action::SyncRepository(_, wanted)) = plan(&desired, &observed, &config) else {
+        let Some(Action::SyncRepository(_, wanted)) =
+            plan(&desired, &observed, &config, Utc::now())
+        else {
             panic!("the repository first");
         };
         observed.repositories.insert(
@@ -3913,7 +4528,8 @@ mod tests {
                 evidence: evidence(),
             },
         );
-        let Some(Action::Build(project, built)) = plan(&desired, &observed, &config) else {
+        let Some(Action::Build(project, built)) = plan(&desired, &observed, &config, Utc::now())
+        else {
             panic!("then the build");
         };
         assert_eq!(project.name, "app");
@@ -3929,9 +4545,10 @@ mod tests {
         );
         // A failed build starts nothing from its repository, and is not
         // retried until something changes.
-        assert_eq!(plan(&desired, &observed, &config), None);
+        assert_eq!(plan(&desired, &observed, &config, Utc::now()), None);
         observed.builds.get_mut("app").unwrap().evidence = evidence();
-        let Some(Action::StartProcess(process, started)) = plan(&desired, &observed, &config)
+        let Some(Action::StartProcess(process, started)) =
+            plan(&desired, &observed, &config, Utc::now())
         else {
             panic!("then the application");
         };
@@ -3943,13 +4560,19 @@ mod tests {
                 fingerprint: started,
                 pid: Some(1),
                 evidence: evidence(),
+                started_at: None,
+                readiness: None,
+                restarts: 0,
+                attempts: 0,
+                retry_at: None,
+                last_failure: None,
             },
         );
-        assert_eq!(plan(&desired, &observed, &config), None);
+        assert_eq!(plan(&desired, &observed, &config, Utc::now()), None);
         // New configuration: build again, then restart.
         let config = BTreeMap::from([("MODE".to_owned(), "x".to_owned())]);
         assert!(matches!(
-            plan(&desired, &observed, &config),
+            plan(&desired, &observed, &config, Utc::now()),
             Some(Action::Build(..))
         ));
         // The process sees the configuration, its port, and its own env.
@@ -3959,5 +4582,330 @@ mod tests {
         let env = process_env(&process, &config);
         assert_eq!(env["PORT"], "8080");
         assert_eq!(env["MODE"], "own");
+    }
+
+    /// A running process with a readiness check on port 8080, as its start
+    /// job left it.
+    fn web(
+        policy: ProcessRestartPolicy,
+        max_restarts: u32,
+        ready: bool,
+    ) -> (EnvironmentContents, ObservedContents) {
+        let mut desired = contents();
+        desired.repositories.clear();
+        let spec = &mut desired.processes[0];
+        spec.repository = None;
+        spec.port = Some(8080);
+        spec.readiness = ready.then(|| compute_core::HttpReadiness {
+            deadline_seconds: 10,
+            ..compute_core::HttpReadiness::path("/health")
+        });
+        spec.restart_policy = policy;
+        spec.max_restarts = max_restarts;
+        let mut observed = ObservedContents::default();
+        let wanted =
+            process_fingerprint(&desired.processes[0], &desired, &observed, &BTreeMap::new());
+        let (mut seen, _) = claim_start(None, &wanted, Utc::now());
+        seen.state = ProcessState::Running;
+        seen.pid = Some(42);
+        seen.started_at = Some(Utc::now());
+        seen.readiness = ready.then(|| ObservedReadiness {
+            state: ReadinessState::Starting,
+            since: Utc::now(),
+            detail: None,
+            evidence: None,
+        });
+        observed.processes.insert("api".into(), seen);
+        (desired, observed)
+    }
+
+    fn probed(
+        desired: &EnvironmentContents,
+        observed: &mut ObservedContents,
+        output: &str,
+        at: chrono::DateTime<Utc>,
+    ) -> Vec<&'static str> {
+        apply_probe(desired, observed, &parse_probe(output), &evidence(), at)
+            .into_iter()
+            .map(|(kind, _, _)| kind)
+            .collect()
+    }
+
+    fn starts(
+        desired: &EnvironmentContents,
+        observed: &ObservedContents,
+        at: chrono::DateTime<Utc>,
+    ) -> bool {
+        matches!(
+            plan(desired, observed, &BTreeMap::new(), at),
+            Some(Action::StartProcess(..))
+        )
+    }
+
+    #[test]
+    fn readiness_is_what_a_check_inside_the_computer_answered() {
+        let (desired, mut observed) = web(ProcessRestartPolicy::OnFailure, 5, true);
+        let now = Utc::now();
+        assert_eq!(
+            readiness_requests(&desired, &observed),
+            ["api", "8080", "/health", "2"]
+        );
+        // Started, and not answering yet: starting, not ready.
+        let running = "process api running 42\n";
+        assert!(
+            probed(
+                &desired,
+                &mut observed,
+                &format!("{running}http api 000"),
+                now
+            )
+            .is_empty()
+        );
+        assert_eq!(observed.processes["api"].status(), "starting");
+        assert!(readiness_pending(&observed));
+        // A 503 is an answer, and not ready.
+        probed(
+            &desired,
+            &mut observed,
+            &format!("{running}http api 503"),
+            now,
+        );
+        assert_eq!(observed.processes["api"].status(), "starting");
+        let readiness = observed.processes["api"].readiness.clone().unwrap();
+        assert_eq!(readiness.detail.as_deref(), Some("HTTP 503"));
+        // 2xx: ready, with the probe job as its evidence.
+        assert_eq!(
+            probed(
+                &desired,
+                &mut observed,
+                &format!("{running}http api 204"),
+                now
+            ),
+            [events::PROCESS_READY]
+        );
+        let seen = &observed.processes["api"];
+        assert_eq!(seen.status(), "ready");
+        let evidence = seen.readiness.clone().unwrap().evidence.unwrap();
+        assert_eq!(evidence.job_id, "job_1");
+        assert!(!readiness_pending(&observed));
+        // Then it stops answering: unready, still running, not yet failed.
+        assert_eq!(
+            probed(
+                &desired,
+                &mut observed,
+                &format!("{running}http api 000"),
+                now
+            ),
+            [events::PROCESS_UNREADY]
+        );
+        assert_eq!(observed.processes["api"].status(), "unready");
+        assert_eq!(observed.processes["api"].state, ProcessState::Running);
+    }
+
+    #[test]
+    fn a_missed_readiness_deadline_is_a_recorded_failure_and_the_policy_decides() {
+        for (policy, restarts) in [
+            (ProcessRestartPolicy::Never, false),
+            (ProcessRestartPolicy::OnFailure, true),
+            (ProcessRestartPolicy::Always, true),
+        ] {
+            let (desired, mut observed) = web(policy, 5, true);
+            let later = Utc::now() + chrono::Duration::seconds(11);
+            assert_eq!(
+                probed(
+                    &desired,
+                    &mut observed,
+                    "process api running 42\nhttp api 000",
+                    later
+                ),
+                [events::PROCESS_FAILED],
+                "{policy:?}"
+            );
+            let seen = &observed.processes["api"];
+            assert_eq!(seen.state, ProcessState::Failed);
+            // Never reported healthy: it runs, unready, past its deadline.
+            assert_eq!(seen.status(), "unready");
+            let failure = seen.last_failure.clone().unwrap();
+            assert_eq!(failure.reason, "readiness_timeout");
+            assert_eq!(
+                failure.evidence.job_id, "job_1",
+                "evidence names the probe job"
+            );
+            assert!(
+                failure.message.contains("within 10s"),
+                "{}",
+                failure.message
+            );
+            assert_eq!(
+                seen.retry_at.is_some(),
+                restarts,
+                "{policy:?}: {}",
+                failure.decision
+            );
+            let due = later + chrono::Duration::seconds(5);
+            assert_eq!(starts(&desired, &observed, due), restarts, "{policy:?}");
+        }
+    }
+
+    #[test]
+    fn exits_are_restarted_only_as_the_policy_says() {
+        let now = Utc::now();
+        for (policy, exit, restarts) in [
+            (ProcessRestartPolicy::Never, "3", false),
+            (ProcessRestartPolicy::Never, "0", false),
+            (ProcessRestartPolicy::OnFailure, "3", true),
+            (ProcessRestartPolicy::OnFailure, "-", true),
+            (ProcessRestartPolicy::OnFailure, "0", false),
+            (ProcessRestartPolicy::Always, "0", true),
+            (ProcessRestartPolicy::Always, "137", true),
+        ] {
+            let (desired, mut observed) = web(policy, 5, false);
+            assert_eq!(
+                probed(
+                    &desired,
+                    &mut observed,
+                    &format!("process api exited {exit}"),
+                    now
+                ),
+                [events::PROCESS_FAILED]
+            );
+            let seen = &observed.processes["api"];
+            assert_eq!(seen.state, ProcessState::Exited);
+            let failure = seen.last_failure.clone().unwrap();
+            assert_eq!(failure.exit_code, exit.parse().ok());
+            assert_eq!(seen.retry_at.is_some(), restarts, "{policy:?} {exit}");
+            // Never before its backoff.
+            assert!(!starts(&desired, &observed, now));
+            let later = now + chrono::Duration::seconds(2);
+            assert_eq!(
+                starts(&desired, &observed, later),
+                restarts,
+                "{policy:?} {exit}"
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_restarts_are_counted_once_and_bounded() {
+        let (desired, mut observed) = web(ProcessRestartPolicy::Always, 3, false);
+        let config = BTreeMap::new();
+        let mut now = Utc::now();
+        for attempt in 1..=3u32 {
+            probed(&desired, &mut observed, "process api exited 1", now);
+            let retry_at = observed.processes["api"].retry_at.expect("a restart");
+            // The backoff doubles: 1s, 2s, 4s.
+            let backoff = chrono::Duration::seconds(1 << (attempt - 1));
+            assert_eq!(retry_at - now, backoff);
+            now = retry_at;
+            let Some(Action::StartProcess(_, wanted)) = plan(&desired, &observed, &config, now)
+            else {
+                panic!("attempt {attempt} is due");
+            };
+            // The claim counts it; a claim found again (by a controller that
+            // restarted) runs without counting it again.
+            let (claim, automatic) = claim_start(observed.processes.get("api"), &wanted, now);
+            assert!(automatic);
+            assert_eq!(
+                (claim.restarts, claim.attempts),
+                (u64::from(attempt), attempt)
+            );
+            observed.processes.insert("api".into(), claim);
+            assert!(starts(&desired, &observed, now));
+            let seen = observed.processes.get_mut("api").unwrap();
+            seen.state = ProcessState::Running;
+            seen.started_at = Some(now);
+        }
+        // The fourth failure in a row: no more restarts, and it says why.
+        probed(&desired, &mut observed, "process api exited 1", now);
+        let seen = &observed.processes["api"];
+        assert_eq!(seen.retry_at, None);
+        let decision = seen.last_failure.clone().unwrap().decision;
+        assert!(decision.contains("3 restarts in a row"), "{decision}");
+        assert!(!starts(
+            &desired,
+            &observed,
+            now + chrono::Duration::hours(1)
+        ));
+        assert_eq!(seen.restarts, 3);
+        // An explicit reconcile starts it again: a recorded start, its count
+        // kept, its bound reset.
+        forget_failures(&mut observed);
+        let seen = &observed.processes["api"];
+        assert_eq!(
+            (seen.state, seen.restarts, seen.attempts),
+            (ProcessState::Starting, 3, 0)
+        );
+    }
+
+    #[test]
+    fn a_process_running_long_enough_or_ready_has_recovered() {
+        let (desired, mut observed) = web(ProcessRestartPolicy::Always, 3, false);
+        let seen = observed.processes.get_mut("api").unwrap();
+        seen.attempts = 2;
+        let started = seen.started_at.unwrap();
+        let soon = started + chrono::Duration::seconds(5);
+        probed(&desired, &mut observed, "process api running 42", soon);
+        assert_eq!(observed.processes["api"].attempts, 2);
+        let stable = started + chrono::Duration::seconds(31);
+        probed(&desired, &mut observed, "process api running 42", stable);
+        assert_eq!(observed.processes["api"].attempts, 0);
+    }
+
+    #[test]
+    fn stopped_means_no_automatic_restart() {
+        let (mut desired, mut observed) = web(ProcessRestartPolicy::Always, 5, true);
+        let now = Utc::now();
+        probed(&desired, &mut observed, "process api exited 1", now);
+        assert!(observed.processes["api"].retry_at.is_some());
+        // Wanted stopped while a restart was due: it is not restarted.
+        desired.processes[0].desired = ProcessDesired::Stopped;
+        assert!(!starts(
+            &desired,
+            &observed,
+            now + chrono::Duration::hours(1)
+        ));
+        // A claimed start is stopped, not run.
+        observed.processes.get_mut("api").unwrap().state = ProcessState::Starting;
+        assert_eq!(
+            plan(&desired, &observed, &BTreeMap::new(), now),
+            Some(Action::StopProcess {
+                name: "api".into(),
+                forget: false
+            })
+        );
+        // A failure recorded while wanted stopped schedules nothing.
+        let mut seen = observed.processes["api"].clone();
+        let spec = &desired.processes[0];
+        fail_process(
+            spec,
+            &mut seen,
+            "exited",
+            "gone".into(),
+            Some(1),
+            evidence(),
+            now,
+        );
+        assert_eq!(seen.retry_at, None);
+        assert!(
+            seen.last_failure
+                .unwrap()
+                .decision
+                .contains("wanted stopped")
+        );
+    }
+
+    #[test]
+    fn a_restart_policy_change_applies_in_place() {
+        let (mut desired, observed) = web(ProcessRestartPolicy::Always, 5, true);
+        let config = BTreeMap::new();
+        let fingerprint_of = |desired: &EnvironmentContents| {
+            process_fingerprint(&desired.processes[0], desired, &observed, &config)
+        };
+        let before = fingerprint_of(&desired);
+        desired.processes[0].restart_policy = ProcessRestartPolicy::Never;
+        desired.processes[0].max_restarts = 1;
+        assert_eq!(before, fingerprint_of(&desired));
+        desired.processes[0].readiness = None;
+        assert_ne!(before, fingerprint_of(&desired));
     }
 }

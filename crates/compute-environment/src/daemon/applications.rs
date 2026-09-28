@@ -101,7 +101,7 @@ impl Daemon {
                         Some(ProcessState::Running) => "running",
                         Some(ProcessState::Failed | ProcessState::Exited) => "failed",
                         Some(ProcessState::Stopped) => "stopped",
-                        None => "starting",
+                        Some(ProcessState::Starting) | None => "starting",
                     }
                 }
             }
@@ -317,6 +317,9 @@ impl Daemon {
                         desired: ProcessDesired::Running,
                         port: Some(port),
                         restart: current.map_or(0, |process| process.restart),
+                        readiness: None,
+                        restart_policy: Default::default(),
+                        max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
                     };
                     upsert(&mut contents.processes, process, |item| &item.name);
                     Ok(())

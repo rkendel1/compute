@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use compute_core::{
-    ComputeError, ComputerLifecycle, ComputerRequirements, EnvironmentContents, IsolationProfile,
-    NetworkPolicy, PackageSpec, ProcessDesired, ProcessKind, ProcessSpec, ProjectSpec,
-    RepositorySpec, SessionCommand,
+    ComputeError, ComputerLifecycle, ComputerRequirements, EnvironmentContents, HttpReadiness,
+    IsolationProfile, NetworkPolicy, PackageSpec, ProcessDesired, ProcessKind, ProcessSpec,
+    ProjectSpec, RepositorySpec, SessionCommand,
 };
 use compute_environment::client::DaemonClient;
 use compute_environment::{
@@ -453,6 +453,32 @@ pub struct ProcessArgs {
     /// as $PORT.
     #[arg(long)]
     port: Option<u16>,
+    /// Ready when a GET of this path, made inside the computer, answers as
+    /// expected (`/health`). Without it, a running process is never
+    /// `ready`, only `running`.
+    #[arg(long = "ready-path")]
+    ready_path: Option<String>,
+    /// The port the readiness request goes to (default: --port).
+    #[arg(long = "ready-port", requires = "ready_path")]
+    ready_port: Option<u16>,
+    /// The answers that mean ready: a status (`204`) or a class (`2xx`).
+    #[arg(long = "ready-expect", requires = "ready_path", default_value = "2xx")]
+    ready_expect: String,
+    /// How long one readiness request may take, in seconds.
+    #[arg(long = "ready-timeout", requires = "ready_path", default_value_t = 2)]
+    ready_timeout: u64,
+    /// How long it may take to become ready (or be unready) before that is
+    /// a failure, in seconds.
+    #[arg(long = "ready-deadline", requires = "ready_path", default_value_t = 60)]
+    ready_deadline: u64,
+    /// When Compute restarts it after it exits, fails to start, or misses
+    /// its readiness deadline: never, on-failure, or always. A process
+    /// stopped on purpose is never restarted.
+    #[arg(long = "restart", default_value = "always")]
+    restart_policy: compute_core::ProcessRestartPolicy,
+    /// Automatic restarts in a row that may fail before Compute stops.
+    #[arg(long = "max-restarts", default_value_t = compute_core::DEFAULT_MAX_RESTARTS)]
+    max_restarts: u32,
     #[arg(long)]
     json: bool,
     #[arg(last = true, required = true)]
@@ -474,6 +500,15 @@ impl ProcessArgs {
             },
             port: self.port,
             restart: 0,
+            readiness: self.ready_path.clone().map(|path| HttpReadiness {
+                path,
+                port: self.ready_port,
+                expect: self.ready_expect.clone(),
+                request_timeout_seconds: self.ready_timeout,
+                deadline_seconds: self.ready_deadline,
+            }),
+            restart_policy: self.restart_policy,
+            max_restarts: self.max_restarts,
         }
     }
 }
@@ -1251,19 +1286,57 @@ pub fn print_computer(view: &ComputerView, json: bool) {
     }
     if !view.desired.processes.is_empty() {
         println!("\nProcesses");
+        println!(
+            "  {:<16} {:<12} {:<8} {:<10} {:<8} {:<8} COMMAND",
+            "NAME", "KIND", "DESIRED", "PROCESS", "PID", "RESTARTS"
+        );
         for process in &view.desired.processes {
-            let observed = view.observed.processes.get(&process.name);
+            let reality = view.reality.processes.get(&process.name);
             println!(
-                "  {:<16} {:<12} {:<9} {:<8} {}",
+                "  {:<16} {:<12} {:<8} {:<10} {:<8} {:<8} {}",
                 process.name,
                 process.kind.as_str(),
-                observed.map_or("pending", |seen| seen.state.as_str()),
-                observed
-                    .and_then(|seen| seen.pid)
+                reality.map_or("running", |reality| reality.desired.as_str()),
+                reality.map_or("pending", |reality| reality.process.as_str()),
+                reality
+                    .and_then(|reality| reality.pid)
                     .map(|pid| pid.to_string())
-                    .unwrap_or_default(),
+                    .unwrap_or_else(|| "-".into()),
+                reality.map_or(0, |reality| reality.restarts),
                 process.command.join(" ")
             );
+            let Some(reality) = reality else { continue };
+            if let (Some(check), Some(readiness)) = (&process.readiness, &reality.readiness) {
+                println!(
+                    "    readiness: {readiness} (GET {} expects {}{})",
+                    check.path,
+                    check.expect,
+                    reality
+                        .readiness_detail
+                        .as_ref()
+                        .map(|detail| format!("; last: {detail}"))
+                        .unwrap_or_default()
+                );
+            }
+            println!(
+                "    restart: {} ({} in a row of at most {}{})",
+                reality.restart_policy.as_str(),
+                reality.attempts,
+                reality.max_restarts,
+                reality
+                    .next_restart_at
+                    .map(|at| format!("; next at {}", at.to_rfc3339()))
+                    .unwrap_or_default()
+            );
+            if let Some(failure) = &reality.last_failure {
+                println!(
+                    "    last failure: {} ({}, {}): {}",
+                    failure.message,
+                    failure.reason,
+                    failure.at.to_rfc3339(),
+                    failure.decision
+                );
+            }
         }
     }
     if !view.endpoints.is_empty() {

@@ -314,10 +314,182 @@ pub struct ProcessSpec {
     /// Increases to restart it in place, with nothing else changed.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub restart: u64,
+    /// The HTTP request that says it is ready to serve. Without one, a
+    /// running process is running, never `ready`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<HttpReadiness>,
+    /// Whether Compute restarts it when it exits or fails its readiness.
+    #[serde(default, skip_serializing_if = "ProcessRestartPolicy::is_default")]
+    pub restart_policy: ProcessRestartPolicy,
+    /// How many automatic restarts in a row may fail to recover it before
+    /// Compute stops trying (until it changes, or someone asks).
+    #[serde(
+        default = "default_max_restarts",
+        skip_serializing_if = "is_default_max_restarts"
+    )]
+    pub max_restarts: u32,
 }
 
 fn is_zero(value: &u64) -> bool {
     *value == 0
+}
+
+/// Restarts in a row that may fail before Compute stops restarting.
+pub const DEFAULT_MAX_RESTARTS: u32 = 5;
+/// The most a process may ask for.
+pub const MAX_RESTARTS_LIMIT: u32 = 100;
+
+fn default_max_restarts() -> u32 {
+    DEFAULT_MAX_RESTARTS
+}
+
+fn is_default_max_restarts(value: &u32) -> bool {
+    *value == DEFAULT_MAX_RESTARTS
+}
+
+/// When Compute restarts a desired-running process that stopped on its
+/// own: it exited, its start failed, or it missed its readiness deadline.
+/// A process stopped by its desired state is never restarted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessRestartPolicy {
+    /// Never: it stays exited or failed until it changes or someone asks.
+    Never,
+    /// When it fails: a non-zero or unknown exit status, a failed start, or
+    /// a missed readiness deadline. A clean exit (status 0) stays exited.
+    OnFailure,
+    /// Whenever it stops running.
+    #[default]
+    Always,
+}
+
+impl ProcessRestartPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::OnFailure => "on_failure",
+            Self::Always => "always",
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl std::str::FromStr for ProcessRestartPolicy {
+    type Err = crate::ComputeError;
+
+    fn from_str(value: &str) -> crate::Result<Self> {
+        match value {
+            "never" => Ok(Self::Never),
+            "on_failure" | "on-failure" => Ok(Self::OnFailure),
+            "always" => Ok(Self::Always),
+            other => Err(crate::ComputeError::InvalidWorkload(format!(
+                "restart policy {other:?} is not never, on_failure, or always"
+            ))),
+        }
+    }
+}
+
+/// An HTTP request, made inside the computer to the process's own port,
+/// whose answer says whether the process is ready to serve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpReadiness {
+    /// The path requested (`/health`). Redirects are not followed.
+    pub path: String,
+    /// The port requested; the process's own port when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// The answers that mean ready: a status (`204`) or a class (`2xx`).
+    #[serde(default = "default_expect")]
+    pub expect: String,
+    /// How long one request may take.
+    #[serde(default = "default_request_timeout")]
+    pub request_timeout_seconds: u64,
+    /// How long it may be starting, or unready once ready, before that is a
+    /// failure.
+    #[serde(default = "default_readiness_deadline")]
+    pub deadline_seconds: u64,
+}
+
+fn default_expect() -> String {
+    "2xx".into()
+}
+
+fn default_request_timeout() -> u64 {
+    2
+}
+
+fn default_readiness_deadline() -> u64 {
+    60
+}
+
+impl HttpReadiness {
+    /// A readiness check of `path` with every default.
+    pub fn path(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            port: None,
+            expect: default_expect(),
+            request_timeout_seconds: default_request_timeout(),
+            deadline_seconds: default_readiness_deadline(),
+        }
+    }
+
+    /// Whether an HTTP status means ready.
+    pub fn accepts(&self, status: u16) -> bool {
+        match self.expect.as_bytes() {
+            [class, b'x', b'x'] => status / 100 == u16::from(class - b'0'),
+            _ => self.expect.parse::<u16>() == Ok(status),
+        }
+    }
+
+    fn validate(&self, process: &str, port: Option<u16>) -> crate::Result<()> {
+        let invalid = |message: String| {
+            Err(crate::ComputeError::InvalidWorkload(format!(
+                "process {process}: readiness {message}"
+            )))
+        };
+        if !self.path.starts_with('/')
+            || self.path.len() > 1024
+            || self
+                .path
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte == b' ')
+        {
+            return invalid(format!(
+                "path {:?} must start with '/' and have no spaces or control characters",
+                self.path
+            ));
+        }
+        if self.port.or(port).is_none_or(|port| port == 0) {
+            return invalid("needs a port: the process's, or its own".into());
+        }
+        let class = matches!(self.expect.as_bytes(), [b'1'..=b'5', b'x', b'x']);
+        let status = self
+            .expect
+            .parse::<u16>()
+            .is_ok_and(|status| (100..=599).contains(&status));
+        if !class && !status {
+            return invalid(format!(
+                "expects {:?}: a status (200) or a class (2xx)",
+                self.expect
+            ));
+        }
+        if !(1..=60).contains(&self.request_timeout_seconds) {
+            return invalid("request timeout must be 1 to 60 seconds".into());
+        }
+        if !(1..=3600).contains(&self.deadline_seconds)
+            || self.deadline_seconds < self.request_timeout_seconds
+        {
+            return invalid(
+                "deadline must be 1 to 3600 seconds, and no shorter than a request".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// A project: software in one of the environment's repositories, with the
@@ -447,6 +619,15 @@ impl EnvironmentContents {
             if process.port == Some(0) {
                 return invalid(format!("process {} has port 0", process.name));
             }
+            if let Some(readiness) = &process.readiness {
+                readiness.validate(&process.name, process.port)?;
+            }
+            if process.max_restarts > MAX_RESTARTS_LIMIT {
+                return invalid(format!(
+                    "process {} may restart at most {MAX_RESTARTS_LIMIT} times in a row",
+                    process.name
+                ));
+            }
             if let Some(port) = process.port
                 && let Some(other) = self
                     .processes
@@ -557,22 +738,82 @@ pub struct ObservedPackage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessState {
+    /// A start was decided and recorded; its job has not reported yet. A
+    /// controller that restarts finds it here and runs the start, without
+    /// deciding (or counting) it again.
+    Starting,
     Running,
     Stopped,
     /// It was started and is no longer running.
     Exited,
+    /// Its start failed, or it missed its readiness deadline (it may still
+    /// be running, unready).
     Failed,
 }
 
 impl ProcessState {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Starting => "starting",
             Self::Running => "running",
             Self::Stopped => "stopped",
             Self::Exited => "exited",
             Self::Failed => "failed",
         }
     }
+}
+
+/// Whether a running process answers its readiness request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessState {
+    /// Started, and not yet ready.
+    Starting,
+    Ready,
+    /// It was ready, and no longer answers as ready.
+    Unready,
+}
+
+impl ReadinessState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Unready => "unready",
+        }
+    }
+}
+
+/// A process's readiness as its last check inside the computer found it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedReadiness {
+    pub state: ReadinessState,
+    /// When it entered this state: the deadline counts from here.
+    pub since: DateTime<Utc>,
+    /// What the last request got: `HTTP 200`, `HTTP 503`, `no answer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The probe job that made the last check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<OperationEvidence>,
+}
+
+/// Why a desired-running process stopped running as it should, and what
+/// its restart policy decided.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessFailure {
+    /// `exited`, `start_failed`, or `readiness_timeout`.
+    pub reason: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// What the restart policy decided.
+    pub decision: String,
+    pub at: DateTime<Utc>,
+    /// The job that established it.
+    pub evidence: OperationEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -585,6 +826,46 @@ pub struct ObservedProcess {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub evidence: OperationEvidence,
+    /// When the running process was started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<ObservedReadiness>,
+    /// Automatic restarts on this machine, ever.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub restarts: u64,
+    /// Automatic restarts in a row that have not yet recovered it: the
+    /// bound of `max_restarts`, and the backoff.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub attempts: u32,
+    /// When the next automatic restart is due. None: none is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<ProcessFailure>,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+impl ObservedProcess {
+    /// The process in one word, as every surface shows it: `starting`,
+    /// `ready`, `unready`, `running` (no readiness to check), `stopped`,
+    /// `exited`, or `failed`.
+    pub fn status(&self) -> &'static str {
+        match (self.state, &self.readiness) {
+            (ProcessState::Running, Some(readiness)) => readiness.state.as_str(),
+            (ProcessState::Failed, Some(readiness)) if self.pid.is_some() => {
+                // Running, but it missed its readiness deadline.
+                match readiness.state {
+                    ReadinessState::Ready => "ready",
+                    _ => "unready",
+                }
+            }
+            (state, _) => state.as_str(),
+        }
+    }
 }
 
 /// What the computer holds, as Compute last observed it. Every entry names
@@ -759,6 +1040,9 @@ mod tests {
             desired: ProcessDesired::Running,
             port: None,
             restart: 0,
+            readiness: None,
+            restart_policy: Default::default(),
+            max_restarts: DEFAULT_MAX_RESTARTS,
         }
     }
 

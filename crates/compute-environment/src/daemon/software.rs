@@ -313,6 +313,9 @@ pub(crate) fn propose(
                 desired: ProcessDesired::Running,
                 port: Some(next_port()),
                 restart: 0,
+                readiness: None,
+                restart_policy: Default::default(),
+                max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
             });
         } else {
             notes.push(
@@ -341,6 +344,9 @@ pub(crate) fn propose(
                 desired: ProcessDesired::Running,
                 port: web.then(&mut next_port),
                 restart: 0,
+                readiness: None,
+                restart_policy: Default::default(),
+                max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
             });
         }
     }
@@ -362,6 +368,9 @@ pub(crate) fn propose(
             desired: ProcessDesired::Running,
             port: Some(5432),
             restart: 0,
+            readiness: None,
+            restart_policy: Default::default(),
+            max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
         });
         notes.push("It appears to use PostgreSQL: a database service is proposed.".into());
     }
@@ -375,6 +384,9 @@ pub(crate) fn propose(
             desired: ProcessDesired::Running,
             port: Some(6379),
             restart: 0,
+            readiness: None,
+            restart_policy: Default::default(),
+            max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
         });
         notes.push("It appears to use Redis: a Redis service is proposed.".into());
     }
@@ -1701,15 +1713,22 @@ impl Daemon {
         }
         let restarted = step(&value.steps, "Restart applications")
             .is_some_and(|index| value.steps[index].status.is_done());
-        // Health: every process running, every endpoint answering.
+        // Health: every process running (and ready, when it has a readiness
+        // check, as a check inside the computer found it), every endpoint
+        // answering.
         if restarted {
             let down = processes
                 .iter()
                 .filter(|name| {
-                    view.observed
+                    let wants_ready = view
+                        .desired
                         .processes
-                        .get(*name)
-                        .is_none_or(|seen| seen.state != compute_core::ProcessState::Running)
+                        .iter()
+                        .any(|spec| &spec.name == *name && spec.readiness.is_some());
+                    view.observed.processes.get(*name).is_none_or(|seen| {
+                        seen.state != compute_core::ProcessState::Running
+                            || (wants_ready && seen.status() != "ready")
+                    })
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -1747,7 +1766,7 @@ impl Daemon {
             if waited > HEALTH_DEADLINE {
                 let mut problems = vec![];
                 if !down.is_empty() {
-                    problems.push(format!("not running: {}", down.join(", ")));
+                    problems.push(format!("not running or not ready: {}", down.join(", ")));
                 }
                 if !unreachable.is_empty() {
                     problems.push(format!("not answering: {}", unreachable.join(", ")));
@@ -2230,6 +2249,9 @@ mod tests {
             desired: ProcessDesired::Running,
             port: Some(3000),
             restart: 0,
+            readiness: None,
+            restart_policy: Default::default(),
+            max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
         };
         let assembly = ProjectAssembly {
             repository: Some(repository.clone()),
