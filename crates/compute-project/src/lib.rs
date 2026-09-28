@@ -15,8 +15,8 @@ mod plan;
 mod stack;
 
 pub use app_bundle::{
-    APP_BUNDLE_PROTOCOL, SuppliedFile, bind_bundle, declared_bundle, has_platform_package,
-    parse_inspection, resolve_bundle,
+    APP_BUNDLE_PROTOCOL, SuppliedFile, bind_bundle, declared_bundle, parse_inspection,
+    resolve_bundle,
 };
 pub use error::{FailureKind, ProjectError};
 pub use pax::{PAX_ENV, PAX_SCHEMA_VERSION, PAX_SOURCE, PaxExecutable, PaxObservation, PaxSource};

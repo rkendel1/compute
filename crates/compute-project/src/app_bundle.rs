@@ -15,7 +15,7 @@ use std::path::Path;
 
 use compute_core::{
     AppBundleBinding, AppBundleDeclaration, AppInspection, ResolvedAppBundle, RuntimeKind,
-    StackBinding, version_satisfies,
+    version_satisfies,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -188,16 +188,5 @@ pub fn parse_inspection(stdout: &str, receipt: &str) -> Option<AppInspection> {
                 .filter_map(|provider| provider.as_str().map(str::to_owned))
                 .collect(),
         })
-    })
-}
-
-/// Whether a stack binding contains the platform package that inspects
-/// application bundles.
-pub fn has_platform_package(binding: &StackBinding) -> bool {
-    binding.components.iter().any(|component| {
-        matches!(
-            &component.declared.source,
-            compute_core::ComponentSource::Package { package, .. } if package == "@appport/appboundry"
-        )
     })
 }
