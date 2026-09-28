@@ -130,11 +130,21 @@ impl PoolConfig {
         Ok(config)
     }
 
+    /// Read a pool file. A relative `token_file` names a file beside it.
     pub fn load(path: &Path) -> Result<Self, PlacementError> {
         let text = std::fs::read_to_string(path).map_err(|error| {
             PlacementError::InvalidConfig(format!("{}: {error}", path.display()))
         })?;
-        Self::parse(&text)
+        let mut config = Self::parse(&text)?;
+        let base = path.parent().unwrap_or_else(|| Path::new(""));
+        for provider in config.providers.values_mut() {
+            if let Some(token_file) = &mut provider.token_file
+                && token_file.is_relative()
+            {
+                *token_file = base.join(&*token_file);
+            }
+        }
+        Ok(config)
     }
 
     /// The implicit pool used when no configuration exists: the local

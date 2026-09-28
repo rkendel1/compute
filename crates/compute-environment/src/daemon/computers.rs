@@ -67,9 +67,11 @@ enum Step {
 
 /// A computer confirmed with its target: when, and at which record
 /// generation. Live evidence, kept in memory only.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct Confirmation {
     pub generation: u64,
+    /// The session the target confirmed.
+    pub session_id: Option<String>,
     pub at: chrono::DateTime<Utc>,
     pub checked: std::time::Instant,
 }
@@ -1927,6 +1929,7 @@ impl Daemon {
                     observed.value.environment_id.clone(),
                     Confirmation {
                         generation: observed.value.generation,
+                        session_id: observed.value.session_id.clone(),
                         at: Utc::now(),
                         checked: std::time::Instant::now(),
                     },
@@ -1934,6 +1937,18 @@ impl Daemon {
             }
             _ => {
                 confirmed.remove(&observed.value.environment_id);
+            }
+        }
+    }
+
+    /// A job in the session answered: the target still has the machine.
+    /// This keeps a running computer confirmed while its driver waits on a
+    /// long job; the periodic check still runs when it is due.
+    fn touch_session(&self, session_id: &str) {
+        let mut confirmed = self.computer_confirmed.lock().expect("confirmations");
+        for confirmation in confirmed.values_mut() {
+            if confirmation.session_id.as_deref() == Some(session_id) {
+                confirmation.at = Utc::now();
             }
         }
     }
@@ -2928,7 +2943,10 @@ impl Daemon {
         let job = loop {
             match tokio::time::timeout(patience, client.job_status(&job_id)).await {
                 Ok(Ok(job)) if job.status.is_terminal() => break job,
-                Ok(Ok(_)) => unanswered_since = None,
+                Ok(Ok(_)) => {
+                    unanswered_since = None;
+                    self.touch_session(session_id);
+                }
                 Ok(Err(error)) if error.kind == ProviderErrorKind::UnknownJob => {
                     return failed(job_id, submission.execution_id, error.to_string());
                 }

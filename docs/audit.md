@@ -714,10 +714,10 @@ agent can answer "can Compute do X here?" without reading prose.
 | Kind | Tests |
 | --- | --- |
 | browser | 4 |
-| rust-integration | 262 |
+| rust-integration | 263 |
 | rust-unit | 98 |
 | typescript | 30 |
-| total | 394 |
+| total | 395 |
 | ignored unless FELTDB_SERVER_BIN is set | 17 |
 
 | CI workflow | Runs |

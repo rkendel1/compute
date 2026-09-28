@@ -2363,7 +2363,13 @@ fn build_pool(config: &DaemonConfig) -> Result<ProviderPool, EnvironmentError> {
             }
             ProviderKind::Remote => {
                 let endpoint = provider.endpoint.clone().expect("validated");
-                let mut remote = RemoteProvider::new(endpoint);
+                // Every call to a target is bounded, so an unresponsive one
+                // is observed as unreachable instead of holding a driver.
+                let mut remote = RemoteProvider::new(endpoint).with_request_timeout(
+                    config
+                        .computer_liveness_timeout
+                        .max(Duration::from_secs(30)),
+                );
                 // The target's credential authenticates this controller to
                 // it; it is never an authority over what Compute owns.
                 if let Some(token) = provider.token(id).map_err(invalid)? {

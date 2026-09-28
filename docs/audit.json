@@ -5169,7 +5169,7 @@
    },
    {
     "path": "crates/compute-placement/tests/pool.rs",
-    "tests": 7,
+    "tests": 8,
     "ignored_without_feltdb": 0,
     "kind": "rust-integration"
    },

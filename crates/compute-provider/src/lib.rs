@@ -1465,6 +1465,7 @@ impl ComputeProvider for LocalProvider {
 pub struct RemoteProvider {
     endpoint: String,
     authorization: Option<String>,
+    timeout: Option<std::time::Duration>,
 }
 
 impl RemoteProvider {
@@ -1472,10 +1473,18 @@ impl RemoteProvider {
         Self {
             endpoint: endpoint.into().trim_end_matches('/').to_string(),
             authorization: None,
+            timeout: None,
         }
     }
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
         self.authorization = Some(format!("Bearer {}", token.into()));
+        self
+    }
+    /// Bound every request but synchronous execution (which lasts as long
+    /// as its workload): a target that accepts a connection and never
+    /// answers fails with `transport_failure` instead of holding the caller.
+    pub fn with_request_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
         self
     }
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ProviderError> {
@@ -1490,6 +1499,32 @@ impl RemoteProvider {
         self.send(method, path, Some(request), None).await
     }
     async fn send<B: Serialize, T: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&B>,
+        idempotency_key: Option<&str>,
+    ) -> Result<T, ProviderError> {
+        match self.timeout.filter(|_| path != "/compute/execute") {
+            Some(timeout) => {
+                tokio::time::timeout(timeout, self.exchange(method, path, body, idempotency_key))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(ProviderError::new(
+                            ProviderErrorKind::TransportFailure,
+                            format!(
+                                "{} did not answer {method} {path} within {:.1}s",
+                                self.endpoint,
+                                timeout.as_secs_f64()
+                            ),
+                        ))
+                    })
+            }
+            None => self.exchange(method, path, body, idempotency_key).await,
+        }
+    }
+
+    async fn exchange<B: Serialize, T: DeserializeOwned>(
         &self,
         method: &str,
         path: &str,
