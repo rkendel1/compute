@@ -397,6 +397,21 @@ impl Compute {
         Ok(result)
     }
 
+    async fn run_materialized_bundle(
+        &self,
+        materialized: compute_core::MaterializedBundle,
+        workload_id: WorkloadIdentity,
+        bundle_id: BundleIdentity,
+        control: Option<&compute_core::ExecutionControl>,
+    ) -> Result<compute_core::ExecutionResult> {
+        let request = materialized.request.clone();
+        let result = self
+            .run_identified(request, workload_id, Some(bundle_id), control)
+            .await;
+        drop(materialized);
+        result
+    }
+
     pub fn load_workload(&self, path: &Path) -> Result<WorkloadSpec> {
         WorkloadSpec::load(path)
     }
@@ -745,10 +760,10 @@ impl Compute {
         attach_dependencies(&bundle.workload, &mut materialized.request, None)?;
         materialized.request.isolation =
             resolve_override(bundle.workload.isolation.profile, isolation)?;
-        self.run_identified(
-            materialized.request,
+        self.run_materialized_bundle(
+            materialized,
             WorkloadIdentity::parse(verification.workload_id)?,
-            Some(BundleIdentity::parse(verification.bundle_id)?),
+            BundleIdentity::parse(verification.bundle_id)?,
             Some(control),
         )
         .await
@@ -769,10 +784,10 @@ impl Compute {
         attach_dependencies(&bundle.workload, &mut materialized.request, capsule)?;
         materialized.request.isolation =
             resolve_override(bundle.workload.isolation.profile, isolation)?;
-        self.run_identified(
-            materialized.request,
+        self.run_materialized_bundle(
+            materialized,
             WorkloadIdentity::parse(verification.workload_id)?,
-            Some(BundleIdentity::parse(verification.bundle_id)?),
+            BundleIdentity::parse(verification.bundle_id)?,
             None,
         )
         .await
@@ -1233,8 +1248,14 @@ fn default_version(kind: RuntimeKind) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use super::*;
+    use async_trait::async_trait;
+    use compute_core::{
+        ExecutionControl, ExecutionResult, ExecutionStatus, Output, ResourceUsage,
+        RuntimeCapabilities, RuntimeDescriptor,
+    };
 
     #[test]
     fn inspect_marks_javascript_as_ambiguous() {
@@ -1271,5 +1292,129 @@ mod tests {
         assert!(inspection.manifest);
         assert_eq!(inspection.runtime.unwrap().kind, RuntimeKind::Python);
         assert!(inspection.entrypoint.ends_with(PathBuf::from("main.py")));
+    }
+
+    struct DelayedReadAdapter;
+
+    #[async_trait]
+    impl RuntimeAdapter for DelayedReadAdapter {
+        fn kind(&self) -> RuntimeKind {
+            RuntimeKind::Shell
+        }
+
+        fn descriptor(&self) -> RuntimeDescriptor {
+            RuntimeDescriptor {
+                id: RuntimeKind::Shell,
+                version: "test".into(),
+                executable: "sh".into(),
+                capabilities: self.capabilities(),
+            }
+        }
+
+        async fn availability(&self, _requested: Option<&str>) -> RuntimeAvailability {
+            RuntimeAvailability {
+                kind: RuntimeKind::Shell,
+                version: Some("test".into()),
+                known: true,
+                installed: true,
+                available: true,
+                compatible: true,
+                selected: false,
+                executable: None,
+                source: compute_core::RuntimeSource::Embedded,
+                expected_version: Some("test".into()),
+                remediation: None,
+            }
+        }
+
+        async fn resolve(&self, _workload: &Workload) -> Result<compute_core::ResolvedRuntime> {
+            Ok(compute_core::ResolvedRuntime {
+                kind: RuntimeKind::Shell,
+                requested_version: None,
+                resolved_version: Some("test".into()),
+                executable: None,
+            })
+        }
+
+        fn capabilities(&self) -> RuntimeCapabilities {
+            RuntimeCapabilities::process()
+        }
+
+        async fn execute(
+            &self,
+            workload: &Workload,
+            _runtime: &compute_core::ResolvedRuntime,
+        ) -> Result<ExecutionResult> {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            std::fs::read_to_string(&workload.entrypoint)?;
+            Ok(ExecutionResult {
+                execution_id: "exec_test".into(),
+                runtime: RuntimeKind::Shell,
+                network: workload.network.clone(),
+                lifecycle: vec![
+                    ExecutionStatus::Created,
+                    ExecutionStatus::Resolved,
+                    ExecutionStatus::Prepared,
+                    ExecutionStatus::Started,
+                    ExecutionStatus::Running,
+                    ExecutionStatus::Completed,
+                ],
+                status: ExecutionStatus::Completed,
+                exit_code: Some(0),
+                stdout: Output::from_bytes(vec![], None),
+                stderr: Output::from_bytes(vec![], None),
+                duration: Duration::from_millis(25),
+                resource_usage: ResourceUsage::default(),
+                artifacts: vec![],
+                outputs: vec![],
+                missing_outputs: vec![],
+                error: None,
+                isolation: None,
+                dependencies: None,
+                provider: None,
+                admission: None,
+                receipt: None,
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_bundle_controlled_keeps_materialized_bundle_alive() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("main.sh"), "echo ok\n").unwrap();
+        let bundle = root.path().join("workload.compute");
+        WorkloadBundle::create_from(
+            WorkloadSpec {
+                version: compute_core::WORKLOAD_SPEC_VERSION.into(),
+                runtime: RuntimeKind::Shell,
+                runtime_version: None,
+                architecture: None,
+                entrypoint: "main.sh".into(),
+                args: vec![],
+                env: BTreeMap::new(),
+                inputs: vec![],
+                outputs: vec![],
+                resources: compute_core::ResourceLimits::default(),
+                network: compute_core::NetworkPolicy::Network,
+                isolation: compute_core::IsolationRequirement::default(),
+                dependencies: None,
+            },
+            root.path(),
+        )
+        .unwrap()
+        .write(&bundle)
+        .unwrap();
+
+        let compute = Compute {
+            adapters: vec![Box::new(DelayedReadAdapter)],
+            distribution_root: None,
+        };
+        let control = ExecutionControl::new();
+        let result = compute
+            .run_bundle_controlled(&bundle, None, None, None, &control)
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, ExecutionStatus::Completed);
     }
 }
