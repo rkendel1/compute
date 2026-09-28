@@ -13,35 +13,35 @@ because every later capability inherits them.
 ## Index
 
 <!-- audit:gap_index -->
-| Gap | Area | Current |
-| --- | --- | --- |
-| G-ARCH-1 | Core architecture | Targets accept any caller (AllowAllAuthorizer); the daemon authenticates to targets with nothing. |
-| G-ARCH-2 | Core architecture | Three deployment models: applications, bundle projects (node environments), computer versions/rollouts. |
-| G-ARCH-3 | Core architecture | Default control state is a local file; FeltDB is opt-in. |
-| G-ARCH-4 | Core architecture | Machine loss and target unreachability are not detected for computers without processes; the view keeps "running". |
-| G-RT-1 | Runtime support | Computers are workspaces (native processes) or unverified containers. |
-| G-RT-2 | Runtime support | Target features describe the host (`containers` = docker on PATH), not the computer. |
-| G-PROV-1 | Providers | No Fly/Railway/Render/cloud/bare-metal provisioning; targets must already run `compute serve`. |
-| G-DISC-1 | Placement | Targets are configured in a pool file; network, GPU model, nested virtualization are not discovered. |
-| G-PLACE-1 | Placement | persistent_storage, public_endpoint, terminal are requestable (UI checkboxes) but offered by no provider. |
-| G-EXEC-1 | Execution | Bundle workloads and applications execute on the daemon host. |
-| G-EXEC-2 | Execution | No cancellation or timeout controls in the UI; jobs have timeouts in the API. |
-| G-PROJ-1 | Projects | Local folders must be Git repositories; no upload. |
-| G-APP-1 | Applications | Endpoints are target-host:port; no domains, TLS, or ingress for computer applications. |
-| G-SVC-1 | Services | Database/Redis are command templates that assume binaries on the host. |
-| G-DEP-1 | Deployment | A release restarts processes (downtime); bundle releases have zero-downtime switching. |
-| G-REL-1 | Releases | A version is a commit and a digest; no artifact is kept. |
-| G-PROD-1 | Production | No approvals, no protected environments, no deploy freezes. |
-| G-UI-1 | UI | Targets, credentials, audit, node upgrades, runtimes, placement explanation are CLI-only. |
-| G-UI-2 | UI | The browser certification package fails; browser tests do not run in CI. |
-| G-CLI-1 | CLI | 52 commands have broken or missing help; `compute session` mixes target sessions and work sessions. |
-| G-API-1 | API | No versioning of the Compute API; routes without any client (/info, /metrics, …). |
-| G-AGENT-1 | Agents | Agents are operators; no delegation, budgets, or per-agent audit identity. |
-| G-SEC-1 | Security | See SEC-1…SEC-6. |
-| G-OBS-1 | Observability | Process logs are read on demand; no log streaming, metrics, or traces for computers in the UI. |
-| G-DOC-1 | Documentation | README and getting-started lead with a command that fails by default; daemon.md describes an old UI. |
-| G-TEST-1 | Testing | 87 CLI commands are never invoked by a test; container provider, target auth, and machine loss have no real tests. |
-| G-PERF-1 | Performance | Every event re-renders and refetches the whole page; /software fans out per environment. |
+| Gap | Area | Status | Current |
+| --- | --- | --- | --- |
+| G-ARCH-1 | Core architecture | closed | Closed: targets authenticate every request with a credential they issued; the daemon presents one; sessions belong to the control plane's identity (experiments.json#foundation, SEC-1, SEC-2). |
+| G-ARCH-2 | Core architecture | open | Three deployment models: applications, bundle projects (node environments), computer versions/rollouts. |
+| G-ARCH-3 | Core architecture | closed | Closed: FeltDB is the production authority; the file backend remains for local development and says so everywhere (launcher output, /info, `compute status`, `compute node info`: durability local-development). |
+| G-ARCH-4 | Core architecture | closed | Closed: every running computer is confirmed with its target; unreachable and lost are durable, evented, fenced observed states that keep desired state (experiments.json#foundation). |
+| G-RT-1 | Runtime support | open | Computers are workspaces (native processes) or unverified containers. |
+| G-RT-2 | Runtime support | open | Target features describe the host (`containers` = docker on PATH), not the computer. |
+| G-PROV-1 | Providers | open | No Fly/Railway/Render/cloud/bare-metal provisioning; targets must already run `compute serve`. |
+| G-DISC-1 | Placement | open | Targets are configured in a pool file; network, GPU model, nested virtualization are not discovered. |
+| G-PLACE-1 | Placement | open | persistent_storage, public_endpoint, terminal are requestable (UI checkboxes) but offered by no provider. |
+| G-EXEC-1 | Execution | open | Bundle workloads and applications execute on the daemon host. |
+| G-EXEC-2 | Execution | open | No cancellation or timeout controls in the UI; jobs have timeouts in the API. |
+| G-PROJ-1 | Projects | open | Local folders must be Git repositories; no upload. |
+| G-APP-1 | Applications | open | Endpoints are target-host:port; no domains, TLS, or ingress for computer applications. |
+| G-SVC-1 | Services | open | Database/Redis are command templates that assume binaries on the host. |
+| G-DEP-1 | Deployment | open | A release restarts processes (downtime); bundle releases have zero-downtime switching. |
+| G-REL-1 | Releases | open | A version is a commit and a digest; no artifact is kept. |
+| G-PROD-1 | Production | open | No approvals, no protected environments, no deploy freezes. |
+| G-UI-1 | UI | open | Targets, credentials, audit, node upgrades, runtimes, placement explanation are CLI-only. |
+| G-UI-2 | UI | closed | Closed: the certification is fixed for the action home and runs in CI with Chromium, with a computer-reality journey (.github/workflows/test.yml). |
+| G-CLI-1 | CLI | open | 52 commands have broken or missing help; `compute session` mixes target sessions and work sessions. |
+| G-API-1 | API | open | No versioning of the Compute API; routes without any client (/info, /metrics, …). |
+| G-AGENT-1 | Agents | open | Agents are operators; no delegation, budgets, or per-agent audit identity. |
+| G-SEC-1 | Security | open | See SEC-1…SEC-6. |
+| G-OBS-1 | Observability | open | Process logs are read on demand; no log streaming, metrics, or traces for computers in the UI. |
+| G-DOC-1 | Documentation | open | README and getting-started lead with a command that fails by default; daemon.md describes an old UI. |
+| G-TEST-1 | Testing | open | 87 CLI commands are never invoked by a test; the container provider has no real test (target auth and machine loss now do). |
+| G-PERF-1 | Performance | open | Every event re-renders and refetches the whole page; /software fans out per environment. |
 <!-- /audit -->
 
 ## Gaps by area
@@ -49,13 +49,13 @@ because every later capability inherits them.
 <!-- audit:gaps -->
 ### Core architecture
 
-**G-ARCH-1**
+**G-ARCH-1** (closed)
 
-- Current: Targets accept any caller (AllowAllAuthorizer); the daemon authenticates to targets with nothing.
+- Was: Targets accept any caller (AllowAllAuthorizer); the daemon authenticates to targets with nothing.
 - Desired: Targets trust only their control plane (a credential or mTLS), and sessions belong to the daemon's identity.
 - Impact: Anyone who reaches a target controls every computer on it; the daemon is not actually the authority.
 - Evidence: SEC-1, SEC-2
-- Next: Give `compute serve` a required credential and the pool a token for it; the launcher generates both.
+- Next: Closed: targets authenticate every request with a credential they issued; the daemon presents one; sessions belong to the control plane's identity (experiments.json#foundation, SEC-1, SEC-2).
 
 **G-ARCH-2**
 
@@ -65,21 +65,21 @@ because every later capability inherits them.
 - Evidence: models, execution_paths
 - Next: Decide the fate of node environments and applications: port their features (zero-downtime switch, ingress, domains) to computers, then retire or wrap them.
 
-**G-ARCH-3**
+**G-ARCH-3** (closed)
 
-- Current: Default control state is a local file; FeltDB is opt-in.
+- Was: Default control state is a local file; FeltDB is opt-in.
 - Desired: FeltDB as the one authority, or the file backend stated as a development convenience everywhere.
 - Impact: Contradicts the durability contract; the launcher never uses FeltDB.
 - Evidence: state-default-file
-- Next: Decide and document; make `compute` use FeltDB when configured and say which it uses in the UI.
+- Next: Closed: FeltDB is the production authority; the file backend remains for local development and says so everywhere (launcher output, /info, `compute status`, `compute node info`: durability local-development).
 
-**G-ARCH-4**
+**G-ARCH-4** (closed)
 
-- Current: Machine loss and target unreachability are not detected for computers without processes; the view keeps "running".
+- Was: Machine loss and target unreachability are not detected for computers without processes; the view keeps "running".
 - Desired: Every computer is periodically confirmed with its target; unreachable/lost is visible and actionable.
 - Impact: The UI shows healthy computers that do not exist.
 - Evidence: experiments.json
-- Next: Add a session liveness check to the controller's running step independent of processes; surface "unreachable".
+- Next: Closed: every running computer is confirmed with its target; unreachable and lost are durable, evented, fenced observed states that keep desired state (experiments.json#foundation).
 
 ### Runtime support
 
@@ -215,13 +215,13 @@ because every later capability inherits them.
 - Evidence: ui.not_in_ui
 - Next: Add Manage pages for targets and access.
 
-**G-UI-2**
+**G-UI-2** (closed)
 
-- Current: The browser certification package fails; browser tests do not run in CI.
+- Was: The browser certification package fails; browser tests do not run in CI.
 - Desired: Browser tests in CI.
 - Impact: UI regressions ship (one already did).
 - Evidence: ui-certification
-- Next: Install Chromium in CI; fix the certification for the new home route.
+- Next: Closed: the certification is fixed for the action home and runs in CI with Chromium, with a computer-reality journey (.github/workflows/test.yml).
 
 ### CLI
 
@@ -287,7 +287,7 @@ because every later capability inherits them.
 
 **G-TEST-1**
 
-- Current: 87 CLI commands are never invoked by a test; container provider, target auth, and machine loss have no real tests.
+- Current: 87 CLI commands are never invoked by a test; the container provider has no real test (target auth and machine loss now do).
 - Desired: Every product claim executable.
 - Impact: Regressions in untested paths.
 - Evidence: cli.json tests
@@ -309,11 +309,11 @@ because every later capability inherits them.
 The gaps depend on each other. The path that respects the dependencies:
 
 <!-- audit:backlog -->
-1. **FOUNDATION**
-   - Authenticate targets; the daemon holds the credential (G-ARCH-1)
-   - Detect machine loss and unreachable targets (G-ARCH-4)
-   - Decide the durable-state default (G-ARCH-3)
-   - Browser tests and the UI certification in CI; fix the home-route regression (G-UI-2)
+1. **FOUNDATION (done)**
+   - Done: authenticate targets; the daemon holds the credential (G-ARCH-1)
+   - Done: detect machine loss and unreachable targets (G-ARCH-4)
+   - Done: decide the durable-state default (G-ARCH-3)
+   - Done: browser tests and the UI certification in CI; fix the home-route regression (G-UI-2)
 2. **EXECUTION**
    - One deployment model: retire or port node environments and applications (G-ARCH-2, G-EXEC-1)
    - Cancel/retry for computer jobs and operations (G-EXEC-2)

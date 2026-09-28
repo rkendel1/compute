@@ -44,6 +44,10 @@ pub struct DaemonStatus {
     pub state_dir: String,
     /// Where durable control state lives.
     pub state: BackendInfo,
+    /// `production`, `local-development`, or `ephemeral`: see
+    /// [`BackendInfo::durability`].
+    #[serde(default)]
+    pub durability: String,
     /// Where durable artifacts (bundles, receipts) live.
     pub artifacts: String,
     /// Whether the last read of control state succeeded. When it did not,
@@ -151,6 +155,10 @@ pub struct SecurityView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlPlaneView {
     pub state: BackendInfo,
+    /// `production` (FeltDB, the durable authority), `local-development`
+    /// (a file on this machine), or `ephemeral` (memory).
+    #[serde(default)]
+    pub durability: String,
     /// `normal`, or `degraded_control_plane` while durable control state is
     /// unreachable: workloads keep running, reads are served from the last
     /// snapshot, and mutations are refused with `state_unavailable`.
@@ -497,6 +505,31 @@ pub struct ComputerView {
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<DateTime<Utc>>,
+    /// Desired and observed state, told apart: what every surface shows.
+    pub reality: ComputerReality,
+}
+
+/// What the environment wants of its computer, and what Compute last
+/// established about it. The API, the CLI, and the UI all show this; none
+/// derives its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerReality {
+    /// `running`, `stopped`, or `destroyed`: what the environment asks for.
+    pub desired: String,
+    /// What was last observed: `starting`, `running`, `unverified` (running
+    /// by its record, but not confirmed with its target recently),
+    /// `reconciling` (running, catching up with what it should hold),
+    /// `unreachable`, `lost`, `stopping`, `stopped`, `failed`, `destroyed`,
+    /// or `expired`.
+    pub observed: String,
+    /// When the target last confirmed the machine, while it is running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_at: Option<DateTime<Utc>>,
+    /// When the computer became unreachable or lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<DateTime<Utc>>,
+    /// What this means, and what to do about it.
+    pub explanation: String,
 }
 
 /// Summary row for `compute environment list` and the UI's first screen.
@@ -514,6 +547,9 @@ pub struct EnvironmentSummary {
     /// The status of the environment's computer, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer: Option<compute_core::ComputerStatus>,
+    /// Its desired and observed state, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reality: Option<ComputerReality>,
     /// Where the environment's computer runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,

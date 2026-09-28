@@ -783,6 +783,7 @@ async fn environment_placement_participates_in_provider_selection() {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let jobs = tempfile::tempdir().unwrap();
     let mut server = compute_provider::ServerConfig::local(endpoint.clone());
+    server.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     server.provider = Arc::new(
         LocalProvider::with_identity(compute_core::ProviderIdentity::Remote {
             id: endpoint.clone(),

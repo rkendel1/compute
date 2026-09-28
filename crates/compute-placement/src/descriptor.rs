@@ -200,6 +200,10 @@ pub struct ProviderDescriptor {
     /// Machine features the provider reports as a target (`kvm`, ...).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_features: Vec<String>,
+    /// How the provider authenticates callers, as it advertises it
+    /// (`credential`, `insecure-unauthenticated`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<String>,
     pub availability: Availability,
 }
 
@@ -530,6 +534,7 @@ impl ProviderDescriptor {
                 features.dedup();
                 features
             },
+            authentication: capabilities.authentication.clone(),
             availability,
         };
         descriptor.capability_version = descriptor.compute_capability_version();

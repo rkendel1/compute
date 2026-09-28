@@ -87,6 +87,7 @@ async fn serve(policy: ProviderPolicy) -> Server {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let jobs = tempfile::tempdir().unwrap();
     let mut config = ServerConfig::local(endpoint.clone());
+    config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     config.provider = Arc::new(
         LocalProvider::with_identity(ProviderIdentity::Remote {
             id: endpoint.clone(),
@@ -135,6 +136,7 @@ fn remote(endpoint: &str, priority: i64) -> ProviderConfig {
         application_endpoint: None,
         priority,
         token_env: None,
+        token_file: None,
     }
 }
 
@@ -145,6 +147,7 @@ fn local(priority: i64) -> ProviderConfig {
         application_endpoint: None,
         priority,
         token_env: None,
+        token_file: None,
     }
 }
 
@@ -788,6 +791,7 @@ async fn policy_denied_providers_are_excluded_and_never_execute() {
         .with_runtime_catalog(catalog()),
     );
     let mut config = ServerConfig::local(endpoint.clone());
+    config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     config.provider = locked.clone();
     config.job_store = jobs.path().to_path_buf();
     let handle = tokio::spawn(async move {
@@ -881,4 +885,40 @@ async fn policy_denied_providers_are_excluded_and_never_execute() {
     assert_eq!(bypass.admission.unwrap().codes(), ["runtime_denied"]);
     assert_eq!(locked.executions_started(), 0);
     handle.abort();
+}
+
+/// A pool member presents its target credential from a file, named
+/// relative to the pool file; the credential is never part of what the
+/// pool shows.
+#[test]
+fn a_token_file_is_read_beside_the_pool_and_never_shown() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("target.token"),
+        "cmpt_tcred_0123456789abcdef_secret\n",
+    )
+    .unwrap();
+    let path = directory.path().join("pool.toml");
+    std::fs::write(
+        &path,
+        "[providers.target]\nkind = \"remote\"\nendpoint = \"http://127.0.0.1:9\"\ntoken_file = \"target.token\"\n",
+    )
+    .unwrap();
+    let config = compute_placement::PoolConfig::load(&path).unwrap();
+    let member = &config.providers["target"];
+    assert_eq!(
+        member.token("target").unwrap().as_deref(),
+        Some("cmpt_tcred_0123456789abcdef_secret")
+    );
+    let pool = compute_placement::ProviderPool::from_config(&config).unwrap();
+    let shown = serde_json::to_string(&pool.inspect()).unwrap();
+    assert!(shown.contains("\"authenticated\":true"), "{shown}");
+    assert!(!shown.contains("secret"), "{shown}");
+    // One source of a credential, not two.
+    assert!(
+        compute_placement::PoolConfig::parse(
+            "[providers.target]\nkind = \"remote\"\nendpoint = \"http://127.0.0.1:9\"\ntoken_file = \"a\"\ntoken_env = \"B\"\n",
+        )
+        .is_err()
+    );
 }

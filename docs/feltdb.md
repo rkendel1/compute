@@ -28,6 +28,22 @@ reads filtered in Compute are prohibited on production controller paths.**
 
 Compute owns execution. FeltDB owns durable state.
 
+**Production control planes use FeltDB** (`[state] backend = "feltdb"`, or
+`--state feltdb`). Two other backends stay behind the same `StateStore`
+abstraction, and every surface says which is active — `compute` (the
+launcher) prints it, and `GET /info`, `compute status`, and
+`compute node info` report its `durability`:
+
+| Backend | `durability` | For |
+| --- | --- | --- |
+| `feltdb` | `production` | Every control plane that matters: the durable authority, shared by every controller |
+| `file` (`control-state.json`) | `local-development` | One developer's machine, when nothing is configured: durable on that disk only |
+| `memory` | `ephemeral` | Tests; gone when the process ends |
+
+The launcher never chooses a model of its own: it uses what `[state]` (or
+`--state`) says, and without configuration uses the file backend and says
+it is local development.
+
 This page is the contract between them. The certification that the
 contract holds is [feltdb-0.11.8-consumer-certification.md](feltdb-0.11.8-consumer-certification.md).
 
@@ -192,6 +208,7 @@ The controller keeps working state in memory. None of it is authority.
 | Operator credential verifiers | `OperatorCredential` | Authenticating without a round trip | Reload every 30 s and after recovery | 30 s | Reloaded |
 | Computer drivers (one task per environment computer) | The `Computer` record | Driving one computer's lifecycle and contents | Every step re-reads its record by identity (`refresh_targeted`) and writes fenced by its version; a record another writer changed wins | One step; a driver never acts on a record older than its last read | Restarted from the records; provisioning finds the session by its idempotency reference, never creates a second |
 | Orphan sweep schedule | — | When to compare target sessions against `Computer` records | Every 60 s | — | Runs on the first cycle |
+| Computer confirmations (when each running computer was last confirmed by its target, and at which record generation) | The target's answer; transitions it causes (`unreachable`, `lost`, `recovered`) are written to the `Computer` record, fenced by its version | Reporting `confirmed_at`, and `unverified` instead of `running` when the confirmation is old | A new confirmation (every `computer_liveness`, 10 s), any transition away from `running`, and any record the confirmation was not made against | `3 × computer_liveness + computer_liveness_timeout` (40 s); past that the view says `unverified`, never `running` | Empty: every running computer is confirmed again on its driver's first step, and reads `unverified` until then |
 
 Rules:
 
@@ -244,9 +261,10 @@ Recovery, in order, before a mutation is accepted:
 
 ## The model and upgrades
 
-The model is `compute.flow` (`compute.state@1`), at **generation 6**
+The model is `compute.flow` (`compute.state@1`), at **generation 7**
 (`compute_state::MODEL_GENERATION`). Each generation only adds collections,
-optional fields, and indexes.
+optional fields, indexes, and enumeration values (generation 7: a
+computer's `status` may be `unreachable` or `lost`).
 
 | Active model vs. this build | Controller start | `compute control-plane upgrade` |
 | --- | --- | --- |

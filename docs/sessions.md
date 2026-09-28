@@ -280,7 +280,8 @@ and removed on destroy or expiry.
 
 ```sh
 compute serve --listen 0.0.0.0:8080 --public-url https://node.example \
-  --job-store /var/lib/compute/jobs --session-store /var/lib/compute/sessions
+  --job-store /var/lib/compute/jobs --session-store /var/lib/compute/sessions \
+  --credentials /var/lib/compute/target-credentials.json
 ```
 
 `--offer` includes `sessions` by default; `--offer run,jobs` withholds them,
@@ -318,10 +319,11 @@ The session API does not change when the provider does.
   authorizer resolves from the request's credential; nothing a client sends
   can set or change it. Another principal cannot list, inspect, connect to,
   run commands in, stop, claim, or destroy your session, or read the jobs it
-  ran. `compute serve` uses the explicit allow-all authorizer, as it does for
-  jobs ([remote-execution.md](remote-execution.md)): its principal is the
-  request's credential, and callers without one share `anonymous`. Replace
-  the authorizer at your boundary before exposing a server.
+  ran; to it, your sessions are `unknown_session`. `compute serve`
+  authenticates every request with a target credential and resolves the
+  principal to the control plane that credential names, so a session stays
+  its control plane's across restarts and credential rotation
+  ([remote-execution.md](remote-execution.md#target-credentials)).
 - **Endpoints need a decision.** Each requested endpoint is authorized
   separately; a refusal creates nothing.
 - **Provider credentials are never authority.** A provider's identifier for

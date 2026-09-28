@@ -5,6 +5,8 @@
 
 #[path = "support/runtimes.rs"]
 mod runtimes;
+#[path = "support/targets.rs"]
+mod targets;
 
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
@@ -61,6 +63,11 @@ fn chromium() -> Option<PathBuf> {
 #[test]
 fn manage_and_work_are_modes_of_one_environment() {
     let (Some(module), Some(browser)) = (playwright(), chromium()) else {
+        // CI certifies the UI in a browser: there, a missing browser fails.
+        assert!(
+            std::env::var_os("COMPUTE_REQUIRE_BROWSER").is_none(),
+            "COMPUTE_REQUIRE_BROWSER is set, but there is no Playwright or Chromium"
+        );
         eprintln!("skipped: no Playwright or Chromium here");
         return;
     };
@@ -87,6 +94,7 @@ fn manage_and_work_are_modes_of_one_environment() {
     }
 
     let target = format!("127.0.0.1:{}", free_port());
+    let credential = targets::issue(&root, "target-a", "control-plane");
     let mut serve = std::process::Command::new(env!("CARGO_BIN_EXE_compute"));
     runtimes::with_fixture_runtimes(&mut serve);
     let _target = Kill(
@@ -97,6 +105,8 @@ fn manage_and_work_are_modes_of_one_environment() {
             .arg(root.join("jobs"))
             .arg("--session-store")
             .arg(root.join("sessions"))
+            .arg("--credentials")
+            .arg(&credential.credentials)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -105,7 +115,10 @@ fn manage_and_work_are_modes_of_one_environment() {
     wait_for_port(&target);
     std::fs::write(
         root.join("pool.toml"),
-        format!("[providers.target-a]\nkind = \"remote\"\nendpoint = \"http://{target}\"\n"),
+        format!(
+            "[providers.target-a]\nkind = \"remote\"\nendpoint = \"http://{target}\"\n{}",
+            credential.pool_line()
+        ),
     )
     .unwrap();
     let listen = format!("127.0.0.1:{}", free_port());

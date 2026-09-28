@@ -78,6 +78,10 @@ const STATES = {
   exited: ['idle', '○', 'Exited'],
   destroyed: ['idle', '○', 'Destroyed'],
   degraded: ['warn', '◐', 'Degraded'],
+  reconciling: ['warn', '◐', 'Reconciling'],
+  unverified: ['warn', '◐', 'Unverified'],
+  unreachable: ['bad', '◌', 'Unreachable'],
+  lost: ['bad', '×', 'Lost'],
   unknown: ['idle', '○', 'Unknown'],
   stopped: ['idle', '○', 'Stopped'],
   superseded: ['idle', '○', 'Superseded'],
@@ -97,6 +101,39 @@ const RELEASE = ['pending', 'starting', 'ready', 'network_ready', 'switching', '
 function state(value, text) {
   const [tone, glyph, label] = STATES[value] || ['idle', '○', value];
   return h('span', { class: `state ${tone}` }, h('span', { class: 'glyph', 'aria-hidden': 'true' }, glyph), text || label);
+}
+
+/// What Compute last established about a computer, in the API's one
+/// vocabulary (`reality.observed`): never what the environment wants of it.
+function observedOf(computer) {
+  return computer.reality ? computer.reality.observed : computer.status;
+}
+
+/// The same, for an environment summary row.
+function observedSummary(environment) {
+  return environment.reality ? environment.reality.observed : environment.computer;
+}
+
+/// Why a computer is not simply running, and what to do about it.
+function realityPanel(name, computer) {
+  const reality = computer.reality || {};
+  const observed = reality.observed;
+  if (!['unreachable', 'lost', 'unverified'].includes(observed)) return null;
+  const reconcile = (label) => h('button', { 'data-reality-action': 'reconcile',
+    onclick: () => act(`Checking ${name}'s computer`, () => api('POST', `/environments/${enc(name)}/reconcile`)) }, label);
+  return h('div', { class: `panel reality ${observed === 'unverified' ? 'warn' : 'error'}`, 'data-reality': observed, role: 'status' },
+    h('div', {}, state(observed), ' ', h('span', { class: 'meta' }, `wanted: ${reality.desired}`),
+      reality.since ? h('span', { class: 'meta' }, ` · since ${ago(reality.since)}`) : null),
+    h('p', { 'data-reality-explanation': 'true' }, reality.explanation),
+    observed === 'unreachable'
+      ? h('p', { class: 'meta', 'data-recovering': 'true' }, 'Recovering: Compute keeps asking the target, and this computer returns to running on its own when the target answers with the same machine.')
+      : null,
+    h('div', { class: 'actions row' },
+      observed === 'lost' ? [
+        h('button', { class: 'primary', 'data-reality-action': 'replace', onclick: () => replaceDialog(name, computer) }, 'Replace machine…'),
+        reconcile('Check again'),
+        h('button', { class: 'danger', onclick: () => destroyComputer(name) }, 'Destroy'),
+      ] : reconcile('Check now')));
 }
 
 /// The single status of a project or environment: actual state, unless it
@@ -448,7 +485,7 @@ async function environmentView(name) {
   const header = [
     h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Environments'), ' / ', name),
     h('div', { class: 'title', 'data-view': 'manage', 'data-environment-id': environment.environment_id },
-      h('h1', {}, name.toUpperCase()), computer ? state(computer.status) : status(environment),
+      h('h1', {}, name.toUpperCase()), computer ? state(observedOf(computer)) : status(environment),
       h('span', { class: 'chip mono', title: 'Environment ID' }, environment.environment_id),
       h('div', { class: 'actions' },
         computer
@@ -633,7 +670,7 @@ function machineFacts(computer) {
   const requirements = computer.requirements || {};
   const machine = computer.machine || {};
   return [
-    fact('Status', state(computer.status)),
+    fact('Status', state(observedOf(computer))),
     fact('Resources', [requirements.cpu_count ? `${requirements.cpu_count} CPU` : null, requirements.memory_bytes ? bytes(requirements.memory_bytes) : null, requirements.architecture]
       .filter(Boolean).join(' · ') || 'Any'),
     fact('Target', computer.target
@@ -660,6 +697,7 @@ function machineSection(name, environment) {
   const live = !['destroying', 'destroyed', 'expired'].includes(computer.status);
   return [
     h('h2', {}, 'Computer'),
+    realityPanel(name, computer),
     h('div', { class: 'grid', 'data-machine': 'computer' }, machineFacts(computer),
       fact('Placement', short(computer.placement_id), true),
       fact('Contents', computer.converged ? state('running', `Converged · generation ${computer.desired.generation || 0}`)
@@ -716,7 +754,7 @@ async function workHomeView() {
         onkeydown: (event) => { if (event.key === 'Enter') location.hash = `#/work/${enc(environment.name)}`; } },
       h('div', { class: 'name' }, environment.name),
       h('div', { class: 'meta' }, environment.target ? `on ${environment.target}` : 'placing…'),
-      state(environment.computer))))
+      state(observedSummary(environment)))))
       : h('div', { class: 'panel empty' }, 'No environment has a computer yet. Create one, or start a temporary one.'),
   ];
 }
@@ -838,11 +876,12 @@ async function workView(name) {
 
   return h('div', { class: 'work draft', 'data-view': 'work', 'data-environment-id': environment.environment_id },
     h('div', { class: 'crumbs' }, h('a', { href: '#/work' }, 'Work'), ' / ', name),
-    h('div', { class: 'title' }, h('h1', {}, name), state(computer.status),
+    h('div', { class: 'title' }, h('h1', {}, name), state(observedOf(computer)),
       h('span', { class: 'chip mono', title: 'Environment ID' }, environment.environment_id),
       h('div', { class: 'actions' },
         h('a', { class: 'button', href: `#/environments/${enc(name)}` }, 'Manage'),
         h('button', { disabled: !live, onclick: () => act(`Reconciling ${name}`, () => api('POST', `/environments/${enc(name)}/reconcile`)) }, 'Reconcile'))),
+    realityPanel(name, computer),
     h('div', { class: 'subtitle' }, 'What do you want to do?'),
     h('div', { class: 'actions row' },
       h('a', { class: 'button', href: '#/run?add=1' }, 'Add another project'),
@@ -1063,7 +1102,7 @@ async function homeView() {
         onclick: () => { location.hash = `#/work/${enc(environment.name)}`; } },
       h('div', { class: 'name' }, environment.name),
       h('div', { class: 'meta' }, environment.target ? `on ${environment.target}` : 'placing…'),
-      state(environment.computer))))
+      state(observedSummary(environment)))))
       : h('div', { class: 'panel empty' }, 'No computers yet.'),
   ];
 }
@@ -2200,9 +2239,14 @@ async function refreshDaemon() {
   const box = document.getElementById('daemon');
   try {
     const status = await api('GET', '/status');
-    box.replaceChildren(
+    box.replaceChildren(...[
       state(status.state_available ? 'healthy' : 'failed', status.state_available ? `${status.state.kind} state` : 'control state unavailable'),
-      h('span', { class: 'chip', title: status.state.location }, status.instance_id));
+      // Production durability is FeltDB; anything else says what it is.
+      status.durability && status.durability !== 'production'
+        ? h('span', { class: 'chip', 'data-durability': status.durability, title: 'Production control planes use FeltDB' }, status.durability.replace('-', ' '))
+        : null,
+      h('span', { class: 'chip', title: status.state.location }, status.instance_id),
+    ].filter(Boolean));
   } catch (error) {
     box.replaceChildren(state('failed', error.kind === 'authentication_failed'
       ? 'credential required: set a token'

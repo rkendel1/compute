@@ -28,10 +28,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 mod containers;
+pub mod credentials;
 mod jobs;
 mod runtime;
 mod sessions;
 pub use containers::{CONTAINER_WORKSPACE, ContainerSessionProvider};
+pub use credentials::{
+    INSECURE_AUTHENTICATION, InsecureUnauthenticated, NoCredentialsConfigured, TargetAuthorizer,
+    TargetCredentials,
+};
 pub use runtime::RuntimeCatalog;
 pub use sessions::{
     DEFAULT_SESSION_SWEEP, DEFAULT_SESSION_TTL, EnvironmentState, ProviderConnection,
@@ -356,6 +361,11 @@ pub struct ProviderCapabilities {
     /// (`containers`, `kvm`, `firecracker`, `gpu`, `virtualization`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_features: Vec<String>,
+    /// How the endpoint authenticates callers: `credential` for a target
+    /// that trusts only the control planes it issued credentials to,
+    /// `insecure-unauthenticated` for an explicitly open development one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<String>,
     pub inventory: RuntimeInventory,
 }
 
@@ -1375,6 +1385,7 @@ impl ComputeProvider for LocalProvider {
             execution: Some(self.execution),
             sessions: None,
             target_features: vec![],
+            authentication: None,
             inventory,
         })
     }
@@ -1454,6 +1465,7 @@ impl ComputeProvider for LocalProvider {
 pub struct RemoteProvider {
     endpoint: String,
     authorization: Option<String>,
+    timeout: Option<std::time::Duration>,
 }
 
 impl RemoteProvider {
@@ -1461,10 +1473,18 @@ impl RemoteProvider {
         Self {
             endpoint: endpoint.into().trim_end_matches('/').to_string(),
             authorization: None,
+            timeout: None,
         }
     }
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
         self.authorization = Some(format!("Bearer {}", token.into()));
+        self
+    }
+    /// Bound every request but synchronous execution (which lasts as long
+    /// as its workload): a target that accepts a connection and never
+    /// answers fails with `transport_failure` instead of holding the caller.
+    pub fn with_request_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
         self
     }
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ProviderError> {
@@ -1479,6 +1499,32 @@ impl RemoteProvider {
         self.send(method, path, Some(request), None).await
     }
     async fn send<B: Serialize, T: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&B>,
+        idempotency_key: Option<&str>,
+    ) -> Result<T, ProviderError> {
+        match self.timeout.filter(|_| path != "/compute/execute") {
+            Some(timeout) => {
+                tokio::time::timeout(timeout, self.exchange(method, path, body, idempotency_key))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(ProviderError::new(
+                            ProviderErrorKind::TransportFailure,
+                            format!(
+                                "{} did not answer {method} {path} within {:.1}s",
+                                self.endpoint,
+                                timeout.as_secs_f64()
+                            ),
+                        ))
+                    })
+            }
+            None => self.exchange(method, path, body, idempotency_key).await,
+        }
+    }
+
+    async fn exchange<B: Serialize, T: DeserializeOwned>(
         &self,
         method: &str,
         path: &str,
@@ -1951,13 +1997,11 @@ pub trait ProviderAuthorizer: Send + Sync {
         let _ = owner;
         Ok(())
     }
-}
 
-pub struct AllowAllAuthorizer;
-#[async_trait]
-impl ProviderAuthorizer for AllowAllAuthorizer {
-    async fn authorize(&self, _: ProviderOperation, _: Option<&str>) -> Result<(), ProviderError> {
-        Ok(())
+    /// How this authority authenticates callers, as the endpoint
+    /// advertises it: `credential`, `insecure-unauthenticated`, ...
+    fn authentication(&self) -> &'static str {
+        "custom"
     }
 }
 
@@ -2011,7 +2055,9 @@ impl ServerConfig {
                 .with_policy(policy)
                 .with_execution_policy(execution_policy),
             ),
-            authorizer: Arc::new(AllowAllAuthorizer),
+            // Fail closed: an endpoint trusts nobody until it is given an
+            // authority.
+            authorizer: Arc::new(NoCredentialsConfigured),
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             job_store: std::env::temp_dir().join(format!("compute-jobs-{store_id}")),
             job_retention: std::time::Duration::from_secs(7 * 24 * 60 * 60),
@@ -2259,6 +2305,8 @@ impl RemoteService {
                                 .as_ref()
                                 .map(|sessions| sessions.capabilities());
                             value.target_features = self.state.config.target_features.clone();
+                            value.authentication =
+                                Some(self.state.config.authorizer.authentication().to_owned());
                             value.resources.available = ResourceVector {
                                 cpu_count: snapshot.available.cpu_millis / 1_000,
                                 memory_bytes: snapshot.available.memory_bytes,

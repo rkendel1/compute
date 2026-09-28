@@ -63,6 +63,39 @@ pub struct ProviderConfig {
     pub priority: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
+    /// A file holding the target credential (`compute target credential
+    /// issue --token-file`). Read when the pool is built; never shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_file: Option<std::path::PathBuf>,
+}
+
+impl ProviderConfig {
+    /// The bearer token this member authenticates with, if it has one.
+    pub fn token(&self, id: &str) -> Result<Option<String>, PlacementError> {
+        if let Some(name) = &self.token_env {
+            return std::env::var(name).map(Some).map_err(|_| {
+                PlacementError::InvalidConfig(format!(
+                    "provider {id}: environment variable {name} is not set"
+                ))
+            });
+        }
+        if let Some(path) = &self.token_file {
+            return compute_provider::credentials::read_token_file(path)
+                .map(Some)
+                .map_err(|error| {
+                    PlacementError::InvalidConfig(format!(
+                        "provider {id}: token file {}: {error}",
+                        path.display()
+                    ))
+                });
+        }
+        Ok(None)
+    }
+
+    /// Whether this member presents a credential.
+    pub fn authenticated(&self) -> bool {
+        self.token_env.is_some() || self.token_file.is_some()
+    }
 }
 
 /// TOML pool configuration:
@@ -97,11 +130,21 @@ impl PoolConfig {
         Ok(config)
     }
 
+    /// Read a pool file. A relative `token_file` names a file beside it.
     pub fn load(path: &Path) -> Result<Self, PlacementError> {
         let text = std::fs::read_to_string(path).map_err(|error| {
             PlacementError::InvalidConfig(format!("{}: {error}", path.display()))
         })?;
-        Self::parse(&text)
+        let mut config = Self::parse(&text)?;
+        let base = path.parent().unwrap_or_else(|| Path::new(""));
+        for provider in config.providers.values_mut() {
+            if let Some(token_file) = &mut provider.token_file
+                && token_file.is_relative()
+            {
+                *token_file = base.join(&*token_file);
+            }
+        }
+        Ok(config)
     }
 
     /// The implicit pool used when no configuration exists: the local
@@ -117,6 +160,7 @@ impl PoolConfig {
                     application_endpoint: None,
                     priority: 0,
                     token_env: None,
+                    token_file: None,
                 },
             )]),
         }
@@ -148,7 +192,7 @@ impl ProviderConfig {
                 if self.endpoint.is_some() {
                     return invalid("a local provider has no endpoint");
                 }
-                if self.token_env.is_some() {
+                if self.authenticated() {
                     return invalid("a local provider has no credentials");
                 }
             }
@@ -177,6 +221,9 @@ impl ProviderConfig {
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
         {
             return invalid("token_env must name an environment variable");
+        }
+        if self.token_env.is_some() && self.token_file.is_some() {
+            return invalid("set token_env or token_file, not both");
         }
         if let Some(endpoint) = &self.application_endpoint
             && (!(endpoint.starts_with("http://") || endpoint.starts_with("https://"))
@@ -281,12 +328,7 @@ impl ProviderPool {
                 ProviderKind::Remote => {
                     let mut remote =
                         RemoteProvider::new(provider.endpoint.clone().expect("validated"));
-                    if let Some(name) = &provider.token_env {
-                        let token = std::env::var(name).map_err(|_| {
-                            PlacementError::InvalidConfig(format!(
-                                "provider {id}: environment variable {name} is not set"
-                            ))
-                        })?;
+                    if let Some(token) = provider.token(id)? {
                         remote = remote.with_bearer_token(token);
                     }
                     pool.add_remote(id.clone(), provider.clone(), Arc::new(remote))?;
@@ -375,7 +417,7 @@ impl ProviderPool {
                 endpoint: member.config.endpoint.clone(),
                 application_endpoint: member.config.application_endpoint.clone(),
                 priority: member.config.priority,
-                authenticated: member.config.token_env.is_some(),
+                authenticated: member.config.authenticated(),
             })
             .collect::<Vec<_>>();
         providers.sort_by(|left, right| {

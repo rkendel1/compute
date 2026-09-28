@@ -1458,7 +1458,9 @@
             "failed",
             "destroying",
             "destroyed",
-            "expired"
+            "expired",
+            "unreachable",
+            "lost"
           ]
         },
         {

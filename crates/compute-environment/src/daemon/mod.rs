@@ -130,6 +130,12 @@ pub struct DaemonConfig {
     pub execution: compute_provider::ExecutionModes,
     /// How often a running computer's processes are checked for drift.
     pub computer_probe: Duration,
+    /// How often every running (or unreachable) computer is confirmed with
+    /// its target: the target answers, and still has the machine.
+    pub computer_liveness: Duration,
+    /// How long a target has to answer a confirmation before the computer
+    /// is reported unreachable.
+    pub computer_liveness_timeout: Duration,
 }
 
 impl DaemonConfig {
@@ -166,6 +172,8 @@ impl DaemonConfig {
                 sessions: false,
             },
             computer_probe: Duration::from_secs(15),
+            computer_liveness: Duration::from_secs(10),
+            computer_liveness_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -704,6 +712,10 @@ pub struct Daemon {
     computer_drivers: std::sync::Mutex<BTreeSet<String>>,
     /// Wakes computer drivers after a change to what they drive.
     computer_wake: Notify,
+    /// When each computer was last confirmed with its target, and at which
+    /// record generation: live evidence, never durable. A confirmation of
+    /// an older generation confirms nothing about the current one.
+    computer_confirmed: std::sync::Mutex<BTreeMap<String, computers::Confirmation>>,
     /// When targets were last swept for orphaned computers.
     orphan_sweep: std::sync::Mutex<Option<std::time::Instant>>,
     /// Publishes and rollouts a task is driving: working state, rebuilt
@@ -914,8 +926,9 @@ impl Daemon {
                     },
                 ));
                 // The daemon authenticates and authorizes every request
-                // before it reaches the service.
-                server.authorizer = Arc::new(compute_provider::AllowAllAuthorizer);
+                // before it reaches the service; the service admits only
+                // requests that carry that decision.
+                server.authorizer = Arc::new(crate::auth::DaemonAuthorized);
                 server.job_store = config.state_dir.join("jobs");
                 server.execution = config.execution;
                 Some(Arc::new(
@@ -987,6 +1000,7 @@ impl Daemon {
             lock: std::sync::Mutex::new(Some(lock)),
             computer_drivers: std::sync::Mutex::new(BTreeSet::new()),
             computer_wake: Notify::new(),
+            computer_confirmed: std::sync::Mutex::new(BTreeMap::new()),
             orphan_sweep: std::sync::Mutex::new(None),
             operation_drivers: std::sync::Mutex::new(BTreeSet::new()),
             operations_polled: std::sync::Mutex::new(None),
@@ -1170,6 +1184,7 @@ impl Daemon {
             pid: std::process::id(),
             started_at: self.started_at,
             state_dir: self.config.state_dir.display().to_string(),
+            durability: self.config.state.backend().durability().into(),
             state: self.config.state.backend(),
             artifacts: self.config.artifacts.location(),
             state_available: inner.state_error.is_none(),
@@ -1446,6 +1461,7 @@ impl Daemon {
                     .count(),
             },
             control_plane: ControlPlaneView {
+                durability: self.config.state.backend().durability().into(),
                 state: self.config.state.backend(),
                 mode: if inner.state_error.is_none() {
                     "normal".into()
@@ -2347,15 +2363,16 @@ fn build_pool(config: &DaemonConfig) -> Result<ProviderPool, EnvironmentError> {
             }
             ProviderKind::Remote => {
                 let endpoint = provider.endpoint.clone().expect("validated");
-                let mut remote = RemoteProvider::new(endpoint);
+                // Every call to a target is bounded, so an unresponsive one
+                // is observed as unreachable instead of holding a driver.
+                let mut remote = RemoteProvider::new(endpoint).with_request_timeout(
+                    config
+                        .computer_liveness_timeout
+                        .max(Duration::from_secs(30)),
+                );
                 // The target's credential authenticates this controller to
                 // it; it is never an authority over what Compute owns.
-                if let Some(name) = &provider.token_env {
-                    let token = std::env::var(name).map_err(|_| {
-                        EnvironmentError::Invalid(format!(
-                            "provider {id} names token variable {name}, which is not set"
-                        ))
-                    })?;
+                if let Some(token) = provider.token(id).map_err(invalid)? {
                     remote = remote.with_bearer_token(token);
                 }
                 pool.add_remote(id.clone(), provider.clone(), Arc::new(remote))
@@ -2372,6 +2389,7 @@ fn build_pool(config: &DaemonConfig) -> Result<ProviderPool, EnvironmentError> {
                 application_endpoint: None,
                 priority: 0,
                 token_env: None,
+                token_file: None,
             },
             config.provider.clone(),
         )

@@ -12,6 +12,8 @@
 
 #[path = "support/runtimes.rs"]
 mod runtimes;
+#[path = "support/targets.rs"]
+mod targets;
 
 use std::process::{Child, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -27,6 +29,15 @@ fn free_port() -> u16 {
 }
 
 struct Server(Option<Child>);
+
+impl Server {
+    fn stop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 impl Drop for Server {
     fn drop(&mut self) {
@@ -48,6 +59,8 @@ fn serve(root: &std::path::Path, port: u16) -> Server {
         .arg(root.join("jobs"))
         .arg("--session-store")
         .arg(root.join("sessions"))
+        .arg("--credentials")
+        .arg(root.join("node-credentials.json"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -100,11 +113,13 @@ fn a_session_is_a_durable_computer_on_whatever_provider_placement_selects() {
     let temporary = tempfile::tempdir().unwrap();
     let port = free_port();
     let root = temporary.path().to_path_buf();
+    let credential = targets::issue(&root, "node", "cli");
     std::fs::write(
         root.join("compute-pool.toml"),
         format!(
             "[providers.local]\nkind = \"local\"\npriority = 100\n\
-             [providers.node]\nkind = \"remote\"\nendpoint = \"http://127.0.0.1:{port}\"\n"
+             [providers.node]\nkind = \"remote\"\nendpoint = \"http://127.0.0.1:{port}\"\n{}",
+            credential.pool_line()
         ),
     )
     .unwrap();
@@ -294,4 +309,276 @@ fn a_session_is_a_durable_computer_on_whatever_provider_placement_selects() {
     assert_eq!(entries[0]["provider_id"], "node");
     assert_eq!(entries[0]["session"]["status"], "destroyed");
     drop(server);
+}
+
+/// `compute serve` is controlled only by the control planes it trusts:
+/// no credential, a wrong one, or one it revoked is refused; another
+/// control plane's valid credential reaches none of this one's sessions;
+/// a restart keeps who owns what; and the only open mode is named.
+#[test]
+fn a_target_is_controlled_only_by_the_control_planes_it_trusts() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().to_path_buf();
+    let cli = Cli { root: root.clone() };
+
+    // A target that trusts nobody does not start.
+    let refused = std::process::Command::new(env!("CARGO_BIN_EXE_compute"))
+        .args(["serve", "--listen", "127.0.0.1:0", "--credentials"])
+        .arg(root.join("nobody.json"))
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("compute target credential issue")
+            && stderr.contains("--insecure-unauthenticated"),
+        "{stderr}"
+    );
+
+    let port = free_port();
+    let a = targets::issue(&root, "node", "control-plane-a");
+    let b = targets::issue(&root, "node", "control-plane-b");
+    let wrong = root.join("wrong.token");
+    std::fs::write(&wrong, "cmpt_tcred_0000000000000000_00\n").unwrap();
+    let pool = |name: &str, token: Option<&std::path::Path>| {
+        let path = root.join(format!("pool-{name}.toml"));
+        std::fs::write(
+            &path,
+            format!(
+                "[providers.node]\nkind = \"remote\"\nendpoint = \"http://127.0.0.1:{port}\"\n{}",
+                token
+                    .map(|token| format!("token_file = {:?}\n", token.display().to_string()))
+                    .unwrap_or_default()
+            ),
+        )
+        .unwrap();
+        path.display().to_string()
+    };
+    let (pool_a, pool_b, pool_none, pool_wrong) = (
+        pool("a", Some(&a.token_file)),
+        pool("b", Some(&b.token_file)),
+        pool("none", None),
+        pool("wrong", Some(&wrong)),
+    );
+    let mut server = serve(&root, port);
+    let capabilities = |pool: &str| {
+        cli.run(&[
+            "remote",
+            "capabilities",
+            "--provider",
+            "node",
+            "--json",
+            "--pool-config",
+            pool,
+        ])
+    };
+
+    // 1–2. No credential, or a wrong one: refused, by structured kind.
+    for pool in [&pool_none, &pool_wrong] {
+        let output = capabilities(pool);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("unauthorized:"), "{stderr}");
+    }
+    // 3. The control plane's credential: accepted, and the target says how
+    // it authenticates.
+    let output = capabilities(&pool_a);
+    assert!(output.status.success(), "{output:?}");
+    let advertised: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(advertised["authentication"], "credential");
+
+    // 4. The authenticated control plane creates, lists, and runs in its
+    // session.
+    let created = cli.json(&[
+        "session",
+        "create",
+        "--cpu",
+        "1",
+        "--memory",
+        "64Mi",
+        "--provider",
+        "node",
+        "--wait",
+        "--json",
+        "--pool-config",
+        &pool_a,
+    ]);
+    let id = created["session"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let listed = cli.json(&["session", "list", "--json", "--pool-config", &pool_a]);
+    assert!(listed.to_string().contains(&id), "{listed}");
+    let output = cli.run(&[
+        "session",
+        "exec",
+        &id,
+        "--provider",
+        "node",
+        "--pool-config",
+        &pool_a,
+        "--",
+        "sh",
+        "-c",
+        "echo mine",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "mine\n");
+
+    // 5. Another control plane, with a valid credential, cannot inspect or
+    // run in it: to it, the session does not exist.
+    let listed = cli.json(&["session", "list", "--json", "--pool-config", &pool_b]);
+    assert!(!listed.to_string().contains(&id), "{listed}");
+    for arguments in [
+        vec![
+            "session",
+            "info",
+            &id,
+            "--provider",
+            "node",
+            "--pool-config",
+            &pool_b,
+        ],
+        vec![
+            "session",
+            "exec",
+            &id,
+            "--provider",
+            "node",
+            "--pool-config",
+            &pool_b,
+            "--",
+            "true",
+        ],
+        vec![
+            "session",
+            "destroy",
+            &id,
+            "--provider",
+            "node",
+            "--pool-config",
+            &pool_b,
+        ],
+    ] {
+        let output = cli.run(&arguments);
+        assert!(!output.status.success(), "{arguments:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("unknown_session"),
+            "{arguments:?}: {stderr}"
+        );
+    }
+
+    // 6. A restart keeps the relationship.
+    server.stop();
+    server = serve(&root, port);
+    let info = |pool: &str| {
+        cli.run(&[
+            "session",
+            "info",
+            &id,
+            "--provider",
+            "node",
+            "--json",
+            "--pool-config",
+            pool,
+        ])
+    };
+    let output = info(&pool_a);
+    assert!(output.status.success(), "{output:?}");
+    let session: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(session["owner"], "control-plane:control-plane-a");
+
+    // 7. A revoked credential cannot revive access; the control plane's
+    // new credential keeps what it owns.
+    let trusted = cli.json(&[
+        "target",
+        "credential",
+        "list",
+        "--credentials",
+        &a.credentials.display().to_string(),
+        "--json",
+    ]);
+    let credential_a = trusted
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["control_plane"] == "control-plane-a")
+        .unwrap()["credential_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!trusted.to_string().contains(&a.token()));
+    let revoked = cli.json(&[
+        "target",
+        "credential",
+        "revoke",
+        &credential_a,
+        "--credentials",
+        &a.credentials.display().to_string(),
+        "--json",
+    ]);
+    assert_eq!(revoked["status"], "revoked");
+    let output = info(&pool_a);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unauthorized:") && stderr.contains("revoked"),
+        "{stderr}"
+    );
+    let rotated = root.join("rotated.token");
+    cli.ok(&[
+        "target",
+        "credential",
+        "issue",
+        "--credentials",
+        &a.credentials.display().to_string(),
+        "--control-plane",
+        "control-plane-a",
+        "--token-file",
+        &rotated.display().to_string(),
+    ]);
+    let pool_rotated = pool("rotated", Some(&rotated));
+    let output = info(&pool_rotated);
+    assert!(output.status.success(), "{output:?}");
+    cli.ok(&[
+        "session",
+        "destroy",
+        &id,
+        "--provider",
+        "node",
+        "--pool-config",
+        &pool_rotated,
+    ]);
+    server.stop();
+
+    // The one open mode is named, and says so.
+    let insecure_port = free_port();
+    let listen = format!("127.0.0.1:{insecure_port}");
+    let mut insecure = Server(Some(
+        std::process::Command::new(env!("CARGO_BIN_EXE_compute"))
+            .args(["serve", "--listen", &listen, "--insecure-unauthenticated"])
+            .arg("--job-store")
+            .arg(root.join("insecure-jobs"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::net::TcpStream::connect(&listen).is_err() {
+        assert!(Instant::now() < deadline, "compute serve did not start");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let open = root.join("pool-open.toml");
+    std::fs::write(
+        &open,
+        format!("[providers.node]\nkind = \"remote\"\nendpoint = \"http://{listen}\"\n"),
+    )
+    .unwrap();
+    let output = capabilities(&open.display().to_string());
+    assert!(output.status.success(), "{output:?}");
+    let advertised: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(advertised["authentication"], "insecure-unauthenticated");
+    insecure.stop();
 }

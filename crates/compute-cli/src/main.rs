@@ -216,6 +216,17 @@ struct ServeCommand {
     /// `[server.policy] path` in `--config`/compute.toml.
     #[command(flatten)]
     execution_policy: admission::PolicyLocation,
+    /// The control planes this target trusts (`compute target credential
+    /// issue`). Every request must carry one of their credentials; the
+    /// file is re-read when it changes, so a revocation takes effect at
+    /// the next request.
+    #[arg(long, default_value = ".compute/target-credentials.json")]
+    credentials: PathBuf,
+    /// Accept every request without a credential: anyone who reaches this
+    /// target controls every computer on it. Local development only; the
+    /// target advertises itself as `insecure-unauthenticated`.
+    #[arg(long, conflicts_with = "credentials")]
+    insecure_unauthenticated: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1492,6 +1503,36 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 );
             }
             let mut config = ServerConfig::local_with_policies(endpoint, policy, execution_policy);
+            config.authorizer = if command.insecure_unauthenticated {
+                eprintln!(
+                    "WARNING: this target is insecure-unauthenticated: anyone who reaches {} controls every computer on it. For local development only.",
+                    command.listen
+                );
+                Arc::new(compute_provider::InsecureUnauthenticated)
+            } else {
+                let trusted =
+                    compute_provider::TargetCredentials::load(&command.credentials).map_err(
+                        |error| {
+                            compute_core::ComputeError::InvalidWorkload(format!(
+                                "{}: a target needs the credentials of the control planes it trusts; issue one with `compute target credential issue --credentials {} --control-plane <name> --token-file <file>` (or run with --insecure-unauthenticated for local development)",
+                                error.message,
+                                command.credentials.display()
+                            ))
+                        },
+                    )?;
+                let active = trusted
+                    .credentials
+                    .iter()
+                    .filter(|record| record.active())
+                    .count();
+                eprintln!(
+                    "Authentication: target credentials in {} ({active} active)",
+                    command.credentials.display()
+                );
+                Arc::new(compute_provider::TargetAuthorizer::from_file(
+                    command.credentials.clone(),
+                ))
+            };
             config.job_store = command.job_store;
             let mut features = compute_provider::detect_target_features();
             features.extend(command.target_features.iter().cloned());
@@ -2092,8 +2133,14 @@ async fn finish_remote_job(
     print_remote_execution_result(job_id, result.result, json, receipt_path)
 }
 
+/// A provider's failure, by its structured kind (`unauthorized`,
+/// `unknown_job`, ...), then what it said.
 fn provider_error(error: compute_provider::ProviderError) -> compute_core::ComputeError {
-    compute_core::ComputeError::Runtime(error.to_string())
+    let code = serde_json::to_value(error.kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    compute_core::ComputeError::Runtime(format!("{code}: {}", error.message))
 }
 
 fn print_provider_value(value: &impl serde::Serialize, _json: bool) {

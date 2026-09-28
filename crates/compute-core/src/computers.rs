@@ -35,9 +35,17 @@ impl ComputerLifecycle {
     }
 }
 
-/// The durable lifecycle of an environment's computer. `destroyed`,
-/// `expired`, and `failed` are terminal: a terminal computer never changes
-/// status again, and its record stays as evidence.
+/// The durable lifecycle of an environment's computer, as the controller
+/// last observed it. `destroyed`, `expired`, and `failed` are terminal: a
+/// terminal computer never changes status again, and its record stays as
+/// evidence.
+///
+/// `unreachable` and `lost` are observed reality, not decisions: the
+/// environment still wants its computer. An unreachable computer's target
+/// did not answer (or refused this control plane); it returns to `running`
+/// when the target answers with the same machine. A lost computer's target
+/// answered and no longer has the machine; it stays lost until it is
+/// replaced or destroyed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputerStatus {
@@ -51,10 +59,12 @@ pub enum ComputerStatus {
     Destroying,
     Destroyed,
     Expired,
+    Unreachable,
+    Lost,
 }
 
 impl ComputerStatus {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::Pending,
         Self::Provisioning,
         Self::Running,
@@ -65,10 +75,29 @@ impl ComputerStatus {
         Self::Destroying,
         Self::Destroyed,
         Self::Expired,
+        Self::Unreachable,
+        Self::Lost,
     ];
 
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Destroyed | Self::Expired | Self::Failed)
+    }
+
+    /// What an operator sees: the one vocabulary every surface (API, CLI,
+    /// UI) uses for observed reality. `starting` covers placement,
+    /// provisioning, and resuming; `stopping` covers destroying.
+    pub const fn observed(self) -> &'static str {
+        match self {
+            Self::Pending | Self::Provisioning | Self::Resuming => "starting",
+            Self::Running => "running",
+            Self::Unreachable => "unreachable",
+            Self::Lost => "lost",
+            Self::Stopping | Self::Destroying => "stopping",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+            Self::Destroyed => "destroyed",
+            Self::Expired => "expired",
+        }
     }
 
     pub const fn as_str(self) -> &'static str {
@@ -83,6 +112,8 @@ impl ComputerStatus {
             Self::Destroying => "destroying",
             Self::Destroyed => "destroyed",
             Self::Expired => "expired",
+            Self::Unreachable => "unreachable",
+            Self::Lost => "lost",
         }
     }
 }

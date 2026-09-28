@@ -23,7 +23,7 @@ use compute_placement::{
 use compute_provider::{
     Admission, ComputeProvider, ExecuteResponse, InspectResponse, LocalProvider,
     ProviderCapabilities, ProviderError, ProviderHealth, ProviderPolicy, ProviderRequest,
-    RemoteProvider, ServerConfig,
+    ServerConfig,
 };
 
 /// The local provider, counting executions so certification can prove that
@@ -76,6 +76,7 @@ async fn spawn_server(
     );
     let jobs = tempfile::tempdir().map_err(|error| error.to_string())?;
     let mut config = ServerConfig::local_with_policy(endpoint.clone(), policy);
+    config.authorizer = crate::certification::harness_authorizer();
     config.job_store = jobs.path().to_path_buf();
     let handle = tokio::spawn(async move {
         let _ = compute_provider::serve_listener(listener, config).await;
@@ -90,6 +91,7 @@ fn remote_config(endpoint: &str, priority: i64) -> ProviderConfig {
         application_endpoint: None,
         priority,
         token_env: None,
+        token_file: None,
     }
 }
 
@@ -130,6 +132,7 @@ impl PlacementHarness {
                 application_endpoint: None,
                 priority: 10,
                 token_env: None,
+                token_file: None,
             },
             Arc::new(CountingLocal {
                 inner: LocalProvider::new(),
@@ -140,13 +143,15 @@ impl PlacementHarness {
         pool.add_remote(
             "remote",
             remote_config(remote_endpoint, 50),
-            Arc::new(RemoteProvider::new(remote_endpoint)),
+            Arc::new(crate::certification::harness_client(remote_endpoint)),
         )
         .map_err(add)?;
         pool.add_remote(
             "restricted",
             remote_config(&restricted_endpoint, 100),
-            Arc::new(RemoteProvider::new(restricted_endpoint.clone())),
+            Arc::new(crate::certification::harness_client(
+                restricted_endpoint.clone(),
+            )),
         )
         .map_err(add)?;
         Ok(Self {
@@ -364,7 +369,7 @@ impl PlacementHarness {
                 .add_remote(
                     id,
                     remote_config(endpoint, 1),
-                    Arc::new(RemoteProvider::new(endpoint)),
+                    Arc::new(crate::certification::harness_client(endpoint)),
                 )
                 .map_err(add)?;
         }

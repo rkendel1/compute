@@ -50,13 +50,51 @@ Status:
 | `failed` | Could not be made or kept (the `failure` says in which phase, with what code, and whether a retry can help) |
 | `destroying` / `destroyed` | Destroyed on request; the record, contents, and evidence remain |
 | `expired` | An ephemeral computer whose TTL passed; torn down, record kept |
+| `unreachable` | Its target did not answer (`target_unreachable`) or refused this control plane's credential (`credential_rejected`). Still wanted; Compute keeps asking, and it is `running` again when the target answers with the same machine |
+| `lost` | Its target answered without the machine: the session is gone (`session_missing`), ended, or its provider no longer has the environment (`machine_missing`). Still wanted; never re-provisioned on its own. Replace it (a new machine, the same contents) or destroy it; a reconcile asks the target again |
+
+## Observed reality
+
+Status is what Compute last established, never what the environment wants.
+Every running computer is confirmed with its target every 10 s
+(`computer_liveness`, answered within `computer_liveness_timeout`),
+whatever runs in it; a process that exited is a process failure (the
+process probe restarts it), a machine that is gone is a lost computer. Each
+change is a durable transition with an event (`computer.unreachable`,
+`computer.recovered`, `computer.lost`), and each observation is applied only
+to the record version it was made against, so an answer that arrives after a
+newer observation found the machine gone cannot bring it back.
+
+The API, `compute environment status`, the UI, and AppPort all show the same
+`reality`:
+
+| Field | Meaning |
+| --- | --- |
+| `desired` | `running`, `stopped`, or `destroyed`: what the environment asks for |
+| `observed` | `starting`, `running`, `unverified` (running by its record, not confirmed recently), `reconciling`, `unreachable`, `lost`, `stopping`, `stopped`, `failed`, `destroyed`, `expired` |
+| `confirmed_at` | When the target last confirmed the machine, while it runs |
+| `since` | When it became unreachable or lost |
+| `explanation` | What it means and what to do |
+
+An environment on a computer is what its computer was observed to be:
+`compute environment status` reports `actual degraded, health unhealthy`
+for an unreachable computer and `actual failed` for a lost one. Work in an
+unreachable computer fails with `runtime_unavailable`; in a lost one, with
+`conflict`, naming the state.
 
 ## Quick start
 
 ```sh
-# A target: any node that offers sessions.
+# A target: any node that offers sessions, trusting this control plane.
+compute target credential issue --credentials /var/lib/compute/target-credentials.json \
+  --control-plane prod-cp --token-file target-a.token   # copy the token to the controller
 compute serve --listen 0.0.0.0:8080 --public-url https://target-a.example \
-  --job-store /var/lib/compute/jobs --session-store /var/lib/compute/sessions
+  --job-store /var/lib/compute/jobs --session-store /var/lib/compute/sessions \
+  --credentials /var/lib/compute/target-credentials.json
+
+# The controller, whose pool names the target and its token:
+#   [providers.target-a]  kind = "remote"  endpoint = "https://target-a.example"
+#   token_file = "/etc/compute/target-a.token"
 
 # The controller, whose pool names the target.
 compute start --detach --pool-config compute-pool.toml

@@ -287,6 +287,17 @@ impl StateOptions {
         ))
     }
 
+    /// The backend this configuration selects: flags, then `[state]`, then
+    /// `file`.
+    pub fn backend_name(&self) -> compute_core::Result<String> {
+        let (_, section) = self.section()?;
+        Ok(self
+            .backend
+            .clone()
+            .or(section.backend)
+            .unwrap_or_else(|| "file".into()))
+    }
+
     /// Flags that reproduce this choice in a detached daemon.
     pub fn arguments(&self) -> Vec<String> {
         let mut arguments = vec![];

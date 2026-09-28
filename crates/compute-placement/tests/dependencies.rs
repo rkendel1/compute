@@ -143,6 +143,7 @@ async fn dependency_capsule_matrix() {
         .unwrap()
         .catalog;
     let mut config = ServerConfig::local(endpoint.clone());
+    config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     config.provider = Arc::new(
         LocalProvider::with_identity(compute_core::ProviderIdentity::Remote {
             id: endpoint.clone(),
@@ -163,6 +164,7 @@ async fn dependency_capsule_matrix() {
             application_endpoint: None,
             priority: 0,
             token_env: None,
+            token_file: None,
         },
         Arc::new(LocalProvider::new().with_runtime_catalog(catalog)),
     )
@@ -175,6 +177,7 @@ async fn dependency_capsule_matrix() {
             application_endpoint: None,
             priority: 10,
             token_env: None,
+            token_file: None,
         },
         Arc::new(RemoteProvider::new(endpoint.clone())),
     )

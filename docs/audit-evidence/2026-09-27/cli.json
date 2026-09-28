@@ -4,11 +4,13 @@
   "about": "Launch the Compute control plane on this machine and open it: what `compute` alone does. Starts this machine's computer host and the daemon when they are not running",
   "help_defect": null,
   "interface": "launcher: spawns compute serve + compute start",
-  "state": "local processes, pool.toml",
+  "state": "local processes, pool.toml, the target trust file and the control plane token",
   "authority": "n/a (local)",
   "ui": "the UI itself",
   "tests": [
-   "crates/compute-cli/tests/product_journey.rs"
+   "crates/compute-cli/tests/product_journey.rs",
+   "crates/compute-cli/tests/launcher.rs",
+   "packages/compute-ui-e2e/src/computer-reality.test.mjs"
   ]
  },
  {
@@ -204,7 +206,7 @@
   "help_defect": "describes itself as the pool location (a flattened doc comment)",
   "interface": "local engine, or a provider chosen by pool placement",
   "state": "none (execution record + receipt)",
-  "authority": "local user; providers are AllowAll",
+  "authority": "local user; providers: the target credential its pool names",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/cli.rs",
@@ -479,7 +481,7 @@
   "help_defect": "describes itself as the pool location (a flattened doc comment)",
   "interface": "provider compute.remote@1 directly",
   "state": "provider job store",
-  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "authority": "provider: the target credential its pool names on compute serve",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/sessions.rs"
@@ -491,7 +493,7 @@
   "help_defect": "describes itself as the pool location (a flattened doc comment)",
   "interface": "provider compute.remote@1 directly",
   "state": "provider job store",
-  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "authority": "provider: the target credential its pool names on compute serve",
   "ui": "none",
   "tests": []
  },
@@ -501,7 +503,7 @@
   "help_defect": "describes itself as the pool location (a flattened doc comment)",
   "interface": "provider compute.remote@1 directly",
   "state": "provider job store",
-  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "authority": "provider: the target credential its pool names on compute serve",
   "ui": "none",
   "tests": [
    "packages/compute-appport/src/provider.ts"
@@ -513,7 +515,7 @@
   "help_defect": "describes itself as the pool location (a flattened doc comment)",
   "interface": "provider compute.remote@1 directly",
   "state": "provider job store",
-  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "authority": "provider: the target credential its pool names on compute serve",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/sessions.rs"
@@ -525,7 +527,7 @@
   "help_defect": "describes itself as the pool location (a flattened doc comment)",
   "interface": "provider compute.remote@1 directly",
   "state": "provider job store",
-  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "authority": "provider: the target credential its pool names on compute serve",
   "ui": "none",
   "tests": []
  },
@@ -535,7 +537,7 @@
   "help_defect": "describes itself as the pool location (a flattened doc comment)",
   "interface": "provider compute.remote@1 directly",
   "state": "provider job store",
-  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "authority": "provider: the target credential its pool names on compute serve",
   "ui": "none",
   "tests": []
  },
@@ -545,7 +547,7 @@
   "help_defect": "describes itself as the pool location (a flattened doc comment)",
   "interface": "provider compute.remote@1 directly",
   "state": "provider job store",
-  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "authority": "provider: the target credential its pool names on compute serve",
   "ui": "none",
   "tests": []
  },
@@ -555,7 +557,7 @@
   "help_defect": "describes itself as the pool location (a flattened doc comment)",
   "interface": "provider compute.remote@1 directly",
   "state": "provider job store",
-  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "authority": "provider: the target credential its pool names on compute serve",
   "ui": "none",
   "tests": []
  },
@@ -565,7 +567,7 @@
   "help_defect": "describes itself as the pool location (a flattened doc comment)",
   "interface": "provider compute.remote@1 directly",
   "state": "provider job store",
-  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "authority": "provider: the target credential its pool names on compute serve",
   "ui": "none",
   "tests": []
  },
@@ -575,7 +577,7 @@
   "help_defect": "describes itself as the pool location (a flattened doc comment)",
   "interface": "provider compute.remote@1 directly",
   "state": "provider job store",
-  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "authority": "provider: the target credential its pool names on compute serve",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/remote_pool.rs"
@@ -587,7 +589,7 @@
   "help_defect": "describes itself as the pool location (a flattened doc comment)",
   "interface": "provider compute.remote@1 directly",
   "state": "provider job store",
-  "authority": "provider: AllowAllAuthorizer on compute serve",
+  "authority": "provider: the target credential its pool names on compute serve",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/remote_pool.rs",
@@ -698,7 +700,7 @@
   "help_defect": null,
   "interface": "pool placement then provider",
   "state": "provider job store",
-  "authority": "provider: AllowAll",
+  "authority": "provider: target credential",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/product.rs",
@@ -711,11 +713,50 @@
   "help_defect": null,
   "interface": "pool placement then provider",
   "state": "provider job store",
-  "authority": "provider: AllowAll",
+  "authority": "provider: target credential",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/product.rs",
    "packages/compute-appport/src/provider.ts"
+  ]
+ },
+ {
+  "command": "compute target credential issue",
+  "about": "Issue a credential that lets a control plane control this target. The token is shown (or written to --token-file) once; the target keeps only its verifier",
+  "help_defect": null,
+  "interface": "local: the target's trust file (compute serve --credentials)",
+  "state": "the target trust file (verifiers only)",
+  "authority": "n/a (local file on the target machine)",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/sessions.rs",
+   "crates/compute-cli/tests/launcher.rs"
+  ]
+ },
+ {
+  "command": "compute target credential list",
+  "about": "The credentials a target trusts: never a secret",
+  "help_defect": null,
+  "interface": "local: the target's trust file (compute serve --credentials)",
+  "state": "the target trust file (verifiers only)",
+  "authority": "n/a (local file on the target machine)",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/sessions.rs",
+   "crates/compute-cli/tests/launcher.rs"
+  ]
+ },
+ {
+  "command": "compute target credential revoke",
+  "about": "Revoke a credential: the target refuses it at the next request",
+  "help_defect": null,
+  "interface": "local: the target's trust file (compute serve --credentials)",
+  "state": "the target trust file (verifiers only)",
+  "authority": "n/a (local file on the target machine)",
+  "ui": "none",
+  "tests": [
+   "crates/compute-cli/tests/sessions.rs",
+   "crates/compute-cli/tests/launcher.rs"
   ]
  },
  {
@@ -727,7 +768,8 @@
   "authority": "daemon read scope",
   "ui": "none (targets are not shown in the UI)",
   "tests": [
-   "crates/compute-cli/tests/computers.rs"
+   "crates/compute-cli/tests/computers.rs",
+   "crates/compute-cli/tests/launcher.rs"
   ]
  },
  {
@@ -736,7 +778,7 @@
   "help_defect": null,
   "interface": "pool placement then target sessions directly",
   "state": "target session store (not FeltDB)",
-  "authority": "target: AllowAll; owner = hash of the Authorization header",
+  "authority": "target: target credential; owner = hash of the Authorization header",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/sessions.rs",
@@ -750,7 +792,7 @@
   "help_defect": null,
   "interface": "targets directly",
   "state": "none",
-  "authority": "target: AllowAll",
+  "authority": "target: target credential",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/sessions.rs",
@@ -763,7 +805,7 @@
   "help_defect": null,
   "interface": "targets directly",
   "state": "none",
-  "authority": "target: AllowAll",
+  "authority": "target: target credential",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/sessions.rs",
@@ -776,7 +818,7 @@
   "help_defect": null,
   "interface": "targets directly",
   "state": "target session store",
-  "authority": "target: AllowAll",
+  "authority": "target: target credential",
   "ui": "none",
   "tests": [
    "packages/compute-appport/src/sessions.ts"
@@ -788,7 +830,7 @@
   "help_defect": null,
   "interface": "targets directly",
   "state": "target job store",
-  "authority": "target: AllowAll",
+  "authority": "target: target credential",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/sessions.rs",
@@ -802,7 +844,7 @@
   "help_defect": null,
   "interface": "targets directly",
   "state": "none",
-  "authority": "target: AllowAll",
+  "authority": "target: target credential",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/sessions.rs",
@@ -815,7 +857,7 @@
   "help_defect": null,
   "interface": "targets directly",
   "state": "target session store",
-  "authority": "target: AllowAll",
+  "authority": "target: target credential",
   "ui": "none",
   "tests": []
  },
@@ -825,7 +867,7 @@
   "help_defect": null,
   "interface": "targets directly",
   "state": "target session store",
-  "authority": "target: AllowAll",
+  "authority": "target: target credential",
   "ui": "none",
   "tests": []
  },
@@ -835,7 +877,7 @@
   "help_defect": null,
   "interface": "targets directly",
   "state": "target session store",
-  "authority": "target: AllowAll",
+  "authority": "target: target credential",
   "ui": "none",
   "tests": []
  },
@@ -845,7 +887,7 @@
   "help_defect": null,
   "interface": "targets directly",
   "state": "target session store",
-  "authority": "target: AllowAll",
+  "authority": "target: target credential",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/sessions.rs"
@@ -1933,13 +1975,14 @@
   "help_defect": null,
   "interface": "runs a target (compute.remote@1)",
   "state": "job and session stores on disk",
-  "authority": "AllowAllAuthorizer: no authentication",
+  "authority": "target credentials (--credentials; the named --insecure-unauthenticated is the only open mode)",
   "ui": "none",
   "tests": [
    "crates/compute-cli/tests/computers.rs",
    "crates/compute-cli/tests/product.rs",
    "crates/compute-cli/tests/remote_pool.rs",
-   "crates/compute-cli/tests/runtime_store.rs"
+   "crates/compute-cli/tests/runtime_store.rs",
+   "crates/compute-cli/tests/sessions.rs"
   ]
  },
  {

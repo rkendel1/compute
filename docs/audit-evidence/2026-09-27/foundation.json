@@ -1,0 +1,183 @@
+{
+ "serve_without_credentials": {
+  "exit": 1,
+  "stderr": "Compute provider listening on 127.0.0.1:0 (http://127.0.0.1:0)\ninvalid workload: target credentials /tmp/compute-foundation-64zzhr3w/none.json: No such file or directory (os error 2): a target needs the credentials of the control planes it trusts; issue one with `compute target credential issue --credentials /tmp/compute-foundation-64zzhr3w/none.json --control-plane <name> --token-file <file>` (or run with --insecure-unauthenticated for local development)"
+ },
+ "launch_output": [
+  "Compute is running: http://127.0.0.1:18797/",
+  "  computers run on this machine's computer host (127.0.0.1:18798)",
+  "  this control plane (cp-f3d247ab08c80f27) authenticates to it with a target credential",
+  "  control state: file on this machine (local development; production control planes use FeltDB: [state] backend = \"feltdb\")",
+  "  state: /tmp/compute-foundation-64zzhr3w/home",
+  "  stop it with `compute down`"
+ ],
+ "launcher_credential": {
+  "pool_names_token_file": true,
+  "pool_holds_token": false,
+  "trust_file_holds_secret": false,
+  "trusted_control_planes": [
+   "cp-f3d247ab08c80f27"
+  ],
+  "token_file_mode": "0o600"
+ },
+ "targets": [
+  {
+   "target_id": "local",
+   "health": "healthy",
+   "hosts_computers": false,
+   "authentication": null,
+   "credential": false
+  },
+  {
+   "target_id": "this-machine",
+   "health": "healthy",
+   "hosts_computers": true,
+   "authentication": "credential",
+   "credential": true
+  }
+ ],
+ "control_state": {
+  "kind": "file",
+  "durability": "local-development"
+ },
+ "computer_running": {
+  "seconds": 0.41,
+  "status": "running",
+  "reality": {
+   "confirmed_at": "2026-09-27T23:46:58.265495795Z",
+   "desired": "running",
+   "explanation": "Running on this-machine, confirmed by the target.",
+   "observed": "running"
+  },
+  "failure": null
+ },
+ "target_without_credential": {
+  "list_http": 401,
+  "kind": "unauthorized"
+ },
+ "target_exec_without_credential": {
+  "http": 401,
+  "kind": "unauthorized"
+ },
+ "target_wrong_credential": {
+  "http": 401,
+  "kind": "unauthorized"
+ },
+ "target_other_control_plane": {
+  "list_http": 200,
+  "sessions_seen": 0,
+  "inspect": [
+   404,
+   "unknown_session"
+  ],
+  "exec": [
+   404,
+   "unknown_session"
+  ]
+ },
+ "target_revoked_credential": {
+  "http": 401,
+  "message": "target credential tcred_5207d8a0539c2092 was revoked"
+ },
+ "target_own_credential": {
+  "http": 200,
+  "owner": "control-plane:cp-f3d247ab08c80f27"
+ },
+ "target_down": {
+  "seconds_to_unreachable": 9.97,
+  "status": "unreachable",
+  "reality": {
+   "desired": "running",
+   "explanation": "this-machine is not answering for this computer: TransportFailure: Connection refused (os error 111) (target_unreachable). The environment still wants it; Compute keeps checking and it returns to running when this-machine answers with the same machine.",
+   "observed": "unreachable",
+   "since": "2026-09-27T23:47:08.267586062Z"
+  },
+  "failure": {
+   "code": "target_unreachable",
+   "retryable": true
+  },
+  "exec": {
+   "http": 503,
+   "kind": "runtime_unavailable"
+  }
+ },
+ "target_recovered": {
+  "seconds": 1.94,
+  "same_session": true,
+  "status": "running",
+  "reality": {
+   "confirmed_at": "2026-09-27T23:47:10.278508922Z",
+   "desired": "running",
+   "explanation": "Running on this-machine, confirmed by the target.",
+   "observed": "running"
+  },
+  "failure": null
+ },
+ "machine_lost": {
+  "seconds_after_target_back": 1.93,
+  "status": "lost",
+  "reality": {
+   "desired": "running",
+   "explanation": "this-machine no longer has this computer's machine: the target no longer has the session: unknown session (session_missing). The environment still wants it; replace the computer to provision a new machine with the same contents, or destroy it.",
+   "observed": "lost",
+   "since": "2026-09-27T23:47:22.286430325Z"
+  },
+  "failure": {
+   "code": "session_missing",
+   "retryable": false
+  }
+ },
+ "lost_after_reconcile": {
+  "status": "lost",
+  "reality": {
+   "desired": "running",
+   "explanation": "this-machine no longer has this computer's machine: the target no longer has the session: unknown session (session_missing). The environment still wants it; replace the computer to provision a new machine with the same contents, or destroy it.",
+   "observed": "lost",
+   "since": "2026-09-27T23:47:22.286430325Z"
+  },
+  "failure": {
+   "code": "session_missing",
+   "retryable": false
+  }
+ },
+ "lost_after_control_plane_restart": {
+  "status": "lost",
+  "reality": {
+   "desired": "running",
+   "explanation": "this-machine no longer has this computer's machine: the target no longer has the session: unknown session (session_missing). The environment still wants it; replace the computer to provision a new machine with the same contents, or destroy it.",
+   "observed": "lost",
+   "since": "2026-09-27T23:47:22.286430325Z"
+  },
+  "failure": {
+   "code": "session_missing",
+   "retryable": false
+  }
+ },
+ "replaced": {
+  "seconds": 0.51,
+  "new_session": true,
+  "status": "running",
+  "reality": {
+   "confirmed_at": "2026-09-27T23:47:29.094111771Z",
+   "desired": "running",
+   "explanation": "Running on this-machine, confirmed by the target.",
+   "observed": "running"
+  },
+  "failure": null
+ },
+ "events": [
+  "computer.requested",
+  "computer.placed",
+  "computer.provisioned",
+  "computer.running",
+  "computer.unreachable",
+  "computer.recovered",
+  "computer.unreachable",
+  "computer.lost",
+  "computer.replacing",
+  "computer.replacing",
+  "computer.placed",
+  "computer.provisioned",
+  "computer.running"
+ ]
+}

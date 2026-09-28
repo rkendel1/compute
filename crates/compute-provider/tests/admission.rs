@@ -90,6 +90,7 @@ async fn serve(execution_policy: Option<Policy>, max_concurrent_jobs: usize) -> 
         .with_execution_policy(execution_policy),
     );
     let mut config = ServerConfig::local(endpoint.clone());
+    config.authorizer = Arc::new(compute_provider::InsecureUnauthenticated);
     config.provider = provider.clone();
     config.job_store = jobs.path().to_path_buf();
     config.max_concurrent_jobs = max_concurrent_jobs;

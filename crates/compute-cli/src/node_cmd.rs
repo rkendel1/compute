@@ -496,10 +496,11 @@ pub(crate) fn print_info(info: &ControllerInfo) {
         }
     );
     println!(
-        "Control plane: {} ({} {}){}",
+        "Control plane: {} ({} {}, {}){}",
         info.control_plane.mode,
         info.control_plane.state.kind,
         info.control_plane.state.location,
+        info.control_plane.durability,
         info.control_plane
             .error
             .as_ref()

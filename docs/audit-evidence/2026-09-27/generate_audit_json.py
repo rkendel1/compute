@@ -2,8 +2,10 @@
 joined with the audit's verified classifications.
 
 Inputs are the inventories captured on 2026-09-27 (cli.json, routes.json,
-tests.json in this directory) and the experiment results
-(experiments.json). Run from the repository root:
+tests.json in this directory), the experiment results (experiments.json),
+and the foundation re-audit (foundation.json, from foundation.py: the
+security and recovery journeys re-run after targets were authenticated and
+target reality made authoritative). Run from the repository root:
 
     python3 docs/audit-evidence/2026-09-27/generate_audit_json.py
 
@@ -20,6 +22,15 @@ cli = json.load(open(os.path.join(HERE, 'cli.json')))
 api = json.load(open(os.path.join(HERE, 'api.json')))
 tests = json.load(open(os.path.join(HERE, 'tests.json')))
 experiments = json.load(open(os.path.join(HERE, 'experiments.json')))
+# The foundation re-audit, cited as experiments.json#foundation. The
+# earlier results stay: they are what the boundary replaced.
+experiments['foundation'] = json.load(open(os.path.join(HERE, 'foundation.json')))
+FOUNDATION = 'experiments.json#foundation'
+CLI_COMPUTERS = 'crates/compute-cli/tests/computers.rs'
+CLI_SESSIONS = 'crates/compute-cli/tests/sessions.rs'
+LAUNCHER = 'crates/compute-cli/tests/launcher.rs'
+E2E = 'packages/compute-ui-e2e/src/control-plane.test.mjs'
+E2E_REALITY = 'packages/compute-ui-e2e/src/computer-reality.test.mjs'
 
 STATUSES = ['IMPLEMENTED', 'IMPLEMENTED + VERIFIED', 'PARTIAL', 'DOCUMENTED ONLY', 'STUB',
             'UNUSED', 'BROKEN', 'MISSING', 'UNKNOWN']
@@ -39,17 +50,17 @@ PJ = 'crates/compute-cli/tests/product_journey.rs'
 capabilities = [
     # Launch and surface
     cap('launch', 'launch', '`compute` launches the control plane and a local computer host', 'IMPLEMENTED + VERIFIED', 'yes', True,
-        {'source': ['crates/compute-cli/src/launch_cmd.rs'], 'tests': [PJ], 'journey': 'first-launch'},
-        'Starts `compute serve` (127.0.0.1:8788) and `compute start` (127.0.0.1:8787) with a generated pool; 3.7 s cold, 0.01 s when running. Opens a browser with xdg-open/open.'),
+        {'source': ['crates/compute-cli/src/launch_cmd.rs'], 'tests': [PJ, LAUNCHER, E2E_REALITY], 'journey': 'first-launch'},
+        'Starts `compute serve` (127.0.0.1:8788) trusting only this control plane (a generated target credential, a persistent control-plane identity) and `compute start` (127.0.0.1:8787) with a generated pool that names the token file; says which control state it uses. 3.7 s cold, 0.01 s when running. Opens a browser with xdg-open/open.'),
     cap('ui-modes', 'ui', 'Work / Manage modes of one control plane', 'IMPLEMENTED + VERIFIED', 'yes', True,
         {'source': ['crates/compute-environment/ui/app.js', 'crates/compute-environment/ui/index.html'], 'tests': ['crates/compute-cli/tests/work_mode_ui.rs', PJ]},
-        'Browser tests skip where Playwright/Chromium are absent, which includes CI.'),
+        'Run in CI with Chromium (test.yml `browser`, COMPUTE_REQUIRE_BROWSER: a missing browser fails); skip elsewhere without Playwright/Chromium.'),
     cap('ui-home', 'ui', 'Action-first home ("What do you want to do?")', 'IMPLEMENTED + VERIFIED', 'yes', True,
         {'source': ['crates/compute-environment/ui/app.js#homeView'], 'tests': [PJ]},
         'Shows software and computers; environments without a computer are not on the home page.'),
-    cap('ui-certification-package', 'ui', 'packages/compute-ui-e2e browser certification', 'BROKEN', 'n/a', True,
-        {'tests': ['packages/compute-ui-e2e/src/control-plane.test.mjs'], 'journey': 'experiments.json#ui_certification_package'},
-        'Fails since 69b70d9 changed the `#/` route; not run in CI.'),
+    cap('ui-certification-package', 'ui', 'packages/compute-ui-e2e browser certification', 'IMPLEMENTED + VERIFIED', 'n/a', True,
+        {'tests': [E2E, E2E_REALITY, '.github/workflows/test.yml'], 'journey': 'experiments.json#ui_certification_package'},
+        'Fixed for the action home (`#/` → `#/environments`); runs in CI with Chromium: the operator journey, and a computer that is created, runs, becomes unreachable, recovers, is lost, and is replaced, launched with `compute up`.'),
     # Computer model
     cap('computer-environments', 'computer', 'Environments backed by a durable computer', 'IMPLEMENTED + VERIFIED', 'yes', True,
         {'source': ['crates/compute-environment/src/daemon/computers.rs', 'crates/compute-core/src/computers.rs'], 'tests': [CT]}),
@@ -66,13 +77,22 @@ capabilities = [
     cap('stop-resume', 'computer', 'Stop and resume the same machine', 'IMPLEMENTED + VERIFIED', 'yes', True, {'tests': [CT, PJ]}),
     cap('orphan-sweep', 'computer', 'Sessions no computer record claims are torn down', 'IMPLEMENTED + VERIFIED', 'no (automatic)', True,
         {'tests': [CT + '#provisioning_survives_a_controller_restart_and_orphans_are_torn_down']}),
-    cap('machine-loss', 'computer', 'A machine the target lost is reported (environment_lost)', 'PARTIAL', 'partial', True,
-        {'source': ['crates/compute-environment/src/daemon/computers.rs#target_unreachable'], 'tests': [CT + '#provider_failures_and_replacements_are_explicit'],
-         'journey': 'experiments.json#after_the_target_forgot_the_machine'},
-        'Only noticed by the process probe or a lifecycle step. A computer with no processes stays "running" with no failure indefinitely, through reconcile and a control-plane restart.'),
-    cap('target-down-visibility', 'computer', 'A computer whose target is unreachable says so', 'MISSING', 'no', True,
-        {'journey': 'experiments.json#computer_while_target_down'},
-        'The view keeps "running", failure null; exec fails with runtime_unavailable.'),
+    cap('machine-loss', 'computer', 'A machine or session the target lost makes the computer `lost`', 'IMPLEMENTED + VERIFIED', 'yes', True,
+        {'source': ['crates/compute-environment/src/daemon/computers.rs#observe_machine,apply_observation,lost_step', 'crates/compute-provider/src/sessions.rs#environment_lost'],
+         'tests': [CT + '#a_machine_or_session_that_disappears_is_lost_until_replaced', CLI_COMPUTERS + '#the_cli_reports_observed_reality_not_desired_state', E2E_REALITY],
+         'journey': FOUNDATION},
+        'Every running computer is confirmed with its target (liveness every 10 s, whatever runs in it). A target that answers without the session, or whose provider no longer has the machine, makes it lost: desired state kept, never re-provisioned on its own, stays lost through reconcile and a control-plane restart until it is replaced or destroyed.'),
+    cap('target-down-visibility', 'computer', 'A computer whose target is unreachable says so', 'IMPLEMENTED + VERIFIED', 'yes', True,
+        {'source': ['crates/compute-environment/src/daemon/computers.rs#unreachable_step'],
+         'tests': [CT + '#an_unreachable_target_keeps_desired_state_and_recovers_the_same_machine', CLI_COMPUTERS, E2E_REALITY], 'journey': FOUNDATION},
+        '`unreachable` (target_unreachable, or credential_rejected when the target refuses this control plane) within one liveness interval; exec answers runtime_unavailable naming it; the same machine returns to running when the target answers.'),
+    cap('stale-fencing', 'computer', 'A stale target answer cannot revive a lost computer', 'IMPLEMENTED + VERIFIED', 'no (automatic)', True,
+        {'source': ['crates/compute-environment/src/daemon/computers.rs#apply_observation'], 'tests': [CT + '#a_stale_answer_from_a_target_cannot_revive_a_lost_computer']},
+        'Every observation is applied only to the record version it was made against (the generation-fenced write); lost is sticky: only an operator reconcile with a fresh answer can find the machine again.'),
+    cap('reality-surfaces', 'computer', 'Desired and observed state, told apart, on every surface', 'IMPLEMENTED + VERIFIED', 'yes', True,
+        {'source': ['crates/compute-environment/src/status.rs#ComputerReality', 'crates/compute-environment/ui/app.js#realityPanel', 'crates/compute-cli/src/computer_cmd.rs#print_computer', 'packages/compute-appport/src/computers.ts#ComputerReality'],
+         'tests': [CLI_COMPUTERS + '#the_cli_reports_observed_reality_not_desired_state', E2E_REALITY, CT]},
+        'One model (`reality`: desired, observed, confirmed_at, since, explanation) in the API, `compute environment status`, the UI, and AppPort. An environment on a computer is never `running` because it is meant to be: it is what its computer was last observed to be.'),
     cap('contents', 'computer', 'Repositories, packages, processes, projects, configuration as desired state', 'IMPLEMENTED + VERIFIED', 'yes', True, {'tests': [CT, PJ]}),
     cap('endpoints', 'computer', 'Process ports published as endpoints (target host:port)', 'IMPLEMENTED + VERIFIED', 'yes', True, {'tests': [CT, PJ]},
         'No port publishing for the container provider; no ingress/TLS/domains for computer endpoints.'),
@@ -86,7 +106,8 @@ capabilities = [
         'Each line is a durable job; no interactive PTY. The `terminal` session capability is offered by no provider.'),
     # Targets, discovery, placement
     cap('target-inventory', 'targets', 'Targets listed with health, platform, resources, capabilities, features', 'IMPLEMENTED + VERIFIED', 'CLI/API only', True,
-        {'api': ['GET /targets'], 'cli': ['compute target list'], 'tests': ['crates/compute-cli/tests/computers.rs']}, 'Not shown in the UI.'),
+        {'api': ['GET /targets'], 'cli': ['compute target list'], 'tests': ['crates/compute-cli/tests/computers.rs', LAUNCHER]},
+        'Includes how each target authenticates (`credential`, or `insecure-unauthenticated`) and whether this control plane presents a credential. Not shown in the UI.'),
     cap('discovery-resources', 'discovery', 'CPU count, memory, disk, OS/architecture discovered', 'IMPLEMENTED + VERIFIED', 'indirect', True,
         {'journey': 'GET /compute/capabilities on this host: 4 CPU, 16.9 GB, 270 GB, linux-x86_64'}),
     cap('discovery-runtimes', 'discovery', 'Language runtimes discovered (installed/available/ready)', 'IMPLEMENTED + VERIFIED', 'CLI', True, {'cli': ['compute runtimes', 'compute doctor']}),
@@ -158,24 +179,28 @@ capabilities = [
     cap('logs', 'operations', 'Process logs and job output', 'IMPLEMENTED + VERIFIED', 'yes', True, {'tests': [CT, PJ]}, 'Read on demand (tail); no streaming for computer processes.'),
     cap('restart', 'operations', 'Restart a process in place', 'IMPLEMENTED + VERIFIED', 'yes', True, {'tests': ['crates/compute-environment/src/daemon/software.rs', PJ]}),
     cap('health', 'operations', 'Process health (probe) and endpoint reachability (rollouts)', 'PARTIAL', 'yes', True, {'tests': [CT]},
-        'Process liveness is probed every 15 s; endpoints are TCP-checked only during a rollout; no HTTP health checks for computer processes.'),
+        'The machine is confirmed with its target every 10 s; process liveness is probed every 15 s; endpoints are TCP-checked only during a rollout; no HTTP health checks for computer processes.'),
     cap('metrics', 'observability', 'Metrics endpoint', 'IMPLEMENTED', 'API only', True, {'api': ['GET /metrics']}, 'Not surfaced in the UI or CLI.'),
     cap('events', 'observability', 'Durable lifecycle events and a live stream', 'IMPLEMENTED + VERIFIED', 'yes', True, {'tests': ['crates/compute-environment/tests/control_plane.rs']}),
     cap('receipts', 'observability', 'Verifiable execution receipts', 'IMPLEMENTED + VERIFIED', 'yes', True, {'tests': ['crates/compute-core/src/receipt.rs', 'crates/compute-cli/tests/product.rs']}),
     # State
-    cap('state-feltdb', 'state', 'FeltDB as the durable authority (model generation 6)', 'IMPLEMENTED + VERIFIED', 'configuration', True,
-        {'tests': ['crates/compute-state-feltdb/tests/consumer.rs', 'crates/compute-environment/tests/feltdb_consumer.rs']}, 'Opt-in: `--state feltdb` or compute.toml.'),
-    cap('state-default-file', 'state', 'Default control state is a local file (control-state.json)', 'IMPLEMENTED', 'yes', 'reconcile',
-        {'source': ['crates/compute-cli/src/control_state.rs'], 'journey': 'experiments.json#environment'}, 'The launcher and `compute start` default to the file backend, contrary to "FeltDB owns durable state".'),
+    cap('state-feltdb', 'state', 'FeltDB as the durable authority of a production control plane (model generation 7)', 'IMPLEMENTED + VERIFIED', 'configuration', True,
+        {'tests': ['crates/compute-state-feltdb/tests/consumer.rs', 'crates/compute-environment/tests/feltdb_consumer.rs']},
+        'The production decision (docs/feltdb.md): `[state] backend = "feltdb"` (or `--state feltdb`); `compute` and `compute start` pass it through. /info and `compute status` report `durability: production`.'),
+    cap('state-default-file', 'state', 'Without configuration, control state is a local file, stated as local development', 'IMPLEMENTED + VERIFIED', 'yes', True,
+        {'source': ['crates/compute-cli/src/control_state.rs#backend_name', 'crates/compute-state/src/store.rs#durability', 'crates/compute-cli/src/launch_cmd.rs#durability_note'], 'tests': [LAUNCHER], 'journey': FOUNDATION},
+        'The file backend is kept for local development behind the same StateStore abstraction and labelled everywhere: `compute` prints it, /info, `compute status`, and `compute node info` report `durability: local-development`. The launcher uses whatever `[state]` says; it never picks a different model silently.'),
     cap('restart-recovery', 'state', 'Control-plane restart keeps and resumes everything', 'IMPLEMENTED + VERIFIED', 'yes', True,
         {'tests': [CT, 'crates/compute-cli/tests/recovery.rs'], 'journey': 'experiments.json#after_control_plane_restart'}),
     # Security
     cap('daemon-auth', 'security', 'Daemon: operator credentials, scopes, audit; owner checks for computers', 'IMPLEMENTED + VERIFIED', 'yes', True,
         {'source': ['crates/compute-environment/src/auth.rs'], 'tests': ['crates/compute-environment/tests/security.rs', CT]},
         'Loopback without TLS admits requests with no credential (development mode); unknown bearer tokens get 401.'),
-    cap('target-auth', 'security', 'Target (`compute serve`) authentication', 'MISSING', 'n/a', True,
-        {'source': ['crates/compute-provider/src/lib.rs#AllowAllAuthorizer'], 'journey': 'experiments.json#target_exec_without_credential'},
-        'Any caller that reaches a target can list sessions and exec in any computer; the daemon authenticates to no one, so its computers are owned by "anonymous".'),
+    cap('target-auth', 'security', 'Target (`compute serve`) authentication', 'IMPLEMENTED + VERIFIED', 'yes', True,
+        {'source': ['crates/compute-provider/src/credentials.rs#TargetAuthorizer,NoCredentialsConfigured,InsecureUnauthenticated', 'crates/compute-environment/src/auth.rs#DaemonAuthorized', 'crates/compute-placement/src/pool.rs#token_file'],
+         'tests': ['crates/compute-provider/tests/sessions.rs#a_target_is_controlled_only_by_the_control_planes_it_trusts', CLI_SESSIONS + '#a_target_is_controlled_only_by_the_control_planes_it_trusts', LAUNCHER, 'crates/compute-provider/src/credentials.rs'],
+         'journey': FOUNDATION},
+        'A target trusts only the control planes it issued a credential to (`compute target credential issue`; verifiers only, re-read on change, revocable). What a control plane creates belongs to its identity, not its token: rotation keeps it, another control plane sees nothing. `compute serve` refuses to start without a trust file; the only open mode is the named `--insecure-unauthenticated`, which the target advertises. AllowAllAuthorizer is gone; an endpoint without an authority fails closed.'),
     cap('isolation-computers', 'security', 'Isolation between computers on one host', 'MISSING', 'n/a', True, {'source': ['crates/compute-provider/src/sessions.rs']},
         'Workspace computers are directories under one user; processes share the host network and filesystem permissions.'),
     # Agents and API
@@ -203,8 +228,11 @@ journeys = [
     ('ephemeral', 'create → use → expire → evidence retained', 'PASS', [CT, PJ], ''),
     ('replacement', 'environment → replace → new computer → old retired', 'PASS', [CT], 'CLI/API and the Manage dialog.'),
     ('container-computer', 'a computer in a real container', 'NOT IMPLEMENTED', ['experiments.json#environment'], 'Adapter exists; no engine available to verify; not in CI.'),
-    ('machine-loss', 'the target loses the machine → Compute reports it', 'FAIL', ['experiments.json#after_the_target_forgot_the_machine'], 'Undetected for computers without processes.'),
-    ('ui-certification', 'packages/compute-ui-e2e', 'FAIL', ['experiments.json#ui_certification_package'], 'Broken by the home-route change.'),
+    ('machine-loss', 'the target loses the machine → Compute reports it', 'PASS', [FOUNDATION, CT, E2E_REALITY], 'Lost within one liveness interval of the target answering; stays lost through reconcile and a control-plane restart; replacement brings a new machine.'),
+    ('target-outage', 'target down → unreachable → target back → running, the same machine', 'PASS', [FOUNDATION, CT, CLI_COMPUTERS, E2E_REALITY], 'Desired state is kept throughout.'),
+    ('stale-response', 'observe A → A unavailable → lost → A\'s delayed answer → still lost', 'PASS', [CT], 'Through a proxy that holds a real answer back.'),
+    ('target-security', 'no / wrong / revoked / another control plane\'s credential → refused; own → accepted, across restarts', 'PASS', [FOUNDATION, CLI_SESSIONS, 'crates/compute-provider/tests/sessions.rs', LAUNCHER], ''),
+    ('ui-certification', 'packages/compute-ui-e2e', 'PASS', [E2E, E2E_REALITY, '.github/workflows/test.yml'], 'Runs in CI with Chromium.'),
     ('readme-run', '`compute run script.py` from the README', 'FAIL', ['experiments.json#runtimes'], 'network "none" is unenforceable for python; needs --network.'),
     ('readme-application', '`compute init my-app; compute deploy my-app`', 'PASS', ['experiments.json#application_journey'], 'Auto-starts a second control plane in ./.compute/daemon.'),
 ]
@@ -246,7 +274,8 @@ tests_out = {'files': tests, 'ci': {
     '.github/workflows/test.yml': ['cargo fmt --check', 'cargo test --workspace --locked', 'compute-cli product acceptance', 'AppPort contract (npm test)'],
     '.github/workflows/feltdb-consumer.yml': ['state backends conform', 'FeltDB backend against feltdb-server (ignored tests)', 'controller against feltdb-server'],
     '.github/workflows/distribution-certification.yml': ['release build', 'distribution build/verify/certify'],
-    'not_in_ci': ['browser tests (skip without Playwright/Chromium)', 'packages/compute-ui-e2e', 'container provider against a real engine']}}
+    '.github/workflows/test.yml (browser)': ['packages/compute-ui-e2e in Chromium', 'work_mode_ui and product_journey with COMPUTE_REQUIRE_BROWSER'],
+    'not_in_ci': ['container provider against a real engine']}}
 
 
 models = [
@@ -274,8 +303,8 @@ models = [
 
 execution_paths = [
     {'path': '`compute run` (local)', 'where': 'the caller\'s machine, in process', 'authority': 'none (local user)', 'durable': 'execution record + receipt on disk', 'canonical_job_path': False},
-    {'path': '`compute pool run/submit`, `compute remote *`', 'where': 'the provider placement chose', 'authority': 'provider: AllowAll on compute serve; daemon /compute/* uses scopes', 'durable': 'provider job store', 'canonical_job_path': True},
-    {'path': '`compute session create/exec` (target sessions)', 'where': 'the target', 'authority': 'target AllowAll; owner = hash of Authorization', 'durable': 'target session/job stores', 'canonical_job_path': True},
+    {'path': '`compute pool run/submit`, `compute remote *`', 'where': 'the provider placement chose', 'authority': 'provider: a target credential on compute serve; daemon /compute/* only behind the daemon API\'s scopes', 'durable': 'provider job store', 'canonical_job_path': True},
+    {'path': '`compute session create/exec` (target sessions)', 'where': 'the target', 'authority': 'target credential; owner = the control plane the credential names', 'durable': 'target session/job stores', 'canonical_job_path': True},
     {'path': 'Computer operations (sync, install, build, start/stop, probe, inspect, publish steps)', 'where': 'the environment\'s computer', 'authority': 'daemon controller', 'durable': 'target jobs; evidence in FeltDB', 'canonical_job_path': True},
     {'path': '`environment exec/run/build/test/propose`', 'where': 'the environment\'s computer', 'authority': 'daemon scope + owner', 'durable': 'target jobs; events in FeltDB', 'canonical_job_path': True},
     {'path': 'Bundle project workloads (services, tasks) and releases', 'where': 'THE DAEMON HOST (supervisor)', 'authority': 'daemon scopes, no owner', 'durable': 'Execution records in control state', 'canonical_job_path': False},
@@ -284,7 +313,9 @@ execution_paths = [
 ]
 
 state = [
-    {'what': 'Environments, computers, contents, work sessions, versions, rollouts, events, deployments, executions, credentials, audit', 'where': 'control state: file (default) or FeltDB', 'survives_daemon_restart': True, 'survives_machine_restart': 'yes (file on disk / FeltDB)'},
+    {'what': 'Environments, computers, contents, work sessions, versions, rollouts, events, deployments, executions, credentials, audit', 'where': 'control state: FeltDB (production) or a file (local development, stated as such)', 'survives_daemon_restart': True, 'survives_machine_restart': 'yes (FeltDB / file on disk)'},
+    {'what': 'Target trust (which control planes a target trusts: verifiers only) and each control plane\'s target tokens', 'where': 'the target\'s trust file; the control plane\'s token files, named by the pool', 'survives_daemon_restart': True, 'survives_machine_restart': True},
+    {'what': 'When each running computer was last confirmed by its target', 'where': 'daemon memory (live evidence; transitions are durable)', 'survives_daemon_restart': 'rebuilt by the next confirmation', 'survives_machine_restart': 'rebuilt'},
     {'what': 'Target sessions and jobs (the machine, its commands, their results and receipts)', 'where': 'the target\'s session and job stores on its disk', 'survives_daemon_restart': True, 'survives_machine_restart': 'target records yes; workspace processes no (restarted by reconciliation)'},
     {'what': 'Computer workspaces (checkouts, builds, process pid/log files)', 'where': 'the target host filesystem', 'survives_daemon_restart': True, 'survives_machine_restart': 'files yes; processes no'},
     {'what': 'Desired snapshot, read cache, computer/operation drivers, orphan sweep schedule', 'where': 'daemon memory (derived)', 'survives_daemon_restart': 'rebuilt', 'survives_machine_restart': 'rebuilt'},
@@ -298,7 +329,8 @@ authorization = [
     {'operation': 'Publish / deploy / promote / rollback versions', 'check': 'deploy scope + owner of the environment(s)', 'every_operation': True},
     {'operation': 'Node environments, bundle projects, applications, domains', 'check': 'scopes only; no ownership', 'every_operation': True},
     {'operation': 'Loopback daemon without TLS', 'check': 'no credential required (development mode); `--production` requires TLS and credentials', 'every_operation': 'bypassable locally'},
-    {'operation': 'Target (`compute serve`) jobs and sessions', 'check': 'NONE (AllowAllAuthorizer)', 'every_operation': False},
+    {'operation': 'Target (`compute serve`) jobs and sessions', 'check': 'a target credential on every request (reads included); sessions and jobs owned by the control plane it names; `--insecure-unauthenticated` only by name', 'every_operation': True},
+    {'operation': 'Daemon /compute/* (node as provider)', 'check': 'only requests the daemon API authenticated and scoped (DaemonAuthorized)', 'every_operation': True},
 ]
 
 placement = {
@@ -317,20 +349,20 @@ documentation = [
     ('docs/architecture.md', 'OUTDATED → rewritten in this audit', 'Did not show targets, sessions, the file default, or the daemon-host execution paths.'),
     ('docs/audit-2026-09-25.md', 'OUTDATED (historical; replaced by docs/audit.md)', 'The 2026-09-25 audit predates computers, work sessions, versions.'),
     ('docs/platform-audit.md', 'OUTDATED', 'Historical (dated).'), ('docs/hardening-audit.md', 'OUTDATED', 'Historical (dated).'),
-    ('docs/computers.md', 'MISLEADING', '"Lost machines are reported, not recreated" is true only when a process probe or lifecycle step notices.'),
+    ('docs/computers.md', 'DOCUMENTED CORRECTLY', 'States `unreachable` and `lost`, the liveness check, and the one `reality` model. Was MISLEADING: "lost machines are reported" held only when a process probe noticed.'),
     ('docs/environment-control-plane.md', 'DOCUMENTED CORRECTLY', 'Matches the verified journeys; its limitations list is accurate.'),
     ('docs/product-surface/README.md', 'DOCUMENTED CORRECTLY', 'Screenshots from the passing journey.'),
-    ('docs/sessions.md', 'INCOMPLETE', 'Target sessions correct; does not explain work sessions or that targets are unauthenticated.'),
-    ('docs/session-architecture.md', 'INCOMPLETE', 'Describes an authority (ProviderAuthorizer) that `compute serve` wires as AllowAll.'),
+    ('docs/sessions.md', 'INCOMPLETE', 'Target sessions and their authority correct; does not explain work sessions.'),
+    ('docs/session-architecture.md', 'DOCUMENTED CORRECTLY', 'Describes the authority `compute serve` wires (TargetAuthorizer: owner = the control plane a credential names). Was INCOMPLETE: it described an authority `compute serve` wired as AllowAll.'),
     ('docs/providers.md', 'DOCUMENTED CORRECTLY', 'Describes target feature detection as implemented (binary-on-PATH), which is itself the defect.'),
-    ('docs/placement.md', 'DOCUMENTED CORRECTLY', ''), ('docs/feltdb.md', 'INCOMPLETE', 'The FeltDB contract is accurate; it does not say the default backend is a local file.'),
+    ('docs/placement.md', 'DOCUMENTED CORRECTLY', ''), ('docs/feltdb.md', 'DOCUMENTED CORRECTLY', 'States the production decision (FeltDB) and the labelled local-development file backend; the working-state table includes computer confirmations.'),
     ('docs/daemon.md', 'OUTDATED', '"Environments are the first screen" — the UI opens on the action home with Work/Manage.'),
     ('docs/control-plane.md', 'DOCUMENTED CORRECTLY', 'Spot-checked; notes computer environments.'),
     ('docs/environments.md', 'DOCUMENTED CORRECTLY', 'Node environments; points to computers.'),
     ('docs/applications.md', 'INCOMPLETE', 'Does not say `compute deploy <dir>` starts a control plane in ./.compute/daemon.'),
     ('docs/releases.md', 'DOCUMENTED CORRECTLY', 'Bundle releases (spot-checked; tests pass).'),
     ('docs/networking.md', 'INCOMPLETE', 'Ingress/domains apply to bundle projects only; not said.'),
-    ('docs/jobs.md', 'DOCUMENTED CORRECTLY', 'Spot-checked.'), ('docs/remote-execution.md', 'INCOMPLETE', 'Does not state that `compute serve` is unauthenticated.'),
+    ('docs/jobs.md', 'DOCUMENTED CORRECTLY', 'Spot-checked.'), ('docs/remote-execution.md', 'DOCUMENTED CORRECTLY', 'Target credentials: issue, rotate, revoke, the trust file, and the one named open mode.'),
     ('docs/receipts.md', 'DOCUMENTED CORRECTLY', 'Spot-checked.'), ('docs/policy.md', 'DOCUMENTED CORRECTLY', 'Spot-checked.'), ('docs/admission.md', 'DOCUMENTED CORRECTLY', 'Spot-checked.'),
     ('docs/isolation.md', 'DOCUMENTED CORRECTLY', 'Workload isolation; says nothing about computers (which have none).'),
     ('docs/dependencies.md', 'DOCUMENTED CORRECTLY', 'Spot-checked.'), ('docs/capacity.md', 'DOCUMENTED CORRECTLY', 'Spot-checked.'), ('docs/provider-pools.md', 'DOCUMENTED CORRECTLY', 'Spot-checked.'),
@@ -338,12 +370,12 @@ documentation = [
 documentation = [{'doc': d, 'status': s, 'notes': n} for d, s, n in documentation]
 
 security = [
-    {'id': 'SEC-1', 'severity': 'critical', 'finding': '`compute serve` has no authentication (AllowAllAuthorizer). Anyone who reaches a target lists every session and runs commands in any computer.', 'evidence': 'experiments.json#target_exec_without_credential, #bypass_file_seen_through_the_daemon'},
-    {'id': 'SEC-2', 'severity': 'high', 'finding': 'The daemon presents no credential to its targets by default (pool token_env unset, including the launcher), so every computer is owned by "anonymous" on its target.', 'evidence': 'crates/compute-cli/src/launch_cmd.rs; crates/compute-provider/src/lib.rs#owner'},
-    {'id': 'SEC-3', 'severity': 'high', 'finding': 'Workspace computers are directories under one OS user on one host: no filesystem, process, or network isolation between computers or from the target.', 'evidence': 'crates/compute-provider/src/sessions.rs#WorkspaceSessionProvider'},
-    {'id': 'SEC-4', 'severity': 'medium', 'finding': 'A loopback daemon without TLS admits requests with no credential (development mode). The launcher runs this way.', 'evidence': 'crates/compute-environment/src/auth.rs; docs/daemon.md'},
-    {'id': 'SEC-5', 'severity': 'medium', 'finding': 'Configuration values are passed as environment variables into every process and job in the computer; there is no secret type distinct from configuration.', 'evidence': 'crates/compute-environment/src/daemon/computers.rs#exec_in'},
-    {'id': 'SEC-6', 'severity': 'low', 'finding': 'Any operator with read scope can read any computer view (desired contents, configuration keys, endpoints); only mutations are owner-bound.', 'evidence': 'crates/compute-environment/src/daemon/computers.rs#computer'},
+    {'id': 'SEC-1', 'severity': 'critical', 'status': 'resolved', 'finding': 'Was: `compute serve` had no authentication (AllowAllAuthorizer); anyone who reached a target listed every session and ran commands in any computer. Now: every request needs a credential the target issued; anonymous, wrong, and revoked credentials get 401, another control plane\'s valid credential sees no sessions and gets unknown_session for this one\'s. AllowAllAuthorizer no longer exists.', 'evidence': 'experiments.json#foundation (target_without_credential, target_exec_without_credential, target_wrong_credential, target_other_control_plane, target_revoked_credential); before: experiments.json#target_exec_without_credential'},
+    {'id': 'SEC-2', 'severity': 'high', 'status': 'resolved', 'finding': 'Was: the daemon presented no credential to its targets, so every computer was owned by "anonymous". Now: the launcher issues the host a credential for this control plane\'s persistent identity and the pool presents it (token_file); sessions belong to `control-plane:<id>` across restarts and credential rotation.', 'evidence': 'experiments.json#foundation (launcher_credential, target_own_credential); crates/compute-cli/tests/launcher.rs'},
+    {'id': 'SEC-3', 'severity': 'high', 'status': 'open', 'finding': 'Workspace computers are directories under one OS user on one host: no filesystem, process, or network isolation between computers or from the target.', 'evidence': 'crates/compute-provider/src/sessions.rs#WorkspaceSessionProvider'},
+    {'id': 'SEC-4', 'severity': 'medium', 'status': 'open', 'finding': 'A loopback daemon without TLS admits requests with no credential (development mode). The launcher runs this way.', 'evidence': 'crates/compute-environment/src/auth.rs; docs/daemon.md'},
+    {'id': 'SEC-5', 'severity': 'medium', 'status': 'open', 'finding': 'Configuration values are passed as environment variables into every process and job in the computer; there is no secret type distinct from configuration.', 'evidence': 'crates/compute-environment/src/daemon/computers.rs#exec_in'},
+    {'id': 'SEC-6', 'severity': 'low', 'status': 'open', 'finding': 'Any operator with read scope can read any computer view (desired contents, configuration keys, endpoints); only mutations are owner-bound.', 'evidence': 'crates/compute-environment/src/daemon/computers.rs#computer'},
 ]
 
 performance = {
@@ -356,8 +388,18 @@ performance = {
     'Computer drivers re-read their records by identity every step; rollout drivers poll every 250 ms.', 'Debug build on a 4-CPU VM; not a benchmark.']}
 
 
+# Gaps the foundation re-audit closed, with what closed them.
+CLOSED = {
+    'G-ARCH-1': 'Closed: targets authenticate every request with a credential they issued; the daemon presents one; sessions belong to the control plane\'s identity (experiments.json#foundation, SEC-1, SEC-2).',
+    'G-ARCH-3': 'Closed: FeltDB is the production authority; the file backend remains for local development and says so everywhere (launcher output, /info, `compute status`, `compute node info`: durability local-development).',
+    'G-ARCH-4': 'Closed: every running computer is confirmed with its target; unreachable and lost are durable, evented, fenced observed states that keep desired state (experiments.json#foundation).',
+    'G-UI-2': 'Closed: the certification is fixed for the action home and runs in CI with Chromium, with a computer-reality journey (.github/workflows/test.yml).',
+}
+
+
 def gap(id, area, current, desired, impact, evidence, next):
-    return {'id': id, 'area': area, 'current': current, 'desired': desired, 'impact': impact, 'evidence': evidence, 'next': next}
+    return {'id': id, 'area': area, 'status': 'closed' if id in CLOSED else 'open', 'current': current, 'desired': desired,
+            'impact': impact, 'evidence': evidence, 'next': CLOSED.get(id, next)}
 
 gaps = [
     gap('G-ARCH-1', 'Core architecture', 'Targets accept any caller (AllowAllAuthorizer); the daemon authenticates to targets with nothing.', 'Targets trust only their control plane (a credential or mTLS), and sessions belong to the daemon\'s identity.', 'Anyone who reaches a target controls every computer on it; the daemon is not actually the authority.', 'SEC-1, SEC-2', 'Give `compute serve` a required credential and the pool a token for it; the launcher generates both.'),
@@ -385,7 +427,7 @@ gaps = [
     gap('G-SEC-1', 'Security', 'See SEC-1…SEC-6.', 'Real boundaries at the target and between computers.', 'Critical.', 'security', 'G-ARCH-1, then isolation via container/microVM substrates.'),
     gap('G-OBS-1', 'Observability', 'Process logs are read on demand; no log streaming, metrics, or traces for computers in the UI.', 'Live logs and metrics per application.', 'Operating production is blind between refreshes.', 'logs, metrics', 'Stream process logs through the daemon; surface /metrics.'),
     gap('G-DOC-1', 'Documentation', 'README and getting-started lead with a command that fails by default; daemon.md describes an old UI.', 'Docs lead with `compute` and verified journeys.', 'First impressions fail.', 'documentation', 'Rewrite the first pages around the verified journey.'),
-    gap('G-TEST-1', 'Testing', '87 CLI commands are never invoked by a test; container provider, target auth, and machine loss have no real tests.', 'Every product claim executable.', 'Regressions in untested paths.', 'cli.json tests', 'Add the missing journeys to CI.'),
+    gap('G-TEST-1', 'Testing', '87 CLI commands are never invoked by a test; the container provider has no real test (target auth and machine loss now do).', 'Every product claim executable.', 'Regressions in untested paths.', 'cli.json tests', 'Add the missing journeys to CI.'),
     gap('G-PERF-1', 'Performance', 'Every event re-renders and refetches the whole page; /software fans out per environment.', 'Incremental updates.', 'Fine at 3 computers; unmeasured at scale.', 'performance', 'Measure at 100 computers; add a software index.'),
 ]
 
@@ -435,18 +477,18 @@ readiness = [
     ('Deploy', 'PASS', 'journey', 'G-DEP-1'), ('Promote', 'PASS', 'journey', 'G-PROD-1'),
     ('Production', 'PARTIAL', 'an environment; no domains/TLS/approvals for computers', 'G-APP-1, G-PROD-1'),
     ('Rollback', 'PASS', 'journey', ''),
-    ('Operations', 'PARTIAL', 'restart/logs/config/health probe', 'G-OBS-1, G-ARCH-4'),
-    ('UI', 'PARTIAL', 'journey passes; certification package fails; no CI browser', 'G-UI-1, G-UI-2'),
-    ('CLI', 'PARTIAL', '182 commands; 52 help defects; 87 untested through the CLI', 'G-CLI-1'),
+    ('Operations', 'PARTIAL', 'restart/logs/config/health probe; target liveness', 'G-OBS-1'),
+    ('UI', 'PARTIAL', 'journey and certification pass in CI with Chromium; unreachable/lost shown with actions', 'G-UI-1'),
+    ('CLI', 'PARTIAL', f'{len(cli)} commands; 52 help defects; 87 untested through the CLI', 'G-CLI-1'),
     ('Agents', 'PARTIAL', 'AppPort parity (stub-tested)', 'G-AGENT-1'),
     ('Providers', 'PARTIAL', 'local + remote targets only', 'G-PROV-1'),
-    ('Security', 'FAIL', 'unauthenticated targets demonstrated', 'G-ARCH-1, SEC-3'),
-    ('Recovery', 'PARTIAL', 'daemon restart, target restart recover; machine loss undetected', 'G-ARCH-4'),
+    ('Security', 'PARTIAL', 'targets authenticate every request and isolate control planes (demonstrated); computers on one host are not isolated from each other', 'SEC-3, SEC-4'),
+    ('Recovery', 'PASS', 'daemon restart, target restart, target outage, machine and session loss, stale answers: demonstrated (experiments.json#foundation)', ''),
 ]
 readiness = [{'area': a, 'status': s, 'evidence': e, 'blocking_gap': g} for a, s, e, g in readiness]
 
 backlog = [
-    ('FOUNDATION', ['Authenticate targets; the daemon holds the credential (G-ARCH-1)', 'Detect machine loss and unreachable targets (G-ARCH-4)', 'Decide the durable-state default (G-ARCH-3)', 'Browser tests and the UI certification in CI; fix the home-route regression (G-UI-2)']),
+    ('FOUNDATION (done)', ['Done: authenticate targets; the daemon holds the credential (G-ARCH-1)', 'Done: detect machine loss and unreachable targets (G-ARCH-4)', 'Done: decide the durable-state default (G-ARCH-3)', 'Done: browser tests and the UI certification in CI; fix the home-route regression (G-UI-2)']),
     ('EXECUTION', ['One deployment model: retire or port node environments and applications (G-ARCH-2, G-EXEC-1)', 'Cancel/retry for computer jobs and operations (G-EXEC-2)']),
     ('RUNTIME COVERAGE', ['Container computers verified in CI, with ports and volumes (G-RT-1)', 'Live, substrate-accurate target features (G-RT-2, G-DISC-1)', 'A microVM session provider (Firecracker)']),
     ('PROJECT/APP ASSEMBLY', ['Non-Git sources (G-PROJ-1)', 'Managed services on container computers (G-SVC-1)', 'Persistent storage and public endpoints, or hide them (G-PLACE-1)']),
@@ -461,6 +503,9 @@ backlog = [{'stage': s, 'items': i} for s, i in backlog]
 
 audit = {
     'audit': {'date': '2026-09-27', 'commit': '69b70d9', 'branch': 'claude/great-galileo-z1xed0',
+              'reaudit': {'date': '2026-09-27', 'base': 'dfe7704', 'branch': 'claude/pensive-brown-3qgk9f',
+                          'scope': 'the foundation: authenticated targets (G-ARCH-1), durable-state semantics (G-ARCH-3), truthful machine reality (G-ARCH-4), browser certification in CI (G-UI-2)',
+                          'evidence': 'experiments.json#foundation (foundation.py), the tests each capability cites'},
               'supersedes': 'docs/audit-2026-09-25.md (the audit of 2026-09-25 at 7a3a160)',
               'environment': experiments['environment'], 'status_vocabulary': STATUSES, 'journey_vocabulary': JOURNEY},
     'capabilities': capabilities, 'journeys': journeys, 'runtimes': runtimes,

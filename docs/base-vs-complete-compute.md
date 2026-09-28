@@ -71,13 +71,13 @@ promise is broken.
 | Promote | **PASS** | journey | G-PROD-1 |
 | Production | **PARTIAL** | an environment; no domains/TLS/approvals for computers | G-APP-1, G-PROD-1 |
 | Rollback | **PASS** | journey | — |
-| Operations | **PARTIAL** | restart/logs/config/health probe | G-OBS-1, G-ARCH-4 |
-| UI | **PARTIAL** | journey passes; certification package fails; no CI browser | G-UI-1, G-UI-2 |
-| CLI | **PARTIAL** | 182 commands; 52 help defects; 87 untested through the CLI | G-CLI-1 |
+| Operations | **PARTIAL** | restart/logs/config/health probe; target liveness | G-OBS-1 |
+| UI | **PARTIAL** | journey and certification pass in CI with Chromium; unreachable/lost shown with actions | G-UI-1 |
+| CLI | **PARTIAL** | 185 commands; 52 help defects; 87 untested through the CLI | G-CLI-1 |
 | Agents | **PARTIAL** | AppPort parity (stub-tested) | G-AGENT-1 |
 | Providers | **PARTIAL** | local + remote targets only | G-PROV-1 |
-| Security | **FAIL** | unauthenticated targets demonstrated | G-ARCH-1, SEC-3 |
-| Recovery | **PARTIAL** | daemon restart, target restart recover; machine loss undetected | G-ARCH-4 |
+| Security | **PARTIAL** | targets authenticate every request and isolate control planes (demonstrated); computers on one host are not isolated from each other | SEC-3, SEC-4 |
+| Recovery | **PASS** | daemon restart, target restart, target outage, machine and session loss, stale answers: demonstrated (experiments.json#foundation) | — |
 <!-- /audit -->
 
 ## Summary

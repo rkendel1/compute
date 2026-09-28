@@ -9,6 +9,11 @@ name: test
 # including an agent deploying an application through AppPort. Managed
 # runtimes in tests come from a host-backed fixture catalog, so no test
 # downloads one.
+#
+# `browser` certifies the control-plane UI in Chromium against real
+# daemons and targets: the operator journey, computers that become
+# unreachable, lost, recovered, and replaced, Work mode, and the whole
+# product from one command. A missing browser fails it; nothing skips.
 
 on:
   workflow_dispatch:
@@ -38,3 +43,30 @@ jobs:
         run: |
           npm ci
           npm test
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build Compute
+        run: cargo build --locked -p compute-cli
+      - name: Install Chromium
+        working-directory: packages/compute-ui-e2e
+        run: |
+          npm ci
+          npx playwright-core install --with-deps chromium
+          echo "CHROMIUM_PATH=$(node --input-type=module -e "import { chromium } from 'playwright-core'; console.log(chromium.executablePath())")" >> "$GITHUB_ENV"
+      - name: UI certification
+        working-directory: packages/compute-ui-e2e
+        run: npm test
+      - name: Work mode and the whole product, in the browser
+        env:
+          COMPUTE_REQUIRE_BROWSER: "1"
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/packages/compute-ui-e2e/node_modules/playwright-core/index.mjs
+        run: |
+          COMPUTE_UI_CHROMIUM="$CHROMIUM_PATH" cargo test --locked -p compute-cli \
+            --test work_mode_ui --test product_journey -- --nocapture

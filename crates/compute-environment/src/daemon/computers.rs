@@ -55,12 +55,37 @@ pub(crate) const DEFAULT_TTL: u64 = 60 * 60;
 const TARGET_GRACE: u64 = 5 * 60;
 const POLL: Duration = Duration::from_millis(150);
 const BACKOFF: Duration = Duration::from_secs(2);
+/// A lost computer waits for an operator; it is woken by any change.
+const LOST_WAIT: Duration = Duration::from_secs(60);
 
 /// What a driver does next.
 enum Step {
     Continue,
     Wait(Duration),
     Done,
+}
+
+/// A computer confirmed with its target: when, and at which record
+/// generation. Live evidence, kept in memory only.
+#[derive(Debug, Clone)]
+pub(crate) struct Confirmation {
+    pub generation: u64,
+    /// The session the target confirmed.
+    pub session_id: Option<String>,
+    pub at: chrono::DateTime<Utc>,
+    pub checked: std::time::Instant,
+}
+
+/// What a target said about a computer's machine.
+#[derive(Debug)]
+pub(crate) enum Observation {
+    /// The target answered, and still has the machine.
+    Present,
+    /// The target did not answer, or refused this control plane: nothing
+    /// is known about the machine.
+    Unreachable { code: &'static str, message: String },
+    /// The target answered, and no longer has the machine.
+    Lost { code: String, message: String },
 }
 
 /// A command run in an environment's computer.
@@ -605,7 +630,9 @@ impl Daemon {
                 })
             })
             .collect();
+        let reality = self.reality(&record.value, &spec, &value, converged);
         Some(ComputerView {
+            reality,
             environment: record.value.name.clone(),
             environment_id: record.id.clone(),
             owner: value.owner,
@@ -635,6 +662,76 @@ impl Daemon {
             expires_at: spec.expires_at,
             ended_at: value.ended_at,
         })
+    }
+
+    /// Desired and observed state, told apart, with what it means.
+    pub(crate) fn reality(
+        &self,
+        environment: &EnvironmentRecord,
+        spec: &ComputerSpec,
+        computer: &ComputerRecord,
+        converged: bool,
+    ) -> ComputerReality {
+        let desired = if spec.destroy_requested_at.is_some() {
+            "destroyed"
+        } else {
+            match environment.desired_state {
+                DesiredState::Running => "running",
+                DesiredState::Stopped => "stopped",
+            }
+        };
+        let target = computer.target.as_deref().unwrap_or("its target");
+        let failure = computer.failure.as_ref();
+        let reason = failure
+            .map(|failure| format!("{} ({})", failure.message, failure.code))
+            .unwrap_or_default();
+        let confirmed_at = self.confirmed_at(computer);
+        let since = matches!(
+            computer.status,
+            ComputerStatus::Unreachable | ComputerStatus::Lost
+        )
+        .then(|| failure.map(|failure| failure.at))
+        .flatten();
+        let fresh = confirmed_at.is_some_and(|at| {
+            (Utc::now() - at).to_std().unwrap_or_default() <= self.confirmation_bound()
+        });
+        let (observed, explanation) = match computer.status {
+            ComputerStatus::Running if !fresh => (
+                "unverified",
+                format!(
+                    "Its record says running, but {target} has not confirmed the machine recently; Compute is checking."
+                ),
+            ),
+            ComputerStatus::Running if !converged => (
+                "reconciling",
+                format!("Running on {target}; bringing it to what the environment asks for."),
+            ),
+            ComputerStatus::Running => (
+                "running",
+                format!("Running on {target}, confirmed by the target."),
+            ),
+            ComputerStatus::Unreachable => (
+                "unreachable",
+                format!(
+                    "{target} is not answering for this computer: {reason}. The environment still wants it; Compute keeps checking and it returns to running when {target} answers with the same machine."
+                ),
+            ),
+            ComputerStatus::Lost => (
+                "lost",
+                format!(
+                    "{target} no longer has this computer's machine: {reason}. The environment still wants it; replace the computer to provision a new machine with the same contents, or destroy it."
+                ),
+            ),
+            ComputerStatus::Failed => ("failed", format!("The computer failed: {reason}.")),
+            status => (status.observed(), String::new()),
+        };
+        ComputerReality {
+            desired: desired.into(),
+            observed: observed.into(),
+            confirmed_at: confirmed_at.filter(|_| computer.status == ComputerStatus::Running),
+            since,
+            explanation,
+        }
     }
 
     /// The environment, if it has a computer and `operator` owns it.
@@ -1074,31 +1171,60 @@ impl Daemon {
             json!({ "environment_id": record.id }),
         );
         self.apply(change).await?;
+        // An unreachable or lost computer is asked about now. This is the
+        // one way a lost computer comes back: an operator asked, and its
+        // target answered with the same machine.
+        // Each answer is applied only to the record it was asked about; if
+        // the driver moved the record on meanwhile, the target is asked
+        // again.
+        for attempt in 0.. {
+            let Some(computer) = self.fresh_computer(&record.id).await else {
+                break;
+            };
+            let (
+                ComputerStatus::Unreachable | ComputerStatus::Lost,
+                Some(target),
+                Some(session_id),
+            ) = (
+                computer.value.status,
+                computer.value.target.clone(),
+                computer.value.session_id.clone(),
+            )
+            else {
+                break;
+            };
+            let client = self.target_client(&target)?;
+            let observation = self.observe_machine(&client, &session_id).await;
+            match self
+                .apply_observation(&computer, &record.value.name, observation, true)
+                .await
+            {
+                Err(EnvironmentError::Conflict(_)) if attempt < 5 => {}
+                Err(error) => return Err(error),
+                Ok(_) => break,
+            }
+        }
         // A failed item is retried on request: forget its failed attempt.
-        if let Some(computer) = self.stored_computer(&record.id).await {
+        // The driver may write meanwhile; this is retried against what it
+        // wrote.
+        for attempt in 0.. {
+            let Some(computer) = self.fresh_computer(&record.id).await else {
+                break;
+            };
             let mut value = computer.value.clone();
-            value
-                .observed
-                .repositories
-                .retain(|_, seen| seen.evidence.outcome == "succeeded");
-            value
-                .observed
-                .packages
-                .retain(|_, seen| seen.evidence.outcome == "succeeded");
-            value
-                .observed
-                .builds
-                .retain(|_, seen| seen.evidence.outcome == "succeeded");
-            value
-                .observed
-                .processes
-                .retain(|_, seen| seen.state != ProcessState::Failed);
-            value.observed.observed_at = None;
-            if value != computer.value {
-                value.generation += 1;
-                value.updated_at = Utc::now();
-                self.apply(Change::new().with(|batch| batch.replace(&computer, &value)))
-                    .await?;
+            forget_failures(&mut value.observed);
+            if value == computer.value {
+                break;
+            }
+            value.generation += 1;
+            value.updated_at = Utc::now();
+            match self
+                .apply(Change::new().with(|batch| batch.replace(&computer, &value)))
+                .await
+            {
+                Err(EnvironmentError::Conflict(_)) if attempt < 5 => {}
+                Err(error) => return Err(error),
+                Ok(()) => break,
             }
         }
         self.computer_wake.notify_waiters();
@@ -1194,11 +1320,35 @@ impl Daemon {
                 EnvironmentError::Conflict("the computer is not provisioned yet".into())
             })?
             .value;
-        if computer.status != ComputerStatus::Running {
-            return Err(EnvironmentError::Conflict(format!(
-                "environment {}'s computer is {}",
-                record.value.name, computer.status
-            )));
+        let reason = || {
+            computer
+                .failure
+                .as_ref()
+                .map(|failure| format!(": {} ({})", failure.message, failure.code))
+                .unwrap_or_default()
+        };
+        match computer.status {
+            ComputerStatus::Running => {}
+            ComputerStatus::Unreachable => {
+                return Err(EnvironmentError::RuntimeUnavailable(format!(
+                    "environment {}'s computer is unreachable{}",
+                    record.value.name,
+                    reason()
+                )));
+            }
+            ComputerStatus::Lost => {
+                return Err(EnvironmentError::Conflict(format!(
+                    "environment {}'s computer is lost{}; replace or destroy it",
+                    record.value.name,
+                    reason()
+                )));
+            }
+            status => {
+                return Err(EnvironmentError::Conflict(format!(
+                    "environment {}'s computer is {status}",
+                    record.value.name
+                )));
+            }
         }
         let target = computer
             .target
@@ -1654,7 +1804,7 @@ impl Daemon {
             self.end_sessions_of(&record, computer.status).await?;
             // Earlier sessions of a failed or ended computer are still torn
             // down.
-            return if self.retire(&stored, &name).await? {
+            return if self.retire(&stored, &name).await?.0 {
                 Ok(Step::Done)
             } else {
                 Ok(Step::Wait(BACKOFF))
@@ -1688,8 +1838,411 @@ impl Daemon {
                 }
             }
             ComputerStatus::Resuming => self.resume_step(&stored, &name).await,
+            ComputerStatus::Unreachable => self.unreachable_step(&record, &spec, &stored).await,
+            ComputerStatus::Lost => self.lost_step(&record, &spec, &stored).await,
             _ => Ok(Step::Done),
         }
+    }
+
+    /// Ask the target whether it still has the computer's machine. A
+    /// target that does not answer in time is unreachable; one that refuses
+    /// this control plane's credential is too (nothing is known about the
+    /// machine); one that answers without the machine has lost it.
+    async fn observe_machine(&self, client: &RemoteProvider, session_id: &str) -> Observation {
+        let timeout = self.config.computer_liveness_timeout;
+        let seconds = timeout.as_secs_f64();
+        let answer = match tokio::time::timeout(timeout, client.session(session_id)).await {
+            Ok(answer) => answer,
+            Err(_) => {
+                return Observation::Unreachable {
+                    code: "target_unreachable",
+                    message: format!("the target did not answer within {seconds:.1}s"),
+                };
+            }
+        };
+        match answer {
+            Ok(session) if session.status.is_terminal() => {
+                let (code, message) = session
+                    .failure
+                    .map(|failure| (failure.code, failure.message))
+                    .unwrap_or_else(|| {
+                        (
+                            "session_ended".into(),
+                            format!("the target's session is {}", session.status),
+                        )
+                    });
+                Observation::Lost {
+                    code: if code == "environment_lost" {
+                        "machine_missing".into()
+                    } else {
+                        code
+                    },
+                    message,
+                }
+            }
+            Ok(_) => Observation::Present,
+            Err(error) if error.kind == ProviderErrorKind::UnknownSession => Observation::Lost {
+                code: "session_missing".into(),
+                message: format!("the target no longer has the session: {}", error.message),
+            },
+            // The target refuses this control plane: nothing is known about
+            // the machine. (A session held for someone else is unknown.)
+            Err(error) if error.kind == ProviderErrorKind::Unauthorized => {
+                Observation::Unreachable {
+                    code: "credential_rejected",
+                    message: format!(
+                        "the target refuses this control plane's credential: {}",
+                        error.message
+                    ),
+                }
+            }
+            Err(error) => Observation::Unreachable {
+                code: "target_unreachable",
+                message: error.to_string(),
+            },
+        }
+    }
+
+    /// Whether the computer is due a confirmation with its target.
+    fn liveness_due(&self, environment_id: &str) -> bool {
+        self.computer_confirmed
+            .lock()
+            .expect("confirmations")
+            .get(environment_id)
+            .is_none_or(|confirmation| {
+                confirmation.checked.elapsed() >= self.config.computer_liveness
+            })
+    }
+
+    /// Remember a confirmation, for the generation it was made against. A
+    /// confirmation of a record that has moved on since is discarded: it
+    /// says nothing about what is true now.
+    async fn confirm(&self, observed: &Stored<ComputerRecord>) {
+        let current = self.stored_computer(&observed.value.environment_id).await;
+        let mut confirmed = self.computer_confirmed.lock().expect("confirmations");
+        match current {
+            Some(current)
+                if current.version == observed.version
+                    && current.value.status == ComputerStatus::Running =>
+            {
+                confirmed.insert(
+                    observed.value.environment_id.clone(),
+                    Confirmation {
+                        generation: observed.value.generation,
+                        session_id: observed.value.session_id.clone(),
+                        at: Utc::now(),
+                        checked: std::time::Instant::now(),
+                    },
+                );
+            }
+            _ => {
+                confirmed.remove(&observed.value.environment_id);
+            }
+        }
+    }
+
+    /// A job in the session answered: the target still has the machine.
+    /// This keeps a running computer confirmed while its driver waits on a
+    /// long job; the periodic check still runs when it is due.
+    fn touch_session(&self, session_id: &str) {
+        let mut confirmed = self.computer_confirmed.lock().expect("confirmations");
+        for confirmation in confirmed.values_mut() {
+            if confirmation.session_id.as_deref() == Some(session_id) {
+                confirmation.at = Utc::now();
+            }
+        }
+    }
+
+    /// When the running computer was last confirmed, if the confirmation
+    /// is of its current generation.
+    pub(crate) fn confirmed_at(&self, computer: &ComputerRecord) -> Option<chrono::DateTime<Utc>> {
+        self.computer_confirmed
+            .lock()
+            .expect("confirmations")
+            .get(&computer.environment_id)
+            .filter(|confirmation| {
+                computer.status == ComputerStatus::Running
+                    && confirmation.generation <= computer.generation
+            })
+            .map(|confirmation| confirmation.at)
+    }
+
+    /// How old a confirmation of a running computer may be before the
+    /// computer is reported unverified rather than running.
+    pub(crate) fn confirmation_bound(&self) -> Duration {
+        self.config.computer_liveness * 3 + self.config.computer_liveness_timeout
+    }
+
+    /// Record what the target said, fenced on the version it was asked
+    /// about: an answer to a question about an older record changes
+    /// nothing. `lost` is sticky: only an operator's explicit reconcile
+    /// (`revive`) may find the machine again; a driver's answer never does.
+    async fn apply_observation(
+        &self,
+        stored: &Stored<ComputerRecord>,
+        name: &str,
+        observation: Observation,
+        revive: bool,
+    ) -> Result<Step, EnvironmentError> {
+        let computer = &stored.value;
+        let target = computer.target.clone().unwrap_or_default();
+        let session_id = computer.session_id.clone().unwrap_or_default();
+        match observation {
+            Observation::Present => match computer.status {
+                ComputerStatus::Running => {
+                    self.confirm(stored).await;
+                    Ok(Step::Continue)
+                }
+                ComputerStatus::Unreachable | ComputerStatus::Lost
+                    if computer.status == ComputerStatus::Unreachable || revive =>
+                {
+                    let mut value = computer.clone();
+                    value.status = ComputerStatus::Running;
+                    value.failure = None;
+                    // What ran before the outage is checked again now, and
+                    // what failed while the target was away is retried.
+                    forget_failures(&mut value.observed);
+                    self.advance(
+                        stored,
+                        name,
+                        value,
+                        Some((
+                            events::COMPUTER_RECOVERED,
+                            format!("{name}'s computer is reachable again on {target}, with the same machine"),
+                            json!({
+                                "environment_id": computer.environment_id,
+                                "target": target,
+                                "session_id": session_id,
+                                "from": computer.status,
+                            }),
+                        )),
+                    )
+                    .await?;
+                    if let Some(fresh) = self.stored_computer(&computer.environment_id).await {
+                        self.confirm(&fresh).await;
+                    }
+                    Ok(Step::Continue)
+                }
+                _ => Ok(Step::Wait(self.config.computer_liveness)),
+            },
+            Observation::Unreachable { code, message } => {
+                self.computer_confirmed
+                    .lock()
+                    .expect("confirmations")
+                    .remove(&computer.environment_id);
+                match computer.status {
+                    ComputerStatus::Running => {
+                        self.observed_transition(
+                            stored,
+                            name,
+                            ComputerStatus::Unreachable,
+                            code,
+                            &message,
+                            true,
+                            events::COMPUTER_UNREACHABLE,
+                            format!("{name}'s computer is unreachable: {message}"),
+                        )
+                        .await?;
+                        Ok(Step::Continue)
+                    }
+                    // Unreachable never overrides what is known: a lost
+                    // machine stays lost.
+                    ComputerStatus::Unreachable | ComputerStatus::Lost => {
+                        if computer.status == ComputerStatus::Unreachable {
+                            self.record_failure(
+                                stored,
+                                name,
+                                "liveness",
+                                code,
+                                &message,
+                                true,
+                                Some(&target),
+                            )
+                            .await?;
+                        }
+                        Ok(Step::Wait(self.unreachable_retry()))
+                    }
+                    _ => Ok(Step::Wait(BACKOFF)),
+                }
+            }
+            Observation::Lost { code, message } => {
+                self.computer_confirmed
+                    .lock()
+                    .expect("confirmations")
+                    .remove(&computer.environment_id);
+                match computer.status {
+                    ComputerStatus::Lost => {
+                        self.record_failure(
+                            stored,
+                            name,
+                            "liveness",
+                            &code,
+                            &message,
+                            false,
+                            Some(&target),
+                        )
+                        .await?;
+                        Ok(Step::Wait(LOST_WAIT))
+                    }
+                    status if status.is_terminal() => Ok(Step::Done),
+                    _ => {
+                        self.observed_transition(
+                            stored,
+                            name,
+                            ComputerStatus::Lost,
+                            &code,
+                            &message,
+                            false,
+                            events::COMPUTER_LOST,
+                            format!(
+                                "{name}'s computer is lost: {message}. The environment still wants it; replace or destroy it"
+                            ),
+                        )
+                        .await?;
+                        Ok(Step::Continue)
+                    }
+                }
+            }
+        }
+    }
+
+    fn unreachable_retry(&self) -> Duration {
+        self.config.computer_liveness.clamp(POLL, BACKOFF)
+    }
+
+    /// Move the computer to an observed state, with the failure that
+    /// explains it and an event. Desired state is untouched.
+    #[allow(clippy::too_many_arguments)]
+    async fn observed_transition(
+        &self,
+        stored: &Stored<ComputerRecord>,
+        name: &str,
+        status: ComputerStatus,
+        code: &str,
+        message: &str,
+        retryable: bool,
+        kind: &str,
+        summary: String,
+    ) -> Result<(), EnvironmentError> {
+        let computer = &stored.value;
+        let mut value = computer.clone();
+        value.status = status;
+        value.failure = Some(ComputerFailure {
+            phase: "liveness".into(),
+            code: code.into(),
+            message: message.into(),
+            retryable,
+            target: computer.target.clone(),
+            at: Utc::now(),
+        });
+        self.advance(
+            stored,
+            name,
+            value,
+            Some((
+                kind,
+                summary,
+                json!({
+                    "environment_id": computer.environment_id,
+                    "target": computer.target,
+                    "session_id": computer.session_id,
+                    "from": computer.status,
+                    "to": status,
+                    "code": code,
+                    "message": message,
+                }),
+            )),
+        )
+        .await
+    }
+
+    /// An unreachable computer: keep asking its target. The same machine
+    /// answering makes it running again; a target that answers without it
+    /// makes it lost. Desired state is kept throughout.
+    async fn unreachable_step(
+        &self,
+        record: &Stored<EnvironmentRecord>,
+        spec: &ComputerSpec,
+        stored: &Stored<ComputerRecord>,
+    ) -> Result<Step, EnvironmentError> {
+        let name = &record.value.name;
+        if spec.generation > stored.value.spec_generation {
+            return self.begin_replacement(record, spec, stored).await;
+        }
+        let (Some(target), Some(session_id)) =
+            (stored.value.target.clone(), stored.value.session_id.clone())
+        else {
+            return Ok(Step::Wait(BACKOFF));
+        };
+        let client = self.target_client(&target)?;
+        let observation = self.observe_machine(&client, &session_id).await;
+        self.apply_observation(stored, name, observation, false)
+            .await
+    }
+
+    /// A lost computer stays lost until an operator replaces it (a new
+    /// machine, the same desired contents) or destroys it.
+    async fn lost_step(
+        &self,
+        record: &Stored<EnvironmentRecord>,
+        spec: &ComputerSpec,
+        stored: &Stored<ComputerRecord>,
+    ) -> Result<Step, EnvironmentError> {
+        if spec.generation > stored.value.spec_generation {
+            return self.begin_replacement(record, spec, stored).await;
+        }
+        Ok(Step::Wait(LOST_WAIT))
+    }
+
+    /// New requirements, or an explicit replacement: a new machine is
+    /// provisioned for the same environment, and the old session retired.
+    async fn begin_replacement(
+        &self,
+        record: &Stored<EnvironmentRecord>,
+        spec: &ComputerSpec,
+        stored: &Stored<ComputerRecord>,
+    ) -> Result<Step, EnvironmentError> {
+        let name = &record.value.name;
+        let computer = &stored.value;
+        let mut value = computer.clone();
+        if let (Some(target), Some(session_id)) = (&computer.target, &computer.session_id) {
+            value.retired.push(RetiredSession {
+                target: target.clone(),
+                session_id: session_id.clone(),
+                spec_generation: computer.spec_generation,
+            });
+        }
+        value.status = ComputerStatus::Pending;
+        value.session_id = None;
+        value.target = None;
+        value.reference = None;
+        value.capabilities = None;
+        value.connection = None;
+        value.observed = ObservedContents::default();
+        value.ready_at = None;
+        value.failure = None;
+        self.computer_confirmed
+            .lock()
+            .expect("confirmations")
+            .remove(&computer.environment_id);
+        self.advance(
+            stored,
+            name,
+            value,
+            Some((
+                events::COMPUTER_REPLACING,
+                format!("{name}'s computer is being replaced"),
+                json!({
+                    "environment_id": record.id,
+                    "from_generation": computer.spec_generation,
+                    "to_generation": spec.generation,
+                    "retired_session": computer.session_id,
+                    "from": computer.status,
+                }),
+            )),
+        )
+        .await?;
+        Ok(Step::Continue)
     }
 
     async fn place_step(
@@ -1901,47 +2454,16 @@ impl Daemon {
     ) -> Result<Step, EnvironmentError> {
         let name = &record.value.name;
         let computer = &stored.value;
-        // Sessions of an earlier generation go once this one runs.
-        if !computer.retired.is_empty() {
-            self.retire(stored, name).await?;
+        // Sessions of an earlier generation go once this one runs. A target
+        // that cannot tear one down now is asked again later; it never
+        // holds up the computer that replaced it.
+        if !computer.retired.is_empty() && self.retire(stored, name).await?.1 {
             return Ok(Step::Continue);
         }
         // New requirements: a replacement, provisioned alongside, never an
         // ordinary change.
         if spec.generation > computer.spec_generation {
-            let mut value = computer.clone();
-            if let (Some(target), Some(session_id)) = (&computer.target, &computer.session_id) {
-                value.retired.push(RetiredSession {
-                    target: target.clone(),
-                    session_id: session_id.clone(),
-                    spec_generation: computer.spec_generation,
-                });
-            }
-            value.status = ComputerStatus::Pending;
-            value.session_id = None;
-            value.target = None;
-            value.reference = None;
-            value.capabilities = None;
-            value.connection = None;
-            value.observed = ObservedContents::default();
-            value.ready_at = None;
-            self.advance(
-                stored,
-                name,
-                value,
-                Some((
-                    events::COMPUTER_REPLACING,
-                    format!("{name}'s computer is being replaced"),
-                    json!({
-                        "environment_id": record.id,
-                        "from_generation": computer.spec_generation,
-                        "to_generation": spec.generation,
-                        "retired_session": computer.session_id,
-                    }),
-                )),
-            )
-            .await?;
-            return Ok(Step::Continue);
+            return self.begin_replacement(record, spec, stored).await;
         }
         if record.value.desired_state == DesiredState::Stopped {
             let mut value = computer.clone();
@@ -1968,6 +2490,17 @@ impl Daemon {
             .clone()
             .expect("a running computer has a session");
         let client = self.target_client(&target)?;
+        // The machine is confirmed with its target now and then, whatever
+        // runs in it: a running computer is one its target still has.
+        if self.liveness_due(&stored.value.environment_id) {
+            let observation = self.observe_machine(&client, &session_id).await;
+            if !matches!(observation, Observation::Present) {
+                return self
+                    .apply_observation(stored, name, observation, false)
+                    .await;
+            }
+            self.confirm(stored).await;
+        }
         // A new lifetime is applied in place: Compute takes over the
         // machine's expiry from the target (a claim), then keeps or ends it
         // itself.
@@ -2097,6 +2630,7 @@ impl Daemon {
                     .saturating_sub((Utc::now() - at).to_std().unwrap_or_default())
             })
             .unwrap_or(self.config.computer_probe)
+            .min(self.config.computer_liveness)
             .max(POLL);
         Ok(Step::Wait(wait))
     }
@@ -2385,25 +2919,69 @@ impl Daemon {
                 String::new(),
             )
         };
-        let submission = match client.session_exec(session_id, &command).await {
-            Ok(submission) => submission,
-            Err(error) => return failed(String::new(), String::new(), error.to_string()),
-        };
+        // Every call is bounded: a target that stops answering mid-job
+        // must not hold the controller, which has to notice it is gone.
+        let patience = self.config.computer_liveness_timeout;
+        let submission =
+            match tokio::time::timeout(patience, client.session_exec(session_id, &command)).await {
+                Ok(Ok(submission)) => submission,
+                Ok(Err(error)) => {
+                    return failed(String::new(), String::new(), error.to_string());
+                }
+                Err(_) => {
+                    return failed(
+                        String::new(),
+                        String::new(),
+                        "the target did not accept the command in time".into(),
+                    );
+                }
+            };
         let job_id = submission.job_id.0.clone();
         let mut delay = Duration::from_millis(50);
+        let deadline = std::time::Instant::now() + timeout + patience;
+        let mut unanswered_since: Option<std::time::Instant> = None;
         let job = loop {
-            match client.job_status(&job_id).await {
-                Ok(job) if job.status.is_terminal() => break job,
-                Ok(_) => {}
-                Err(error) if error.kind == ProviderErrorKind::UnknownJob => {
+            match tokio::time::timeout(patience, client.job_status(&job_id)).await {
+                Ok(Ok(job)) if job.status.is_terminal() => break job,
+                Ok(Ok(_)) => {
+                    unanswered_since = None;
+                    self.touch_session(session_id);
+                }
+                Ok(Err(error)) if error.kind == ProviderErrorKind::UnknownJob => {
                     return failed(job_id, submission.execution_id, error.to_string());
                 }
-                Err(_) => {}
+                Ok(Err(error)) => {
+                    let since = *unanswered_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= patience {
+                        return failed(
+                            job_id,
+                            submission.execution_id,
+                            format!("the target stopped answering for the job: {error}"),
+                        );
+                    }
+                }
+                Err(_) => {
+                    return failed(
+                        job_id,
+                        submission.execution_id,
+                        "the target stopped answering for the job".into(),
+                    );
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return failed(
+                    job_id,
+                    submission.execution_id,
+                    "the job did not finish in time".into(),
+                );
             }
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_millis(500));
         };
-        let result = client.job_result(&job_id).await.ok();
+        let result = tokio::time::timeout(patience, client.job_result(&job_id))
+            .await
+            .ok()
+            .and_then(Result::ok);
         let succeeded = job.status == compute_core::JobStatus::Succeeded;
         let stdout = result
             .as_ref()
@@ -2495,20 +3073,7 @@ impl Daemon {
         match client.resume_session(&session_id).await {
             Ok(_) => {}
             Err(error) if error.kind == ProviderErrorKind::UnknownSession => {
-                self.record_failure(
-                    stored,
-                    name,
-                    "resuming",
-                    "environment_lost",
-                    &error.message,
-                    false,
-                    Some(&target),
-                )
-                .await?;
-                let refreshed = self.fresh_computer(&computer.environment_id).await;
-                return self
-                    .fail_computer(refreshed.as_ref().unwrap_or(stored), name)
-                    .await;
+                return self.target_unreachable(stored, name, &target, error).await;
             }
             Err(error) if error.kind == ProviderErrorKind::OperationUnsupported => {
                 // The target cannot resume this machine: say so, and keep
@@ -2669,25 +3234,33 @@ impl Daemon {
         Ok(Step::Done)
     }
 
-    /// Tear down earlier sessions. Returns whether none remain.
+    /// Tear down earlier sessions. Returns whether none remain, and whether
+    /// the record changed.
     async fn retire(
         &self,
         stored: &Stored<ComputerRecord>,
         name: &str,
-    ) -> Result<bool, EnvironmentError> {
+    ) -> Result<(bool, bool), EnvironmentError> {
         if stored.value.retired.is_empty() {
-            return Ok(true);
+            return Ok((true, false));
         }
         let mut value = stored.value.clone();
         let mut kept = vec![];
         for retired in &stored.value.retired {
             let done = match self.target_client(&retired.target) {
-                Ok(client) => match client.destroy_session(&retired.session_id).await {
-                    Ok(_) => true,
-                    Err(error) => matches!(
+                // A target that does not answer is asked again later.
+                Ok(client) => match tokio::time::timeout(
+                    self.config.computer_liveness_timeout,
+                    client.destroy_session(&retired.session_id),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => true,
+                    Ok(Err(error)) => matches!(
                         error.kind,
                         ProviderErrorKind::UnknownSession | ProviderErrorKind::SessionConflict
                     ),
+                    Err(_) => false,
                 },
                 Err(_) => false,
             };
@@ -2697,10 +3270,11 @@ impl Daemon {
         }
         value.retired = kept;
         let none_left = value.retired.is_empty();
-        if value != stored.value {
+        let changed = value != stored.value;
+        if changed {
             self.advance(stored, name, value, None).await?;
         }
-        Ok(none_left)
+        Ok((none_left, changed))
     }
 
     /// Mark the computer failed and tear down what it had. Terminal.
@@ -2739,8 +3313,10 @@ impl Daemon {
         Ok(Step::Done)
     }
 
-    /// The target did not answer as expected. A target that lost the
-    /// session makes the computer fail; anything else is retried.
+    /// The target did not answer as expected. A target that no longer has
+    /// the session has lost the machine: the computer is lost, and waits
+    /// for an operator. A running computer whose target does not answer is
+    /// unreachable. Anything else is retried where it is.
     async fn target_unreachable(
         &self,
         stored: &Stored<ComputerRecord>,
@@ -2749,27 +3325,36 @@ impl Daemon {
         error: compute_provider::ProviderError,
     ) -> Result<Step, EnvironmentError> {
         if error.kind == ProviderErrorKind::UnknownSession {
-            self.record_failure(
-                stored,
-                name,
-                "reconciliation",
-                "environment_lost",
-                &error.message,
-                false,
-                Some(target),
-            )
-            .await?;
-            let refreshed = self.fresh_computer(&stored.value.environment_id).await;
-            let change = self.event(
-                Change::new(),
-                events::COMPUTER_ENVIRONMENT_LOST,
-                Scope::environment(name),
-                format!("target {target} no longer has {name}'s computer"),
-                json!({ "environment_id": stored.value.environment_id, "target": target }),
-            );
-            self.apply(change).await?;
             return self
-                .fail_computer(refreshed.as_ref().unwrap_or(stored), name)
+                .apply_observation(
+                    stored,
+                    name,
+                    Observation::Lost {
+                        code: "session_missing".into(),
+                        message: format!(
+                            "target {target} no longer has the session: {}",
+                            error.message
+                        ),
+                    },
+                    false,
+                )
+                .await;
+        }
+        if stored.value.status == ComputerStatus::Running {
+            return self
+                .apply_observation(
+                    stored,
+                    name,
+                    Observation::Unreachable {
+                        code: if error.kind == ProviderErrorKind::Unauthorized {
+                            "credential_rejected"
+                        } else {
+                            "target_unreachable"
+                        },
+                        message: error.to_string(),
+                    },
+                    false,
+                )
                 .await;
         }
         self.record_failure(
@@ -2895,6 +3480,24 @@ impl Daemon {
     }
 }
 
+/// Forget failed attempts, so they are tried again, and check processes
+/// again now.
+fn forget_failures(observed: &mut ObservedContents) {
+    observed
+        .repositories
+        .retain(|_, seen| seen.evidence.outcome == "succeeded");
+    observed
+        .packages
+        .retain(|_, seen| seen.evidence.outcome == "succeeded");
+    observed
+        .builds
+        .retain(|_, seen| seen.evidence.outcome == "succeeded");
+    observed
+        .processes
+        .retain(|_, seen| seen.state != ProcessState::Failed);
+    observed.observed_at = None;
+}
+
 fn lifecycle_label(lifecycle: &LifecycleChange) -> String {
     match lifecycle.lifecycle {
         ComputerLifecycle::Persistent => "kept until destroyed".into(),
@@ -2978,7 +3581,10 @@ impl Daemon {
             .iter()
             .filter_map(|record| {
                 configs.get(&record.provider_id).map(|config| {
-                    compute_placement::ComputeTarget::from_record(record, config.kind)
+                    let mut target =
+                        compute_placement::ComputeTarget::from_record(record, config.kind);
+                    target.credential = config.authenticated();
+                    target
                 })
             })
             .collect()

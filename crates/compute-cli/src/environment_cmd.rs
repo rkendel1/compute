@@ -553,11 +553,12 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
         print_json(&status);
     } else {
         eprintln!(
-            "Compute daemon {} listening on {scheme}://{} (control state: {} {}; UI: {scheme}://{}/ui/)",
+            "Compute daemon {} listening on {scheme}://{} (control state: {} {}, {}; UI: {scheme}://{}/ui/)",
             status.instance_id,
             command.listen,
             status.state.kind,
             status.state.location,
+            status.durability,
             command.listen
         );
         match mode {
@@ -856,9 +857,10 @@ pub async fn status(command: DaemonCommand) -> compute_core::Result<()> {
         println!("Started: {}", status.started_at.to_rfc3339());
         println!("Node directory: {}", status.state_dir);
         println!(
-            "Control state: {} ({}){}",
+            "Control state: {} ({}), {}{}",
             status.state.kind,
             status.state.location,
+            status.durability,
             if status.state_available {
                 String::new()
             } else {

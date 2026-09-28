@@ -143,8 +143,12 @@ record `policy_id`, `admission_id`, and `admission_status`. See
 compute policy validate production.json
 compute policy check ./script.py --policy production.json
 compute explain ./script.py
-compute serve --policy production.json
+compute serve --policy production.json --credentials target-credentials.json
 ```
+
+A target (`compute serve`) is controlled only by the control planes it
+trusts: `compute target credential issue` writes its trust file and the
+token a pool presents ([docs/remote-execution.md](docs/remote-execution.md#target-credentials)).
 
 Compute also operates long-running software. A persistent daemon holds
 **environments** (such as `staging` and `prod`), each containing

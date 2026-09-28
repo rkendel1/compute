@@ -127,55 +127,139 @@ impl SessionProvider for Steered {
     }
 }
 
-/// A target: a server hosting sessions, in a runtime of its own.
+/// A target: a server hosting sessions, in a runtime of its own. It can be
+/// stopped (unreachable), started again on the same address with the same
+/// stores (a target restart), or lose its session store.
 struct Target {
     runtime: Option<Runtime>,
     endpoint: String,
+    address: std::net::SocketAddr,
     provider: Arc<Steered>,
-    _stores: tempfile::TempDir,
+    features: Vec<String>,
+    /// The target's trust file: `compute serve --credentials`.
+    trust: PathBuf,
+    /// The control plane's token for this target, in the file its pool
+    /// member names.
+    token_file: PathBuf,
+    stores: tempfile::TempDir,
 }
 
 impl Target {
     fn start(provider: Arc<Steered>, features: &[&str]) -> Self {
         let stores = tempfile::tempdir().unwrap();
+        // The target trusts one control plane, as `compute serve
+        // --credentials` does.
+        let mut credentials = compute_provider::TargetCredentials::default();
+        let (_, token) = credentials.issue("test-control-plane").unwrap();
+        let trust = stores.path().join("credentials.json");
+        credentials.save(&trust).unwrap();
+        let token_file = stores.path().join("control-plane.token");
+        compute_provider::credentials::write_token_file(&token_file, &token).unwrap();
+        Self::start_trusting(provider, features, stores, trust, token_file)
+    }
+
+    /// Another target that trusts the same control plane as `other`: a
+    /// different machine answering with the same credential.
+    fn trusting_like(provider: Arc<Steered>, other: &Target) -> Self {
+        let stores = tempfile::tempdir().unwrap();
+        let trust = stores.path().join("credentials.json");
+        std::fs::copy(&other.trust, &trust).unwrap();
+        Self::start_trusting(provider, &[], stores, trust, other.token_file.clone())
+    }
+
+    fn start_trusting(
+        provider: Arc<Steered>,
+        features: &[&str],
+        stores: tempfile::TempDir,
+        trust: PathBuf,
+        token_file: PathBuf,
+    ) -> Self {
         let socket = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut target = Self {
+            runtime: None,
+            endpoint: format!("http://{address}"),
+            address,
+            provider,
+            features: features.iter().map(|feature| feature.to_string()).collect(),
+            trust,
+            token_file,
+            stores,
+        };
+        target.serve(socket);
+        target
+    }
+
+    fn serve(&mut self, socket: StdTcpListener) {
         socket.set_nonblocking(true).unwrap();
-        let endpoint = format!("http://{}", socket.local_addr().unwrap());
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .unwrap();
+        let endpoint = self.endpoint.clone();
         let mut config = ServerConfig::local(endpoint.clone());
+        config.authorizer = Arc::new(compute_provider::TargetAuthorizer::from_file(
+            self.trust.clone(),
+        ));
         config.provider = Arc::new(
             compute_provider::LocalProvider::with_identity(
                 compute_core::ProviderIdentity::Remote {
                     id: endpoint.clone(),
-                    endpoint: endpoint.clone(),
+                    endpoint,
                 },
             )
             .with_runtime_catalog(common::catalog()),
         );
-        config.job_store = stores.path().join("jobs");
-        config.session_store = stores.path().join("sessions");
-        config.session_provider = Some(provider.clone());
+        config.job_store = self.stores.path().join("jobs");
+        config.session_store = self.stores.path().join("sessions");
+        config.session_provider = Some(self.provider.clone());
         config.execution.sessions = true;
         config.session_sweep = Duration::from_millis(100);
-        config.target_features = features.iter().map(|feature| feature.to_string()).collect();
+        config.target_features = self.features.clone();
         runtime.spawn(async move {
             let listener = tokio::net::TcpListener::from_std(socket).unwrap();
             let _ = compute_provider::serve_listener(listener, config).await;
         });
-        Self {
-            runtime: Some(runtime),
-            endpoint,
-            provider,
-            _stores: stores,
+        self.runtime = Some(runtime);
+    }
+
+    /// Stop answering, as a machine that went away does.
+    fn stop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
         }
     }
 
+    /// Answer again on the same address, with the same stores.
+    fn restart(&mut self) {
+        self.stop();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let socket = loop {
+            match StdTcpListener::bind(self.address) {
+                Ok(socket) => break socket,
+                Err(error) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "cannot listen on {} again: {error}",
+                        self.address
+                    );
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        };
+        self.serve(socket);
+    }
+
+    /// Lose every session record, as a target whose store was wiped does.
+    fn wipe_sessions(&self) {
+        std::fs::remove_dir_all(self.stores.path().join("sessions")).unwrap();
+    }
+
     fn client(&self) -> RemoteProvider {
-        RemoteProvider::new(self.endpoint.clone())
+        RemoteProvider::new(self.endpoint.clone()).with_bearer_token(
+            compute_provider::credentials::read_token_file(&self.token_file).unwrap(),
+        )
     }
 }
 
@@ -201,6 +285,7 @@ fn pool(targets: &[(&str, &Target)]) -> PoolConfig {
                         application_endpoint: None,
                         priority: 0,
                         token_env: None,
+                        token_file: Some(target.token_file.clone()),
                     },
                 )
             })
@@ -221,6 +306,8 @@ async fn start_daemon(
     config.pool = Some(pool);
     config.reconcile_interval = Duration::from_millis(200);
     config.computer_probe = Duration::from_millis(400);
+    config.computer_liveness = Duration::from_millis(300);
+    config.computer_liveness_timeout = Duration::from_secs(3);
     let seed = (std::process::id() % 400) as u16 * 20;
     config.port_range = (41000 + seed, 41000 + seed + 9);
     config.instance_port_range = (49000 + seed, 49000 + seed + 9);
@@ -2287,5 +2374,453 @@ async fn versions_are_published_deployed_promoted_and_rolled_back_in_place() {
         .unwrap();
     assert_eq!(checks.status, compute_core::StepStatus::Failed);
     assert!(checks.job_id.is_some());
+    daemon.shutdown().await;
+}
+
+// ---- Target reality ----------------------------------------------------
+
+/// A TCP proxy in front of a target, steerable by a test: it forwards to
+/// an upstream, refuses when there is none, and can hold the next answer
+/// back until released, so the answer arrives after the world moved on.
+struct Proxy {
+    endpoint: String,
+    upstream: Arc<std::sync::Mutex<Option<String>>>,
+    hold_next: Arc<AtomicBool>,
+    holding: Arc<AtomicBool>,
+    release: Arc<tokio::sync::Notify>,
+    runtime: Option<Runtime>,
+}
+
+impl Proxy {
+    fn start(upstream: &Target) -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let socket = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", socket.local_addr().unwrap());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut proxy = Self {
+            endpoint,
+            upstream: Arc::new(std::sync::Mutex::new(Some(upstream.address.to_string()))),
+            hold_next: Arc::new(AtomicBool::new(false)),
+            holding: Arc::new(AtomicBool::new(false)),
+            release: Arc::new(tokio::sync::Notify::new()),
+            runtime: None,
+        };
+        let (upstream, hold_next, holding, release) = (
+            proxy.upstream.clone(),
+            proxy.hold_next.clone(),
+            proxy.holding.clone(),
+            proxy.release.clone(),
+        );
+        runtime.spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(socket).unwrap();
+            loop {
+                let Ok((mut client, _)) = listener.accept().await else {
+                    continue;
+                };
+                let upstream = upstream.lock().unwrap().clone();
+                let (hold_next, holding, release) =
+                    (hold_next.clone(), holding.clone(), release.clone());
+                tokio::spawn(async move {
+                    // No upstream: the connection closes unanswered.
+                    let Some(upstream) = upstream else {
+                        return;
+                    };
+                    let Ok(server) = tokio::net::TcpStream::connect(&upstream).await else {
+                        return;
+                    };
+                    let (mut client_read, mut client_write) = client.split();
+                    let (mut server_read, mut server_write) = server.into_split();
+                    let forward = async {
+                        let mut buffer = [0_u8; 8192];
+                        loop {
+                            match client_read.read(&mut buffer).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(read) => {
+                                    if server_write.write_all(&buffer[..read]).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        std::future::pending::<()>().await
+                    };
+                    let answer = async {
+                        let mut response = vec![];
+                        let _ = server_read.read_to_end(&mut response).await;
+                        response
+                    };
+                    let response = tokio::select! {
+                        response = answer => response,
+                        _ = forward => unreachable!(),
+                    };
+                    if hold_next.swap(false, Ordering::SeqCst) {
+                        holding.store(true, Ordering::SeqCst);
+                        release.notified().await;
+                        holding.store(false, Ordering::SeqCst);
+                    }
+                    let _ = client_write.write_all(&response).await;
+                    let _ = client_write.shutdown().await;
+                });
+            }
+        });
+        proxy.runtime = Some(runtime);
+        proxy
+    }
+
+    fn forward_to(&self, target: Option<&Target>) {
+        *self.upstream.lock().unwrap() = target.map(|target| target.address.to_string());
+    }
+}
+
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        self.release.notify_one();
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
+fn proxied_pool(id: &str, proxy: &Proxy, target: &Target) -> PoolConfig {
+    let mut config = pool(&[(id, target)]);
+    config.providers.get_mut(id).unwrap().endpoint = Some(proxy.endpoint.clone());
+    config
+}
+
+async fn converged(daemon: &Arc<Daemon>, name: &str) -> ComputerView {
+    computer_where(daemon, name, "a running, converged computer", |view| {
+        view.status == ComputerStatus::Running
+            && view.converged
+            && view.reality.observed == "running"
+    })
+    .await
+}
+
+fn kinds(events: &[(String, serde_json::Value)]) -> Vec<&str> {
+    events.iter().map(|(kind, _)| kind.as_str()).collect()
+}
+
+/// A target that stops answering makes its computer unreachable, never
+/// running and never gone: the environment keeps wanting it, and the same
+/// machine is running again when the target answers. A target that
+/// refuses this control plane's credential is unreachable too, for that
+/// reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unreachable_target_keeps_desired_state_and_recovers_the_same_machine() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let mut target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let (daemon, _node) =
+        start_daemon(Arc::new(MemoryState::new()), pool(&[("target-a", &target)])).await;
+    daemon
+        .create_computer_environment(
+            definition(
+                "reality",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    let running = converged(&daemon, "reality").await;
+    assert_eq!(running.reality.desired, "running");
+    assert!(running.reality.confirmed_at.is_some());
+    let session = running.session_id.clone().unwrap();
+
+    // The target goes away.
+    target.stop();
+    let unreachable = computer_where(&daemon, "reality", "unreachable", |view| {
+        view.status == ComputerStatus::Unreachable
+    })
+    .await;
+    assert_eq!(unreachable.reality.observed, "unreachable");
+    assert_eq!(unreachable.reality.desired, "running");
+    assert!(unreachable.reality.since.is_some());
+    assert!(unreachable.reality.confirmed_at.is_none());
+    assert!(
+        unreachable
+            .endpoints
+            .iter()
+            .all(|endpoint| !endpoint.serving)
+    );
+    let failure = unreachable.failure.clone().unwrap();
+    assert_eq!(failure.code, "target_unreachable");
+    assert!(failure.retryable);
+    // Desired state is untouched: the environment still asks for the same
+    // computer and contents.
+    let environment = daemon.environment("reality").await.unwrap();
+    assert_eq!(environment.desired_state, DesiredState::Running);
+    assert_eq!(unreachable.desired.repositories[0].revision, "v1");
+    assert_eq!(unreachable.session_id.as_deref(), Some(session.as_str()));
+    // Work in it says why it cannot run, in the structured failure kind.
+    let refused = daemon
+        .computer_exec("reality", "alice", SessionCommand::new(vec!["true".into()]))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.kind(), "runtime_unavailable", "{refused}");
+    assert!(refused.to_string().contains("unreachable"), "{refused}");
+    // It stays unreachable while the target is away: never lost, never
+    // running.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        daemon.computer("reality").await.unwrap().status,
+        ComputerStatus::Unreachable
+    );
+
+    // The target comes back with its stores: the same machine, running.
+    target.restart();
+    let recovered = converged(&daemon, "reality").await;
+    assert_eq!(recovered.session_id.as_deref(), Some(session.as_str()));
+    assert!(recovered.failure.is_none());
+    assert_eq!(target.provider.provisions.load(Ordering::SeqCst), 1);
+    let history = events(&daemon, "reality").await;
+    let history = kinds(&history);
+    let unreachable_at = history
+        .iter()
+        .position(|kind| *kind == "computer.unreachable")
+        .expect("an unreachable event");
+    let recovered_at = history
+        .iter()
+        .position(|kind| *kind == "computer.recovered")
+        .expect("a recovered event");
+    assert!(unreachable_at < recovered_at, "{history:?}");
+    assert!(!history.contains(&"computer.lost"), "{history:?}");
+    let (output, _) = run(&daemon, "reality", "alice", &["cat", "running-version"]).await;
+    assert_eq!(output.trim(), "v1");
+
+    // The target stops trusting this control plane: unreachable, because
+    // nothing can be known about the machine, not lost.
+    let original = std::fs::read(&target.trust).unwrap();
+    let mut trust = compute_provider::TargetCredentials::load(&target.trust).unwrap();
+    for credential in trust.credentials.clone() {
+        trust.revoke(&credential.credential_id).unwrap();
+    }
+    trust.save(&target.trust).unwrap();
+    bump(&target.trust);
+    let refused = computer_where(&daemon, "reality", "credential rejected", |view| {
+        view.status == ComputerStatus::Unreachable
+    })
+    .await;
+    assert_eq!(refused.failure.unwrap().code, "credential_rejected");
+    let restored = target.trust.with_extension("restored");
+    std::fs::write(&restored, original).unwrap();
+    std::fs::rename(&restored, &target.trust).unwrap();
+    bump(&target.trust);
+    let trusted_again = converged(&daemon, "reality").await;
+    assert_eq!(trusted_again.session_id.as_deref(), Some(session.as_str()));
+    daemon.shutdown().await;
+}
+
+/// Make a rewritten trust file visibly newer, whatever the filesystem's
+/// timestamp resolution.
+fn bump(path: &Path) {
+    let file = std::fs::File::options().append(true).open(path).unwrap();
+    let modified = file.metadata().unwrap().modified().unwrap();
+    file.set_modified(modified + Duration::from_secs(2))
+        .unwrap();
+}
+
+/// A machine that disappears, or a target that loses its session store,
+/// makes the computer lost: the target answered, and the machine is not
+/// there. A lost computer is never reported healthy and never recreated
+/// on its own; the environment keeps wanting it, and an explicit
+/// replacement provisions a new machine with the same contents.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_or_session_that_disappears_is_lost_until_replaced() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let mut target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let (daemon, _node) =
+        start_daemon(Arc::new(MemoryState::new()), pool(&[("target-a", &target)])).await;
+    daemon
+        .create_computer_environment(
+            definition(
+                "vanishing",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    let running = converged(&daemon, "vanishing").await;
+    let first_session = running.session_id.clone().unwrap();
+
+    // The machine itself disappears (its workspace is gone).
+    let resource = running.machine.as_ref().unwrap().resource.clone().unwrap();
+    std::fs::remove_dir_all(workspaces.path().join(&resource)).unwrap();
+    let lost = computer_where(&daemon, "vanishing", "lost", |view| {
+        view.status == ComputerStatus::Lost
+    })
+    .await;
+    assert_eq!(lost.reality.observed, "lost");
+    assert_eq!(lost.reality.desired, "running");
+    assert!(
+        lost.reality.explanation.contains("replace"),
+        "{:?}",
+        lost.reality
+    );
+    let failure = lost.failure.clone().unwrap();
+    assert_eq!(failure.code, "machine_missing");
+    assert!(!failure.retryable);
+    assert!(lost.endpoints.iter().all(|endpoint| !endpoint.serving));
+    // It stays lost: nothing re-provisions it on its own, and an explicit
+    // reconcile finds the machine still gone.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    daemon
+        .reconcile_computer("vanishing", "alice")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let still = daemon.computer("vanishing").await.unwrap();
+    assert_eq!(still.status, ComputerStatus::Lost);
+    assert_eq!(target.provider.provisions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        daemon.environment("vanishing").await.unwrap().desired_state,
+        DesiredState::Running
+    );
+    let refused = daemon
+        .computer_exec(
+            "vanishing",
+            "alice",
+            SessionCommand::new(vec!["true".into()]),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.kind(), "conflict", "{refused}");
+    assert!(refused.to_string().contains("lost"), "{refused}");
+    let history = events(&daemon, "vanishing").await;
+    assert!(kinds(&history).contains(&"computer.lost"), "{history:?}");
+
+    // Replacement: a new machine for the same environment and contents.
+    daemon
+        .replace_computer("vanishing", "alice", requirements())
+        .await
+        .unwrap();
+    let replaced = computer_where(&daemon, "vanishing", "a replacement", |view| {
+        view.status == ComputerStatus::Running
+            && view.converged
+            && view.session_id.as_deref() != Some(first_session.as_str())
+    })
+    .await;
+    assert_eq!(target.provider.provisions.load(Ordering::SeqCst), 2);
+    let (output, _) = run(&daemon, "vanishing", "alice", &["cat", "running-version"]).await;
+    assert_eq!(output.trim(), "v1");
+    let second_session = replaced.session_id.clone().unwrap();
+
+    // The target restarts without its session store: the session is gone.
+    target.stop();
+    target.wipe_sessions();
+    target.restart();
+    let lost_again = computer_where(&daemon, "vanishing", "lost after a wiped store", |view| {
+        view.status == ComputerStatus::Lost
+    })
+    .await;
+    assert_eq!(lost_again.failure.unwrap().code, "session_missing");
+    assert_eq!(
+        lost_again.session_id.as_deref(),
+        Some(second_session.as_str())
+    );
+
+    // A destroy of a lost computer ends it; the record stays.
+    daemon.destroy_computer("vanishing", "alice").await.unwrap();
+    computer_where(&daemon, "vanishing", "destroyed", |view| {
+        view.status == ComputerStatus::Destroyed
+    })
+    .await;
+    daemon.shutdown().await;
+}
+
+/// An answer the target gave before the controller learned the machine is
+/// gone cannot bring the computer back:
+///
+/// 1. the controller observes target A;
+/// 2. target A becomes unavailable;
+/// 3. the controller records unreachable, then lost;
+/// 4. a delayed answer from target A (the machine is there) arrives;
+/// 5. the computer stays lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_answer_from_a_target_cannot_revive_a_lost_computer() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target_a = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let proxy = Proxy::start(&target_a);
+    let (daemon, _node) = start_daemon(
+        Arc::new(MemoryState::new()),
+        proxied_pool("target-a", &proxy, &target_a),
+    )
+    .await;
+    daemon
+        .create_computer_environment(
+            definition(
+                "fenced",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    // 1. Observed on target A.
+    converged(&daemon, "fenced").await;
+
+    // 2–3. Target A stops answering: unreachable.
+    proxy.forward_to(None);
+    computer_where(&daemon, "fenced", "unreachable", |view| {
+        view.status == ComputerStatus::Unreachable
+    })
+    .await;
+
+    // The controller asks target A again, and A answers that the machine
+    // is there; that answer is held back.
+    proxy.hold_next.store(true, Ordering::SeqCst);
+    proxy.forward_to(Some(&target_a));
+    eventually("an answer from target A to be held", async || {
+        proxy.holding.load(Ordering::SeqCst).then_some(())
+    })
+    .await;
+
+    // Meanwhile what answers at A's address is another machine, which does
+    // not have the session: an explicit reconcile records the computer
+    // lost.
+    let other_root = tempfile::tempdir().unwrap();
+    let target_b = Target::trusting_like(Steered::new(other_root.path(), full(), None), &target_a);
+    proxy.forward_to(Some(&target_b));
+    let lost = daemon.reconcile_computer("fenced", "alice").await.unwrap();
+    assert_eq!(lost.status, ComputerStatus::Lost, "{:?}", lost.failure);
+    let lost_generation = lost.generation;
+
+    // 4. Target A's delayed answer arrives.
+    proxy.release.notify_one();
+    eventually("the held answer to be delivered", async || {
+        (!proxy.holding.load(Ordering::SeqCst)).then_some(())
+    })
+    .await;
+
+    // 5. The computer stays lost; nothing recovered it.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let after = daemon.computer("fenced").await.unwrap();
+    assert_eq!(after.status, ComputerStatus::Lost);
+    assert_eq!(after.reality.observed, "lost");
+    assert!(after.generation >= lost_generation);
+    let history = events(&daemon, "fenced").await;
+    let history = kinds(&history);
+    let lost_at = history
+        .iter()
+        .rposition(|kind| *kind == "computer.lost")
+        .expect("a lost event");
+    assert!(
+        !history[lost_at..].contains(&"computer.recovered"),
+        "a stale answer revived the computer: {history:?}"
+    );
     daemon.shutdown().await;
 }

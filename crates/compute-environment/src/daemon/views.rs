@@ -55,6 +55,10 @@ impl Daemon {
                     .computer
                     .as_ref()
                     .and_then(|computer| computer.target.clone()),
+                reality: view
+                    .computer
+                    .as_ref()
+                    .map(|computer| computer.reality.clone()),
                 computer: view.computer.map(|computer| computer.status),
             });
         }
@@ -87,14 +91,27 @@ impl Daemon {
         for project in &projects {
             views.push(self.project_view(&record.value.name, project).await?);
         }
-        let actual_state = aggregate(
+        let mut actual_state = aggregate(
             record.value.desired_state,
             views
                 .iter()
                 .map(|project| (project.desired_state, project.actual_state)),
         );
-        let health = combine_health(views.iter().map(|project| project.health));
+        let mut health = combine_health(views.iter().map(|project| project.health));
         let computer = self.computer_view_of(&record).await;
+        // An environment on a computer is what its computer was last
+        // observed to be: never running because it is meant to be.
+        if let Some(computer) = &computer {
+            let (state, observed_health) = computer_state(&computer.reality.observed);
+            if views.is_empty() || state != ActualState::Running {
+                actual_state = state;
+                health = if views.is_empty() {
+                    observed_health
+                } else {
+                    combine_health([health, observed_health].into_iter())
+                };
+            }
+        }
         Ok(EnvironmentView {
             version: ENVIRONMENT_VERSION.into(),
             environment_id: record.id.clone(),
@@ -782,6 +799,20 @@ fn summary(deployment: Stored<DeploymentRecord>) -> DeploymentSummary {
 }
 
 /// Aggregate child states into a parent state.
+/// An environment's state and health from its computer's observed reality.
+fn computer_state(observed: &str) -> (ActualState, Health) {
+    match observed {
+        "running" => (ActualState::Running, Health::Healthy),
+        "reconciling" => (ActualState::Running, Health::Unknown),
+        "starting" => (ActualState::Starting, Health::Unknown),
+        "unverified" => (ActualState::Degraded, Health::Unknown),
+        "unreachable" => (ActualState::Degraded, Health::Unhealthy),
+        "lost" | "failed" => (ActualState::Failed, Health::Unhealthy),
+        "stopping" => (ActualState::Stopping, Health::Unknown),
+        _ => (ActualState::Stopped, Health::Unknown),
+    }
+}
+
 fn aggregate(
     desired: DesiredState,
     children: impl Iterator<Item = (DesiredState, ActualState)>,

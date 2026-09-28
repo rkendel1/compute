@@ -12,6 +12,17 @@
 //! computer host, as they would on any other target. Everything lives in
 //! `$COMPUTE_HOME` (default `~/.compute`); running `compute` again reuses what
 //! is already running.
+//!
+//! The computer host trusts only this control plane: `compute` issues it a
+//! target credential (`computers/credentials.json` holds the verifier, the
+//! control plane's `control-plane/targets/this-machine.token` the token)
+//! and the pool presents it on every request. The control plane's
+//! identity (`identity`) stays the same across restarts, so what it owns on
+//! the host stays its own.
+//!
+//! Control state is whatever `[state]` (or `--state`) says; without one it
+//! is a file on this machine, which `compute` states as local development.
+//! Production control planes use FeltDB.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -39,6 +50,9 @@ pub struct UpCommand {
     /// How often the controller reconciles, in milliseconds.
     #[arg(long, default_value_t = 1000)]
     pub reconcile_interval_ms: u64,
+    /// The control plane's durable state; see `compute start --help`.
+    #[command(flatten)]
+    pub state: crate::control_state::StateOptions,
 }
 
 #[derive(Args, Debug)]
@@ -115,9 +129,17 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
     let home = home()?;
     std::fs::create_dir_all(&home)?;
     let exe = std::env::current_exe()?;
-    // This machine's computer host: a target like any other.
+    // This machine's computer host: a target like any other, which trusts
+    // only this control plane.
     let host = home.join("computers");
     std::fs::create_dir_all(&host)?;
+    let control_plane = control_plane_identity(&home)?;
+    let credentials = host.join("credentials.json");
+    let token_file = home
+        .join("control-plane")
+        .join("targets")
+        .join("this-machine.token");
+    ensure_target_credential(&credentials, &token_file, &control_plane)?;
     if !answers(&target_listen) {
         let mut serve = std::process::Command::new(&exe);
         serve
@@ -126,7 +148,9 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
             .arg("--job-store")
             .arg(host.join("jobs"))
             .arg("--session-store")
-            .arg(host.join("sessions"));
+            .arg(host.join("sessions"))
+            .arg("--credentials")
+            .arg(&credentials);
         if command.containers {
             serve.args(["--session-provider", "container"]);
         }
@@ -139,9 +163,11 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
     std::fs::write(
         &pool,
         format!(
-            "# Written by `compute`: the targets computers are placed on.\n\
-             [providers.this-machine]\nkind = \"remote\"\nendpoint = \"http://{}\"\n",
-            target_listen
+            "# Written by `compute`: the targets computers are placed on, and the\n\
+             # credential this control plane presents to each.\n\
+             [providers.this-machine]\nkind = \"remote\"\nendpoint = \"http://{}\"\ntoken_file = {:?}\n",
+            target_listen,
+            token_file.display().to_string()
         ),
     )?;
     let url = format!("http://{}", listen);
@@ -149,6 +175,7 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
         let state = home.join("control-plane");
         let output = std::process::Command::new(&exe)
             .args(["start", "--detach", "--listen", &listen])
+            .args(command.state.arguments())
             .arg("--state-dir")
             .arg(&state)
             .arg("--pool-config")
@@ -171,6 +198,8 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
         "  computers run on this machine's computer host ({})",
         target_listen
     );
+    println!("  this control plane ({control_plane}) authenticates to it with a target credential");
+    println!("  control state: {}", durability_note(&command.state));
     println!("  state: {}", home.display());
     println!("  stop it with `compute down`");
     if !no_browser {
@@ -187,6 +216,68 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
         }
     }
     Ok(())
+}
+
+/// This control plane's identity: generated once, kept in `$COMPUTE_HOME`.
+fn control_plane_identity(home: &std::path::Path) -> compute_core::Result<String> {
+    let path = home.join("identity");
+    if let Ok(identity) = std::fs::read_to_string(&path) {
+        let identity = identity.trim().to_owned();
+        if compute_provider::credentials::validate_control_plane(&identity).is_ok() {
+            return Ok(identity);
+        }
+    }
+    let mut bytes = [0_u8; 8];
+    {
+        use std::io::Read;
+        std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    }
+    let identity = format!(
+        "cp-{}",
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    std::fs::write(&path, format!("{identity}\n"))?;
+    Ok(identity)
+}
+
+/// Make sure the computer host trusts this control plane, and that the
+/// control plane holds a token it accepts. A token the host no longer
+/// accepts (revoked, or its trust file replaced) is replaced by a new
+/// credential; nothing falls back to an open host.
+fn ensure_target_credential(
+    credentials: &std::path::Path,
+    token_file: &std::path::Path,
+    control_plane: &str,
+) -> compute_core::Result<()> {
+    let invalid = |error: compute_provider::ProviderError| ComputeError::Runtime(error.message);
+    let mut trusted =
+        compute_provider::TargetCredentials::load_or_default(credentials).map_err(invalid)?;
+    if let Ok(token) = compute_provider::credentials::read_token_file(token_file)
+        && trusted
+            .authenticate(Some(&format!("Bearer {token}")))
+            .is_ok_and(|identity| identity == control_plane)
+    {
+        return Ok(());
+    }
+    let (_, token) = trusted.issue(control_plane).map_err(invalid)?;
+    trusted.save(credentials).map_err(invalid)?;
+    compute_provider::credentials::write_token_file(token_file, &token)?;
+    Ok(())
+}
+
+/// What the control plane's durable state is, said plainly.
+fn durability_note(state: &crate::control_state::StateOptions) -> String {
+    match state.backend_name() {
+        Ok(backend) if backend == "feltdb" => "FeltDB (production durable authority)".into(),
+        Ok(backend) if backend == "memory" => "memory (ephemeral: lost when it stops)".into(),
+        Ok(backend) => format!(
+            "{backend} on this machine (local development; production control planes use FeltDB: [state] backend = \"feltdb\")"
+        ),
+        Err(error) => error.to_string(),
+    }
 }
 
 pub async fn down(command: DownCommand) -> compute_core::Result<()> {

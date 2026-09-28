@@ -111,8 +111,9 @@ def documentation(_):
 
 
 def security(_):
-    return table(['ID', 'Severity', 'Finding', 'Evidence'],
-                 [(s['id'], f"**{s['severity']}**", s['finding'], s['evidence']) for s in AUDIT['security']])
+    return table(['ID', 'Severity', 'Status', 'Finding', 'Evidence'],
+                 [(s['id'], f"**{s['severity']}**", s.get('status', 'open'), s['finding'], s['evidence'])
+                  for s in AUDIT['security']])
 
 
 def gaps(args):
@@ -125,14 +126,18 @@ def gaps(args):
     for area, items in by_area.items():
         out.append(f'### {area}\n')
         for g in items:
-            out.append(f"**{g['id']}**\n\n"
-                       f"- Current: {g['current']}\n- Desired: {g['desired']}\n- Impact: {g['impact']}\n"
+            label = ' (closed)' if g.get('status') == 'closed' else ''
+            current = 'Was' if g.get('status') == 'closed' else 'Current'
+            out.append(f"**{g['id']}**{label}\n\n"
+                       f"- {current}: {g['current']}\n- Desired: {g['desired']}\n- Impact: {g['impact']}\n"
                        f"- Evidence: {g['evidence']}\n- Next: {g['next']}\n")
     return '\n'.join(out).rstrip()
 
 
 def gap_index(_):
-    return table(['Gap', 'Area', 'Current'], [(g['id'], g['area'], g['current']) for g in AUDIT['gaps']])
+    return table(['Gap', 'Area', 'Status', 'Current'],
+                 [(g['id'], g['area'], g.get('status', 'open'), g['next'] if g.get('status') == 'closed' else g['current'])
+                  for g in AUDIT['gaps']])
 
 
 def base_vs_complete(_):

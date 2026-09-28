@@ -13,6 +13,9 @@
 //! inside a publish. The deterministic proofs that a read waits for a
 //! publish are in `compute-provider`'s `runtime` tests.
 
+#[path = "support/targets.rs"]
+mod targets;
+
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -79,11 +82,14 @@ async fn processes_sharing_a_runtime_store_prepare_it_and_read_coherent_snapshot
     let mut providers = vec![];
     for index in 0..PROCESSES {
         let port = free_port();
+        let credential = targets::issue(root.path(), &format!("server-{index}"), "store-test");
         servers.0.push(
             Command::new(BIN)
                 .args(["serve", "--listen", &format!("127.0.0.1:{port}")])
                 .arg("--job-store")
                 .arg(root.path().join(format!("jobs-{index}")))
+                .arg("--credentials")
+                .arg(&credential.credentials)
                 .env("COMPUTE_RUNTIME_CATALOG", &catalog)
                 .env("COMPUTE_RUNTIME_STORE", &store)
                 .stdout(Stdio::null())
@@ -91,7 +97,10 @@ async fn processes_sharing_a_runtime_store_prepare_it_and_read_coherent_snapshot
                 .spawn()
                 .unwrap(),
         );
-        providers.push(RemoteProvider::new(format!("http://127.0.0.1:{port}")));
+        providers.push(
+            RemoteProvider::new(format!("http://127.0.0.1:{port}"))
+                .with_bearer_token(credential.token()),
+        );
     }
     let deadline = Instant::now() + Duration::from_secs(60);
     for provider in &providers {

@@ -516,7 +516,14 @@ def measure_release(work):
 def measure_remote(work):
     port = free_port()
     store = os.path.join(work, "jobs")
+    # The target trusts one caller; `compute remote --provider URL` presents
+    # its token from $COMPUTE_TARGET_TOKEN.
+    credentials = os.path.join(work, "target-credentials.json")
+    issued = subprocess.run([COMPUTE, "target", "credential", "issue", "--credentials", credentials,
+                             "--control-plane", "platform-audit", "--json"], capture_output=True, text=True, check=True)
+    os.environ["COMPUTE_TARGET_TOKEN"] = json.loads(issued.stdout)["token"]
     server = subprocess.Popen([COMPUTE, "serve", "--listen", f"127.0.0.1:{port}", "--job-store", store,
+                               "--credentials", credentials,
                                "--max-concurrent-jobs", "4"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     provider = f"http://127.0.0.1:{port}"
     results = {}

@@ -291,3 +291,7 @@ label.inline { display: flex; align-items: center; gap: 8px; color: var(--muted)
 body[data-mode="manage"] .work-only { display: none; }
 
 .wizard-step h3 + ul, .wizard-step .row + h3, .wizard-step h3:not(:first-child) { margin-top: 18px; }
+/* A computer that is not simply running: what Compute observed, and what to do. */
+.panel.reality { border-left: 4px solid var(--bad); margin-bottom: 12px; }
+.panel.reality.warn { border-left-color: var(--warn); }
+.panel.reality p { margin: 6px 0; color: var(--text); }

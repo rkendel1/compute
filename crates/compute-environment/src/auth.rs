@@ -633,6 +633,32 @@ impl RequestContext {
     }
 }
 
+/// The authority of the daemon's own `compute.remote@1` service: a request
+/// reaches it only after the daemon's API authenticated it and checked its
+/// scope, which leaves the request's context behind. Without one, nothing
+/// is admitted: the service is never reachable around the daemon.
+pub(crate) struct DaemonAuthorized;
+
+#[async_trait::async_trait]
+impl compute_provider::ProviderAuthorizer for DaemonAuthorized {
+    async fn authorize(
+        &self,
+        _: compute_provider::ProviderOperation,
+        _: Option<&str>,
+    ) -> Result<(), compute_provider::ProviderError> {
+        RequestContext::current().map(|_| ()).ok_or_else(|| {
+            compute_provider::ProviderError::new(
+                compute_provider::ProviderErrorKind::Unauthorized,
+                "this service is reachable only through the Compute API",
+            )
+        })
+    }
+
+    fn authentication(&self) -> &'static str {
+        "operator-credential"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -723,6 +749,38 @@ mod tests {
                 .authenticate(Some("Bearer cmpt_cred_x_y"))
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn the_daemon_provider_service_admits_only_what_the_api_authenticated() {
+        use compute_provider::{ProviderAuthorizer, ProviderOperation};
+        let authority = DaemonAuthorized;
+        // Anything reaching the service without passing the API is refused,
+        // whatever it presents.
+        for header in [None, Some("Bearer anything")] {
+            let error = authority
+                .authorize(ProviderOperation::SessionList, header)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.kind,
+                compute_provider::ProviderErrorKind::Unauthorized
+            );
+        }
+        let context = RequestContext {
+            request_id: "req_1".into(),
+            operator_id: "alice".into(),
+            credential_id: Some("cred_1".into()),
+        };
+        REQUEST
+            .scope(context, async {
+                authority
+                    .authorize(ProviderOperation::SessionList, Some("Bearer token"))
+                    .await
+                    .unwrap();
+            })
+            .await;
+        assert_eq!(authority.authentication(), "operator-credential");
     }
 
     #[test]

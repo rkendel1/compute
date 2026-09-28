@@ -386,6 +386,21 @@ pub struct BackendInfo {
     pub durable: bool,
 }
 
+impl BackendInfo {
+    /// What this backend is for. FeltDB is the durable authority of a
+    /// production control plane; a file is local development (durable on
+    /// one machine, with no transactions shared by other controllers); memory
+    /// ends with the process.
+    pub fn durability(&self) -> &'static str {
+        match self.kind.as_str() {
+            "feltdb" => "production",
+            "file" => "local-development",
+            "memory" => "ephemeral",
+            _ => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
     #[error("{collection:?} {id} already exists")]
