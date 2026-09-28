@@ -441,6 +441,7 @@ app compute {
     environment: text
     commit: text?
     package_digest: text?
+    artifact: json?
     assembly: json
     config_keys: json?
     status: enum(publishing, published, failed)

@@ -52,7 +52,11 @@ pub const STATE_VERSION: &str = "compute.state@1";
 /// - 7: target reality: `Computer.status` gains `unreachable` (its target
 ///   did not confirm it) and `lost` (its target no longer has it). Both
 ///   keep the environment's desired state.
-pub const MODEL_GENERATION: u32 = 7;
+/// - 8: one deployment model: `Version.artifact` (the application artifact
+///   a version's source was imported from), and operation steps name the
+///   receipt of the job that did them (inside `steps`). Applications are
+///   versions and rollouts of a project on their own computer.
+pub const MODEL_GENERATION: u32 = 8;
 
 /// A typed document of one collection.
 pub trait Document: Serialize + DeserializeOwned + Clone + Send + Sync {
@@ -414,6 +418,10 @@ pub struct VersionRecord {
     /// `sha256:` over the source package (`git archive` of the commit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_digest: Option<String>,
+    /// The artifact the version's source was imported from, when it was
+    /// not a repository of its own (an application artifact).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ApplicationArtifactEvidence>,
     pub assembly: compute_core::ProjectAssembly,
     /// The configuration keys it was checked with (never values).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -656,6 +664,11 @@ pub struct ApplicationArtifactEvidence {
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    /// The runtime its bundle names, and the version it asks for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
 }
 
 /// A caller's placement decision that sent a deployment to this node:

@@ -656,6 +656,10 @@ pub struct OperationStep {
     pub job_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
+    /// The receipt (`compute.receipt@1`, its `receipt_hash`) the target
+    /// issued for the job, once it is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<DateTime<Utc>>,
 }
@@ -668,6 +672,7 @@ impl OperationStep {
             detail: None,
             job_id: None,
             execution_id: None,
+            receipt: None,
             at: None,
         }
     }

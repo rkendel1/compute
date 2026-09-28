@@ -921,8 +921,8 @@
   },
   {
    "id": "applications",
-   "area": "legacy",
-   "name": "`compute init/deploy` applications on a provider node",
+   "area": "release",
+   "name": "`compute init/deploy` applications: a compatibility view over a computer, a version, and a rollout",
    "status": "IMPLEMENTED + VERIFIED",
    "user_can_use": "yes",
    "in_complete_model": "reconcile",
@@ -931,11 +931,12 @@
      "crates/compute-environment/src/daemon/applications.rs"
     ],
     "tests": [
+     "crates/compute-environment/tests/applications.rs",
      "crates/compute-cli/tests/product.rs"
     ],
     "journey": "experiments.json#application_journey"
    },
-   "notes": "`compute deploy <dir>` auto-starts a daemon with state in ./.compute/daemon; the app runs on that daemon node."
+   "notes": "Each application is its own computer environment on a target (never the daemon host): source imported by target jobs, published as a version, deployed as a rollout; runtimes that need the pinned catalog (wasm, jvm, dotnet) are refused."
   },
   {
    "id": "domains-tls",
@@ -1042,7 +1043,7 @@
   {
    "id": "state-feltdb",
    "area": "state",
-   "name": "FeltDB as the durable authority of a production control plane (model generation 7)",
+   "name": "FeltDB as the durable authority of a production control plane (model generation 8)",
    "status": "IMPLEMENTED + VERIFIED",
    "user_can_use": "configuration",
    "in_complete_model": true,
@@ -4576,6 +4577,15 @@
    "http_path_in_tests": false
   },
   {
+   "method": "GET",
+   "path": "/applications/{application}/deployments/{deployment}/receipt",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
    "method": "POST",
    "path": "/applications/{application}/rollback",
    "scope": "Deploy",
@@ -5681,7 +5691,7 @@
    "term": "Environment",
    "is": "A durable record (Environment in control state) with a name, desired state (running/stopped), configuration, policy, and optionally an owner, a ComputerSpec, and EnvironmentContents.",
    "source": "crates/compute-state/src/model.rs#EnvironmentRecord",
-   "collision": "Two kinds share the name: an environment with a computer, and a \"node environment\" whose bundle projects run on the daemon host. `applications` is a reserved node environment for `compute deploy <dir>`."
+   "collision": "Two kinds share the name: an environment with a computer, and a \"node environment\" whose bundle projects run on the daemon host. An application is an environment with a computer, `application-<name>`."
   },
   {
    "term": "Computer",
@@ -5727,9 +5737,9 @@
   },
   {
    "term": "Application",
-   "is": "Three things: (a) a process of kind application in a computer; (b) an `compute init/deploy` application with versions on a provider node; (c) a project in the reserved `applications` environment.",
-   "source": "crates/compute-core/src/computers.rs#ProcessKind; crates/compute-environment/src/daemon/applications.rs",
-   "collision": "Three meanings."
+   "is": "A compatibility name for canonical records: `compute init/deploy` resolves an application to its environment `application-<name>` (a computer), a project and its versions, and rollouts; its process is a process of kind application in that computer.",
+   "source": "crates/compute-environment/src/daemon/applications.rs; crates/compute-core/src/computers.rs#ProcessKind",
+   "collision": "None of its own: an application version is a rollout, numbered in its environment."
   },
   {
    "term": "Service",
@@ -5747,7 +5757,7 @@
    "term": "Version / Rollout",
    "is": "Version: a published commit + package digest + assembly + step evidence. Rollout: a version made real in an environment (deploy/promote/rollback) with steps.",
    "source": "crates/compute-state/src/model.rs#VersionRecord,RolloutRecord",
-   "collision": "Parallel to bundle Revisions/Deployments and to application versions."
+   "collision": "Parallel to bundle Revisions/Deployments of node environments; application versions ARE rollouts."
   }
  ],
  "execution_paths": [
@@ -5794,11 +5804,11 @@
    "canonical_job_path": false
   },
   {
-   "path": "Applications (`compute deploy <dir>`)",
-   "where": "a provider node offering deployments \u2014 the daemon host by default",
-   "authority": "daemon scopes",
-   "durable": "deployments in control state",
-   "canonical_job_path": false
+   "path": "Applications (`compute deploy <dir>`, `compute application \u2026`)",
+   "where": "the application's computer on a target of the selected daemon's pool",
+   "authority": "daemon scope + owner (the computer's)",
+   "durable": "environment, computer, version, rollout in FeltDB; target jobs and receipts",
+   "canonical_job_path": true
   },
   {
    "path": "Daemon /compute/* (node as provider)",
@@ -5874,7 +5884,12 @@
    "every_operation": true
   },
   {
-   "operation": "Node environments, bundle projects, applications, domains",
+   "operation": "Applications (deploy, rollback, stop, logs)",
+   "check": "the computer's: scope + owner of `application-<name>`",
+   "every_operation": true
+  },
+  {
+   "operation": "Node environments, bundle projects, domains",
    "check": "scopes only; no ownership",
    "every_operation": true
   },
@@ -6144,12 +6159,22 @@
   {
    "id": "G-ARCH-2",
    "area": "Core architecture",
-   "status": "open",
+   "status": "closed",
    "current": "Three deployment models: applications, bundle projects (node environments), computer versions/rollouts.",
    "desired": "One: versions reconciled into an environment's computer.",
    "impact": "Three vocabularies, three code paths, and work that still runs on the daemon host.",
    "evidence": "models, execution_paths",
-   "next": "Decide the fate of node environments and applications: port their features (zero-downtime switch, ingress, domains) to computers, then retire or wrap them."
+   "next": "Closed for applications: `compute deploy`/`compute application` resolve to a computer environment, a version, and a rollout; source is imported by target jobs; the endpoint, logs, and receipt are the computer's (crates/compute-environment/tests/applications.rs). Node environments remain: G-ARCH-5."
+  },
+  {
+   "id": "G-ARCH-5",
+   "area": "Core architecture",
+   "status": "open",
+   "current": "Node environments (bundle projects, releases, ingress) still run on the daemon host through the supervisor.",
+   "desired": "Their features (zero-downtime switch, ingress, domains) ported to computers, then retired.",
+   "impact": "A second deployment model remains for bundle projects (not for applications).",
+   "evidence": "execution_paths",
+   "next": "Port zero-downtime switching and ingress to computers (G-DEP-1, G-APP-1), then retire node environments."
   },
   {
    "id": "G-ARCH-3",
@@ -6225,11 +6250,11 @@
    "id": "G-EXEC-1",
    "area": "Execution",
    "status": "open",
-   "current": "Bundle workloads and applications execute on the daemon host.",
+   "current": "Bundle workloads of node environments execute on the daemon host (applications no longer do).",
    "desired": "The daemon coordinates; computers execute.",
    "impact": "The daemon is both coordinator and executor.",
    "evidence": "execution_paths",
-   "next": "Covered by G-ARCH-2."
+   "next": "Covered by G-ARCH-5."
   },
   {
    "id": "G-EXEC-2",
@@ -6549,7 +6574,7 @@
   },
   {
    "capability": "API",
-   "base_capture": "128 routes, scoped",
+   "base_capture": "129 routes, scoped",
    "complete_compute": "Versioned, documented",
    "gap": "Description"
   },
@@ -6725,7 +6750,7 @@
   {
    "stage": "EXECUTION",
    "items": [
-    "One deployment model: retire or port node environments and applications (G-ARCH-2, G-EXEC-1)",
+    "One deployment model: retire or port node environments (G-ARCH-5, G-EXEC-1); applications are converged (G-ARCH-2)",
     "Cancel/retry for computer jobs and operations (G-EXEC-2)"
    ]
   },

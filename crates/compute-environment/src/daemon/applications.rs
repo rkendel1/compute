@@ -1,39 +1,57 @@
-//! Applications: a product view over one owned Computer environment per
-//! application.
+//! Applications: a compatibility view over the one deployment model.
 //!
 //! ```text
-//! application ── deployments (v1, v2, …) ── executions ── receipts
-//!      └── endpoint (stable across versions)
+//! compute application …            (this module: resolve, invoke, adapt)
+//!   → Environment `application-<name>`, owned by the caller
+//!   → Computer            placed and provisioned by the computer controller
+//!   → Project `<name>`    its source imported into the computer (durable jobs)
+//!   → Version             publish_version: source, package digest, artifact
+//!   → Rollout             deploy_version / rollback_version: the deployment
+//!   → target job          the process start, run in the target session
+//!   → Endpoint            the computer's endpoint for the process's port
+//!   → Receipt             the target's receipt for that job
 //! ```
 //!
-//! An application is a project with one service, `app`, released through
-//! the ordinary release lifecycle. Nothing here is a second release path or
-//! a second store: every operation is an existing daemon operation, and
-//! every view is derived from control state.
+//! Nothing here is a controller, a store, a supervisor, or a state machine.
+//! Every operation resolves the application to its canonical records,
+//! invokes the canonical operation — the same one the computer, version, and
+//! rollout APIs invoke, with the same owner-bound authorization — and
+//! describes the result in application terms. An application version is a
+//! rollout; its number counts the project's rollouts in its environment.
 
-use std::net::IpAddr;
+use std::collections::BTreeMap;
+use std::io::Write as _;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
-use compute_core::{ApplicationIdentity, ComputerLifecycle, WorkloadBundle};
+use compute_core::{
+    ApplicationIdentity, ComputerLifecycle, ComputerRequirements, ComputerStatus, InputSource,
+    ProcessDesired, ProcessKind, ProcessSpec, ProcessState, ProjectSpec, RepositorySpec,
+    RuntimeKind, WorkloadBundle,
+};
+use compute_state::{RolloutKind, RolloutRecord, RolloutStatus, VersionRecord, VersionStatus};
 
 use super::Daemon;
+use super::computers::imported_source;
 use crate::EnvironmentError;
 use crate::model::*;
 use crate::status::*;
 
-/// Kept for clients that used the old product environment. New applications
-/// use an owned, deterministic Computer environment instead.
-pub const APPLICATIONS_ENVIRONMENT: &str = "applications";
-/// An application's one service.
-pub const APPLICATION_WORKLOAD: &str = "app";
-const HISTORY: usize = 50;
+/// How long a deploy waits for each canonical step it drives: the computer
+/// to run, to hold the imported source, and the version to publish.
+const STEP_DEADLINE: Duration = Duration::from_secs(5 * 60);
+const POLL: Duration = Duration::from_millis(100);
+/// The lines of the process's log a logs request returns.
+const LOG_LINES: usize = 1000;
 
-fn application_environment(name: &str) -> String {
+/// The environment an application is: one computer of its own.
+pub fn application_environment(name: &str) -> String {
     format!("application-{name}")
 }
 
 impl Daemon {
-    /// Every application on this node.
+    /// Every application on this node: every environment that is one.
     pub async fn applications(&self) -> Result<Vec<ApplicationView>, EnvironmentError> {
         let mut applications = vec![];
         for environment in self.environments().await? {
@@ -47,20 +65,11 @@ impl Daemon {
         Ok(applications)
     }
 
-    /// One application: its status, stable endpoint, and versions.
+    /// One application: its computer, endpoint, and versions.
     pub async fn application(&self, name: &str) -> Result<ApplicationView, EnvironmentError> {
         let identity = ApplicationIdentity::new(name, None)?;
-        let environment = application_environment(name);
-        let project = match self.project(&environment, name).await {
-            Ok(project) => project,
-            Err(EnvironmentError::NotFound(_)) => {
-                return Err(EnvironmentError::NotFound(format!(
-                    "application {name} is not deployed on this node"
-                )));
-            }
-            Err(error) => return Err(error),
-        };
-        let deployments = self.application_deployments(name, Some(&project)).await?;
+        let computer = self.application_computer(name).await?;
+        let deployments = self.application_deployments_of(name, &computer).await?;
         let active = deployments
             .iter()
             .find(|deployment| deployment.active)
@@ -69,19 +78,37 @@ impl Daemon {
             .iter()
             .find(|deployment| deployment.state == ApplicationDeploymentState::Deploying)
             .cloned();
-        let status = if deploying.is_some() && active.is_none() {
-            "deploying".to_owned()
-        } else {
-            project.actual_state.as_str().to_owned()
-        };
-        let endpoint = active
-            .as_ref()
-            .and_then(|deployment| deployment.endpoint.clone())
-            .or_else(|| {
-                deployments
-                    .iter()
-                    .find_map(|deployment| deployment.endpoint.clone())
-            });
+        let process = computer
+            .desired
+            .processes
+            .iter()
+            .find(|process| process.name == name);
+        let observed = computer.observed.processes.get(name);
+        // The computer's reality first: an application is never more alive
+        // than the machine it runs on.
+        let status = match computer.status {
+            ComputerStatus::Running => {
+                if process.is_some_and(|process| process.desired == ProcessDesired::Stopped) {
+                    if observed.is_some_and(|seen| seen.state == ProcessState::Running) {
+                        "stopping"
+                    } else {
+                        "stopped"
+                    }
+                } else if deploying.is_some() && active.is_none() {
+                    "deploying"
+                } else {
+                    match observed.map(|seen| seen.state) {
+                        Some(ProcessState::Running) => "running",
+                        Some(ProcessState::Failed | ProcessState::Exited) => "failed",
+                        Some(ProcessState::Stopped) => "stopped",
+                        None => "starting",
+                    }
+                }
+            }
+            status => status.observed(),
+        }
+        .to_owned();
+        let endpoint = self.application_endpoint(name, &computer);
         Ok(ApplicationView {
             application: identity,
             status,
@@ -90,122 +117,67 @@ impl Daemon {
             active,
             deploying,
             deployments,
+            environment: Some(computer.environment.clone()),
+            computer: Some(computer),
         })
     }
 
-    /// An application's versions, newest first, in product terms.
+    /// An application's versions, newest first: its project's rollouts in
+    /// its environment.
     pub async fn application_deployments(
         &self,
         name: &str,
-        project: Option<&ProjectView>,
     ) -> Result<Vec<ApplicationDeploymentView>, EnvironmentError> {
-        let project = match project {
-            Some(project) => project.clone(),
-            None => self.project(&application_environment(name), name).await?,
-        };
-        let records = self
-            .deployments(
-                Some(application_environment(name)),
-                Some(name.into()),
-                Some(HISTORY),
-            )
-            .await?;
-        let current = project
-            .deployment
-            .as_ref()
-            .map(|deployment| deployment.deployment_id.clone());
-        let stopped = project.desired_state == DesiredState::Stopped
-            || project.actual_state == ActualState::Stopped;
-        // Newest first: a version newer than the one that serves has not
-        // been replaced by anything; it is still being released, even once
-        // its record moved ahead of the membership.
-        let serving = records
-            .iter()
-            .position(|deployment| current.as_deref() == Some(deployment.deployment_id.as_str()));
-        let mut views = vec![];
-        for (index, deployment) in records.iter().enumerate() {
-            let record = &deployment.record;
-            let active = serving == Some(index);
-            let state = match record.status {
-                DeploymentStatus::Failed => ApplicationDeploymentState::Failed,
-                DeploymentStatus::RolledBack => ApplicationDeploymentState::RolledBack,
-                _ if active && stopped => ApplicationDeploymentState::Stopped,
-                _ if active => ApplicationDeploymentState::Active,
-                _ if serving.is_none_or(|serving| index < serving) => {
-                    ApplicationDeploymentState::Deploying
-                }
-                status if !status.is_terminal() && !status.serves() => {
-                    ApplicationDeploymentState::Deploying
-                }
-                _ => ApplicationDeploymentState::Superseded,
-            };
-            // Newest first: the version released just before this one is
-            // the next record, and earlier ones follow.
-            let earlier = &records[index + 1..];
-            let rollback_of = earlier
-                .first()
-                .filter(|previous| previous.record.revision_id != record.revision_id)
-                .and_then(|_| {
-                    earlier
-                        .iter()
-                        .find(|older| {
-                            older.record.revision_id == record.revision_id
-                                && older.record.status.serves()
-                        })
-                        .map(|older| older.record.version)
-                });
-            let workload = record
-                .workloads
-                .iter()
-                .find(|workload| workload.name == APPLICATION_WORKLOAD)
-                .or_else(|| record.workloads.first());
-            views.push(ApplicationDeploymentView {
-                application: name.to_owned(),
-                version: record.version,
-                deployment_id: deployment.deployment_id.clone(),
-                state,
-                active,
-                rollback_of,
-                endpoint: workload
-                    .and_then(|workload| workload.endpoints.first())
-                    .map(|binding| self.application_url(binding.host)),
-                runtime: workload.map(|workload| workload.runtime.clone()),
-                runtime_version: workload.and_then(|workload| {
-                    workload
-                        .resolved_runtime_version
-                        .clone()
-                        .or_else(|| workload.runtime_version.clone())
-                }),
-                placement: workload.and_then(|workload| workload.pool_placement.clone()),
-                artifact: workload.and_then(|workload| workload.application_artifact.clone()),
-                failure: record.failure.clone().or(record.rollback_reason.clone()),
-                receipt: record.receipt.clone(),
-                execution_receipts: record.receipt_ids.clone(),
-                created_at: record.created_at,
-                completed_at: record.completed_at,
-            });
-        }
-        Ok(views)
+        let computer = self.application_computer(name).await?;
+        self.application_deployments_of(name, &computer).await
     }
 
-    /// One version, by version number (`3`, `v3`) or deployment ID.
+    /// One version, by number (`3`, `v3`) or deployment (rollout) ID.
     pub async fn application_deployment(
         &self,
         name: &str,
         target: &str,
     ) -> Result<ApplicationDeploymentView, EnvironmentError> {
-        let deployments = self.application_deployments(name, None).await?;
+        let deployments = self.application_deployments(name).await?;
         find_version(&deployments, target)
             .cloned()
             .ok_or_else(|| EnvironmentError::NotFound(format!("{name} {target}")))
     }
 
-    /// Release a new version of an application on this node. The first
-    /// deployment creates the application; every one is the ordinary
-    /// release: revision, admission, start, readiness, traffic switch.
+    /// The receipt of the execution that made a version run, exactly as
+    /// the computer's target issued it for the job: canonical bytes.
+    pub async fn application_receipt(
+        &self,
+        name: &str,
+        target: &str,
+    ) -> Result<Vec<u8>, EnvironmentError> {
+        let deployment = self.application_deployment(name, target).await?;
+        let records = deployment
+            .canonical
+            .as_ref()
+            .expect("an application deployment is a rollout");
+        let (Some(target), Some(job_id)) = (&records.target, &records.job_id) else {
+            return Err(EnvironmentError::NotFound(format!(
+                "{name} v{} has no execution yet",
+                deployment.version
+            )));
+        };
+        let receipt = self
+            .target_client(target)?
+            .job_receipt(job_id)
+            .await
+            .map_err(|error| EnvironmentError::RuntimeUnavailable(error.to_string()))?;
+        Ok(receipt.receipt.encoded_bytes()?)
+    }
+
+    /// Release a new version: import the artifact's source into the
+    /// application's computer, publish it as a version of its project, and
+    /// deploy that version. The first deployment creates the environment,
+    /// placed and owned like any other computer.
     pub async fn deploy_application(
         self: &Arc<Self>,
         name: &str,
+        operator: &str,
         request: ApplicationDeployRequest,
     ) -> Result<ApplicationDeploymentView, EnvironmentError> {
         if !self.config.execution.deployments {
@@ -215,179 +187,483 @@ impl Daemon {
         }
         let resolved = resolve_application(name, &request).await?;
         let bundle = WorkloadBundle::from_bytes(&resolved.bundle)?;
-        let bundle_id = bundle.bundle_id()?;
+        let command = process_command(&bundle)?;
+        let archive = source_archive(&bundle)?;
         let environment = application_environment(name);
-        self.ensure_application_environment(name).await?;
-        let definition = RevisionDefinition {
-            revision: format!("artifact-{}", bundle_id.trim_start_matches("sha256:")),
-            source: request.source.clone(),
-            workloads: vec![WorkloadDefinition {
-                name: APPLICATION_WORKLOAD.into(),
-                kind: WorkloadKind::Service,
-                bundle: resolved.bundle,
-                ports: vec![PortSpec {
-                    name: "http".into(),
-                    port: resolved.port,
-                }],
-                restart: RestartPolicy::OnFailure,
-                desired_state: DesiredState::Running,
-                readiness: Some(Readiness {
-                    check: ReadinessCheck::Http,
-                    port: Some("http".into()),
-                    path: Some("/".into()),
-                    task: None,
-                    timeout_ms: 60_000,
-                    interval_ms: 250,
-                }),
-            }],
+        // The environment contract is checked before anything is recorded.
+        let existing = self.stored_environment(&environment).await?;
+        let config = match (&request.env, &existing) {
+            (Some(env), _) => env.clone(),
+            (None, Some(record)) => record.value.config.clone(),
+            (None, None) => BTreeMap::new(),
         };
-        let daemon = self.clone();
-        let project = name.to_owned();
-        let revision =
-            on_own_task(async move { daemon.register_revision(&project, definition).await })
-                .await?;
-        self.release(DeployRequest {
-            project: name.into(),
-            environment,
-            revision: Some(revision.revision_id),
-            config: request.env,
-            desired_state: Some(DesiredState::Running),
-            placement: request.placement,
-            artifact: resolved.evidence,
-            required_config: resolved.required_env,
+        let missing = resolved
+            .required_env
+            .iter()
+            .filter(|key| !config.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(EnvironmentError::Invalid(format!(
+                "{name} requires configuration it was not given: {}",
+                missing.join(", ")
+            )));
+        }
+        // The application's computer: placed now, refused with every
+        // target's reasons when none can host it.
+        if existing.is_none() {
+            let created = self
+                .create_computer_environment(
+                    ComputerEnvironmentDefinition {
+                        name: environment.clone(),
+                        desired_state: DesiredState::Running,
+                        env: config.clone(),
+                        policy: None,
+                        computer: ComputerRequest {
+                            lifecycle: ComputerLifecycle::Persistent,
+                            requirements: requirements(&bundle),
+                            target: None,
+                            ttl_seconds: None,
+                        },
+                        contents: Default::default(),
+                    },
+                    operator,
+                )
+                .await;
+            match created {
+                Ok(_) | Err(EnvironmentError::Conflict(_)) => {}
+                Err(EnvironmentError::Invalid(reason)) => {
+                    return Err(EnvironmentError::Invalid(format!(
+                        "{name} has no computer to run on: {reason}"
+                    )));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        // Owner-bound, like every change to a computer.
+        let record = self.owned_environment(&environment, operator).await?;
+        self.require_live(&record).await?;
+        self.await_computer(&environment, "run", |view| {
+            view.status == ComputerStatus::Running
         })
-        .await
+        .await?;
+        let label = resolved
+            .evidence
+            .as_ref()
+            .map(|evidence| evidence.artifact_id.clone())
+            .unwrap_or(bundle.bundle_id()?);
+        let commit = self
+            .import_source(
+                &environment,
+                operator,
+                name,
+                &archive,
+                &format!("{name} {label}"),
+            )
+            .await?;
+        // Desired state: the configuration, the repository at the imported
+        // commit, the project, and the process that runs it.
+        let taken = self.ports_in_use().await;
+        let range = self.config.port_range;
+        let short = commit[..12].to_owned();
+        let view = self
+            .change_environment(
+                &environment,
+                operator,
+                format!("application {name} at {short}"),
+                None,
+                |value| {
+                    value.config = config.clone();
+                    let contents = value.contents.get_or_insert_with(Default::default);
+                    let repository = RepositorySpec {
+                        name: name.to_owned(),
+                        url: imported_source(name),
+                        revision: commit.clone(),
+                        sync: 0,
+                    };
+                    upsert(&mut contents.repositories, repository, |item| &item.name);
+                    let project = ProjectSpec {
+                        name: name.to_owned(),
+                        repository: name.to_owned(),
+                        build: vec![],
+                        test: vec![],
+                        commands: Default::default(),
+                        checks: vec![],
+                    };
+                    upsert(&mut contents.projects, project, |item| &item.name);
+                    let current = contents.processes.iter().find(|item| item.name == name);
+                    // The endpoint is stable: a process keeps its port.
+                    let port = current.and_then(|process| process.port).or_else(|| {
+                        (range.0..=range.1).find(|port| {
+                            !taken.contains(port)
+                                && !contents
+                                    .processes
+                                    .iter()
+                                    .any(|other| other.port == Some(*port))
+                        })
+                    });
+                    let Some(port) = port else {
+                        return Err(EnvironmentError::Conflict(format!(
+                            "no endpoint port is free in {}-{}",
+                            range.0, range.1
+                        )));
+                    };
+                    let process = ProcessSpec {
+                        name: name.to_owned(),
+                        kind: ProcessKind::Application,
+                        command: command.clone(),
+                        repository: Some(name.to_owned()),
+                        env: process_env(&bundle),
+                        desired: ProcessDesired::Running,
+                        port: Some(port),
+                        restart: current.map_or(0, |process| process.restart),
+                    };
+                    upsert(&mut contents.processes, process, |item| &item.name);
+                    Ok(())
+                },
+            )
+            .await?;
+        let generation = view.desired.generation;
+        self.await_computer(&environment, "hold the imported source", |view| {
+            view.observed.converged_generation >= generation
+                && view
+                    .observed
+                    .repositories
+                    .get(name)
+                    .is_some_and(|seen| seen.commit.as_deref() == Some(commit.as_str()))
+        })
+        .await?;
+        let version = self
+            .publish_version_from(
+                name,
+                operator,
+                PublishRequest {
+                    environment: environment.clone(),
+                    version: None,
+                },
+                resolved.evidence,
+            )
+            .await?;
+        let version = self.await_published(name, &version.version).await?;
+        let rollout = self
+            .deploy_version(
+                name,
+                operator,
+                DeployVersionRequest {
+                    environment,
+                    version: version.version,
+                    expected_generation: None,
+                },
+            )
+            .await?;
+        self.application_deployment(name, &rollout.rollout_id).await
     }
 
-    /// Release through the ordinary lifecycle, and describe the result as
-    /// a version of the application.
-    async fn release(
-        self: &Arc<Self>,
-        request: DeployRequest,
-    ) -> Result<ApplicationDeploymentView, EnvironmentError> {
-        let name = request.project.clone();
-        let daemon = self.clone();
-        let deployment = on_own_task(async move { daemon.deploy(request).await }).await?;
-        self.application_deployment(&name, &deployment.deployment_id)
-            .await
-    }
-
-    /// Deploy an earlier version's revision and configuration again, as the
-    /// next version. History is never edited.
+    /// Roll back to an earlier version: the canonical rollback of the
+    /// project in the application's environment to that version.
     pub async fn rollback_application(
         self: &Arc<Self>,
         name: &str,
+        operator: &str,
         request: ApplicationRollbackRequest,
     ) -> Result<ApplicationDeploymentView, EnvironmentError> {
-        let deployments = self
-            .deployments(
-                Some(application_environment(name)),
-                Some(name.into()),
-                Some(HISTORY),
-            )
-            .await?;
-        let target = deployments
-            .iter()
-            .find(|deployment| {
-                deployment.deployment_id == request.target
-                    || parse_version(&request.target) == Some(deployment.record.version)
-            })
-            .ok_or_else(|| {
-                EnvironmentError::NotFound(format!("{name} has no version {}", request.target))
-            })?;
-        if matches!(
-            target.record.status,
-            DeploymentStatus::Failed | DeploymentStatus::RolledBack
-        ) {
+        let deployments = self.application_deployments(name).await?;
+        let target = find_version(&deployments, &request.target).ok_or_else(|| {
+            EnvironmentError::NotFound(format!("{name} has no version {}", request.target))
+        })?;
+        if target.state == ApplicationDeploymentState::Failed {
             return Err(EnvironmentError::Invalid(format!(
                 "{name} v{} never served; roll back to a version that did",
-                target.record.version
+                target.version
             )));
         }
-        self.release(DeployRequest {
-            project: name.into(),
-            environment: application_environment(name),
-            revision: Some(target.record.revision_id.clone()),
-            config: Some(target.record.config.clone()),
-            desired_state: Some(DesiredState::Running),
-            placement: request.placement,
-            // The same artifact as the version rolled back to.
-            artifact: target
-                .record
-                .workloads
-                .iter()
-                .find(|workload| workload.name == APPLICATION_WORKLOAD)
-                .and_then(|workload| workload.application_artifact.clone()),
-            required_config: Default::default(),
-        })
-        .await
+        let records = target.canonical.clone().expect("a rollout");
+        let rollout = self
+            .rollback_version(
+                name,
+                operator,
+                RollbackRequest {
+                    environment: records.environment,
+                    version: Some(records.version),
+                },
+            )
+            .await?;
+        self.application_deployment(name, &rollout.rollout_id).await
     }
 
-    /// Stop an application. Its versions, endpoint, and evidence remain.
+    /// Stop the application's process. Its computer, versions, endpoint,
+    /// and evidence remain.
     pub async fn stop_application(
         self: &Arc<Self>,
         name: &str,
+        operator: &str,
     ) -> Result<ApplicationView, EnvironmentError> {
-        let daemon = self.clone();
-        let project = name.to_owned();
-        let environment = application_environment(name);
-        on_own_task(async move {
-            daemon
-                .set_project_state(&environment, &project, DesiredState::Stopped, false)
-                .await
-        })
+        self.set_process(
+            &application_environment(name),
+            operator,
+            name,
+            ProcessDesired::Stopped,
+        )
         .await?;
         self.application(name).await
     }
 
-    /// The application's current output.
-    pub async fn application_logs(&self, name: &str) -> Result<(String, String), EnvironmentError> {
-        self.logs(&application_environment(name), name, APPLICATION_WORKLOAD)
-            .await
-    }
-
-    async fn ensure_application_environment(
+    /// The application's output: its process's log in the computer, read
+    /// by a durable job on the target.
+    pub async fn application_logs(
         self: &Arc<Self>,
         name: &str,
-    ) -> Result<(), EnvironmentError> {
-        let environment = application_environment(name);
-        match self.environment(&environment).await {
-            Ok(_) => Ok(()),
-            Err(EnvironmentError::NotFound(_)) => {
-                let operator = crate::auth::RequestContext::current()
-                    .map(|context| context.operator_id)
-                    .unwrap_or_else(|| format!("application:{name}"));
-                match self
-                    .create_computer_environment(
-                        ComputerEnvironmentDefinition {
-                            name: environment,
-                            desired_state: DesiredState::Running,
-                            env: Default::default(),
-                            policy: None,
-                            computer: ComputerRequest {
-                                lifecycle: ComputerLifecycle::Persistent,
-                                requirements: Default::default(),
-                                target: None,
-                                ttl_seconds: None,
-                            },
-                            contents: Default::default(),
-                        },
-                        &operator,
-                    )
-                    .await
-                {
-                    Ok(_) | Err(EnvironmentError::Conflict(_)) => Ok(()),
-                    Err(error) => Err(error),
-                }
-            }
-            Err(error) => Err(error),
-        }
+        operator: &str,
+    ) -> Result<serde_json::Value, EnvironmentError> {
+        let logs = self
+            .computer_logs(
+                &application_environment(name),
+                operator,
+                Some(name),
+                LOG_LINES,
+            )
+            .await?;
+        Ok(serde_json::json!({
+            "stdout": logs["log"],
+            "stderr": "",
+            "process": name,
+            "job_id": logs["evidence"]["job_id"],
+            "execution_id": logs["evidence"]["execution_id"],
+        }))
     }
 
     /// This node as a `compute.remote@1` provider: capabilities, health,
-    /// runs, and jobs, on the provider its deployments use.
+    /// runs, and jobs.
     pub fn remote_service(&self) -> Option<Arc<compute_provider::RemoteService>> {
         self.remote.clone()
+    }
+
+    // ---- Resolving an application to its canonical records ---------------
+
+    async fn stored_environment(
+        &self,
+        environment: &str,
+    ) -> Result<Option<compute_state::Stored<compute_state::EnvironmentRecord>>, EnvironmentError>
+    {
+        self.refresh_for_read().await?;
+        Ok(self
+            .inner
+            .lock()
+            .await
+            .desired
+            .environment(environment)
+            .cloned())
+    }
+
+    /// The application's computer, when it is one this node hosts.
+    async fn application_computer(&self, name: &str) -> Result<ComputerView, EnvironmentError> {
+        ApplicationIdentity::new(name, None)?;
+        let not_deployed = || {
+            EnvironmentError::NotFound(format!("application {name} is not deployed on this node"))
+        };
+        let computer = match self.computer(&application_environment(name)).await {
+            Ok(computer) => computer,
+            Err(EnvironmentError::NotFound(_)) => return Err(not_deployed()),
+            Err(error) => return Err(error),
+        };
+        if !computer
+            .desired
+            .projects
+            .iter()
+            .any(|project| project.name == name)
+        {
+            return Err(not_deployed());
+        }
+        Ok(computer)
+    }
+
+    fn application_endpoint(&self, name: &str, computer: &ComputerView) -> Option<String> {
+        computer
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.process == name)
+            .and_then(|endpoint| endpoint.url.clone())
+    }
+
+    async fn application_deployments_of(
+        &self,
+        name: &str,
+        computer: &ComputerView,
+    ) -> Result<Vec<ApplicationDeploymentView>, EnvironmentError> {
+        // Newest first.
+        let rollouts = self
+            .rollouts(Some(&computer.environment), Some(name))
+            .await?;
+        let mut versions: BTreeMap<String, Option<VersionRecord>> = BTreeMap::new();
+        for rollout in &rollouts {
+            if !versions.contains_key(&rollout.version) {
+                let version = self.version(name, &rollout.version).await.ok();
+                versions.insert(rollout.version.clone(), version);
+            }
+        }
+        let stopped = computer
+            .desired
+            .processes
+            .iter()
+            .any(|process| process.name == name && process.desired == ProcessDesired::Stopped);
+        let endpoint = self.application_endpoint(name, computer);
+        let count = rollouts.len() as u64;
+        let number = |index: usize| count - index as u64;
+        let mut views = vec![];
+        for (index, rollout) in rollouts.iter().enumerate() {
+            let state = match rollout.status {
+                RolloutStatus::Applying => ApplicationDeploymentState::Deploying,
+                RolloutStatus::Failed => ApplicationDeploymentState::Failed,
+                RolloutStatus::Superseded => ApplicationDeploymentState::Superseded,
+                RolloutStatus::Active if stopped => ApplicationDeploymentState::Stopped,
+                RolloutStatus::Active => ApplicationDeploymentState::Active,
+            };
+            // The same version deployed again after another replaced it.
+            let earlier = &rollouts[index + 1..];
+            let rollback_of = earlier
+                .first()
+                .filter(|previous| {
+                    previous.version_id != rollout.version_id
+                        || rollout.kind == RolloutKind::Rollback
+                })
+                .and_then(|_| {
+                    earlier
+                        .iter()
+                        .position(|older| {
+                            older.version_id == rollout.version_id
+                                && older.status != RolloutStatus::Failed
+                        })
+                        .map(|position| number(index + 1 + position))
+                });
+            let version = versions.get(&rollout.version).cloned().flatten();
+            let artifact = version
+                .as_ref()
+                .and_then(|version| version.artifact.clone());
+            let (job_id, execution_id, receipt) = restart_evidence(rollout);
+            views.push(ApplicationDeploymentView {
+                application: name.to_owned(),
+                version: number(index),
+                deployment_id: rollout.rollout_id.clone(),
+                state,
+                active: rollout.status == RolloutStatus::Active,
+                rollback_of,
+                endpoint: endpoint.clone(),
+                runtime: artifact
+                    .as_ref()
+                    .and_then(|artifact| artifact.runtime.clone()),
+                runtime_version: artifact
+                    .as_ref()
+                    .and_then(|artifact| artifact.runtime_version.clone()),
+                placement: None,
+                artifact,
+                failure: rollout.failure.clone(),
+                receipt: receipt.clone(),
+                execution_receipts: receipt.into_iter().collect(),
+                created_at: rollout.created_at,
+                completed_at: rollout.completed_at,
+                canonical: Some(ApplicationRecords {
+                    environment: computer.environment.clone(),
+                    environment_id: computer.environment_id.clone(),
+                    computer_id: compute_state::ids::computer(&computer.environment_id),
+                    project: name.to_owned(),
+                    rollout_id: rollout.rollout_id.clone(),
+                    rollout_kind: rollout.kind,
+                    rollout_status: rollout.status,
+                    version_id: rollout.version_id.clone(),
+                    version: rollout.version.clone(),
+                    commit: version.as_ref().and_then(|version| version.commit.clone()),
+                    package_digest: version
+                        .as_ref()
+                        .and_then(|version| version.package_digest.clone()),
+                    target: computer.target.clone(),
+                    session_id: computer.session_id.clone(),
+                    job_id,
+                    execution_id,
+                }),
+            });
+        }
+        Ok(views)
+    }
+
+    // ---- Waiting on canonical operations -----------------------------------
+
+    /// Wait until the application's computer is as `wanted`, failing as
+    /// soon as it cannot get there: a computer that ended, is lost, or whose
+    /// target is not answering says so.
+    async fn await_computer(
+        &self,
+        environment: &str,
+        what: &str,
+        wanted: impl Fn(&ComputerView) -> bool,
+    ) -> Result<ComputerView, EnvironmentError> {
+        let deadline = tokio::time::Instant::now() + STEP_DEADLINE;
+        loop {
+            let view = self.computer(environment).await?;
+            if wanted(&view) {
+                return Ok(view);
+            }
+            let reason = || {
+                view.failure
+                    .as_ref()
+                    .map(|failure| format!(": {} ({})", failure.message, failure.code))
+                    .unwrap_or_default()
+            };
+            match view.status {
+                status if status.is_terminal() => {
+                    return Err(EnvironmentError::Conflict(format!(
+                        "{environment}'s computer is {status}{}",
+                        reason()
+                    )));
+                }
+                ComputerStatus::Lost => {
+                    return Err(EnvironmentError::Conflict(format!(
+                        "{environment}'s computer is lost{}; replace or destroy it",
+                        reason()
+                    )));
+                }
+                ComputerStatus::Unreachable => {
+                    return Err(EnvironmentError::RuntimeUnavailable(format!(
+                        "{environment}'s computer is unreachable{}",
+                        reason()
+                    )));
+                }
+                _ => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(EnvironmentError::RuntimeUnavailable(format!(
+                    "{environment}'s computer did not {what} in time ({}){}",
+                    view.status,
+                    reason()
+                )));
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    async fn await_published(
+        &self,
+        project: &str,
+        label: &str,
+    ) -> Result<VersionRecord, EnvironmentError> {
+        let deadline = tokio::time::Instant::now() + STEP_DEADLINE;
+        loop {
+            let version = self.version(project, label).await?;
+            match version.status {
+                VersionStatus::Published => return Ok(version),
+                VersionStatus::Failed => {
+                    return Err(EnvironmentError::Invalid(format!(
+                        "{project} {label} was not published: {}",
+                        version.failure.unwrap_or_default()
+                    )));
+                }
+                VersionStatus::Publishing if tokio::time::Instant::now() >= deadline => {
+                    return Err(EnvironmentError::RuntimeUnavailable(format!(
+                        "{project} {label} did not publish in time"
+                    )));
+                }
+                VersionStatus::Publishing => tokio::time::sleep(POLL).await,
+            }
+        }
     }
 
     fn node_url(&self) -> String {
@@ -396,33 +672,33 @@ impl Daemon {
             .clone()
             .unwrap_or_else(|| self.instance_id.clone())
     }
-
-    /// Where an application endpoint on `port` is reached.
-    fn application_url(&self, port: u16) -> String {
-        let host = self.config.application_host.clone().unwrap_or_else(|| {
-            let address = self.config.network.endpoint_address;
-            if !address.is_unspecified() {
-                return host_literal(address);
-            }
-            self.config
-                .public_url
-                .as_deref()
-                .and_then(url_host)
-                .unwrap_or_else(|| "127.0.0.1".into())
-        });
-        format!("http://{host}:{port}")
-    }
 }
 
-/// Run a daemon operation as its own task. Registration and releases are
-/// deep futures; polled by the scheduler rather than nested inside a
-/// request's future, they stay within a worker thread's stack.
-async fn on_own_task<T: Send + 'static>(
-    operation: impl std::future::Future<Output = Result<T, EnvironmentError>> + Send + 'static,
-) -> Result<T, EnvironmentError> {
-    tokio::spawn(operation)
-        .await
-        .map_err(|error| EnvironmentError::Invalid(format!("operation did not finish: {error}")))?
+/// The job, execution, and receipt a rollout recorded for the process start
+/// that made its version run.
+fn restart_evidence(rollout: &RolloutRecord) -> (Option<String>, Option<String>, Option<String>) {
+    rollout
+        .steps
+        .iter()
+        .find(|step| step.name == "Restart applications")
+        .map(|step| {
+            (
+                step.job_id.clone(),
+                step.execution_id.clone(),
+                step.receipt.clone(),
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn upsert<T>(items: &mut Vec<T>, item: T, name: impl Fn(&T) -> &String) {
+    match items
+        .iter_mut()
+        .find(|existing| name(existing) == name(&item))
+    {
+        Some(existing) => *existing = item,
+        None => items.push(item),
+    }
 }
 
 fn find_version<'a>(
@@ -438,41 +714,140 @@ fn parse_version(target: &str) -> Option<u64> {
     target.strip_prefix('v').unwrap_or(target).parse().ok()
 }
 
-fn host_literal(address: IpAddr) -> String {
-    match address {
-        IpAddr::V4(address) => address.to_string(),
-        IpAddr::V6(address) => format!("[{address}]"),
+/// What the application's computer must be: what its bundle asks of the
+/// machine. Placement matches it against the pool's targets.
+fn requirements(bundle: &WorkloadBundle) -> ComputerRequirements {
+    let workload = &bundle.workload;
+    ComputerRequirements {
+        cpu_count: workload.resources.cpu_count,
+        memory_bytes: workload
+            .resources
+            .memory_required_bytes
+            .or(workload.resources.memory_bytes),
+        architecture: workload.architecture.clone(),
+        network: workload.network.clone(),
+        ..Default::default()
     }
 }
 
-fn url_host(url: &str) -> Option<String> {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = rest.split('/').next()?;
-    let host = if authority.starts_with('[') {
-        authority
-            .split_once(']')
-            .map(|(host, _)| format!("{host}]"))?
-    } else {
-        authority
-            .rsplit_once(':')
-            .map_or(authority, |(host, _)| host)
-            .to_owned()
+/// The command a computer runs the application with: its runtime, from the
+/// target host, as every computer process runs. Computers have no pinned
+/// runtime catalog, so runtimes that need one are refused, not emulated.
+fn process_command(bundle: &WorkloadBundle) -> Result<Vec<String>, EnvironmentError> {
+    let workload = &bundle.workload;
+    if bundle.dependency_capsule.is_some() {
+        return Err(EnvironmentError::Invalid(
+            "this application carries a dependency capsule; a computer installs dependencies as packages, so deploy it without one".into(),
+        ));
+    }
+    let entrypoint = workload.entrypoint.display().to_string();
+    let mut command: Vec<String> = match workload.runtime {
+        RuntimeKind::Python => vec![
+            "sh".into(),
+            "-c".into(),
+            r#"exec "$(command -v python3 || command -v python)" "$@""#.into(),
+            "python".into(),
+            entrypoint,
+        ],
+        RuntimeKind::Node => vec!["node".into(), entrypoint],
+        RuntimeKind::Bun => vec!["bun".into(), entrypoint],
+        RuntimeKind::Deno => vec!["deno".into(), "run".into(), "-A".into(), entrypoint],
+        RuntimeKind::Ruby => vec!["ruby".into(), entrypoint],
+        RuntimeKind::Php => vec!["php".into(), entrypoint],
+        RuntimeKind::Shell => vec!["sh".into(), entrypoint],
+        RuntimeKind::Native => vec![format!("./{entrypoint}")],
+        other => {
+            return Err(EnvironmentError::Invalid(format!(
+                "a {} application cannot run on a computer yet: computers run the target's own runtimes, and {} needs Compute's pinned runtime",
+                other.as_str(),
+                other.as_str()
+            )));
+        }
     };
-    (!host.is_empty()).then_some(host)
+    command.extend(workload.args.iter().cloned());
+    Ok(command)
 }
 
-/// What a deploy request releases: the bundle, its port, and, from an
-/// artifact, the artifact's evidence and environment contract.
+fn process_env(bundle: &WorkloadBundle) -> BTreeMap<String, String> {
+    let mut env = bundle.workload.env.clone();
+    if bundle.workload.runtime == RuntimeKind::Python {
+        env.entry("PYTHONUNBUFFERED".into())
+            .or_insert_with(|| "1".into());
+    }
+    env
+}
+
+/// The application's source as a deterministic tar archive: its entrypoint
+/// and every input its bundle carries, at their paths.
+fn source_archive(bundle: &WorkloadBundle) -> Result<Vec<u8>, EnvironmentError> {
+    let mut files = BTreeMap::new();
+    files.insert(
+        bundle.entrypoint.path.clone(),
+        bundle.entrypoint.data.clone(),
+    );
+    let bundled = bundle
+        .inputs
+        .iter()
+        .map(|input| (input.path.clone(), input.data.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for input in &bundle.workload.inputs {
+        let data = match &input.source {
+            InputSource::Inline { data } => data.clone(),
+            InputSource::File { .. } => bundled.get(&input.path).cloned().ok_or_else(|| {
+                EnvironmentError::Invalid(format!(
+                    "the bundle does not carry its input {}",
+                    input.path.display()
+                ))
+            })?,
+        };
+        files.insert(input.path.clone(), data);
+    }
+    let executable =
+        (bundle.workload.runtime == RuntimeKind::Native).then(|| bundle.entrypoint.path.clone());
+    let mut archive = tar::Builder::new(Vec::new());
+    archive.mode(tar::HeaderMode::Deterministic);
+    for (path, data) in files {
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(EnvironmentError::Invalid(format!(
+                "the bundle names a path outside its source: {}",
+                path.display()
+            )));
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(if executable.as_deref() == Some(Path::new(&path)) {
+            0o755
+        } else {
+            0o644
+        });
+        header.set_mtime(0);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, &path, data.as_slice())
+            .map_err(|error| EnvironmentError::Invalid(error.to_string()))?;
+    }
+    let mut bytes = archive
+        .into_inner()
+        .map_err(|error| EnvironmentError::Invalid(error.to_string()))?;
+    bytes.flush().ok();
+    Ok(bytes)
+}
+
+/// What a deploy request releases: the bundle, and, from an artifact, the
+/// artifact's evidence and environment contract.
 struct ResolvedApplication {
     bundle: Vec<u8>,
-    port: u16,
     evidence: Option<compute_state::ApplicationArtifactEvidence>,
     required_env: std::collections::BTreeSet<String>,
 }
 
 /// Resolve a deploy request to the application it releases. An artifact
-/// by reference is fetched here, on the provider, and must have the digest
-/// the caller pinned; a manifest must name the application being deployed.
+/// by reference is fetched here and must have the digest the caller
+/// pinned; a manifest must name the application being deployed.
 async fn resolve_application(
     name: &str,
     request: &ApplicationDeployRequest,
@@ -489,7 +864,6 @@ async fn resolve_application(
         ApplicationIdentity::new(name, Some(port))?;
         return Ok(ResolvedApplication {
             bundle: request.bundle.clone(),
-            port,
             evidence: None,
             required_env: Default::default(),
         });
@@ -519,15 +893,13 @@ async fn resolve_application(
     }
     Ok(ResolvedApplication {
         bundle: artifact.bundle_bytes().to_vec(),
-        port: manifest
-            .application
-            .port
-            .expect("a verified artifact has a port"),
         evidence: Some(compute_state::ApplicationArtifactEvidence {
             artifact_id: artifact.artifact_id()?,
             url,
             version: manifest.version.clone(),
             capabilities: manifest.capabilities.iter().cloned().collect(),
+            runtime: Some(manifest.runtime.name.as_str().to_owned()),
+            runtime_version: manifest.runtime.version.clone(),
         }),
         // Defaults built into the artifact satisfy a requirement too.
         required_env: manifest
@@ -545,18 +917,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn versions_and_hosts_parse() {
+    fn versions_parse() {
         assert_eq!(parse_version("v3"), Some(3));
         assert_eq!(parse_version("3"), Some(3));
-        assert_eq!(parse_version("dep_abc"), None);
-        assert_eq!(
-            url_host("http://10.0.0.20:8787").as_deref(),
-            Some("10.0.0.20")
-        );
-        assert_eq!(url_host("https://[::1]:8787/").as_deref(), Some("[::1]"));
-        assert_eq!(
-            url_host("http://node.example").as_deref(),
-            Some("node.example")
-        );
+        assert_eq!(parse_version("rol_abc"), None);
     }
 }

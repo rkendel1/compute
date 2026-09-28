@@ -16,7 +16,8 @@ because every later capability inherits them.
 | Gap | Area | Status | Current |
 | --- | --- | --- | --- |
 | G-ARCH-1 | Core architecture | closed | Closed: targets authenticate every request with a credential they issued; the daemon presents one; sessions belong to the control plane's identity (experiments.json#foundation, SEC-1, SEC-2). |
-| G-ARCH-2 | Core architecture | open | Three deployment models: applications, bundle projects (node environments), computer versions/rollouts. |
+| G-ARCH-2 | Core architecture | closed | Closed for applications: `compute deploy`/`compute application` resolve to a computer environment, a version, and a rollout; source is imported by target jobs; the endpoint, logs, and receipt are the computer's (crates/compute-environment/tests/applications.rs). Node environments remain: G-ARCH-5. |
+| G-ARCH-5 | Core architecture | open | Node environments (bundle projects, releases, ingress) still run on the daemon host through the supervisor. |
 | G-ARCH-3 | Core architecture | closed | Closed: FeltDB is the production authority; the file backend remains for local development and says so everywhere (launcher output, /info, `compute status`, `compute node info`: durability local-development). |
 | G-ARCH-4 | Core architecture | closed | Closed: every running computer is confirmed with its target; unreachable and lost are durable, evented, fenced observed states that keep desired state (experiments.json#foundation). |
 | G-RT-1 | Runtime support | open | Computers are workspaces (native processes) or unverified containers. |
@@ -24,7 +25,7 @@ because every later capability inherits them.
 | G-PROV-1 | Providers | open | No Fly/Railway/Render/cloud/bare-metal provisioning; targets must already run `compute serve`. |
 | G-DISC-1 | Placement | open | Targets are configured in a pool file; network, GPU model, nested virtualization are not discovered. |
 | G-PLACE-1 | Placement | open | persistent_storage, public_endpoint, terminal are requestable (UI checkboxes) but offered by no provider. |
-| G-EXEC-1 | Execution | open | Bundle workloads and applications execute on the daemon host. |
+| G-EXEC-1 | Execution | open | Bundle workloads of node environments execute on the daemon host (applications no longer do). |
 | G-EXEC-2 | Execution | open | No cancellation or timeout controls in the UI; jobs have timeouts in the API. |
 | G-PROJ-1 | Projects | open | Local folders must be Git repositories; no upload. |
 | G-APP-1 | Applications | open | Endpoints are target-host:port; no domains, TLS, or ingress for computer applications. |
@@ -57,13 +58,21 @@ because every later capability inherits them.
 - Evidence: SEC-1, SEC-2
 - Next: Closed: targets authenticate every request with a credential they issued; the daemon presents one; sessions belong to the control plane's identity (experiments.json#foundation, SEC-1, SEC-2).
 
-**G-ARCH-2**
+**G-ARCH-2** (closed)
 
-- Current: Three deployment models: applications, bundle projects (node environments), computer versions/rollouts.
+- Was: Three deployment models: applications, bundle projects (node environments), computer versions/rollouts.
 - Desired: One: versions reconciled into an environment's computer.
 - Impact: Three vocabularies, three code paths, and work that still runs on the daemon host.
 - Evidence: models, execution_paths
-- Next: Decide the fate of node environments and applications: port their features (zero-downtime switch, ingress, domains) to computers, then retire or wrap them.
+- Next: Closed for applications: `compute deploy`/`compute application` resolve to a computer environment, a version, and a rollout; source is imported by target jobs; the endpoint, logs, and receipt are the computer's (crates/compute-environment/tests/applications.rs). Node environments remain: G-ARCH-5.
+
+**G-ARCH-5**
+
+- Current: Node environments (bundle projects, releases, ingress) still run on the daemon host through the supervisor.
+- Desired: Their features (zero-downtime switch, ingress, domains) ported to computers, then retired.
+- Impact: A second deployment model remains for bundle projects (not for applications).
+- Evidence: execution_paths
+- Next: Port zero-downtime switching and ingress to computers (G-DEP-1, G-APP-1), then retire node environments.
 
 **G-ARCH-3** (closed)
 
@@ -131,11 +140,11 @@ because every later capability inherits them.
 
 **G-EXEC-1**
 
-- Current: Bundle workloads and applications execute on the daemon host.
+- Current: Bundle workloads of node environments execute on the daemon host (applications no longer do).
 - Desired: The daemon coordinates; computers execute.
 - Impact: The daemon is both coordinator and executor.
 - Evidence: execution_paths
-- Next: Covered by G-ARCH-2.
+- Next: Covered by G-ARCH-5.
 
 **G-EXEC-2**
 
@@ -315,7 +324,7 @@ The gaps depend on each other. The path that respects the dependencies:
    - Done: decide the durable-state default (G-ARCH-3)
    - Done: browser tests and the UI certification in CI; fix the home-route regression (G-UI-2)
 2. **EXECUTION**
-   - One deployment model: retire or port node environments and applications (G-ARCH-2, G-EXEC-1)
+   - One deployment model: retire or port node environments (G-ARCH-5, G-EXEC-1); applications are converged (G-ARCH-2)
    - Cancel/retry for computer jobs and operations (G-EXEC-2)
 3. **RUNTIME COVERAGE**
    - Container computers verified in CI, with ports and volumes (G-RT-1)

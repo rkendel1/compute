@@ -170,9 +170,9 @@ capabilities = [
     cap('bundle-projects', 'legacy', 'Bundle projects, revisions, zero-downtime releases on the daemon node', 'IMPLEMENTED + VERIFIED', 'yes', 'reconcile',
         {'source': ['crates/compute-environment/src/daemon/release.rs', 'crates/compute-environment/src/daemon/deploy.rs'], 'tests': ['crates/compute-environment/tests/releases.rs']},
         'Executes on the daemon host (supervisor). Refused for environments with a computer.'),
-    cap('applications', 'legacy', '`compute init/deploy` applications on a provider node', 'IMPLEMENTED + VERIFIED', 'yes', 'reconcile',
-        {'source': ['crates/compute-environment/src/daemon/applications.rs'], 'tests': ['crates/compute-cli/tests/product.rs'], 'journey': 'experiments.json#application_journey'},
-        '`compute deploy <dir>` auto-starts a daemon with state in ./.compute/daemon; the app runs on that daemon node.'),
+    cap('applications', 'release', '`compute init/deploy` applications: a compatibility view over a computer, a version, and a rollout', 'IMPLEMENTED + VERIFIED', 'yes', 'reconcile',
+        {'source': ['crates/compute-environment/src/daemon/applications.rs'], 'tests': ['crates/compute-environment/tests/applications.rs', 'crates/compute-cli/tests/product.rs'], 'journey': 'experiments.json#application_journey'},
+        'Each application is its own computer environment on a target (never the daemon host): source imported by target jobs, published as a version, deployed as a rollout; runtimes that need the pinned catalog (wasm, jvm, dotnet) are refused.'),
     cap('domains-tls', 'operations', 'Domains, DNS, ACME certificates, ingress', 'IMPLEMENTED + VERIFIED', 'yes (bundle projects)', True,
         {'tests': ['crates/compute-environment/tests/network.rs', 'crates/compute-network/tests/ingress.rs']}, 'Routes to bundle-project services only; not to computer endpoints.'),
     # Operations
@@ -184,7 +184,7 @@ capabilities = [
     cap('events', 'observability', 'Durable lifecycle events and a live stream', 'IMPLEMENTED + VERIFIED', 'yes', True, {'tests': ['crates/compute-environment/tests/control_plane.rs']}),
     cap('receipts', 'observability', 'Verifiable execution receipts', 'IMPLEMENTED + VERIFIED', 'yes', True, {'tests': ['crates/compute-core/src/receipt.rs', 'crates/compute-cli/tests/product.rs']}),
     # State
-    cap('state-feltdb', 'state', 'FeltDB as the durable authority of a production control plane (model generation 7)', 'IMPLEMENTED + VERIFIED', 'configuration', True,
+    cap('state-feltdb', 'state', 'FeltDB as the durable authority of a production control plane (model generation 8)', 'IMPLEMENTED + VERIFIED', 'configuration', True,
         {'tests': ['crates/compute-state-feltdb/tests/consumer.rs', 'crates/compute-environment/tests/feltdb_consumer.rs']},
         'The production decision (docs/feltdb.md): `[state] backend = "feltdb"` (or `--state feltdb`); `compute` and `compute start` pass it through. /info and `compute status` report `durability: production`.'),
     cap('state-default-file', 'state', 'Without configuration, control state is a local file, stated as local development', 'IMPLEMENTED + VERIFIED', 'yes', True,
@@ -280,7 +280,7 @@ tests_out = {'files': tests, 'ci': {
 
 models = [
     {'term': 'Environment', 'is': 'A durable record (Environment in control state) with a name, desired state (running/stopped), configuration, policy, and optionally an owner, a ComputerSpec, and EnvironmentContents.', 'source': 'crates/compute-state/src/model.rs#EnvironmentRecord',
-     'collision': 'Two kinds share the name: an environment with a computer, and a "node environment" whose bundle projects run on the daemon host. `applications` is a reserved node environment for `compute deploy <dir>`.'},
+     'collision': 'Two kinds share the name: an environment with a computer, and a "node environment" whose bundle projects run on the daemon host. An application is an environment with a computer, `application-<name>`.'},
     {'term': 'Computer', 'is': 'The machine behind an environment with a ComputerSpec: a Computer record (status, generation, target, session, provider_resource, observed contents) driven by the daemon.', 'source': 'crates/compute-state/src/model.rs#ComputerRecord',
      'collision': 'The UI says "Computer" and "Machine"; the CLI says `environment computer`; the target calls it a session.'},
     {'term': 'Session (target)', 'is': 'A durable record on a `compute serve` target: a workspace or container, commands run as durable jobs. A computer IS a persistent, referenced target session.', 'source': 'crates/compute-core/src/sessions.rs#ComputeSession',
@@ -294,11 +294,11 @@ models = [
      'collision': 'Not the computer substrate: computers run whatever the target host has on PATH.'},
     {'term': 'Project', 'is': 'Two different things: (a) a computer project — a ProjectSpec in contents: a repository plus build/test/commands/checks; (b) a bundle project — registered revisions of workload bundles, released to node environments.', 'source': 'crates/compute-core/src/computers.rs#ProjectSpec; crates/compute-state/src/model.rs#ProjectRecord',
      'collision': 'Same word, same API prefix (/environments/{e}/projects), dispatched by whether the environment has a computer.'},
-    {'term': 'Application', 'is': 'Three things: (a) a process of kind application in a computer; (b) an `compute init/deploy` application with versions on a provider node; (c) a project in the reserved `applications` environment.', 'source': 'crates/compute-core/src/computers.rs#ProcessKind; crates/compute-environment/src/daemon/applications.rs', 'collision': 'Three meanings.'},
+    {'term': 'Application', 'is': 'A compatibility name for canonical records: `compute init/deploy` resolves an application to its environment `application-<name>` (a computer), a project and its versions, and rollouts; its process is a process of kind application in that computer.', 'source': 'crates/compute-environment/src/daemon/applications.rs; crates/compute-core/src/computers.rs#ProcessKind', 'collision': 'None of its own: an application version is a rollout, numbered in its environment.'},
     {'term': 'Service', 'is': 'Three things: (a) a process of kind service in a computer; (b) a bundle workload of kind service; (c) a registered shared service (`compute service register`).', 'source': 'crates/compute-core/src/computers.rs; crates/compute-environment/src/model.rs#WorkloadKind', 'collision': 'Three meanings.'},
     {'term': 'Execution job', 'is': 'A durable job in a provider\'s job store (filesystem on the target), with a result and a receipt. Computer operations reference jobs by id; FeltDB stores the references and events, not the jobs.', 'source': 'crates/compute-provider/src/jobs.rs', 'collision': 'Daemon node executions are Execution records in control state; target jobs are not.'},
     {'term': 'Version / Rollout', 'is': 'Version: a published commit + package digest + assembly + step evidence. Rollout: a version made real in an environment (deploy/promote/rollback) with steps.', 'source': 'crates/compute-state/src/model.rs#VersionRecord,RolloutRecord',
-     'collision': 'Parallel to bundle Revisions/Deployments and to application versions.'},
+     'collision': 'Parallel to bundle Revisions/Deployments of node environments; application versions ARE rollouts.'},
 ]
 
 execution_paths = [
@@ -308,7 +308,7 @@ execution_paths = [
     {'path': 'Computer operations (sync, install, build, start/stop, probe, inspect, publish steps)', 'where': 'the environment\'s computer', 'authority': 'daemon controller', 'durable': 'target jobs; evidence in FeltDB', 'canonical_job_path': True},
     {'path': '`environment exec/run/build/test/propose`', 'where': 'the environment\'s computer', 'authority': 'daemon scope + owner', 'durable': 'target jobs; events in FeltDB', 'canonical_job_path': True},
     {'path': 'Bundle project workloads (services, tasks) and releases', 'where': 'THE DAEMON HOST (supervisor)', 'authority': 'daemon scopes, no owner', 'durable': 'Execution records in control state', 'canonical_job_path': False},
-    {'path': 'Applications (`compute deploy <dir>`)', 'where': 'a provider node offering deployments — the daemon host by default', 'authority': 'daemon scopes', 'durable': 'deployments in control state', 'canonical_job_path': False},
+    {'path': 'Applications (`compute deploy <dir>`, `compute application …`)', 'where': 'the application\'s computer on a target of the selected daemon\'s pool', 'authority': 'daemon scope + owner (the computer\'s)', 'durable': 'environment, computer, version, rollout in FeltDB; target jobs and receipts', 'canonical_job_path': True},
     {'path': 'Daemon /compute/* (node as provider)', 'where': 'the daemon host', 'authority': 'daemon execute scope', 'durable': 'daemon job store', 'canonical_job_path': True},
 ]
 
@@ -327,7 +327,8 @@ authorization = [
     {'operation': 'Change a computer environment (contents, config, lifetime, replace, destroy, sessions)', 'check': 'operate/deploy scope + owner', 'every_operation': True},
     {'operation': 'Exec / run / connect / propose', 'check': 'execute scope + owner', 'every_operation': True},
     {'operation': 'Publish / deploy / promote / rollback versions', 'check': 'deploy scope + owner of the environment(s)', 'every_operation': True},
-    {'operation': 'Node environments, bundle projects, applications, domains', 'check': 'scopes only; no ownership', 'every_operation': True},
+    {'operation': 'Applications (deploy, rollback, stop, logs)', 'check': 'the computer\'s: scope + owner of `application-<name>`', 'every_operation': True},
+    {'operation': 'Node environments, bundle projects, domains', 'check': 'scopes only; no ownership', 'every_operation': True},
     {'operation': 'Loopback daemon without TLS', 'check': 'no credential required (development mode); `--production` requires TLS and credentials', 'every_operation': 'bypassable locally'},
     {'operation': 'Target (`compute serve`) jobs and sessions', 'check': 'a target credential on every request (reads included); sessions and jobs owned by the control plane it names; `--insecure-unauthenticated` only by name', 'every_operation': True},
     {'operation': 'Daemon /compute/* (node as provider)', 'check': 'only requests the daemon API authenticated and scoped (DaemonAuthorized)', 'every_operation': True},
@@ -393,6 +394,7 @@ CLOSED = {
     'G-ARCH-1': 'Closed: targets authenticate every request with a credential they issued; the daemon presents one; sessions belong to the control plane\'s identity (experiments.json#foundation, SEC-1, SEC-2).',
     'G-ARCH-3': 'Closed: FeltDB is the production authority; the file backend remains for local development and says so everywhere (launcher output, /info, `compute status`, `compute node info`: durability local-development).',
     'G-ARCH-4': 'Closed: every running computer is confirmed with its target; unreachable and lost are durable, evented, fenced observed states that keep desired state (experiments.json#foundation).',
+    'G-ARCH-2': 'Closed for applications: `compute deploy`/`compute application` resolve to a computer environment, a version, and a rollout; source is imported by target jobs; the endpoint, logs, and receipt are the computer\'s (crates/compute-environment/tests/applications.rs). Node environments remain: G-ARCH-5.',
     'G-UI-2': 'Closed: the certification is fixed for the action home and runs in CI with Chromium, with a computer-reality journey (.github/workflows/test.yml).',
 }
 
@@ -404,6 +406,7 @@ def gap(id, area, current, desired, impact, evidence, next):
 gaps = [
     gap('G-ARCH-1', 'Core architecture', 'Targets accept any caller (AllowAllAuthorizer); the daemon authenticates to targets with nothing.', 'Targets trust only their control plane (a credential or mTLS), and sessions belong to the daemon\'s identity.', 'Anyone who reaches a target controls every computer on it; the daemon is not actually the authority.', 'SEC-1, SEC-2', 'Give `compute serve` a required credential and the pool a token for it; the launcher generates both.'),
     gap('G-ARCH-2', 'Core architecture', 'Three deployment models: applications, bundle projects (node environments), computer versions/rollouts.', 'One: versions reconciled into an environment\'s computer.', 'Three vocabularies, three code paths, and work that still runs on the daemon host.', 'models, execution_paths', 'Decide the fate of node environments and applications: port their features (zero-downtime switch, ingress, domains) to computers, then retire or wrap them.'),
+    gap('G-ARCH-5', 'Core architecture', 'Node environments (bundle projects, releases, ingress) still run on the daemon host through the supervisor.', 'Their features (zero-downtime switch, ingress, domains) ported to computers, then retired.', 'A second deployment model remains for bundle projects (not for applications).', 'execution_paths', 'Port zero-downtime switching and ingress to computers (G-DEP-1, G-APP-1), then retire node environments.'),
     gap('G-ARCH-3', 'Core architecture', 'Default control state is a local file; FeltDB is opt-in.', 'FeltDB as the one authority, or the file backend stated as a development convenience everywhere.', 'Contradicts the durability contract; the launcher never uses FeltDB.', 'state-default-file', 'Decide and document; make `compute` use FeltDB when configured and say which it uses in the UI.'),
     gap('G-ARCH-4', 'Core architecture', 'Machine loss and target unreachability are not detected for computers without processes; the view keeps "running".', 'Every computer is periodically confirmed with its target; unreachable/lost is visible and actionable.', 'The UI shows healthy computers that do not exist.', 'experiments.json', 'Add a session liveness check to the controller\'s running step independent of processes; surface "unreachable".'),
     gap('G-RT-1', 'Runtime support', 'Computers are workspaces (native processes) or unverified containers.', 'Containers verified; microVMs (Firecracker/KVM); WASM sandboxes; GPU.', 'No isolation for computers; features advertised but not provided.', 'runtime matrix', 'Verify the container provider against a real engine in CI; then a Firecracker session provider.'),
@@ -411,7 +414,7 @@ gaps = [
     gap('G-PROV-1', 'Providers', 'No Fly/Railway/Render/cloud/bare-metal provisioning; targets must already run `compute serve`.', 'Provider adapters that materialize targets or computers.', '"Put software on Railway" is impossible.', 'provider matrix', 'Define a provisioning interface (materialize a target) and one adapter.'),
     gap('G-DISC-1', 'Placement', 'Targets are configured in a pool file; network, GPU model, nested virtualization are not discovered.', 'Discovery of machines and their capabilities.', 'Placement only knows what a file says.', 'discovery', 'Liveness-checked feature discovery; optional registration of targets with the control plane.'),
     gap('G-PLACE-1', 'Placement', 'persistent_storage, public_endpoint, terminal are requestable (UI checkboxes) but offered by no provider.', 'Either implemented or not offered.', 'Dead-end options.', 'placement_refusals', 'Hide unavailable options using GET /targets; implement persistent volumes and public endpoints.'),
-    gap('G-EXEC-1', 'Execution', 'Bundle workloads and applications execute on the daemon host.', 'The daemon coordinates; computers execute.', 'The daemon is both coordinator and executor.', 'execution_paths', 'Covered by G-ARCH-2.'),
+    gap('G-EXEC-1', 'Execution', 'Bundle workloads of node environments execute on the daemon host (applications no longer do).', 'The daemon coordinates; computers execute.', 'The daemon is both coordinator and executor.', 'execution_paths', 'Covered by G-ARCH-5.'),
     gap('G-EXEC-2', 'Execution', 'No cancellation or timeout controls in the UI; jobs have timeouts in the API.', 'Cancel/retry for every job from every surface.', 'Stuck builds need the CLI or waiting.', 'api: POST /compute/jobs/{job}/cancel has no computer-level route', 'Add cancel for computer jobs and operations.'),
     gap('G-PROJ-1', 'Projects', 'Local folders must be Git repositories; no upload.', 'Any folder.', 'Non-Git projects cannot run.', 'run-a-project', 'Upload a folder as an artifact into the computer.'),
     gap('G-APP-1', 'Applications', 'Endpoints are target-host:port; no domains, TLS, or ingress for computer applications.', 'Public endpoints with domains and certificates.', 'Production traffic cannot reach computer applications properly.', 'endpoints, domains-tls', 'Route domains to computer endpoints through the existing network layer.'),
@@ -456,7 +459,7 @@ base_vs_complete = [
     ('Provider abstraction', 'Pool of local/remote targets; no cloud adapters', 'Fly/Railway/Render/cloud/bare metal', 'Adapters'),
     ('UI', 'Work/Manage, home, run, software, operations; verified in a browser', 'Every capability', 'Targets, access, diagnosis pages'),
     ('CLI', '182 commands; 52 with help defects', 'Consistent, documented', 'Help, naming'),
-    ('API', '128 routes, scoped', 'Versioned, documented', 'Description'),
+    ('API', '129 routes, scoped', 'Versioned, documented', 'Description'),
     ('Observability', 'Events, receipts, job evidence, /metrics (API only)', 'Live logs, metrics, traces', 'Streaming, dashboards'),
     ('Durable evidence', 'Events, versions, rollouts, receipts; jobs on targets', 'Same, in one authority', 'Jobs outside FeltDB; file default'),
     ('Security boundary', 'Daemon: real; targets: none', 'Every hop authenticated; computers isolated', 'Target auth, isolation'),
@@ -489,7 +492,7 @@ readiness = [{'area': a, 'status': s, 'evidence': e, 'blocking_gap': g} for a, s
 
 backlog = [
     ('FOUNDATION (done)', ['Done: authenticate targets; the daemon holds the credential (G-ARCH-1)', 'Done: detect machine loss and unreachable targets (G-ARCH-4)', 'Done: decide the durable-state default (G-ARCH-3)', 'Done: browser tests and the UI certification in CI; fix the home-route regression (G-UI-2)']),
-    ('EXECUTION', ['One deployment model: retire or port node environments and applications (G-ARCH-2, G-EXEC-1)', 'Cancel/retry for computer jobs and operations (G-EXEC-2)']),
+    ('EXECUTION', ['One deployment model: retire or port node environments (G-ARCH-5, G-EXEC-1); applications are converged (G-ARCH-2)', 'Cancel/retry for computer jobs and operations (G-EXEC-2)']),
     ('RUNTIME COVERAGE', ['Container computers verified in CI, with ports and volumes (G-RT-1)', 'Live, substrate-accurate target features (G-RT-2, G-DISC-1)', 'A microVM session provider (Firecracker)']),
     ('PROJECT/APP ASSEMBLY', ['Non-Git sources (G-PROJ-1)', 'Managed services on container computers (G-SVC-1)', 'Persistent storage and public endpoints, or hide them (G-PLACE-1)']),
     ('DEVELOPMENT WORKFLOW', ['Interactive terminal (PTY) and file editing', 'Streaming logs (G-OBS-1)']),

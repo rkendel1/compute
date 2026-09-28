@@ -13,7 +13,7 @@ journey are in [product-surface/](product-surface/README.md).
 | --- | --- | --- | --- |
 | UI (browser, Work/Manage) | the daemon API | 19 routes, 72 API routes used | `crates/compute-cli/tests/product_journey.rs` (Playwright; skipped without Chromium, so **not in CI**) |
 | CLI (`compute`) | the daemon API, targets directly, or nothing (local) | 182 commands | Rust integration tests; 87 commands never invoked |
-| API (daemon) | control state, targets, supervisor | 128 routes, every one scoped | `compute-environment` integration tests |
+| API (daemon) | control state, targets, supervisor | 129 routes, every one scoped | `compute-environment` integration tests |
 | AppPort (TypeScript) | the daemon API | 52 API routes | `npm test` against a stub daemon |
 
 ## Parity
@@ -391,17 +391,17 @@ Usability findings:
 <!-- audit:api_summary -->
 | API | Count |
 | --- | --- |
-| routes | 128 |
+| routes | 129 |
 | scope Admin | 8 |
 | scope Deploy | 13 |
 | scope Execute | 12 |
 | scope Operate | 35 |
-| scope Read | 60 |
+| scope Read | 61 |
 | used by the UI | 72 |
 | used by the CLI | 87 |
 | used by AppPort | 52 |
-| no client at all | 25 |
-| path exercised over HTTP by a test | 36 |
+| no client at all | 26 |
+| path exercised over HTTP by a test | 37 |
 <!-- /audit -->
 
 Routes no client calls:
@@ -417,6 +417,7 @@ Routes no client calls:
 - `POST /environments/{environment}/processes/{process}/stop` (Operate)
 - `GET /projects/{project}/status` (Read)
 - `GET /applications` (Read)
+- `GET /applications/{application}/deployments/{deployment}/receipt` (Read)
 - `GET /compute/capabilities` (Read)
 - `GET /compute/health` (Read)
 - `GET /compute/capacity` (Read)
@@ -437,7 +438,7 @@ Routes no client calls:
 The API is not versioned and has no published description (G-API-1). Every
 route declares a scope; unknown routes need `admin`.
 
-<details><summary>128 routes (from <code>compute_environment::api::ROUTES</code>)</summary>
+<details><summary>129 routes (from <code>compute_environment::api::ROUTES</code>)</summary>
 
 <!-- audit:api -->
 | Method | Path | Scope | UI | CLI | AppPort | Exercised over HTTP by a test |
@@ -550,6 +551,7 @@ route declares a scope; unknown routes need `admin`.
 | GET | `/applications/{application}/deployments` | Read | no | yes | no | no |
 | POST | `/applications/{application}/deployments` | Deploy | no | yes | no | no |
 | GET | `/applications/{application}/deployments/{deployment}` | Read | no | yes | no | no |
+| GET | `/applications/{application}/deployments/{deployment}/receipt` | Read | no | no | no | yes |
 | POST | `/applications/{application}/rollback` | Deploy | yes | yes | no | no |
 | POST | `/applications/{application}/stop` | Operate | yes | yes | no | no |
 | GET | `/applications/{application}/logs` | Read | yes | yes | no | no |

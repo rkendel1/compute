@@ -190,6 +190,10 @@ pub const ROUTES: &[(&str, &str)] = &[
         "GET",
         "/applications/{application}/deployments/{deployment}",
     ),
+    (
+        "GET",
+        "/applications/{application}/deployments/{deployment}/receipt",
+    ),
     ("POST", "/applications/{application}/rollback"),
     ("POST", "/applications/{application}/stop"),
     ("GET", "/applications/{application}/logs"),
@@ -1353,27 +1357,33 @@ async fn route(
         )?),
         ("GET", ["events", "stream"]) => Ok(Response::Stream(event_filter(query))),
 
-        // Applications: the product view over projects in `applications`.
+        // Applications: a compatibility view over environments, computers,
+        // versions, and rollouts. Mutations are the owner's, as for any
+        // computer.
         ("GET", ["applications"]) => ok(to_value(Box::pin(daemon.applications()).await?)?),
         ("GET", ["applications", name]) => ok(to_value(Box::pin(daemon.application(name)).await?)?),
         ("GET", ["applications", name, "deployments"]) => ok(to_value(
-            Box::pin(daemon.application_deployments(name, None)).await?,
+            Box::pin(daemon.application_deployments(name)).await?,
         )?),
         ("POST", ["applications", name, "deployments"]) => created(to_value(
-            Box::pin(daemon.deploy_application(name, parse(body)?)).await?,
+            Box::pin(daemon.deploy_application(name, &principal.operator_id, parse(body)?)).await?,
         )?),
         ("GET", ["applications", name, "deployments", target]) => ok(to_value(
             Box::pin(daemon.application_deployment(name, target)).await?,
         )?),
+        ("GET", ["applications", name, "deployments", target, "receipt"]) => Ok(Response::Bytes(
+            "application/json",
+            Box::pin(daemon.application_receipt(name, target)).await?,
+        )),
         ("POST", ["applications", name, "rollback"]) => created(to_value(
-            Box::pin(daemon.rollback_application(name, parse(body)?)).await?,
+            Box::pin(daemon.rollback_application(name, &principal.operator_id, parse(body)?))
+                .await?,
         )?),
-        ("POST", ["applications", name, "stop"]) => {
-            ok(to_value(Box::pin(daemon.stop_application(name)).await?)?)
-        }
+        ("POST", ["applications", name, "stop"]) => ok(to_value(
+            Box::pin(daemon.stop_application(name, &principal.operator_id)).await?,
+        )?),
         ("GET", ["applications", name, "logs"]) => {
-            let (stdout, stderr) = Box::pin(daemon.application_logs(name)).await?;
-            ok(serde_json::json!({ "stdout": stdout, "stderr": stderr }))
+            ok(Box::pin(daemon.application_logs(name, &principal.operator_id)).await?)
         }
 
         // This node as a provider in a caller's pool: `compute.remote@1`,

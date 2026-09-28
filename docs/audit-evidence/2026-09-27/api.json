@@ -972,6 +972,15 @@
   "http_path_in_tests": false
  },
  {
+  "method": "GET",
+  "path": "/applications/{application}/deployments/{deployment}/receipt",
+  "scope": "Read",
+  "ui": false,
+  "cli": false,
+  "appport": false,
+  "http_path_in_tests": true
+ },
+ {
   "method": "POST",
   "path": "/applications/{application}/rollback",
   "scope": "Deploy",

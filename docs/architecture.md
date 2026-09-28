@@ -3,7 +3,9 @@
 This is the architecture as the code has it at `69b70d9` (audited
 2026-09-27; the evidence is [audit.md](audit.md) and
 [audit.json](audit.json)). Where the code and the intended design differ,
-this page says what the code does and names the gap.
+this page says what the code does and names the gap. Since that audit,
+applications converged on the canonical computer lifecycle (G-ARCH-2,
+[below](#applications-one-lifecycle-g-arch-2)).
 
 > **FeltDB owns durable state; Compute owns execution.** Compute keeps no
 > second durable database, reads targeted state through bounded, indexed
@@ -29,7 +31,7 @@ this page says what the code does and names the gap.
                                  │ HTTP(S) · operator credentials · scopes · audit
                                  ▼          (loopback without TLS: no credential needed)
  ┌──────────────────── control plane: the daemon (`compute start`, :8787) ─────────────────────┐
- │ Compute API (128 routes)  ·  UI assets  ·  events stream                                    │
+ │ Compute API (129 routes)  ·  UI assets  ·  events stream                                    │
  │ controllers: computer drivers (one per computer) · operation drivers (publish, rollout)     │
  │              reconcile loop (node environments) · orphan sweep · process probe (15 s)       │
  │ placement (compute-placement) · policy/admission (compute-policy) · network (compute-network)│
@@ -42,8 +44,8 @@ this page says what the code does and names the gap.
  a file (local development)                (trust only the control planes     bundle-project workloads,
  environments, computers, contents,         they issued credentials to;       releases, ingress :80/:443,
  work sessions, versions, rollouts,         what they create is theirs)
- events, deployments, executions,          ├─ session store (the machines)    applications (`compute deploy`),
- credentials, audit                        ├─ job store (commands, receipts)  /compute/* jobs
+ events, deployments, executions,          ├─ session store (the machines)    /compute/* jobs
+ credentials, audit                        ├─ job store (commands, receipts)  (never applications)
                                            └─ session provider:
                                                 workspace (default: a directory + processes on the host)
                                                 container (docker/podman; unverified against an engine)
@@ -87,7 +89,7 @@ workload in-process with the local provider (or submits it to a pool with
 <!-- audit:models -->
 | Term | What it is in the code | Source | Collision |
 | --- | --- | --- | --- |
-| **Environment** | A durable record (Environment in control state) with a name, desired state (running/stopped), configuration, policy, and optionally an owner, a ComputerSpec, and EnvironmentContents. | `crates/compute-state/src/model.rs#EnvironmentRecord` | Two kinds share the name: an environment with a computer, and a "node environment" whose bundle projects run on the daemon host. `applications` is a reserved node environment for `compute deploy <dir>`. |
+| **Environment** | A durable record (Environment in control state) with a name, desired state (running/stopped), configuration, policy, and optionally an owner, a ComputerSpec, and EnvironmentContents. | `crates/compute-state/src/model.rs#EnvironmentRecord` | Two kinds share the name: an environment with a computer, and a "node environment" whose bundle projects run on the daemon host. An application is an environment with a computer, `application-<name>`. |
 | **Computer** | The machine behind an environment with a ComputerSpec: a Computer record (status, generation, target, session, provider_resource, observed contents) driven by the daemon. | `crates/compute-state/src/model.rs#ComputerRecord` | The UI says "Computer" and "Machine"; the CLI says `environment computer`; the target calls it a session. |
 | **Session (target)** | A durable record on a `compute serve` target: a workspace or container, commands run as durable jobs. A computer IS a persistent, referenced target session. | `crates/compute-core/src/sessions.rs#ComputeSession` | Stored in the target's session store, not FeltDB. `compute session create` makes one directly (no environment, no daemon). |
 | **Work session** | A WorkSession record in control state: an operator entering an environment (attached) or owning a temporary one (ephemeral). | `crates/compute-state/src/model.rs#WorkSessionRecord` | `compute session open/close/opened` beside `compute session create/.../destroy`, which are target sessions. |
@@ -95,19 +97,20 @@ workload in-process with the local provider (or submits it to a pool with
 | **Provider** | A pool member answering the capability API: local (in-process engine) or remote (compute.remote@1). Session providers (workspace, container) are the substrates inside a target. | `crates/compute-provider/src/lib.rs` | "Provider" names three things: pool members, session substrates, and DNS providers. |
 | **Runtime** | A workload language runtime (wasm, node, python, …, native, shell) resolved from a pinned catalog; used by `compute run` and daemon workloads. | `crates/compute-core/src/lib.rs#RuntimeKind` | Not the computer substrate: computers run whatever the target host has on PATH. |
 | **Project** | Two different things: (a) a computer project — a ProjectSpec in contents: a repository plus build/test/commands/checks; (b) a bundle project — registered revisions of workload bundles, released to node environments. | `crates/compute-core/src/computers.rs#ProjectSpec; crates/compute-state/src/model.rs#ProjectRecord` | Same word, same API prefix (/environments/{e}/projects), dispatched by whether the environment has a computer. |
-| **Application** | Three things: (a) a process of kind application in a computer; (b) an `compute init/deploy` application with versions on a provider node; (c) a project in the reserved `applications` environment. | `crates/compute-core/src/computers.rs#ProcessKind; crates/compute-environment/src/daemon/applications.rs` | Three meanings. |
+| **Application** | A compatibility name for canonical records: `compute init/deploy` resolves an application to its environment `application-<name>` (a computer), a project and its versions, and rollouts; its process is a process of kind application in that computer. | `crates/compute-environment/src/daemon/applications.rs; crates/compute-core/src/computers.rs#ProcessKind` | None of its own: an application version is a rollout, numbered in its environment. |
 | **Service** | Three things: (a) a process of kind service in a computer; (b) a bundle workload of kind service; (c) a registered shared service (`compute service register`). | `crates/compute-core/src/computers.rs; crates/compute-environment/src/model.rs#WorkloadKind` | Three meanings. |
 | **Execution job** | A durable job in a provider's job store (filesystem on the target), with a result and a receipt. Computer operations reference jobs by id; FeltDB stores the references and events, not the jobs. | `crates/compute-provider/src/jobs.rs` | Daemon node executions are Execution records in control state; target jobs are not. |
-| **Version / Rollout** | Version: a published commit + package digest + assembly + step evidence. Rollout: a version made real in an environment (deploy/promote/rollback) with steps. | `crates/compute-state/src/model.rs#VersionRecord,RolloutRecord` | Parallel to bundle Revisions/Deployments and to application versions. |
+| **Version / Rollout** | Version: a published commit + package digest + assembly + step evidence. Rollout: a version made real in an environment (deploy/promote/rollback) with steps. | `crates/compute-state/src/model.rs#VersionRecord,RolloutRecord` | Parallel to bundle Revisions/Deployments of node environments; application versions ARE rollouts. |
 <!-- /audit -->
 
 The complete model the product presents is: **a computer** (an environment
 with a `ComputerSpec`) placed on **a target**, holding **projects** as
 desired contents, changed by **GO** (one generation-fenced change),
 **versions** published from one environment and **rolled out** to others,
-and **work sessions** recording who is working where. Node environments,
-bundle projects, and `compute init/deploy` applications are an earlier
-deployment model that still runs on the daemon host (gap G-ARCH-2).
+and **work sessions** recording who is working where. `compute init/deploy`
+applications are a compatibility name for exactly these records (below).
+Node environments and bundle projects are an earlier deployment model that
+still runs on the daemon host (gap G-ARCH-5).
 
 ## Where execution happens
 
@@ -120,57 +123,79 @@ deployment model that still runs on the daemon host (gap G-ARCH-2).
 | Computer operations (sync, install, build, start/stop, probe, inspect, publish steps) | the environment's computer | daemon controller | target jobs; evidence in FeltDB | yes |
 | `environment exec/run/build/test/propose` | the environment's computer | daemon scope + owner | target jobs; events in FeltDB | yes |
 | Bundle project workloads (services, tasks) and releases | THE DAEMON HOST (supervisor) | daemon scopes, no owner | Execution records in control state | no |
-| Applications (`compute deploy <dir>`) | a provider node offering deployments — the daemon host by default | daemon scopes | deployments in control state | no |
+| Applications (`compute deploy <dir>`, `compute application …`) | the application's computer on a target of the selected daemon's pool | daemon scope + owner (the computer's) | environment, computer, version, rollout in FeltDB; target jobs and receipts | yes |
 | Daemon /compute/* (node as provider) | the daemon host | daemon execute scope | daemon job store | yes |
 <!-- /audit -->
 
 For environments with a computer, the daemon coordinates and records and
 never runs their work on its own node: every build, test, process, and
-publish step is a durable job on the computer's target. The three paths
-marked "the daemon host" are the exception, and they are the older model.
+publish step is a durable job on the computer's target — applications
+included. The two paths marked "the daemon host" are the exception: the node
+model's bundle workloads and the daemon's own `/compute/*` provider service.
 
-### Application deployment trace
+### Applications: one lifecycle (G-ARCH-2)
 
-The application acceptance journey now creates a deterministic,
-application-owned Computer environment (`application-<name>`) instead of the
-reserved `applications` environment. A deploy registers a
-`ProjectRevisionRecord` and creates a `DeploymentRecord` in that environment.
-The release
-controller starts a supervisor workload on the provider node; readiness and
-traffic switching update that deployment. Startup and probe work may create
-`ExecutionRecord` and `ReceiptRecord` evidence, with the deployment retaining
-the receipt IDs. The endpoint is a supervisor port binding, logs are read from
-the daemon's node logs, and the deployment receipt is served from the
-deployment's stored receipt artifact.
+An application is not a deployment model of its own. `compute deploy`,
+`compute application …`, the `/applications` routes, and AppPort's
+`compute.application.*` capabilities resolve an application to canonical
+records, invoke the canonical operation, and describe the result
+(`crates/compute-environment/src/daemon/applications.rs`):
 
-The records and authority for one application deployment are therefore:
+```text
+Application compatibility API   compute deploy · compute application … · /applications · AppPort
+          │  resolve → invoke the canonical operation → adapt the result
+          ▼
+Canonical Compute model
+          ├── Project          `<name>` in the environment `application-<name>`
+          ├── Version          publish_version: source (imported), package digest, artifact
+          ├── Computer         the environment's ComputerRecord: placed, owned, fenced
+          ├── Target Session   the computer's authenticated session on its target
+          ├── Job / Execution  durable target jobs: import, checkout, process start
+          ├── Deployment       a Rollout of the version (deploy, or rollback)
+          ├── Endpoint         the computer's endpoint for the process's port
+          └── Receipt          the target's compute.receipt@1 for the start job
+```
 
-| Step | Durable record / ID | Target and controller | Restart and authorization |
-| --- | --- | --- | --- |
-| Application / project | `EnvironmentRecord` (`application-<name>`) and `ProjectRecord` | Provider node; daemon release controller | Reconciled from control state; application-owned Computer environment |
-| Version | `ProjectRevisionRecord.revision_id` plus the deployment's monotonic `version` | Provider node; revision registration | Revision is immutable; deploy scope |
-| Computer | `ComputerRecord` owned by the application caller | Placement is performed during environment creation | Computer placement and target recovery are durable |
-| Deployment | `DeploymentRecord.deployment_id` | Provider node; release controller and supervisor | Durable status resumes; deploy scope |
-| Execution | `ExecutionRecord.execution_id` | Provider node; supervisor/provider job path | Durable evidence is retained; execute/deploy scope |
-| Endpoint | `DeploymentWorkload` port binding | Provider node; supervisor traffic switch | Rebuilt by node reconciliation; deployment authority |
-| Logs | Node log files joined by the application view | Provider node; daemon log reader | Available while node logs remain; read scope |
-| Receipt | `ReceiptRecord.receipt_id` and stored receipt artifact | Provider node; daemon receipt service | Exact bytes survive restart; read scope |
-| Rollback | A new `DeploymentRecord` using the old revision | Provider node; release controller | History is append-only; deploy scope |
-| Authorization | Application route scopes | Daemon API / provider node | No owner-bound Computer authorization |
+The audit that preceded the change traced each piece of the old path to
+its canonical equivalent; every row now uses the right-hand column:
 
-The application view now has the same environment-owned Computer record and
-owner binding as a normal Computer environment. The release, execution, and
-receipt compatibility views remain backed by the existing deployment records;
-the bundle-to-project materialization and target-session execution migration
-remain the next convergence step.
+| Concern | Before (node model, daemon host) | Now (canonical) |
+| --- | --- | --- |
+| Entrypoints | `/applications` routes → `register_revision` + `deploy` (release controller) | `/applications` routes → `create_computer_environment`, `import_source`, `change_environment`, `publish_version`, `deploy_version` / `rollback_version`, `set_process`, `computer_logs` |
+| Application record | project in `applications` (later `application-<name>` with an unused computer) | `EnvironmentRecord` `application-<name>` with its `ComputerRecord`; the project is a `ProjectSpec` in its contents |
+| Version | `ProjectRevisionRecord` + a deployment counter | `VersionRecord` (commit, package digest, `artifact`); application `vN` numbers the project's rollouts in its environment |
+| Deployment | `DeploymentRecord` (`dep_…`) | `RolloutRecord` (`rol_…`) — the application's `deployment_id` |
+| Source | bundle bytes in the revision, run from the daemon's runtime store | the artifact's files imported into a repository in the computer's workspace by durable target jobs (`import_source`), checked out by the ordinary repository sync |
+| Execution | supervisor workload on the daemon host; `ExecutionRecord` | a process in the computer, started by a durable target job in its session; the rollout's "Restart applications" step names the job and execution |
+| Placement | the caller's pool picks a daemon; the daemon ran it itself | the caller's pool picks a daemon (unchanged); that daemon's computer placement picks a target. No target → refused, nothing recorded |
+| Authorization | route scopes only | route scopes + the computer's owner (`owned_environment`) for every mutation and for logs |
+| Readiness / traffic | HTTP readiness, then a supervisor port switch (zero downtime) | the rollout's health check (process running, endpoint answering); the process restarts in place (G-DEP-1) |
+| Endpoint | supervisor port binding on the daemon host | the computer's endpoint: the target's host and the process's port (stable across versions) |
+| Logs | the daemon's node log files | the process's log in the computer, read by a target job (bounded: the last 1000 lines) |
+| Receipt | `ReceiptRecord` + `compute.deployment-receipt@1` in control state | the target's `compute.receipt@1` for the start job; `GET /applications/{a}/deployments/{d}/receipt` serves its canonical bytes; no second receipt is stored |
+| Rollback | a new deployment of an old revision | `rollback_version`: a Rollback rollout, identical to one made through `/software/{p}/rollback` |
+| Stop | project desired state stopped (supervisor) | the process's desired state stopped (`set_process`); the computer keeps running |
+| Restart / recovery | node reconciliation resurrects the supervisor's workloads | the computer's: unreachable, lost, replace, fenced observations, drivers resumed from FeltDB after a control-plane restart |
+| Persistence | revisions, deployments, executions, receipts in control state | environment, computer, version, rollout, events in control state; jobs and receipts in the target's stores |
 
-The smallest migration is an adapter, not a new provider or runtime:
-materialize an application's artifact as a project in a
-`ComputerEnvironmentDefinition`, use the existing `publish_version` and
-Computer release flow for deploy and rollback, and expose its target-backed
-endpoint, logs, and receipt IDs through the application view. Until that
-adapter exists, application deployment must remain documented and tested as a
-parallel model rather than being described as Computer-backed.
+What version is deployed to this computer, by which deployment, through
+which execution, and with what evidence is answered from canonical state
+alone: the active `RolloutRecord` names the `VersionRecord`; its "Restart
+applications" step names the target job, execution, and receipt; the
+`ComputerRecord` names the target and session.
+
+Gaps this does not paper over:
+
+- **Runtimes.** A computer runs the target's own runtimes (Python, Node,
+  Bun, Deno, Ruby, PHP, shell, native). Applications needing Compute's
+  pinned runtime catalog (WASM, JVM, .NET) or a dependency capsule are
+  refused with that reason; they are not emulated.
+- **Source durability.** The imported source lives in the computer's
+  workspace. A replaced machine does not have it until the application is
+  deployed again (the replacement's repository sync fails explicitly until
+  then). Stored version artifacts are G-REL-1.
+- **Zero-downtime switching and ingress** remain node-model features
+  (G-DEP-1, G-APP-1). Node environments themselves are G-ARCH-5.
 
 ## Durable state
 
@@ -201,7 +226,8 @@ copy the jobs.
 | Change a computer environment (contents, config, lifetime, replace, destroy, sessions) | operate/deploy scope + owner | yes |
 | Exec / run / connect / propose | execute scope + owner | yes |
 | Publish / deploy / promote / rollback versions | deploy scope + owner of the environment(s) | yes |
-| Node environments, bundle projects, applications, domains | scopes only; no ownership | yes |
+| Applications (deploy, rollback, stop, logs) | the computer's: scope + owner of `application-<name>` | yes |
+| Node environments, bundle projects, domains | scopes only; no ownership | yes |
 | Loopback daemon without TLS | no credential required (development mode); `--production` requires TLS and credentials | bypassable locally |
 | Target (`compute serve`) jobs and sessions | a target credential on every request (reads included); sessions and jobs owned by the control plane it names; `--insecure-unauthenticated` only by name | yes |
 | Daemon /compute/* (node as provider) | only requests the daemon API authenticated and scoped (DaemonAuthorized) | yes |
@@ -236,6 +262,8 @@ authenticated (SEC-1, SEC-2 in [audit.md](audit.md) are resolved).
   revive a computer a newer observation found gone.
 - **Operations.** Publish and rollout drivers follow their steps to an end;
   they resume after a restart.
+- **Applications.** Nothing of their own: an application is a computer, a
+  version, and rollouts, reconciled as above.
 - **Node environments.** A reconcile loop drives the supervisor toward the
   desired bundle revisions, with zero-downtime switching.
 - **Orphans.** Sessions on a target that no computer claims are destroyed.
@@ -261,7 +289,7 @@ that breaks one fails them.
 | 12 | Receipt identity stays verifiable without repeated expensive executable hashing. | `receipt`: `cached_file_identities_follow_the_file_and_ignore_an_untrusted_cache`; `cli.rs`: `execution_receipt_is_canonical_verifiable_and_binds_artifacts` |
 | 13 | Compute remains runtime-neutral. | The runtime conformance suite (`compute-runtime-conformance`) runs the same contract against every runtime. |
 | 14 | Compute does not require AuthBoundry to execute an application. | Every test above runs Compute alone; operator credentials are Compute's own. |
-| 15 | Compute does not become an application-specific product framework. | Review. Not held at `69b70d9`: `compute init`/`compute deploy <dir>` and `ApplicationIdentity` name applications ([audit.md](audit.md#what-needs-to-be-reconciled)). |
+| 15 | Compute does not become an application-specific product framework: applications are a compatibility view over the one deployment model (computer, version, rollout, target job, receipt), with no lifecycle, store, supervisor, endpoint, or evidence of their own. | `compute-environment/tests/applications.rs`: `an_application_deployment_is_the_canonical_computer_lifecycle` (every canonical record exists and the API names it; no node-model record is written), `an_application_follows_its_computer_through_target_failures`, `an_application_is_never_deployed_without_a_computer`, `the_application_api_is_a_thin_adapter_over_the_canonical_model` (fails if the old path is reintroduced); `compute-cli/tests/product.rs` |
 | 16 | Controller paths read FeltDB through bounded, indexed queries and snapshots; nothing scans a collection to find a few records. | `feltdb_consumer.rs`: `the_controller_keeps_authority_in_feltdb_through_an_outage` (a quiet cycle runs no queries; scans are limited to the listed shapes); `consumer.rs`: `targeted_reads_are_indexed_and_bounded` |
 | 17 | A snapshot is coherent: it never observes part of a transaction, and it is reused only while the revision it represents is current. | `compute_state::conformance` (memory, file, and a real FeltDB): concurrent paired writes, reuse, staleness, identity |
 | 18 | A controller never runs on a model it would misuse, and the model is never downgraded. | `consumer.rs`: `the_upgrade_backs_up_migrates_and_verifies`, `a_newer_model_is_never_downgraded` |

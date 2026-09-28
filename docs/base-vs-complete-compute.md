@@ -40,7 +40,7 @@ capture" says only what runs. Generated from [audit.json](audit.json)
 | Provider abstraction | Pool of local/remote targets; no cloud adapters | Fly/Railway/Render/cloud/bare metal | Adapters |
 | UI | Work/Manage, home, run, software, operations; verified in a browser | Every capability | Targets, access, diagnosis pages |
 | CLI | 182 commands; 52 with help defects | Consistent, documented | Help, naming |
-| API | 128 routes, scoped | Versioned, documented | Description |
+| API | 129 routes, scoped | Versioned, documented | Description |
 | Observability | Events, receipts, job evidence, /metrics (API only) | Live logs, metrics, traces | Streaming, dashboards |
 | Durable evidence | Events, versions, rollouts, receipts; jobs on targets | Same, in one authority | Jobs outside FeltDB; file default |
 | Security boundary | Daemon: real; targets: none | Every hop authenticated; computers isolated | Target auth, isolation |

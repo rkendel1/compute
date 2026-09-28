@@ -319,6 +319,9 @@ pub(crate) fn plan(
 
 const SYNC_REPOSITORY: &str = r#"set -eu
 dir="repos/$1"; url="$2"; revision="$3"
+# A plain relative path names a repository inside the workspace (an
+# imported source): resolved once, so the checkout's remote still finds it.
+case "$url" in /*|*://*|*@*:*) ;; *) url="$PWD/$url" ;; esac
 mkdir -p repos
 if [ ! -d "$dir/.git" ]; then
   rm -rf "$dir"
@@ -335,6 +338,58 @@ fi
 git -c advice.detachedHead=false checkout --quiet --force --detach "$target"
 git rev-parse HEAD
 "#;
+
+/// Where an imported source's repository lives in the workspace: a
+/// repository URL the computer resolves itself.
+pub(crate) fn imported_source(repository: &str) -> String {
+    format!(".compute/sources/{repository}")
+}
+
+/// Append base64 chunks (`COMPUTE_IMPORT_0`, `_1`, …, in the environment)
+/// of a source archive to an import. Arguments: import ID, chunk count.
+const IMPORT_CHUNK: &str = r#"set -eu
+dir=".compute/imports/$1"
+mkdir -p "$dir"
+i=0
+while [ "$i" -lt "$2" ]; do
+  eval "printf '%s' \"\$COMPUTE_IMPORT_$i\"" >>"$dir/source.b64"
+  i=$((i + 1))
+done
+"#;
+
+/// Commit an import as the next revision of a workspace repository, and
+/// print its commit (the same commit when nothing changed). Arguments:
+/// repository, import ID, archive digest, message.
+const IMPORT_COMMIT: &str = r#"set -eu
+root="$PWD"; repo="$root/.compute/sources/$1"; dir="$root/.compute/imports/$2"
+trap 'rm -rf "$dir"' EXIT
+base64 -d <"$dir/source.b64" >"$dir/source.tar"
+if command -v sha256sum >/dev/null 2>&1; then
+  digest="$(sha256sum "$dir/source.tar" | cut -d' ' -f1)"
+else
+  digest="$(shasum -a 256 "$dir/source.tar" | cut -d' ' -f1)"
+fi
+if [ "sha256:$digest" != "$3" ]; then echo "the import is sha256:$digest, not $3" >&2; exit 1; fi
+if [ ! -d "$repo/.git" ]; then
+  mkdir -p "$repo"
+  git -C "$repo" init --quiet
+  git -C "$repo" symbolic-ref HEAD refs/heads/main
+fi
+cd "$repo"
+find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+tar -xf "$dir/source.tar"
+git add -A
+if ! git rev-parse --verify --quiet HEAD >/dev/null || ! git diff --cached --quiet; then
+  git -c user.name=Compute -c user.email=compute@localhost -c commit.gpgsign=false \
+    commit --quiet --allow-empty -m "$4"
+fi
+git rev-parse HEAD
+"#;
+
+/// Largest base64 value one environment variable carries (under the
+/// kernel's per-string limit), and how many one job carries.
+const IMPORT_VALUE: usize = 96 * 1024;
+const IMPORT_VALUES: usize = 8;
 
 const REMOVE_REPOSITORY: &str = r#"rm -rf "repos/$1""#;
 
@@ -1436,6 +1491,113 @@ impl Daemon {
             execution_id: submission.execution_id,
             status: submission.status,
         })
+    }
+
+    /// Import a source tree (a tar archive) into the running computer as
+    /// the next revision of a repository in its workspace, through durable
+    /// jobs on its target, and return the commit. The repository is named
+    /// by [`imported_source`] as a repository URL: syncing, building,
+    /// publishing, and deploying it are the ordinary operations.
+    pub async fn import_source(
+        self: &Arc<Self>,
+        environment: &str,
+        operator: &str,
+        repository: &str,
+        archive: &[u8],
+        message: &str,
+    ) -> Result<String, EnvironmentError> {
+        use base64::Engine as _;
+        let record = self.owned_environment(environment, operator).await?;
+        self.require_live(&record).await?;
+        compute_core::EnvironmentContents {
+            repositories: vec![RepositorySpec {
+                name: repository.to_owned(),
+                url: imported_source(repository),
+                revision: "main".into(),
+                sync: 0,
+            }],
+            ..Default::default()
+        }
+        .validate()?;
+        let (computer, client, session_id) = self.running(&record).await?;
+        let import = crate::auth::hex(&crate::auth::random::<8>()?);
+        let digest = compute_core::sha256_identity(archive);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(archive);
+        let mut jobs = vec![];
+        let values = encoded
+            .as_bytes()
+            .chunks(IMPORT_VALUE)
+            .map(|chunk| String::from_utf8(chunk.to_vec()).expect("base64 is ASCII"))
+            .collect::<Vec<_>>();
+        for batch in values.chunks(IMPORT_VALUES) {
+            let mut command = script(IMPORT_CHUNK, [import.clone(), batch.len().to_string()]);
+            for (index, value) in batch.iter().enumerate() {
+                command
+                    .env
+                    .insert(format!("COMPUTE_IMPORT_{index}"), value.clone());
+            }
+            let (evidence, _) = self
+                .run_in_computer_command(&client, &session_id, command, Duration::from_secs(300))
+                .await;
+            if evidence.outcome != "succeeded" {
+                return Err(EnvironmentError::RuntimeUnavailable(format!(
+                    "importing {repository} into {environment} failed (job {}): {}",
+                    evidence.job_id,
+                    evidence.error.unwrap_or_default()
+                )));
+            }
+            jobs.push(evidence.job_id);
+        }
+        let (evidence, output) = self
+            .run_in_computer_command(
+                &client,
+                &session_id,
+                script(
+                    IMPORT_COMMIT,
+                    [
+                        repository.to_owned(),
+                        import,
+                        digest.clone(),
+                        message.to_owned(),
+                    ],
+                ),
+                Duration::from_secs(300),
+            )
+            .await;
+        let commit = output.lines().last().map(str::trim).unwrap_or_default();
+        if evidence.outcome != "succeeded" || commit.len() < 40 {
+            return Err(EnvironmentError::RuntimeUnavailable(format!(
+                "importing {repository} into {environment} failed (job {}): {}",
+                evidence.job_id,
+                evidence.error.unwrap_or_default()
+            )));
+        }
+        let commit = commit.to_owned();
+        jobs.push(evidence.job_id.clone());
+        let change = self.event(
+            Change::new(),
+            events::ENVIRONMENT_COMMAND,
+            Scope::environment(&record.value.name).execution(&evidence.execution_id),
+            format!(
+                "{operator} imported {repository} ({}) into {}",
+                &commit[..12],
+                record.value.name
+            ),
+            json!({
+                "environment_id": record.id,
+                "command": "import",
+                "repository": repository,
+                "archive": digest,
+                "commit": commit,
+                "target": computer.target,
+                "session_id": session_id,
+                "jobs": jobs,
+                "job_id": evidence.job_id,
+                "execution_id": evidence.execution_id,
+            }),
+        );
+        self.apply(change).await?;
+        Ok(commit)
     }
 
     /// A job run in the computer, current or earlier: only jobs of this
