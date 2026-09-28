@@ -383,15 +383,14 @@ fn discover_executable(
             probe.arg("--version");
         }
     }
-    let output = match probe.output() {
+    let output = match compute_core::executables::output_when_not_busy(&mut probe) {
         Ok(output) if output.status.success() => output,
         // A POSIX shell without `--help` (dash is /bin/sh on Debian and
         // Ubuntu) is identified by the shell it resolves to.
         Ok(_) if definition.invocation == Invocation::Shell => {
-            match std::process::Command::new(path)
-                .args(["-c", "echo posix-sh"])
-                .output()
-            {
+            match compute_core::executables::output_when_not_busy(
+                std::process::Command::new(path).args(["-c", "echo posix-sh"]),
+            ) {
                 Ok(output) if output.status.success() => {
                     let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
                     let name = resolved
@@ -739,7 +738,20 @@ impl ProcessRuntime {
         };
 
         let started = Instant::now();
-        let mut child = match command.spawn() {
+        // A runtime prepared moments ago may be briefly "Text file busy".
+        let mut spawned = command.spawn();
+        let mut attempt = 0;
+        while let Err(error) = &spawned {
+            if !compute_core::executables::is_busy(error)
+                || attempt >= compute_core::executables::BUSY_ATTEMPTS
+            {
+                break;
+            }
+            attempt += 1;
+            tokio::time::sleep(compute_core::executables::busy_backoff(attempt)).await;
+            spawned = command.spawn();
+        }
+        let mut child = match spawned {
             Ok(child) => {
                 if let (Some(control), Some(pid)) = (control, child.id()) {
                     control.record_process(pid);
