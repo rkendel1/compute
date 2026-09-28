@@ -1,0 +1,3 @@
+Data plane: started supervisor pid 67605
+Compute daemon daemon_18e780f070f7e7688920ab98 listening on http://127.0.0.1:8787 (control state: file .compute/daemon/control-state.json, local-development; UI: http://127.0.0.1:8787/ui/)
+WARNING: development mode (loopback listener 127.0.0.1:8787 without TLS; pass --production with TLS for a reachable node): requests without a credential are admitted. Never expose this listener.

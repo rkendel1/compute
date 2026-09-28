@@ -1,2 +1,3 @@
 Compute supervisor pid 9769 serving .compute/daemon/supervisor.sock (0 endpoints restored, 0 orphans stopped)
 runtime error: I/O error: Invalid argument (os error 22)
+Compute supervisor pid 67605 serving .compute/daemon/supervisor.sock (0 endpoints restored, 0 orphans stopped)
