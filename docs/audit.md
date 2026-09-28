@@ -514,14 +514,16 @@ silent one — a feature advertised but unusable is placed anyway.
 <!-- audit:execution_paths -->
 | Path | Where it executes | Authority | Durable record | Canonical job path |
 | --- | --- | --- | --- | --- |
-| `compute run` (local) | the caller's machine, in process | none (local user) | execution record + receipt on disk | no |
-| `compute pool run/submit`, `compute remote *` | the provider placement chose | provider: a target credential on compute serve; daemon /compute/* only behind the daemon API's scopes | provider job store | yes |
-| `compute session create/exec` (target sessions) | the target | target credential; owner = the control plane the credential names | target session/job stores | yes |
-| Computer operations (sync, install, build, start/stop, probe, inspect, publish steps) | the environment's computer | daemon controller | target jobs; evidence in FeltDB | yes |
+| `compute run` / `compute exec` (local) | the caller's machine, in the CLI's process tree (ephemeral) | none (the local user) | nothing; a receipt file only when asked (--receipt) | no |
+| `compute run` / `compute pool run` (a remote provider) | the provider placement chose, as one synchronous request (ephemeral) | the pool's credential for that provider | nothing on the caller; the receipt returns with the result | no |
+| `compute pool submit`, `compute remote *` | the provider placement chose (a target, or a daemon's node) | provider: a target credential on compute serve; daemon /compute/* only behind the daemon API's scopes | one-shot job in that provider's job store | yes |
+| `compute session create/exec` (raw target sessions) | the target | target credential; owner = the control plane the credential names | target session/job stores (no ComputerRecord, no desired state) | yes |
+| Computer operations (sync, install, build, start/stop, probe, inspect, import, publish steps) | the environment's computer | daemon controller | target jobs; evidence in FeltDB | yes |
 | `environment exec/run/build/test/propose` | the environment's computer | daemon scope + owner | target jobs; events in FeltDB | yes |
-| Bundle project workloads (services, tasks) and releases | THE DAEMON HOST (supervisor) | daemon scopes, no owner | Execution records in control state | no |
 | Applications (`compute deploy <dir>`, `compute application …`) | the application's computer on a target of the selected daemon's pool | daemon scope + owner (the computer's) | environment, computer, version, rollout in FeltDB; target jobs and receipts | yes |
-| Daemon /compute/* (node as provider) | the daemon host | daemon execute scope | daemon job store | yes |
+| Node-environment services (bundle projects, releases) | THE DAEMON HOST, supervised by `compute supervisor`; placement that selects anything else is refused | daemon scopes, no owner | deployments, workloads, executions, receipts in control state; unit registry on the daemon host | no |
+| Node-environment tasks (`compute workload run`, readiness tasks) | the provider placement chose: the daemon host by default, a target when the environment pins one — one synchronous request outside any session | daemon scopes, no owner | Execution and Receipt records in control state | no |
+| Daemon /compute/* (its node as a caller's provider) | the daemon host | daemon execute scope | one-shot runs; jobs in the daemon's job store | yes |
 <!-- /audit -->
 
 Every computer operation is a durable job on the computer's target with a
@@ -961,11 +963,11 @@ next step:
 
 **G-ARCH-5**
 
-- Current: Node environments (bundle projects, releases, ingress) still run on the daemon host through the supervisor.
-- Desired: Their features (zero-downtime switch, ingress, domains) ported to computers, then retired.
-- Impact: A second deployment model remains for bundle projects (not for applications).
-- Evidence: execution_paths
-- Next: Port zero-downtime switching and ingress to computers (G-DEP-1, G-APP-1), then retire node environments.
+- Current: Node environments (bundle projects, releases, ingress) run on the daemon host through the supervisor: a second durable deployment authority with scope-only authorization, placement that cannot move services, and its own evidence (Execution/Receipt records, deployment receipts).
+- Desired: Node workloads converged to Project → Version → Computer → target session → job → receipt; the node model retired.
+- Impact: A second durable deployment model remains (not for applications).
+- Evidence: execution_paths, crates/compute-environment/tests/execution_paths.rs
+- Next: Blocked: node environments are durable deployments (desired state, revisions, releases, rollback, stable endpoints, supervised restart, receipts) and should converge to Project → Version → Computer → Execution, but Computer lacks what they use: zero-downtime switching (G-DEP-1), ingress/domains/TLS to computer endpoints (G-APP-1), pinned catalog runtimes in a computer (G-RT-3), dependency capsules in a computer (G-RT-4), HTTP readiness and restart policy for computer processes (G-DEP-2), and per-command admission against the environment policy (G-POL-1). Until then the node model is held to its boundary: daemon host only, never in a computer environment (crates/compute-environment/tests/execution_paths.rs).
 
 **G-ARCH-3** (closed)
 
@@ -985,6 +987,22 @@ next step:
 
 ### Runtime support
 
+**G-RT-3**
+
+- Current: A computer runs the target host's runtimes from PATH; it cannot acquire a pinned catalog runtime (WASM, JVM, .NET, or a pinned version).
+- Desired: A computer prepares catalog runtimes as target jobs and processes run with them.
+- Impact: Node workloads and applications that need a pinned runtime cannot run on a computer (G-ARCH-5).
+- Evidence: crates/compute-environment/src/daemon/applications.rs#process_command
+- Next: Prepare a catalog runtime into a session as a target job; name it in the process spec.
+
+**G-RT-4**
+
+- Current: A dependency capsule (compute.deps@1) cannot be materialized into a computer.
+- Desired: Capsules materialized into a computer's workspace as a package.
+- Impact: Bundles with capsules cannot move to a computer (G-ARCH-5).
+- Evidence: crates/compute-environment/src/daemon/applications.rs#process_command
+- Next: Import a capsule like a source and install it as a package.
+
 **G-RT-1**
 
 - Current: Computers are workspaces (native processes) or unverified containers.
@@ -1000,6 +1018,60 @@ next step:
 - Impact: Placement puts a "containers" computer in a workspace.
 - Evidence: placement_refusals.containers
 - Next: Split host features from substrate; check engine liveness.
+
+### Deployment
+
+**G-DEP-2**
+
+- Current: Computer processes have no HTTP readiness path and no restart policy: a rollout's health check is a TCP connect, and an exited process is started again.
+- Desired: Readiness (HTTP path, task) and restart policy (never, on failure) on ProcessSpec.
+- Impact: Node releases gate traffic on HTTP readiness and honor restart policy (G-ARCH-5).
+- Evidence: crates/compute-environment/src/daemon/software.rs#rollout_step
+- Next: Add readiness and restart to ProcessSpec and the reconciler.
+
+**G-DEP-1**
+
+- Current: A release restarts processes (downtime); bundle releases have zero-downtime switching.
+- Desired: Zero-downtime rollouts for computers.
+- Impact: Production updates interrupt traffic.
+- Evidence: zero-downtime
+- Next: Two instances behind a switched endpoint inside the computer.
+
+### Policy
+
+**G-POL-1**
+
+- Current: A computer's environment policy is evaluated when the computer is placed; commands inside it are admitted by the target's own policy.
+- Desired: Every command in a computer admitted against the environment policy, as every node execution is.
+- Impact: Moving node workloads to computers would weaken per-execution admission (G-ARCH-5).
+- Evidence: crates/compute-environment/src/daemon/computers.rs#place_on
+- Next: Carry the environment policy on target jobs.
+
+### Execution
+
+**G-EXEC-3**
+
+- Current: A `compute run` workload outlives a CLI killed with SIGKILL, untracked (no record, stop, or recovery).
+- Desired: Ephemeral execution ends with its caller.
+- Impact: An orphaned ephemeral process holds resources nobody owns.
+- Evidence: crates/compute-cli/tests/execution_paths.rs (probe in the audit)
+- Next: Tie the workload to its caller (parent-death signal) for local ephemeral runs only.
+
+**G-EXEC-1**
+
+- Current: Bundle workloads of node environments execute on the daemon host (applications no longer do).
+- Desired: The daemon coordinates; computers execute.
+- Impact: The daemon is both coordinator and executor.
+- Evidence: execution_paths
+- Next: Covered by G-ARCH-5 (blocked).
+
+**G-EXEC-2**
+
+- Current: No cancellation or timeout controls in the UI; jobs have timeouts in the API.
+- Desired: Cancel/retry for every job from every surface.
+- Impact: Stuck builds need the CLI or waiting.
+- Evidence: api: POST /compute/jobs/{job}/cancel has no computer-level route
+- Next: Add cancel for computer jobs and operations.
 
 ### Providers
 
@@ -1028,24 +1100,6 @@ next step:
 - Impact: Dead-end options.
 - Evidence: placement_refusals
 - Next: Hide unavailable options using GET /targets; implement persistent volumes and public endpoints.
-
-### Execution
-
-**G-EXEC-1**
-
-- Current: Bundle workloads of node environments execute on the daemon host (applications no longer do).
-- Desired: The daemon coordinates; computers execute.
-- Impact: The daemon is both coordinator and executor.
-- Evidence: execution_paths
-- Next: Covered by G-ARCH-5.
-
-**G-EXEC-2**
-
-- Current: No cancellation or timeout controls in the UI; jobs have timeouts in the API.
-- Desired: Cancel/retry for every job from every surface.
-- Impact: Stuck builds need the CLI or waiting.
-- Evidence: api: POST /compute/jobs/{job}/cancel has no computer-level route
-- Next: Add cancel for computer jobs and operations.
 
 ### Projects
 
@@ -1076,16 +1130,6 @@ next step:
 - Impact: Templates fail where binaries are absent.
 - Evidence: ui TEMPLATES
 - Next: Depends on container computers and volumes.
-
-### Deployment
-
-**G-DEP-1**
-
-- Current: A release restarts processes (downtime); bundle releases have zero-downtime switching.
-- Desired: Zero-downtime rollouts for computers.
-- Impact: Production updates interrupt traffic.
-- Evidence: zero-downtime
-- Next: Two instances behind a switched endpoint inside the computer.
 
 ### Releases
 
@@ -1349,7 +1393,7 @@ releases. Underneath is a solid runtime-neutral workload engine
    - Done: decide the durable-state default (G-ARCH-3)
    - Done: browser tests and the UI certification in CI; fix the home-route regression (G-UI-2)
 2. **EXECUTION**
-   - One deployment model: retire or port node environments (G-ARCH-5, G-EXEC-1); applications are converged (G-ARCH-2)
+   - One deployment model: node environments converge once G-DEP-1, G-APP-1, G-RT-3, G-RT-4, G-DEP-2, G-POL-1 close (G-ARCH-5, blocked); applications are converged (G-ARCH-2)
    - Cancel/retry for computer jobs and operations (G-EXEC-2)
 3. **RUNTIME COVERAGE**
    - Container computers verified in CI, with ports and volumes (G-RT-1)

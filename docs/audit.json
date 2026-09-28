@@ -5762,28 +5762,35 @@
  ],
  "execution_paths": [
   {
-   "path": "`compute run` (local)",
-   "where": "the caller's machine, in process",
-   "authority": "none (local user)",
-   "durable": "execution record + receipt on disk",
+   "path": "`compute run` / `compute exec` (local)",
+   "where": "the caller's machine, in the CLI's process tree (ephemeral)",
+   "authority": "none (the local user)",
+   "durable": "nothing; a receipt file only when asked (--receipt)",
    "canonical_job_path": false
   },
   {
-   "path": "`compute pool run/submit`, `compute remote *`",
-   "where": "the provider placement chose",
+   "path": "`compute run` / `compute pool run` (a remote provider)",
+   "where": "the provider placement chose, as one synchronous request (ephemeral)",
+   "authority": "the pool's credential for that provider",
+   "durable": "nothing on the caller; the receipt returns with the result",
+   "canonical_job_path": false
+  },
+  {
+   "path": "`compute pool submit`, `compute remote *`",
+   "where": "the provider placement chose (a target, or a daemon's node)",
    "authority": "provider: a target credential on compute serve; daemon /compute/* only behind the daemon API's scopes",
-   "durable": "provider job store",
+   "durable": "one-shot job in that provider's job store",
    "canonical_job_path": true
   },
   {
-   "path": "`compute session create/exec` (target sessions)",
+   "path": "`compute session create/exec` (raw target sessions)",
    "where": "the target",
    "authority": "target credential; owner = the control plane the credential names",
-   "durable": "target session/job stores",
+   "durable": "target session/job stores (no ComputerRecord, no desired state)",
    "canonical_job_path": true
   },
   {
-   "path": "Computer operations (sync, install, build, start/stop, probe, inspect, publish steps)",
+   "path": "Computer operations (sync, install, build, start/stop, probe, inspect, import, publish steps)",
    "where": "the environment's computer",
    "authority": "daemon controller",
    "durable": "target jobs; evidence in FeltDB",
@@ -5797,13 +5804,6 @@
    "canonical_job_path": true
   },
   {
-   "path": "Bundle project workloads (services, tasks) and releases",
-   "where": "THE DAEMON HOST (supervisor)",
-   "authority": "daemon scopes, no owner",
-   "durable": "Execution records in control state",
-   "canonical_job_path": false
-  },
-  {
    "path": "Applications (`compute deploy <dir>`, `compute application \u2026`)",
    "where": "the application's computer on a target of the selected daemon's pool",
    "authority": "daemon scope + owner (the computer's)",
@@ -5811,10 +5811,24 @@
    "canonical_job_path": true
   },
   {
-   "path": "Daemon /compute/* (node as provider)",
+   "path": "Node-environment services (bundle projects, releases)",
+   "where": "THE DAEMON HOST, supervised by `compute supervisor`; placement that selects anything else is refused",
+   "authority": "daemon scopes, no owner",
+   "durable": "deployments, workloads, executions, receipts in control state; unit registry on the daemon host",
+   "canonical_job_path": false
+  },
+  {
+   "path": "Node-environment tasks (`compute workload run`, readiness tasks)",
+   "where": "the provider placement chose: the daemon host by default, a target when the environment pins one \u2014 one synchronous request outside any session",
+   "authority": "daemon scopes, no owner",
+   "durable": "Execution and Receipt records in control state",
+   "canonical_job_path": false
+  },
+  {
+   "path": "Daemon /compute/* (its node as a caller's provider)",
    "where": "the daemon host",
    "authority": "daemon execute scope",
-   "durable": "daemon job store",
+   "durable": "one-shot runs; jobs in the daemon's job store",
    "canonical_job_path": true
   }
  ],
@@ -6169,12 +6183,62 @@
   {
    "id": "G-ARCH-5",
    "area": "Core architecture",
+   "status": "blocked",
+   "current": "Node environments (bundle projects, releases, ingress) run on the daemon host through the supervisor: a second durable deployment authority with scope-only authorization, placement that cannot move services, and its own evidence (Execution/Receipt records, deployment receipts).",
+   "desired": "Node workloads converged to Project \u2192 Version \u2192 Computer \u2192 target session \u2192 job \u2192 receipt; the node model retired.",
+   "impact": "A second durable deployment model remains (not for applications).",
+   "evidence": "execution_paths, crates/compute-environment/tests/execution_paths.rs",
+   "next": "Blocked: node environments are durable deployments (desired state, revisions, releases, rollback, stable endpoints, supervised restart, receipts) and should converge to Project \u2192 Version \u2192 Computer \u2192 Execution, but Computer lacks what they use: zero-downtime switching (G-DEP-1), ingress/domains/TLS to computer endpoints (G-APP-1), pinned catalog runtimes in a computer (G-RT-3), dependency capsules in a computer (G-RT-4), HTTP readiness and restart policy for computer processes (G-DEP-2), and per-command admission against the environment policy (G-POL-1). Until then the node model is held to its boundary: daemon host only, never in a computer environment (crates/compute-environment/tests/execution_paths.rs)."
+  },
+  {
+   "id": "G-RT-3",
+   "area": "Runtime support",
    "status": "open",
-   "current": "Node environments (bundle projects, releases, ingress) still run on the daemon host through the supervisor.",
-   "desired": "Their features (zero-downtime switch, ingress, domains) ported to computers, then retired.",
-   "impact": "A second deployment model remains for bundle projects (not for applications).",
-   "evidence": "execution_paths",
-   "next": "Port zero-downtime switching and ingress to computers (G-DEP-1, G-APP-1), then retire node environments."
+   "current": "A computer runs the target host's runtimes from PATH; it cannot acquire a pinned catalog runtime (WASM, JVM, .NET, or a pinned version).",
+   "desired": "A computer prepares catalog runtimes as target jobs and processes run with them.",
+   "impact": "Node workloads and applications that need a pinned runtime cannot run on a computer (G-ARCH-5).",
+   "evidence": "crates/compute-environment/src/daemon/applications.rs#process_command",
+   "next": "Prepare a catalog runtime into a session as a target job; name it in the process spec."
+  },
+  {
+   "id": "G-RT-4",
+   "area": "Runtime support",
+   "status": "open",
+   "current": "A dependency capsule (compute.deps@1) cannot be materialized into a computer.",
+   "desired": "Capsules materialized into a computer's workspace as a package.",
+   "impact": "Bundles with capsules cannot move to a computer (G-ARCH-5).",
+   "evidence": "crates/compute-environment/src/daemon/applications.rs#process_command",
+   "next": "Import a capsule like a source and install it as a package."
+  },
+  {
+   "id": "G-DEP-2",
+   "area": "Deployment",
+   "status": "open",
+   "current": "Computer processes have no HTTP readiness path and no restart policy: a rollout's health check is a TCP connect, and an exited process is started again.",
+   "desired": "Readiness (HTTP path, task) and restart policy (never, on failure) on ProcessSpec.",
+   "impact": "Node releases gate traffic on HTTP readiness and honor restart policy (G-ARCH-5).",
+   "evidence": "crates/compute-environment/src/daemon/software.rs#rollout_step",
+   "next": "Add readiness and restart to ProcessSpec and the reconciler."
+  },
+  {
+   "id": "G-POL-1",
+   "area": "Policy",
+   "status": "open",
+   "current": "A computer's environment policy is evaluated when the computer is placed; commands inside it are admitted by the target's own policy.",
+   "desired": "Every command in a computer admitted against the environment policy, as every node execution is.",
+   "impact": "Moving node workloads to computers would weaken per-execution admission (G-ARCH-5).",
+   "evidence": "crates/compute-environment/src/daemon/computers.rs#place_on",
+   "next": "Carry the environment policy on target jobs."
+  },
+  {
+   "id": "G-EXEC-3",
+   "area": "Execution",
+   "status": "open",
+   "current": "A `compute run` workload outlives a CLI killed with SIGKILL, untracked (no record, stop, or recovery).",
+   "desired": "Ephemeral execution ends with its caller.",
+   "impact": "An orphaned ephemeral process holds resources nobody owns.",
+   "evidence": "crates/compute-cli/tests/execution_paths.rs (probe in the audit)",
+   "next": "Tie the workload to its caller (parent-death signal) for local ephemeral runs only."
   },
   {
    "id": "G-ARCH-3",
@@ -6254,7 +6318,7 @@
    "desired": "The daemon coordinates; computers execute.",
    "impact": "The daemon is both coordinator and executor.",
    "evidence": "execution_paths",
-   "next": "Covered by G-ARCH-5."
+   "next": "Covered by G-ARCH-5 (blocked)."
   },
   {
    "id": "G-EXEC-2",
@@ -6750,7 +6814,7 @@
   {
    "stage": "EXECUTION",
    "items": [
-    "One deployment model: retire or port node environments (G-ARCH-5, G-EXEC-1); applications are converged (G-ARCH-2)",
+    "One deployment model: node environments converge once G-DEP-1, G-APP-1, G-RT-3, G-RT-4, G-DEP-2, G-POL-1 close (G-ARCH-5, blocked); applications are converged (G-ARCH-2)",
     "Cancel/retry for computer jobs and operations (G-EXEC-2)"
    ]
   },
