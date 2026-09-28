@@ -728,6 +728,7 @@ fn evaluate(
                     .map(|descriptor| descriptor.availability.expires_at.to_rfc3339())
                     .unwrap_or_default()
             ),
+            violations: vec![],
         }),
         _ => record.error.clone(),
     };

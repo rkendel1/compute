@@ -319,6 +319,27 @@ fn discover_distribution_runtime(root: &Path, definition: &RuntimeDefinition) ->
     discover_executable(&path, definition, RuntimeSource::Distribution, true)
 }
 
+/// The Microsoft.NETCore.App runtimes in `dotnet --list-runtimes` output,
+/// one `Microsoft.NETCore.App <version>` line each, in the order dotnet
+/// lists them. `None` when there is none.
+fn dotnet_runtimes(listing: &str) -> Option<String> {
+    let mut runtimes: Vec<String> = vec![];
+    for line in listing.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some("Microsoft.NETCore.App") {
+            continue;
+        }
+        let Some(version) = parts.next() else {
+            continue;
+        };
+        let runtime = format!("Microsoft.NETCore.App {version}");
+        if !runtimes.contains(&runtime) {
+            runtimes.push(runtime);
+        }
+    }
+    (!runtimes.is_empty()).then(|| runtimes.join("\n"))
+}
+
 fn discover_host_runtime(definition: &RuntimeDefinition) -> DiscoveredRuntime {
     for name in definition.host_names {
         if let Ok(path) = which::which(name) {
@@ -414,6 +435,25 @@ fn discover_executable(
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let version = if stdout.is_empty() { stderr } else { stdout };
+    // `dotnet --list-runtimes` lists every installed framework with its
+    // install path. What runs a workload is a Microsoft.NETCore.App
+    // runtime: report those versions, and nothing about the host's paths.
+    let version = if definition.invocation == Invocation::Dotnet {
+        match dotnet_runtimes(&version) {
+            Some(runtimes) => runtimes,
+            None => {
+                return DiscoveredRuntime::unavailable(
+                    source,
+                    format!(
+                        "{} reports no Microsoft.NETCore.App runtime",
+                        path.display()
+                    ),
+                );
+            }
+        }
+    } else {
+        version
+    };
     if require_pinned_version
         && !compute_core::runtime_version_matches(definition.kind, &definition.version, &version)
     {
@@ -1067,6 +1107,34 @@ process_adapter!(ShellRuntime, Shell);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dotnet_reports_its_runtimes_not_its_install_paths() {
+        let listing = "Microsoft.AspNetCore.App 8.0.11 [/usr/share/dotnet/shared/Microsoft.AspNetCore.App]\n\
+                       Microsoft.NETCore.App 8.0.11 [/usr/share/dotnet/shared/Microsoft.NETCore.App]\n\
+                       Microsoft.NETCore.App 9.0.1 [/usr/share/dotnet/shared/Microsoft.NETCore.App]\n\
+                       Microsoft.NETCore.App 9.0.1 [/opt/dotnet/shared/Microsoft.NETCore.App]";
+        let runtimes = dotnet_runtimes(listing).unwrap();
+        assert_eq!(
+            runtimes,
+            "Microsoft.NETCore.App 8.0.11\nMicrosoft.NETCore.App 9.0.1"
+        );
+        assert!(compute_core::runtime_version_matches(
+            RuntimeKind::Dotnet,
+            "9.0.1",
+            &runtimes
+        ));
+        assert!(compute_core::runtime_version_matches(
+            RuntimeKind::Dotnet,
+            ">=8",
+            &runtimes
+        ));
+        assert_eq!(dotnet_runtimes(""), None);
+        assert_eq!(
+            dotnet_runtimes("Microsoft.AspNetCore.App 8.0.11 [/usr/share/dotnet]"),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn availability_reports_known_runtime() {

@@ -1269,6 +1269,23 @@ pub(crate) fn placed(report: &PlacementReport, json: bool) -> bool {
             provider.provider_id,
             provider.status.as_str()
         );
+        if let Some(error) = &provider.error {
+            if error.violations.is_empty() {
+                eprintln!("  {}: {}", error.code, error.message);
+            }
+            for violation in &error.violations {
+                eprintln!(
+                    "  {}: {}: {}",
+                    error.code, violation.field, violation.reason
+                );
+                if let Some(expected) = &violation.expected {
+                    eprintln!("    expected: {expected}");
+                }
+                if let Some(actual) = &violation.actual {
+                    eprintln!("    actual: {actual}");
+                }
+            }
+        }
         for reason in &provider.reasons {
             eprintln!(
                 "  {}: required {}, available {}{}",

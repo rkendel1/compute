@@ -692,6 +692,7 @@ fn unavailable_and_invalid_providers_are_excluded_with_their_own_status() {
         error: Some(compute_placement::DiscoveryError {
             code: "provider_unavailable".into(),
             message: "connection refused".into(),
+            violations: vec![],
         }),
     };
     records[2] = DiscoveryRecord {
@@ -701,6 +702,7 @@ fn unavailable_and_invalid_providers_are_excluded_with_their_own_status() {
         error: Some(compute_placement::DiscoveryError {
             code: "provider_capabilities_invalid".into(),
             message: "protocol".into(),
+            violations: vec![],
         }),
     };
     let report = place(
