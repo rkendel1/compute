@@ -12,8 +12,11 @@ name: test
 #
 # `browser` certifies the control-plane UI in Chromium against real
 # daemons and targets: the operator journey, computers that become
-# unreachable, lost, recovered, and replaced, Work mode, and the whole
-# product from one command. A missing browser fails it; nothing skips.
+# unreachable, lost, recovered, and replaced, an application deployed,
+# observed, logged, and rolled back as its computer and versions, Work mode,
+# and the whole product from one command. A missing browser fails it;
+# nothing skips. Each file launches a whole Compute on the runner, so they
+# run one at a time.
 
 on:
   workflow_dispatch:

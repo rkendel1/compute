@@ -30,7 +30,7 @@ mod software;
 mod views;
 mod work;
 
-pub use applications::{APPLICATION_WORKLOAD, APPLICATIONS_ENVIRONMENT};
+pub use applications::application_environment;
 pub use computers::{ComputerExec, ComputerJob};
 pub use views::EventFilter;
 

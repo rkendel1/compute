@@ -7,9 +7,13 @@
 //!                  runs workloads only        daemon       daemon
 //! compute deploy hello-api
 //!   → placement rejects jobs-only, selects provider-a
-//!   → provider-a's daemon releases v1, returns the endpoint
+//!   → provider-a's daemon: the application's computer on its target,
+//!     the project's version, a rollout, the endpoint
 //! v2 · rollback (v3) · stop · receipts that verify offline
 //! ```
+//!
+//! Each provider daemon controls one `compute serve` target, where its
+//! applications' computers run: the daemon's own node never runs them.
 //!
 //! Every provider is an ordinary Compute process on this machine; nothing
 //! here depends on a container runtime, a VM, or the network. Managed
@@ -21,8 +25,6 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -71,6 +73,8 @@ struct Node {
     endpoints: u16,
     instances: u16,
     offer: Option<String>,
+    /// The daemon's own pool: the target its computers run on.
+    targets: PathBuf,
 }
 
 struct Pool {
@@ -121,6 +125,7 @@ impl Pool {
     /// when `None`). Its index in `daemons`.
     fn start_daemon(&mut self, name: &str, token: &str, offer: Option<&str>) -> usize {
         let listen = free_window(1);
+        let targets = self.start_target(name);
         let node = Node {
             name: name.into(),
             url: format!("http://127.0.0.1:{listen}"),
@@ -130,6 +135,7 @@ impl Pool {
             endpoints: free_window(4),
             instances: free_window(12),
             offer: offer.map(str::to_owned),
+            targets,
         };
         self.launch(&node);
         self.daemons.push(node);
@@ -147,6 +153,8 @@ impl Pool {
             ])
             .arg("--state-dir")
             .arg(self.root.path().join(format!("node-{}", node.name)))
+            .arg("--pool-config")
+            .arg(&node.targets)
             .args([
                 "--port-range",
                 &format!("{}-{}", node.endpoints, node.endpoints + 3),
@@ -188,6 +196,47 @@ impl Pool {
             TcpStream::connect(("127.0.0.1", node.listen)).is_err()
         });
         self.launch(node);
+    }
+
+    /// Start the `compute serve` target a daemon's computers run on, trusting
+    /// that daemon alone, and write the daemon's pool naming it.
+    fn start_target(&mut self, daemon: &str) -> PathBuf {
+        let name = format!("target-{daemon}");
+        let port = free_window(1);
+        let credential = targets::issue(self.root.path(), &name, daemon);
+        let child = Command::new(BIN)
+            .args(["serve", "--listen", &format!("127.0.0.1:{port}")])
+            .arg("--job-store")
+            .arg(self.root.path().join(format!("jobs-{name}")))
+            .arg("--session-store")
+            .arg(self.root.path().join(format!("sessions-{name}")))
+            .arg("--credentials")
+            .arg(&credential.credentials)
+            .env("COMPUTE_RUNTIME_CATALOG", &self.catalog)
+            .env(
+                "COMPUTE_RUNTIME_STORE",
+                self.root.path().join(format!("store-{name}")),
+            )
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        self.servers.push(child);
+        wait_until("the target answers", || {
+            TcpStream::connect(("127.0.0.1", port)).is_ok()
+        });
+        let pool = self.root.path().join(format!("{name}-pool.toml"));
+        std::fs::write(
+            &pool,
+            format!(
+                "[providers.{name}]\nkind = \"remote\"\nendpoint = \"http://127.0.0.1:{port}\"\n{}",
+                credential.pool_line()
+            ),
+        )
+        .unwrap();
+        pool
     }
 
     /// Start `compute serve` offering `offer` (its default when `None`).
@@ -328,6 +377,13 @@ impl Drop for Pool {
             let _ = server.kill();
             let _ = server.wait();
         }
+        // The processes computers started outlive their target.
+        let _ = Command::new("sh")
+            .arg("-c")
+            .arg("find \"$1\" -path '*/.compute/processes/*.pid' | while read -r f; do kill -KILL -\"$(cat \"$f\")\" 2>/dev/null; done; true")
+            .arg("kill")
+            .arg(self.root.path())
+            .status();
     }
 }
 
@@ -443,17 +499,57 @@ fn an_application_moves_from_source_to_a_placed_versioned_verifiable_deployment(
     let endpoint = v1["endpoint"].as_str().unwrap().to_owned();
     assert!(endpoint.starts_with("http://127.0.0.1:"), "{endpoint}");
     assert_eq!(v1["deployment"]["runtime"], "python");
-    // Application compatibility deploys use their deterministic Computer
-    // environment rather than the old shared applications environment.
-    let applications_environment: Value =
-        serde_json::from_slice(&pool.api(0, "/environments/application-hello-api")).unwrap();
-    assert!(
-        !applications_environment["computer"].is_null(),
-        "{applications_environment:#}"
-    );
+    // The release is the canonical model's records, and every ID the
+    // application API returns resolves through the canonical APIs: the
+    // application's computer, the project's version, the rollout, and the
+    // durable target job that started it.
+    assert_eq!(v1["environment"], "application-hello-api");
+    let computer: Value =
+        serde_json::from_slice(&pool.api(0, "/environments/application-hello-api/computer"))
+            .unwrap();
+    assert_eq!(computer["status"], "running", "{computer:#}");
+    assert_eq!(computer["session_id"], v1["session_id"]);
+    assert_eq!(computer["target"], v1["target"]);
+    assert_eq!(v1["rollout_id"], v1["deployment_id"]);
+    let rollout: Value = serde_json::from_slice(&pool.api(
+        0,
+        &format!("/rollouts/{}", v1["rollout_id"].as_str().unwrap()),
+    ))
+    .unwrap();
+    assert_eq!(rollout["status"], "active", "{rollout:#}");
+    assert_eq!(rollout["version_id"], v1["version_id"]);
+    let label = v1["deployment"]["canonical"]["version"].as_str().unwrap();
+    let published: Value =
+        serde_json::from_slice(&pool.api(0, &format!("/software/hello-api/versions/{label}")))
+            .unwrap();
+    assert_eq!(published["status"], "published", "{published:#}");
     assert_eq!(
-        applications_environment["projects"][0]["deployments"][0]["deployment_id"],
-        v1["deployment_id"]
+        published["artifact"]["artifact_id"],
+        v1["artifact"]["artifact_id"]
+    );
+    let job: Value = serde_json::from_slice(&pool.api(
+        0,
+        &format!(
+            "/environments/application-hello-api/jobs/{}",
+            v1["job_id"].as_str().unwrap()
+        ),
+    ))
+    .unwrap();
+    assert_eq!(job["job"]["status"], "succeeded", "{job:#}");
+    // Nothing of the node model: no node environment named `applications`,
+    // no bundle project, no daemon-host deployment.
+    let (status, _) = http_get(
+        &pool.daemons[0].url,
+        "/environments/applications",
+        Some(TOKEN_A),
+    )
+    .unwrap();
+    assert_eq!(status, 404);
+    let deployments: Value = serde_json::from_slice(&pool.api(0, "/deployments")).unwrap();
+    assert_eq!(
+        deployments.as_array().map(Vec::len),
+        Some(0),
+        "{deployments:#}"
     );
     // Placement evidence: the jobs-only provider was rejected for this
     // deployment, and provider-a proved it can host it.
@@ -475,34 +571,17 @@ fn an_application_moves_from_source_to_a_placed_versioned_verifiable_deployment(
     let first = version(&pool.json(&["history", app, "--json"]), 1);
     assert!(first["receipt"].as_str().is_some(), "{first:#}");
 
-    // v2 replaces v1 without dropping a request.
+    // v2 replaces v1 in place, on the same computer, at the same endpoint.
+    // (The computer restarts the process; zero-downtime switching is not
+    // part of the computer model yet.)
     set_greeting(&application, "Hello v2");
-    let serving = Arc::new(AtomicBool::new(true));
-    let watcher = {
-        let serving = serving.clone();
-        let endpoint = endpoint.clone();
-        std::thread::spawn(move || {
-            let mut seen = vec![];
-            while serving.load(Ordering::SeqCst) {
-                seen.push(fetch(&endpoint));
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            seen
-        })
-    };
     let v2 = pool.json(&["deploy", app, "--json"]);
-    std::thread::sleep(Duration::from_millis(200));
-    serving.store(false, Ordering::SeqCst);
-    let seen = watcher.join().unwrap();
     assert_eq!(v2["version"], 2);
     assert_eq!(v2["endpoint"], endpoint.as_str(), "the endpoint is stable");
-    assert!(
-        seen.iter()
-            .all(|body| matches!(body.as_deref(), Some("Hello from Compute" | "Hello v2"))),
-        "every request during the release was answered: {seen:?}"
-    );
-    assert_eq!(seen.first().unwrap().as_deref(), Some("Hello from Compute"));
-    assert_eq!(fetch(&endpoint).as_deref(), Some("Hello v2"));
+    assert_eq!(v2["session_id"], v1["session_id"], "the same machine");
+    wait_until("v2 answers", || {
+        fetch(&endpoint).as_deref() == Some("Hello v2")
+    });
     let history = pool.json(&["history", app, "--json"]);
     assert_eq!(version(&history, 2)["state"], "active");
     assert_eq!(version(&history, 1)["state"], "superseded");
@@ -512,7 +591,9 @@ fn an_application_moves_from_source_to_a_placed_versioned_verifiable_deployment(
     assert_eq!(v3["version"], 3);
     assert_eq!(v3["deployment"]["rollback_of"], 1);
     assert_eq!(v3["endpoint"], endpoint.as_str());
-    assert_eq!(fetch(&endpoint).as_deref(), Some("Hello from Compute"));
+    wait_until("v3 serves v1's code", || {
+        fetch(&endpoint).as_deref() == Some("Hello from Compute")
+    });
     let history = pool.json(&["history", app, "--json"]);
     assert_eq!(version(&history, 3)["state"], "active");
     assert_eq!(version(&history, 3)["rollback_of"], 1);
@@ -600,66 +681,41 @@ fn an_application_moves_from_source_to_a_placed_versioned_verifiable_deployment(
     assert_eq!(history.as_array().unwrap().len(), 3);
     assert_eq!(version(&history, 3)["state"], "stopped");
 
-    // Evidence: application → deployment → execution → receipt, fetched
-    // through the API and verified offline.
+    // Evidence: application → rollout → target job → receipt: the
+    // target's receipt for the job that started v3, served byte for byte
+    // and verified offline. There is no second receipt: the node model's
+    // receipt store has none.
     let v3_id = version(&history, 3)["deployment_id"]
         .as_str()
         .unwrap()
         .to_owned();
-    let mut deployment = Value::Null;
-    wait_until("v3's execution receipt is bound", || {
-        deployment = serde_json::from_slice(
-            &pool.api(0, &format!("/applications/hello-api/deployments/{v3_id}")),
-        )
-        .unwrap();
-        deployment["execution_receipts"]
-            .as_array()
-            .is_some_and(|receipts| !receipts.is_empty())
-    });
-    let receipt_id = deployment["execution_receipts"][0].as_str().unwrap();
-    let stored = pool.api(0, &format!("/receipts/{receipt_id}"));
+    let deployment: Value = serde_json::from_slice(
+        &pool.api(0, &format!("/applications/hello-api/deployments/{v3_id}")),
+    )
+    .unwrap();
+    let receipt_id = deployment["receipt"].as_str().unwrap();
+    assert_eq!(deployment["execution_receipts"][0], receipt_id);
+    let stored = pool.api(
+        0,
+        &format!("/applications/hello-api/deployments/{v3_id}/receipt"),
+    );
     let file = pool.root.path().join("receipt.json");
     std::fs::write(&file, &stored).unwrap();
     let verified = pool.compute(&["receipt", "verify", file.to_str().unwrap()]);
     assert!(verified.status.success(), "{}", text(&verified));
     let receipt: Value = serde_json::from_slice(&stored).unwrap();
     assert_eq!(receipt["receipt_hash"], receipt_id);
-    assert_eq!(receipt["application"]["name"], "hello-api");
-    assert_eq!(receipt["application"]["id"], v1["application"]["id"]);
-    assert_eq!(receipt["scope"]["deployment_id"], v3_id.as_str());
-    assert!(receipt["provider"].is_object(), "{receipt:#}");
-    assert!(
-        receipt["placement"]["placement_id"].is_string(),
-        "{receipt:#}"
-    );
-    assert!(receipt["admission_id"].is_string(), "{receipt:#}");
-    assert!(
-        receipt["runtime"]["distribution_id"].is_string(),
-        "{receipt:#}"
-    );
-    let deployment_receipt: Value =
-        serde_json::from_slice(&pool.api(0, &format!("/deployments/{v3_id}/receipt"))).unwrap();
-    assert_eq!(deployment_receipt["application"]["name"], "hello-api");
-    assert_eq!(deployment_receipt["deployment_version"], 3);
-    assert!(
-        deployment_receipt["execution_receipts"]
-            .as_array()
-            .unwrap()
-            .contains(&Value::String(receipt_id.into())),
-        "{deployment_receipt:#}"
-    );
-    let v1_receipt: Value = serde_json::from_slice(&pool.api(
-        0,
-        &format!(
-            "/deployments/{}/receipt",
-            first["deployment_id"].as_str().unwrap()
-        ),
-    ))
-    .unwrap();
     assert_eq!(
-        v1_receipt["workloads"][0]["pool_placement"]["provider_id"],
-        "provider-a"
+        receipt["execution_id"],
+        deployment["canonical"]["execution_id"]
     );
+    let (status, _) = http_get(
+        &pool.daemons[0].url,
+        &format!("/receipts/{receipt_id}"),
+        Some(TOKEN_A),
+    )
+    .unwrap();
+    assert_eq!(status, 404, "no second, application-only receipt");
     // The application is not on provider-b.
     let (status, _) = http_get(
         &pool.daemons[1].url,
@@ -778,18 +834,15 @@ fn a_portable_artifact_is_deployed_by_url_and_fetched_by_its_provider() {
     wait_until("the artifact's application answers", || {
         fetch(&endpoint).as_deref() == Some("Hello from Compute")
     });
-    let receipt: Value = serde_json::from_slice(&pool.api(
-        1,
-        &format!(
-            "/deployments/{}/receipt",
-            deployed["deployment_id"].as_str().unwrap()
-        ),
-    ))
-    .unwrap();
-    assert_eq!(
-        receipt["workloads"][0]["application_artifact"]["artifact_id"],
-        artifact_id.as_str()
-    );
+    // The canonical version records the artifact its source came from.
+    let label = deployed["deployment"]["canonical"]["version"]
+        .as_str()
+        .unwrap();
+    let published: Value =
+        serde_json::from_slice(&pool.api(1, &format!("/software/hello-http/versions/{label}")))
+            .unwrap();
+    assert_eq!(published["artifact"]["artifact_id"], artifact_id.as_str());
+    assert_eq!(published["artifact"]["url"], url.as_str());
 }
 
 /// Serve `bytes` at `path` over HTTP on a free port, for as long as the

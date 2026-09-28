@@ -770,6 +770,8 @@ export const applicationArtifactEvidence = s.object({
   url: s.optional(s.string()),
   version: s.optional(s.string()),
   capabilities: s.optional(s.array(s.string())),
+  runtime: s.optional(s.string()),
+  runtime_version: s.optional(s.string()),
 });
 
 const deploymentWorkload = s.object({

@@ -486,15 +486,29 @@ fn set(
 }
 
 impl Daemon {
-    /// The ports processes of every environment listen on.
-    async fn ports_in_use(&self) -> BTreeSet<u16> {
+    /// The ports processes of every environment listen on, and the
+    /// endpoint ports node environments hold: computers and the node model
+    /// may share a host, and neither may take the other's port.
+    pub(crate) async fn ports_in_use(&self) -> BTreeSet<u16> {
         let inner = self.inner.lock().await;
-        inner
-            .desired
+        let desired = &inner.desired;
+        desired
             .environments
             .values()
             .filter_map(|record| record.value.contents.as_ref())
             .flat_map(|contents| contents.processes.iter().filter_map(|process| process.port))
+            .chain(
+                desired
+                    .traffic
+                    .values()
+                    .map(|assignment| assignment.value.host_port),
+            )
+            .chain(
+                desired
+                    .workloads
+                    .values()
+                    .flat_map(|workload| workload.value.ports.iter().map(|binding| binding.host)),
+            )
             .collect()
     }
 
@@ -636,6 +650,19 @@ impl Daemon {
         operator: &str,
         request: PublishRequest,
     ) -> Result<VersionRecord, EnvironmentError> {
+        self.publish_version_from(project, operator, request, None)
+            .await
+    }
+
+    /// Publish a version whose source was imported into the computer from
+    /// an artifact, and record which one: the same publish.
+    pub(crate) async fn publish_version_from(
+        self: &Arc<Self>,
+        project: &str,
+        operator: &str,
+        request: PublishRequest,
+        artifact: Option<compute_state::ApplicationArtifactEvidence>,
+    ) -> Result<VersionRecord, EnvironmentError> {
         let record = self
             .owned_environment(&request.environment, operator)
             .await?;
@@ -711,6 +738,7 @@ impl Daemon {
             environment: record.value.name.clone(),
             commit: None,
             package_digest: None,
+            artifact,
             assembly: ProjectAssembly {
                 project: Some(spec),
                 ..Default::default()
@@ -1634,6 +1662,14 @@ impl Daemon {
             .collect::<Vec<_>>();
         if checked_out && built {
             if view.converged && view.observed.converged_generation >= value.contents_generation {
+                // The execution that made the version run: the durable job
+                // that started its (first) process, and that job's receipt.
+                let started = processes
+                    .iter()
+                    .find_map(|name| view.observed.processes.get(name))
+                    .map(|seen| seen.evidence.clone());
+                let restart = step(&value.steps, "Restart applications");
+                let recorded = restart.and_then(|index| value.steps[index].job_id.clone());
                 set(
                     &mut value.steps,
                     "Restart applications",
@@ -1643,8 +1679,16 @@ impl Daemon {
                     } else {
                         processes.join(", ")
                     }),
-                    None,
+                    started
+                        .as_ref()
+                        .map(|evidence| (evidence.job_id.as_str(), evidence.execution_id.as_str())),
                 );
+                if let (Some(index), Some(evidence)) = (restart, &started)
+                    && (recorded.as_deref() != Some(evidence.job_id.as_str())
+                        || value.steps[index].receipt.is_none())
+                {
+                    value.steps[index].receipt = self.job_receipt_id(&view, &evidence.job_id).await;
+                }
             } else {
                 set(
                     &mut value.steps,
@@ -1725,6 +1769,19 @@ impl Daemon {
                 .await?;
         }
         Ok(true)
+    }
+
+    /// The receipt the computer's target issued for one of its jobs.
+    pub(crate) async fn job_receipt_id(&self, view: &ComputerView, job_id: &str) -> Option<String> {
+        let client = self.target_client(view.target.as_deref()?).ok()?;
+        let receipt = tokio::time::timeout(
+            self.config.computer_liveness_timeout,
+            client.job_receipt(job_id),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        Some(receipt.receipt.receipt_hash.0)
     }
 
     async fn finish_rollout(

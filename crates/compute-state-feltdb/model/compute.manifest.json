@@ -1667,6 +1667,11 @@
           "required": false
         },
         {
+          "name": "artifact",
+          "type": "json",
+          "required": false
+        },
+        {
           "name": "assembly",
           "type": "json",
           "required": true

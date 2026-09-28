@@ -120,7 +120,8 @@ through the selected server's `/compute/sessions` routes; see
 
 A deployment is placed with `SubmissionMode::Deployment` and then released
 through the selected daemon's authenticated `/applications` API (see
-[applications.md](applications.md)). Nothing here is specific to where the
+[applications.md](applications.md)); that daemon runs it on a computer of
+its own, on a target in the daemon's pool. Nothing here is specific to where the
 daemon runs: a laptop, a Linux host, a VM, or an Apple Container VM are all
 the same provider to Compute.
 

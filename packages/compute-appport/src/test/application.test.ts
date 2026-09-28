@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
@@ -138,8 +138,39 @@ test("an agent deploys, observes, rolls back, and stops an application through A
   const [listen, endpoints, instances] = [await freePort(), 21000 + (process.pid % 2000) * 8, 38000 + (process.pid % 2000) * 8];
   const node = `http://127.0.0.1:${listen}`;
   const token = "appport-provider-operator";
+  // The target the provider's computers run on: applications run there, in
+  // their own computers, never on the provider's daemon host.
+  const targetPort = await freePort();
+  const issued = spawnSync(computeBinary, [
+    "target", "credential", "issue", "--credentials", join(root, "target-credentials.json"),
+    "--control-plane", "appport-provider", "--token-file", join(root, "target.token"), "--json",
+  ], { encoding: "utf8" });
+  assert.equal(issued.status, 0, issued.stderr);
+  const target = spawn(computeBinary, [
+    "serve", "--listen", `127.0.0.1:${targetPort}`,
+    "--job-store", join(root, "target-jobs"), "--session-store", join(root, "target-sessions"),
+    "--credentials", join(root, "target-credentials.json"),
+  ], {
+    stdio: "ignore",
+    env: { ...process.env, COMPUTE_RUNTIME_CATALOG: catalog, COMPUTE_RUNTIME_STORE: join(root, "target-store") },
+  });
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const answered = await new Promise<boolean>((done) => {
+      const probe = httpRequest(`http://127.0.0.1:${targetPort}/compute/health`, { timeout: 500 }, (response) => {
+        response.resume();
+        done(true);
+      });
+      probe.on("error", () => done(false));
+      probe.end();
+    });
+    if (answered) break;
+    await new Promise((wait) => setTimeout(wait, 50));
+  }
+  const nodePool = join(root, "node-pool.toml");
+  await writeFile(nodePool, `[providers.target]\nkind = "remote"\nendpoint = "http://127.0.0.1:${targetPort}"\ntoken_file = ${JSON.stringify(join(root, "target.token"))}\n`);
   const started = spawnSync(computeBinary, [
     "start", "--detach", "--listen", `127.0.0.1:${listen}`, "--state-dir", join(root, "node"),
+    "--pool-config", nodePool,
     "--port-range", `${endpoints}-${endpoints + 3}`,
     "--instance-port-range", `${instances}-${instances + 7}`,
     "--reconcile-interval-ms", "500", "--require-token-env", "NODE_TOKEN",
@@ -155,6 +186,9 @@ test("an agent deploys, observes, rolls back, and stops an application through A
   assert.equal(started.status, 0, started.stderr);
   context.after(async () => {
     spawnSync(computeBinary, ["stop", "--daemon", node], { env: { ...process.env, COMPUTE_DAEMON_TOKEN: token } });
+    target.kill("SIGKILL");
+    // The processes the application's computer started outlive the target.
+    spawnSync("sh", ["-c", `find "$1" -path '*/.compute/processes/*.pid' | while read -r f; do kill -KILL -"$(cat "$f")" 2>/dev/null; done; true`, "kill", root]);
     await rm(root, { recursive: true, force: true });
   });
   const poolConfig = join(root, "compute-pool.toml");
@@ -198,6 +232,13 @@ test("an agent deploys, observes, rolls back, and stops an application through A
   assert.equal(v1.active, true);
   assert.match(v1.artifact.artifact_id, /^sha256:/);
   assert.equal(v1.placement.provider_id, "linux-worker");
+  // The release names canonical records: the application's computer, the
+  // project's version, and the rollout that is this deployment.
+  assert.equal(v1.environment, "application-hello-api");
+  assert.match(v1.computer_id, /^cmp_/);
+  assert.match(v1.version_id, /^ver_/);
+  assert.equal(v1.rollout_id, v1.deployment_id);
+  assert.match(v1.deployment_id, /^rol_/);
   let body: string | undefined;
   for (let attempt = 0; attempt < 100 && body !== "Hello from Compute"; attempt += 1) {
     body = await fetchText(v1.endpoint);
@@ -227,7 +268,12 @@ test("an agent deploys, observes, rolls back, and stops an application through A
   assert.equal(v3.version, 3);
   assert.equal(v3.rollback_of, 1);
   assert.equal(v3.artifact.artifact_id, v1.artifact.artifact_id);
-  assert.equal(await fetchText(v1.endpoint), "Hello from Compute");
+  body = undefined;
+  for (let attempt = 0; attempt < 100 && body !== "Hello from Compute"; attempt += 1) {
+    body = await fetchText(v1.endpoint);
+    if (body !== "Hello from Compute") await new Promise((wait) => setTimeout(wait, 100));
+  }
+  assert.equal(body, "Hello from Compute");
 
   const history = output<any[]>(await app.handleRequest(
     envelope("compute.application.history", { application: "hello-api" }), { session: agent },

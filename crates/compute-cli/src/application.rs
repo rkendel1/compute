@@ -15,7 +15,8 @@
 //!   → provider discovery and placement (the caller-owned pool)
 //!   → the selected provider's Compute daemon: /applications/{name}
 //!     (a URL is fetched and verified there, by the provider)
-//!   → revision, release, stable endpoint, versions, evidence
+//!   → its computer, the project's version, the rollout, the target job,
+//!     the endpoint, the receipt: the canonical deployment model
 //! ```
 //!
 //! The daemon on the selected provider owns everything after placement;
@@ -708,12 +709,15 @@ pub async fn deploy(
                 port: None,
                 env: (!env.is_empty()).then(|| env.into_iter().collect()),
                 source: Some(source),
-                placement: Some(placement),
+                placement: Some(placement.clone()),
             }),
         )
         .await
         .map_err(|error| provider_error(&host, error))?;
-    let deployment = wait_for_release(&host, &name, &started.deployment_id).await?;
+    let mut deployment = wait_for_release(&host, &name, &started.deployment_id).await?;
+    // The pool placement is this caller's decision, reported with the
+    // release it chose a provider for.
+    deployment.placement = Some(placement);
     finish(&host, &name, &deployment, json).await
 }
 
@@ -892,6 +896,7 @@ async fn finish(
         value["receipt"] = serde_json::json!(deployment.receipt);
         value["artifact"] = serde_json::json!(deployment.artifact);
         value["deployment"] = serde_json::to_value(deployment)?;
+        canonical(&mut value, deployment);
         print_json(&value);
     } else {
         print_release(host, &view, deployment);
@@ -1142,6 +1147,25 @@ fn plain(value: &serde_json::Value) -> String {
     }
 }
 
+/// The canonical records a release is, at the top level: the computer, the
+/// project's version, the rollout, and the target job and its receipt.
+fn canonical(value: &mut serde_json::Value, deployment: &ApplicationDeploymentView) {
+    if let Some(records) = &deployment.canonical {
+        for (field, record) in [
+            ("environment", serde_json::json!(records.environment)),
+            ("computer_id", serde_json::json!(records.computer_id)),
+            ("version_id", serde_json::json!(records.version_id)),
+            ("rollout_id", serde_json::json!(records.rollout_id)),
+            ("target", serde_json::json!(records.target)),
+            ("session_id", serde_json::json!(records.session_id)),
+            ("job_id", serde_json::json!(records.job_id)),
+            ("execution_id", serde_json::json!(records.execution_id)),
+        ] {
+            value[field] = record;
+        }
+    }
+}
+
 fn with_provider(host: &Host, view: &ApplicationView) -> serde_json::Value {
     let mut value = serde_json::to_value(view).unwrap_or_default();
     value["provider"] = serde_json::json!(host.provider_id);
@@ -1152,6 +1176,7 @@ fn with_provider(host: &Host, view: &ApplicationView) -> serde_json::Value {
         value["runtime"] = serde_json::json!(active.runtime);
         value["receipt"] = serde_json::json!(active.receipt);
         value["artifact"] = serde_json::json!(active.artifact);
+        canonical(&mut value, active);
     }
     value
 }

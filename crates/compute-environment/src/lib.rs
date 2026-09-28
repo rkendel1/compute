@@ -31,8 +31,8 @@ pub mod upgrade;
 pub use compute_network::acme::AcmeConfig;
 pub use compute_network::dns::DnsProviderConfig;
 pub use daemon::{
-    ComputerExec, ComputerJob, Daemon, DaemonConfig, EventFilter, NetworkConfig, desired_snapshot,
-    observed_snapshot,
+    ComputerExec, ComputerJob, Daemon, DaemonConfig, EventFilter, NetworkConfig,
+    application_environment, desired_snapshot, observed_snapshot,
 };
 pub use model::*;
 pub use status::*;

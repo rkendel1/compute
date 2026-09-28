@@ -668,6 +668,7 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
         detail: Some("make".into()),
         job_id: Some("job_1".into()),
         execution_id: Some("exec_1".into()),
+        receipt: Some("sha256:receipt".into()),
         at: Some(now),
     };
     round_trip(
@@ -681,6 +682,14 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             environment: format!("computer{run}"),
             commit: Some("abc123".into()),
             package_digest: Some("sha256:pkg".into()),
+            artifact: Some(crate::ApplicationArtifactEvidence {
+                artifact_id: "sha256:artifact".into(),
+                url: None,
+                version: Some("1.0.0".into()),
+                capabilities: vec!["http.hello".into()],
+                runtime: Some("python".into()),
+                runtime_version: None,
+            }),
             assembly: compute_core::ProjectAssembly {
                 repository: Some(contents.repositories[0].clone()),
                 project: Some(contents.projects[0].clone()),

@@ -1700,28 +1700,8 @@ const TABS = ['Overview', 'Workloads', 'Deployments', 'Logs', 'Resources', 'Conf
 
 async function projectView(environment, name, tab) {
   const project = await api('GET', `/environments/${enc(environment)}/projects/${enc(name)}`);
-  // A project in `applications` is an application: it is shown as one,
-  // with its versions, active version, and endpoint.
-  const application = environment === 'applications'
-    ? await api('GET', `/applications/${enc(name)}`).catch(() => null) : null;
   const base = `#/environments/${enc(environment)}/projects/${enc(name)}`;
   const active = TABS.includes(tab) ? tab : 'Overview';
-  if (application) {
-    return [
-      h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Environments'), ' / ', h('a', { href: `#/environments/${enc(environment)}` }, 'Applications'), ' / ', name),
-      h('div', { class: 'title' }, h('h1', {}, name), state(application.status),
-        application.active ? h('span', { class: 'chip', 'data-version': String(application.active.version) }, `v${application.active.version}`) : null,
-        h('div', { class: 'actions' },
-          h('button', { onclick: () => { location.hash = `${base}/logs`; } }, 'Logs'),
-          h('button', { onclick: () => rollbackApplication(name, application) }, 'Rollback'),
-          h('button', { class: 'danger', onclick: () => stopApplication(name) }, 'Stop'))),
-      h('div', { class: 'tabs', role: 'tablist' }, TABS.map((item) => h('button', {
-        role: 'tab', class: item === active ? 'active' : '', 'aria-selected': String(item === active),
-        onclick: () => { location.hash = `${base}/${item.toLowerCase()}`; },
-      }, item))),
-      await projectTab(environment, name, project, active, application),
-    ];
-  }
   return [
     h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Environments'), ' / ', h('a', { href: `#/environments/${enc(environment)}` }, environment), ' / ', name),
     h('div', { class: 'title' }, h('h1', {}, `${name.toUpperCase()} / ${environment.toUpperCase()}`), status(project),
@@ -1753,58 +1733,10 @@ function resourceSummary(workloads) {
   ].join('');
 }
 
-/// The version rows of an application, newest first.
-function versionRows(application) {
-  return application.deployments.map((deployment) => h('tr', {
-    class: 'link', 'data-deployment': deployment.deployment_id, 'data-state': deployment.state,
-    onclick: () => { location.hash = `#/deployments/${enc(deployment.deployment_id)}`; },
-  },
-  h('td', {}, h('strong', {}, `v${deployment.version}`), deployment.active ? h('span', { class: 'chip' }, 'active') : null),
-  h('td', {}, state(deployment.state)),
-  h('td', {}, deployment.rollback_of ? `Rollback to v${deployment.rollback_of}` : (deployment.failure ? h('div', { class: 'error' }, deployment.failure) : '—')),
-  h('td', {}, [deployment.runtime, deployment.runtime_version].filter(Boolean).join(' ') || '—'),
-  h('td', {}, ago(deployment.created_at)),
-  h('td', { class: 'mono' }, short(deployment.deployment_id))));
-}
-
-async function rollbackApplication(name, application) {
-  const targets = application.deployments.filter((deployment) => !deployment.active && !['failed', 'rolled_back'].includes(deployment.state));
-  if (!targets.length) { toast('No earlier version to roll back to', true); return; }
-  const select = h('select', { id: 'rollback-version' }, targets.map((deployment) => h('option', { value: `v${deployment.version}` }, `v${deployment.version} · ${ago(deployment.created_at)}`)));
-  modal(`Roll back ${name}`, h('div', {},
-    h('p', {}, 'The chosen version\'s code is deployed again as the next version. History is not edited.'),
-    h('label', { for: 'rollback-version' }, 'Version'), select), [
-    h('button', { onclick: close }, 'Cancel'),
-    h('button', { class: 'danger', onclick: async () => {
-      close();
-      await act(`Rolling ${name} back to ${select.value}`, () => api('POST', `/applications/${enc(name)}/rollback`, { target: select.value }));
-    } }, 'Roll back'),
-  ]);
-}
-
-async function stopApplication(name) {
-  if (await confirmImpact(`Stop ${name}?`, [`${name} stops serving; its endpoint stays reserved`], ['Its versions and evidence', 'Other applications'], 'danger')) {
-    await act(`Stopping ${name}`, () => api('POST', `/applications/${enc(name)}/stop`));
-  }
-}
-
-async function projectTab(environment, name, project, tab, application) {
+async function projectTab(environment, name, project, tab) {
   const services = project.workloads.filter((workload) => workload.kind === 'service');
   switch (tab) {
     case 'Overview': {
-      if (application) {
-        const current = application.active || application.deploying;
-        return h('div', {},
-          h('div', { class: 'grid' },
-            fact('Status', state(application.status)),
-            fact('Version', current ? `v${current.version}` : '—'),
-            fact('Endpoint', application.endpoint ? h('a', { href: application.endpoint, 'data-endpoint': application.endpoint }, application.endpoint) : '—'),
-            fact('Provider', application.node, true),
-            fact('Runtime', current ? [current.runtime, current.runtime_version].filter(Boolean).join(' ') : '—'),
-            fact('Resources', resourceSummary(project.workloads))),
-          h('h2', {}, 'Deployments'),
-          table(['Version', 'State', 'Note', 'Runtime', 'Created', 'Deployment'], versionRows(application), 'No deployments.'));
-      }
       const ports = project.workloads.flatMap((workload) => workload.ports.map((port) => `${workload.name} ${port.name}: endpoint port ${port.host}`));
       const evidence = project.workloads.find((workload) => workload.evidence.admission_id) || { evidence: {} };
       return h('div', {},
@@ -1836,9 +1768,6 @@ async function projectTab(environment, name, project, tab, application) {
             h('button', { class: 'small', onclick: () => workloadLifecycle(environment, name, workload.name, 'restart') }, 'Restart'), ' ',
             h('button', { class: 'small danger', onclick: () => workloadLifecycle(environment, name, workload.name, 'stop') }, 'Stop')]))));
     case 'Deployments': {
-      if (application) {
-        return table(['Version', 'State', 'Note', 'Runtime', 'Created', 'Deployment'], versionRows(application), 'No deployments.');
-      }
       const deployments = await api('GET', `/deployments?environment=${enc(environment)}&project=${enc(name)}&limit=50`);
       const current = project.deployment && project.deployment.deployment_id;
       // A release that completed and is no longer current was replaced.
@@ -1856,10 +1785,6 @@ async function projectTab(environment, name, project, tab, application) {
         h('td', { class: 'mono' }, deployment.promoted_from || '—'))), 'No deployments.');
     }
     case 'Logs': {
-      if (application) {
-        const logs = await api('GET', `/applications/${enc(name)}/logs`);
-        return h('div', {}, h('pre', { class: 'log' }, (logs.stdout || '') + (logs.stderr ? `\n${logs.stderr}` : '') || '(no output yet)'));
-      }
       const panes = [];
       for (const workload of project.workloads) {
         const logs = await api('GET', `/environments/${enc(environment)}/projects/${enc(name)}/workloads/${enc(workload.name)}/logs`);

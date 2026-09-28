@@ -17,7 +17,9 @@ import { applicationArtifactEvidence, poolPlacement } from "./schemas.js";
 
 const applicationName = s.string({ pattern: "^[A-Za-z0-9._-]{1,64}$" });
 const digest = s.string({ pattern: "^sha256:[0-9a-f]{64}$" });
-const deploymentId = s.string({ pattern: "^dep_[0-9a-f]+$" });
+/** A deployment is a canonical rollout (`rol_…`) of the application's project. */
+const deploymentId = s.string({ pattern: "^rol_[0-9a-f]+$" });
+const canonicalId = s.string({ minLength: 1 });
 const providerId = s.string({ pattern: "^[A-Za-z0-9_-]{1,64}$" });
 const timestamp = s.string();
 const versionState = s.enum(["active", "stopped", "superseded", "deploying", "failed", "rolled_back"] as const);
@@ -42,7 +44,7 @@ export const applicationSelectorSchema = s.object({ application: applicationName
 export const applicationRollbackInputSchema = s.object({
   application: applicationName,
   /** A version (`3`, `v3`) or a deployment ID. */
-  version: s.string({ pattern: "^(v?[0-9]+|dep_[0-9a-f]+)$" }),
+  version: s.string({ pattern: "^(v?[0-9]+|rol_[0-9a-f]+)$" }),
 });
 
 /** One version of an application. */
@@ -63,6 +65,24 @@ export const applicationVersionSchema = s.object({
   execution_receipts: s.array(digest),
   created_at: timestamp,
   completed_at: s.optional(timestamp),
+  /** The canonical records this version is: computer, version, rollout, job. */
+  canonical: s.optional(s.object({
+    environment: canonicalId,
+    environment_id: canonicalId,
+    computer_id: canonicalId,
+    project: canonicalId,
+    rollout_id: deploymentId,
+    rollout_kind: s.enum(["deploy", "promote", "rollback"] as const),
+    rollout_status: s.enum(["applying", "active", "failed", "superseded"] as const),
+    version_id: canonicalId,
+    version: canonicalId,
+    commit: s.optional(canonicalId),
+    package_digest: s.optional(canonicalId),
+    target: s.optional(canonicalId),
+    session_id: s.optional(canonicalId),
+    job_id: s.optional(canonicalId),
+    execution_id: s.optional(canonicalId),
+  })),
 });
 
 /** An application as it stands, and the version it serves. */
@@ -78,6 +98,12 @@ export const applicationStatusSchema = s.object({
   receipt: s.optional(digest),
   artifact: s.optional(applicationArtifactEvidence),
   deploying: s.optional(s.integer({ minimum: 1 })),
+  environment: s.optional(canonicalId),
+  computer_id: s.optional(canonicalId),
+  version_id: s.optional(canonicalId),
+  rollout_id: s.optional(deploymentId),
+  job_id: s.optional(canonicalId),
+  execution_id: s.optional(canonicalId),
 });
 
 /** A release: the version it created, where, and its evidence. */
@@ -96,6 +122,12 @@ export const applicationReleaseSchema = s.object({
   receipt: s.optional(digest),
   artifact: s.optional(applicationArtifactEvidence),
   placement: s.optional(poolPlacement),
+  environment: s.optional(canonicalId),
+  computer_id: s.optional(canonicalId),
+  version_id: s.optional(canonicalId),
+  rollout_id: s.optional(deploymentId),
+  job_id: s.optional(canonicalId),
+  execution_id: s.optional(canonicalId),
 });
 
 export const applicationHistorySchema = s.array(applicationVersionSchema);
@@ -275,8 +307,9 @@ function pick(value: Record<string, unknown>, fields: string[]): Record<string, 
 const VERSION_FIELDS = [
   "application", "version", "deployment_id", "state", "active", "rollback_of", "endpoint", "runtime",
   "runtime_version", "placement", "artifact", "failure", "receipt", "execution_receipts", "created_at",
-  "completed_at",
+  "completed_at", "canonical",
 ];
+const CANONICAL_FIELDS = ["environment", "computer_id", "version_id", "rollout_id", "job_id", "execution_id"];
 
 function version(value: Record<string, unknown>): ApplicationVersion {
   return pick(value, VERSION_FIELDS);
@@ -286,7 +319,7 @@ function status(value: Record<string, unknown>): ApplicationStatus {
   const identity = value.application as { id: string; name: string };
   const deploying = value.deploying as { version?: number } | undefined;
   return {
-    ...pick(value, ["application_id", "status", "provider", "endpoint", "version", "deployment_id", "runtime", "receipt", "artifact"]),
+    ...pick(value, ["application_id", "status", "provider", "endpoint", "version", "deployment_id", "runtime", "receipt", "artifact", ...CANONICAL_FIELDS]),
     application_id: identity.id,
     application: identity.name,
     ...(deploying?.version !== undefined ? { deploying: deploying.version } : {}),
@@ -298,7 +331,7 @@ function release(value: Record<string, unknown>): ApplicationRelease {
   const identity = value.application as { id: string; name: string };
   return {
     ...pick(deployment, ["deployment_id", "version", "runtime", "runtime_version", "active", "rollback_of", "receipt", "artifact", "placement"]),
-    ...pick(value, ["provider", "endpoint", "status"]),
+    ...pick(value, ["provider", "endpoint", "status", ...CANONICAL_FIELDS]),
     application_id: identity.id,
     application: identity.name,
   };

@@ -196,7 +196,7 @@ The thirty questions a reader of this audit must be able to answer.
 | --- | --- |
 | Commit | `69b70d9` "Make the control plane the complete product surface" |
 | Code | 15 Rust crates, ~75k lines of Rust in `src/` (compute-environment 23k, compute-cli 17.6k, compute-core 8.7k, compute-provider 7.8k); UI 2.3k lines of JS; 3 TypeScript packages |
-| Model | Control-state model generation 7 (`compute.flow`; generation 6 at the original audit) |
+| Model | Control-state model generation 8 (`compute.flow`; generation 6 at the original audit) |
 | Tests | 382 (351 Rust, 31 TypeScript/browser); 17 need a FeltDB server |
 | CI | `test.yml`, `feltdb-consumer.yml`, `distribution-certification.yml` |
 | Last full run | `cargo test --workspace`: pass. `packages/compute-ui-e2e`: pass, in CI with Chromium (see §22) |
@@ -406,7 +406,7 @@ trusted until a step fails.
 <!-- audit:capabilities area=state -->
 | ID | Capability | Status | User can use | In complete model | Notes | Evidence |
 | --- | --- | --- | --- | --- | --- | --- |
-| `state-feltdb` | FeltDB as the durable authority of a production control plane (model generation 7) | **IMPLEMENTED + VERIFIED** | configuration | yes | The production decision (docs/feltdb.md): `[state] backend = "feltdb"` (or `--state feltdb`); `compute` and `compute start` pass it through. /info and `compute status` report `durability: production`. | `crates/compute-state-feltdb/tests/consumer.rs`<br>`crates/compute-environment/tests/feltdb_consumer.rs` |
+| `state-feltdb` | FeltDB as the durable authority of a production control plane (model generation 8) | **IMPLEMENTED + VERIFIED** | configuration | yes | The production decision (docs/feltdb.md): `[state] backend = "feltdb"` (or `--state feltdb`); `compute` and `compute start` pass it through. /info and `compute status` report `durability: production`. | `crates/compute-state-feltdb/tests/consumer.rs`<br>`crates/compute-environment/tests/feltdb_consumer.rs` |
 | `state-default-file` | Without configuration, control state is a local file, stated as local development | **IMPLEMENTED + VERIFIED** | yes | yes | The file backend is kept for local development behind the same StateStore abstraction and labelled everywhere: `compute` prints it, /info, `compute status`, and `compute node info` report `durability: local-development`. The launcher uses whatever `[state]` says; it never picks a different model silently. | `crates/compute-cli/src/control_state.rs#backend_name`<br>`crates/compute-state/src/store.rs#durability`<br>`crates/compute-cli/src/launch_cmd.rs#durability_note`<br>`crates/compute-cli/tests/launcher.rs`<br>journey `experiments.json#foundation` |
 | `restart-recovery` | Control-plane restart keeps and resumes everything | **IMPLEMENTED + VERIFIED** | yes | yes | — | `crates/compute-environment/tests/computers.rs`<br>`crates/compute-cli/tests/recovery.rs`<br>journey `experiments.json#after_control_plane_restart` |
 <!-- /audit -->
@@ -520,7 +520,7 @@ silent one — a feature advertised but unusable is placed anyway.
 | Computer operations (sync, install, build, start/stop, probe, inspect, publish steps) | the environment's computer | daemon controller | target jobs; evidence in FeltDB | yes |
 | `environment exec/run/build/test/propose` | the environment's computer | daemon scope + owner | target jobs; events in FeltDB | yes |
 | Bundle project workloads (services, tasks) and releases | THE DAEMON HOST (supervisor) | daemon scopes, no owner | Execution records in control state | no |
-| Applications (`compute deploy <dir>`) | a provider node offering deployments — the daemon host by default | daemon scopes | deployments in control state | no |
+| Applications (`compute deploy <dir>`, `compute application …`) | the application's computer on a target of the selected daemon's pool | daemon scope + owner (the computer's) | environment, computer, version, rollout in FeltDB; target jobs and receipts | yes |
 | Daemon /compute/* (node as provider) | the daemon host | daemon execute scope | daemon job store | yes |
 <!-- /audit -->
 
@@ -538,7 +538,8 @@ Timing: exec submitted in 16 ms, completed round trip in 0.13 s.
 | Change a computer environment (contents, config, lifetime, replace, destroy, sessions) | operate/deploy scope + owner | yes |
 | Exec / run / connect / propose | execute scope + owner | yes |
 | Publish / deploy / promote / rollback versions | deploy scope + owner of the environment(s) | yes |
-| Node environments, bundle projects, applications, domains | scopes only; no ownership | yes |
+| Applications (deploy, rollback, stop, logs) | the computer's: scope + owner of `application-<name>` | yes |
+| Node environments, bundle projects, domains | scopes only; no ownership | yes |
 | Loopback daemon without TLS | no credential required (development mode); `--production` requires TLS and credentials | bypassable locally |
 | Target (`compute serve`) jobs and sessions | a target credential on every request (reads included); sessions and jobs owned by the control plane it names; `--insecure-unauthenticated` only by name | yes |
 | Daemon /compute/* (node as provider) | only requests the daemon API authenticated and scoped (DaemonAuthorized) | yes |
@@ -573,7 +574,6 @@ control plane with state in `./.compute/daemon`
 | ID | Capability | Status | User can use | In complete model | Notes | Evidence |
 | --- | --- | --- | --- | --- | --- | --- |
 | `bundle-projects` | Bundle projects, revisions, zero-downtime releases on the daemon node | **IMPLEMENTED + VERIFIED** | yes | reconcile | Executes on the daemon host (supervisor). Refused for environments with a computer. | `crates/compute-environment/src/daemon/release.rs`<br>`crates/compute-environment/src/daemon/deploy.rs`<br>`crates/compute-environment/tests/releases.rs` |
-| `applications` | `compute init/deploy` applications on a provider node | **IMPLEMENTED + VERIFIED** | yes | reconcile | `compute deploy <dir>` auto-starts a daemon with state in ./.compute/daemon; the app runs on that daemon node. | `crates/compute-environment/src/daemon/applications.rs`<br>`crates/compute-cli/tests/product.rs`<br>journey `experiments.json#application_journey` |
 <!-- /audit -->
 
 ## 16. Release and version
@@ -588,6 +588,7 @@ control plane with state in `./.compute/daemon`
 | `zero-downtime` | Zero-downtime release inside a computer | **MISSING** | no | yes | A release restarts processes. Zero-downtime traffic switching exists only for bundle projects on the daemon node. | — |
 | `approvals` | Promotion approvals | **MISSING** | no | yes | — | `crates/compute-environment/src/status.rs#PromotionPlan` |
 | `artifact-store` | Stored build artifacts for versions | **MISSING** | no | yes | Bundle revisions store artifacts; computer versions store only the commit and digest. | — |
+| `applications` | `compute init/deploy` applications: a compatibility view over a computer, a version, and a rollout | **IMPLEMENTED + VERIFIED** | yes | reconcile | Each application is its own computer environment on a target (never the daemon host): source imported by target jobs, published as a version, deployed as a rollout; runtimes that need the pinned catalog (wasm, jvm, dotnet) are refused. | `crates/compute-environment/src/daemon/applications.rs`<br>`crates/compute-environment/tests/applications.rs`<br>`crates/compute-cli/tests/product.rs`<br>journey `experiments.json#application_journey` |
 <!-- /audit -->
 
 A version is immutable: commit, package digest, assembly, and the evidence of
@@ -644,17 +645,17 @@ doctor, placement explanation, FeltDB provisioning); metrics are API-only.
 <!-- audit:api_summary -->
 | API | Count |
 | --- | --- |
-| routes | 128 |
+| routes | 129 |
 | scope Admin | 8 |
 | scope Deploy | 13 |
 | scope Execute | 12 |
 | scope Operate | 35 |
-| scope Read | 60 |
+| scope Read | 61 |
 | used by the UI | 72 |
 | used by the CLI | 87 |
 | used by AppPort | 52 |
-| no client at all | 25 |
-| path exercised over HTTP by a test | 36 |
+| no client at all | 26 |
+| path exercised over HTTP by a test | 37 |
 <!-- /audit -->
 
 ## 20. Agent usability
@@ -885,13 +886,13 @@ Everything that is implemented and proven by a test or an experiment:
 | `promote` | Promote test → production with a reviewed plan | **IMPLEMENTED + VERIFIED** | yes | yes | No approval workflow (approvals list is always empty). | `crates/compute-environment/tests/computers.rs`<br>`crates/compute-cli/tests/product_journey.rs` |
 | `rollback` | Roll back to an earlier version | **IMPLEMENTED + VERIFIED** | yes | yes | — | `crates/compute-environment/tests/computers.rs`<br>`crates/compute-cli/tests/product_journey.rs` |
 | `bundle-projects` | Bundle projects, revisions, zero-downtime releases on the daemon node | **IMPLEMENTED + VERIFIED** | yes | reconcile | Executes on the daemon host (supervisor). Refused for environments with a computer. | `crates/compute-environment/src/daemon/release.rs`<br>`crates/compute-environment/src/daemon/deploy.rs`<br>`crates/compute-environment/tests/releases.rs` |
-| `applications` | `compute init/deploy` applications on a provider node | **IMPLEMENTED + VERIFIED** | yes | reconcile | `compute deploy <dir>` auto-starts a daemon with state in ./.compute/daemon; the app runs on that daemon node. | `crates/compute-environment/src/daemon/applications.rs`<br>`crates/compute-cli/tests/product.rs`<br>journey `experiments.json#application_journey` |
+| `applications` | `compute init/deploy` applications: a compatibility view over a computer, a version, and a rollout | **IMPLEMENTED + VERIFIED** | yes | reconcile | Each application is its own computer environment on a target (never the daemon host): source imported by target jobs, published as a version, deployed as a rollout; runtimes that need the pinned catalog (wasm, jvm, dotnet) are refused. | `crates/compute-environment/src/daemon/applications.rs`<br>`crates/compute-environment/tests/applications.rs`<br>`crates/compute-cli/tests/product.rs`<br>journey `experiments.json#application_journey` |
 | `domains-tls` | Domains, DNS, ACME certificates, ingress | **IMPLEMENTED + VERIFIED** | yes (bundle projects) | yes | Routes to bundle-project services only; not to computer endpoints. | `crates/compute-environment/tests/network.rs`<br>`crates/compute-network/tests/ingress.rs` |
 | `logs` | Process logs and job output | **IMPLEMENTED + VERIFIED** | yes | yes | Read on demand (tail); no streaming for computer processes. | `crates/compute-environment/tests/computers.rs`<br>`crates/compute-cli/tests/product_journey.rs` |
 | `restart` | Restart a process in place | **IMPLEMENTED + VERIFIED** | yes | yes | — | `crates/compute-environment/src/daemon/software.rs`<br>`crates/compute-cli/tests/product_journey.rs` |
 | `events` | Durable lifecycle events and a live stream | **IMPLEMENTED + VERIFIED** | yes | yes | — | `crates/compute-environment/tests/control_plane.rs` |
 | `receipts` | Verifiable execution receipts | **IMPLEMENTED + VERIFIED** | yes | yes | — | `crates/compute-core/src/receipt.rs`<br>`crates/compute-cli/tests/product.rs` |
-| `state-feltdb` | FeltDB as the durable authority of a production control plane (model generation 7) | **IMPLEMENTED + VERIFIED** | configuration | yes | The production decision (docs/feltdb.md): `[state] backend = "feltdb"` (or `--state feltdb`); `compute` and `compute start` pass it through. /info and `compute status` report `durability: production`. | `crates/compute-state-feltdb/tests/consumer.rs`<br>`crates/compute-environment/tests/feltdb_consumer.rs` |
+| `state-feltdb` | FeltDB as the durable authority of a production control plane (model generation 8) | **IMPLEMENTED + VERIFIED** | configuration | yes | The production decision (docs/feltdb.md): `[state] backend = "feltdb"` (or `--state feltdb`); `compute` and `compute start` pass it through. /info and `compute status` report `durability: production`. | `crates/compute-state-feltdb/tests/consumer.rs`<br>`crates/compute-environment/tests/feltdb_consumer.rs` |
 | `state-default-file` | Without configuration, control state is a local file, stated as local development | **IMPLEMENTED + VERIFIED** | yes | yes | The file backend is kept for local development behind the same StateStore abstraction and labelled everywhere: `compute` prints it, /info, `compute status`, and `compute node info` report `durability: local-development`. The launcher uses whatever `[state]` says; it never picks a different model silently. | `crates/compute-cli/src/control_state.rs#backend_name`<br>`crates/compute-state/src/store.rs#durability`<br>`crates/compute-cli/src/launch_cmd.rs#durability_note`<br>`crates/compute-cli/tests/launcher.rs`<br>journey `experiments.json#foundation` |
 | `restart-recovery` | Control-plane restart keeps and resumes everything | **IMPLEMENTED + VERIFIED** | yes | yes | — | `crates/compute-environment/tests/computers.rs`<br>`crates/compute-cli/tests/recovery.rs`<br>journey `experiments.json#after_control_plane_restart` |
 | `daemon-auth` | Daemon: operator credentials, scopes, audit; owner checks for computers | **IMPLEMENTED + VERIFIED** | yes | yes | Loopback without TLS admits requests with no credential (development mode); unknown bearer tokens get 401. | `crates/compute-environment/src/auth.rs`<br>`crates/compute-environment/tests/security.rs`<br>`crates/compute-environment/tests/computers.rs` |
@@ -950,13 +951,21 @@ next step:
 - Evidence: SEC-1, SEC-2
 - Next: Closed: targets authenticate every request with a credential they issued; the daemon presents one; sessions belong to the control plane's identity (experiments.json#foundation, SEC-1, SEC-2).
 
-**G-ARCH-2**
+**G-ARCH-2** (closed)
 
-- Current: Three deployment models: applications, bundle projects (node environments), computer versions/rollouts.
+- Was: Three deployment models: applications, bundle projects (node environments), computer versions/rollouts.
 - Desired: One: versions reconciled into an environment's computer.
 - Impact: Three vocabularies, three code paths, and work that still runs on the daemon host.
 - Evidence: models, execution_paths
-- Next: Decide the fate of node environments and applications: port their features (zero-downtime switch, ingress, domains) to computers, then retire or wrap them.
+- Next: Closed for applications: `compute deploy`/`compute application` resolve to a computer environment, a version, and a rollout; source is imported by target jobs; the endpoint, logs, and receipt are the computer's (crates/compute-environment/tests/applications.rs). Node environments remain: G-ARCH-5.
+
+**G-ARCH-5**
+
+- Current: Node environments (bundle projects, releases, ingress) still run on the daemon host through the supervisor.
+- Desired: Their features (zero-downtime switch, ingress, domains) ported to computers, then retired.
+- Impact: A second deployment model remains for bundle projects (not for applications).
+- Evidence: execution_paths
+- Next: Port zero-downtime switching and ingress to computers (G-DEP-1, G-APP-1), then retire node environments.
 
 **G-ARCH-3** (closed)
 
@@ -1024,11 +1033,11 @@ next step:
 
 **G-EXEC-1**
 
-- Current: Bundle workloads and applications execute on the daemon host.
+- Current: Bundle workloads of node environments execute on the daemon host (applications no longer do).
 - Desired: The daemon coordinates; computers execute.
 - Impact: The daemon is both coordinator and executor.
 - Evidence: execution_paths
-- Next: Covered by G-ARCH-2.
+- Next: Covered by G-ARCH-5.
 
 **G-EXEC-2**
 
@@ -1226,7 +1235,7 @@ next step:
 | Provider abstraction | Pool of local/remote targets; no cloud adapters | Fly/Railway/Render/cloud/bare metal | Adapters |
 | UI | Work/Manage, home, run, software, operations; verified in a browser | Every capability | Targets, access, diagnosis pages |
 | CLI | 182 commands; 52 with help defects | Consistent, documented | Help, naming |
-| API | 128 routes, scoped | Versioned, documented | Description |
+| API | 129 routes, scoped | Versioned, documented | Description |
 | Observability | Events, receipts, job evidence, /metrics (API only) | Live logs, metrics, traces | Streaming, dashboards |
 | Durable evidence | Events, versions, rollouts, receipts; jobs on targets | Same, in one authority | Jobs outside FeltDB; file default |
 | Security boundary | Daemon: real; targets: none | Every hop authenticated; computers isolated | Target auth, isolation |
@@ -1340,7 +1349,7 @@ releases. Underneath is a solid runtime-neutral workload engine
    - Done: decide the durable-state default (G-ARCH-3)
    - Done: browser tests and the UI certification in CI; fix the home-route regression (G-UI-2)
 2. **EXECUTION**
-   - One deployment model: retire or port node environments and applications (G-ARCH-2, G-EXEC-1)
+   - One deployment model: retire or port node environments (G-ARCH-5, G-EXEC-1); applications are converged (G-ARCH-2)
    - Cancel/retry for computer jobs and operations (G-EXEC-2)
 3. **RUNTIME COVERAGE**
    - Container computers verified in CI, with ports and volumes (G-RT-1)

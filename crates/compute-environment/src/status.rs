@@ -775,7 +775,8 @@ pub struct ApplicationDeploymentView {
     pub artifact: Option<compute_state::ApplicationArtifactEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
-    /// The deployment receipt (an artifact digest), once issued.
+    /// The receipt (`compute.receipt@1`) of the execution that made this
+    /// version run: issued by the computer's target for its durable job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<String>,
     /// Receipts of this version's executions.
@@ -784,6 +785,41 @@ pub struct ApplicationDeploymentView {
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
+    /// The canonical records this version is: every ID resolves through
+    /// the environment, computer, version, and rollout APIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical: Option<ApplicationRecords>,
+}
+
+/// Where an application's deployment lives in the one deployment model:
+/// its environment and computer, the project's version, the rollout that
+/// made it real, the target session, and the job that ran it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationRecords {
+    pub environment: String,
+    pub environment_id: String,
+    pub computer_id: String,
+    pub project: String,
+    /// The rollout (`rol_…`): the deployment.
+    pub rollout_id: String,
+    pub rollout_kind: compute_state::RolloutKind,
+    pub rollout_status: compute_state::RolloutStatus,
+    /// The published version (`ver_…`) and its label.
+    pub version_id: String,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The durable target job that started it, and its execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
 }
 
 /// An application as it stands on this node.
@@ -804,6 +840,12 @@ pub struct ApplicationView {
     pub deploying: Option<ApplicationDeploymentView>,
     /// Newest first.
     pub deployments: Vec<ApplicationDeploymentView>,
+    /// The application's environment and its computer, as the computer
+    /// API shows them: lifecycle, target, session, observed reality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<ComputerView>,
 }
 
 /// A project, as the software it is: where it runs and at which version.
