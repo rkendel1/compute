@@ -465,10 +465,11 @@ impl RuntimeManager {
                 locked.executable
             )));
         }
-        let output = Command::new(&executable)
-            .arg("--version")
-            .output()
-            .map_err(io_error)?;
+        // Just assembled: wait out a transient "Text file busy".
+        let output = compute_core::executables::output_when_not_busy(
+            Command::new(&executable).arg("--version"),
+        )
+        .map_err(io_error)?;
         let reported = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),

@@ -16,6 +16,7 @@ use walkdir::WalkDir;
 
 mod receipt;
 pub use receipt::*;
+pub mod executables;
 pub mod host;
 pub use host::{HostEnforcement, HostProfile};
 mod dependencies;

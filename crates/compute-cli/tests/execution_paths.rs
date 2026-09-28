@@ -212,6 +212,11 @@ fn every_execution_site_is_classified() {
                 why: "runtime acquisition and verification (curl, archive tools, the runtime's own --version)",
             },
             Allowed {
+                file: "crates/compute-core/src/executables.rs",
+                count: 2,
+                why: "its unit test: running a file still open for writing, then once closed",
+            },
+            Allowed {
                 file: "crates/compute-core/src/host.rs",
                 count: 1,
                 why: "host capability probe",
