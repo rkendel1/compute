@@ -1,5 +1,13 @@
 # Environments
 
+> **Status.** This page describes node environments (environments without a
+> computer): a durable deployment model that runs on the daemon host through
+> its supervisor. It is the one deployment model outside the Computer, held
+> to that boundary until it converges (G-ARCH-5, blocked on named Computer
+> capabilities; see
+> [architecture.md](architecture.md#every-way-compute-executes-software)).
+> New work belongs in environments on a computer ([computers.md](computers.md)).
+
 Compute runs software in **environments**. An environment is a deployed,
 isolated place such as `dev`, `staging`, or `prod` on one machine. It holds
 **projects**, and each project holds **workloads**. Each time a workload runs,

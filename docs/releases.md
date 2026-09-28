@@ -1,5 +1,13 @@
 # Zero-downtime releases
 
+> **Status.** This page describes node environments (environments without a
+> computer): a durable deployment model that runs on the daemon host through
+> its supervisor. It is the one deployment model outside the Computer, held
+> to that boundary until it converges (G-ARCH-5, blocked on named Computer
+> capabilities; see
+> [architecture.md](architecture.md#every-way-compute-executes-software)).
+> New work belongs in environments on a computer ([computers.md](computers.md)).
+
 A release takes a project from the revision that serves in an environment to
 a new one without refusing a connection. The new revision starts next to the
 old one, traffic moves only once the new revision is ready, and the old one

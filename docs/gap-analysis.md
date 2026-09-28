@@ -17,7 +17,12 @@ because every later capability inherits them.
 | --- | --- | --- | --- |
 | G-ARCH-1 | Core architecture | closed | Closed: targets authenticate every request with a credential they issued; the daemon presents one; sessions belong to the control plane's identity (experiments.json#foundation, SEC-1, SEC-2). |
 | G-ARCH-2 | Core architecture | closed | Closed for applications: `compute deploy`/`compute application` resolve to a computer environment, a version, and a rollout; source is imported by target jobs; the endpoint, logs, and receipt are the computer's (crates/compute-environment/tests/applications.rs). Node environments remain: G-ARCH-5. |
-| G-ARCH-5 | Core architecture | open | Node environments (bundle projects, releases, ingress) still run on the daemon host through the supervisor. |
+| G-ARCH-5 | Core architecture | blocked | Node environments (bundle projects, releases, ingress) run on the daemon host through the supervisor: a second durable deployment authority with scope-only authorization, placement that cannot move services, and its own evidence (Execution/Receipt records, deployment receipts). |
+| G-RT-3 | Runtime support | open | A computer runs the target host's runtimes from PATH; it cannot acquire a pinned catalog runtime (WASM, JVM, .NET, or a pinned version). |
+| G-RT-4 | Runtime support | open | A dependency capsule (compute.deps@1) cannot be materialized into a computer. |
+| G-DEP-2 | Deployment | open | Computer processes have no HTTP readiness path and no restart policy: a rollout's health check is a TCP connect, and an exited process is started again. |
+| G-POL-1 | Policy | open | A computer's environment policy is evaluated when the computer is placed; commands inside it are admitted by the target's own policy. |
+| G-EXEC-3 | Execution | open | A `compute run` workload outlives a CLI killed with SIGKILL, untracked (no record, stop, or recovery). |
 | G-ARCH-3 | Core architecture | closed | Closed: FeltDB is the production authority; the file backend remains for local development and says so everywhere (launcher output, /info, `compute status`, `compute node info`: durability local-development). |
 | G-ARCH-4 | Core architecture | closed | Closed: every running computer is confirmed with its target; unreachable and lost are durable, evented, fenced observed states that keep desired state (experiments.json#foundation). |
 | G-RT-1 | Runtime support | open | Computers are workspaces (native processes) or unverified containers. |
@@ -68,11 +73,11 @@ because every later capability inherits them.
 
 **G-ARCH-5**
 
-- Current: Node environments (bundle projects, releases, ingress) still run on the daemon host through the supervisor.
-- Desired: Their features (zero-downtime switch, ingress, domains) ported to computers, then retired.
-- Impact: A second deployment model remains for bundle projects (not for applications).
-- Evidence: execution_paths
-- Next: Port zero-downtime switching and ingress to computers (G-DEP-1, G-APP-1), then retire node environments.
+- Current: Node environments (bundle projects, releases, ingress) run on the daemon host through the supervisor: a second durable deployment authority with scope-only authorization, placement that cannot move services, and its own evidence (Execution/Receipt records, deployment receipts).
+- Desired: Node workloads converged to Project → Version → Computer → target session → job → receipt; the node model retired.
+- Impact: A second durable deployment model remains (not for applications).
+- Evidence: execution_paths, crates/compute-environment/tests/execution_paths.rs
+- Next: Blocked: node environments are durable deployments (desired state, revisions, releases, rollback, stable endpoints, supervised restart, receipts) and should converge to Project → Version → Computer → Execution, but Computer lacks what they use: zero-downtime switching (G-DEP-1), ingress/domains/TLS to computer endpoints (G-APP-1), pinned catalog runtimes in a computer (G-RT-3), dependency capsules in a computer (G-RT-4), HTTP readiness and restart policy for computer processes (G-DEP-2), and per-command admission against the environment policy (G-POL-1). Until then the node model is held to its boundary: daemon host only, never in a computer environment (crates/compute-environment/tests/execution_paths.rs).
 
 **G-ARCH-3** (closed)
 
@@ -92,6 +97,22 @@ because every later capability inherits them.
 
 ### Runtime support
 
+**G-RT-3**
+
+- Current: A computer runs the target host's runtimes from PATH; it cannot acquire a pinned catalog runtime (WASM, JVM, .NET, or a pinned version).
+- Desired: A computer prepares catalog runtimes as target jobs and processes run with them.
+- Impact: Node workloads and applications that need a pinned runtime cannot run on a computer (G-ARCH-5).
+- Evidence: crates/compute-environment/src/daemon/applications.rs#process_command
+- Next: Prepare a catalog runtime into a session as a target job; name it in the process spec.
+
+**G-RT-4**
+
+- Current: A dependency capsule (compute.deps@1) cannot be materialized into a computer.
+- Desired: Capsules materialized into a computer's workspace as a package.
+- Impact: Bundles with capsules cannot move to a computer (G-ARCH-5).
+- Evidence: crates/compute-environment/src/daemon/applications.rs#process_command
+- Next: Import a capsule like a source and install it as a package.
+
 **G-RT-1**
 
 - Current: Computers are workspaces (native processes) or unverified containers.
@@ -107,6 +128,60 @@ because every later capability inherits them.
 - Impact: Placement puts a "containers" computer in a workspace.
 - Evidence: placement_refusals.containers
 - Next: Split host features from substrate; check engine liveness.
+
+### Deployment
+
+**G-DEP-2**
+
+- Current: Computer processes have no HTTP readiness path and no restart policy: a rollout's health check is a TCP connect, and an exited process is started again.
+- Desired: Readiness (HTTP path, task) and restart policy (never, on failure) on ProcessSpec.
+- Impact: Node releases gate traffic on HTTP readiness and honor restart policy (G-ARCH-5).
+- Evidence: crates/compute-environment/src/daemon/software.rs#rollout_step
+- Next: Add readiness and restart to ProcessSpec and the reconciler.
+
+**G-DEP-1**
+
+- Current: A release restarts processes (downtime); bundle releases have zero-downtime switching.
+- Desired: Zero-downtime rollouts for computers.
+- Impact: Production updates interrupt traffic.
+- Evidence: zero-downtime
+- Next: Two instances behind a switched endpoint inside the computer.
+
+### Policy
+
+**G-POL-1**
+
+- Current: A computer's environment policy is evaluated when the computer is placed; commands inside it are admitted by the target's own policy.
+- Desired: Every command in a computer admitted against the environment policy, as every node execution is.
+- Impact: Moving node workloads to computers would weaken per-execution admission (G-ARCH-5).
+- Evidence: crates/compute-environment/src/daemon/computers.rs#place_on
+- Next: Carry the environment policy on target jobs.
+
+### Execution
+
+**G-EXEC-3**
+
+- Current: A `compute run` workload outlives a CLI killed with SIGKILL, untracked (no record, stop, or recovery).
+- Desired: Ephemeral execution ends with its caller.
+- Impact: An orphaned ephemeral process holds resources nobody owns.
+- Evidence: crates/compute-cli/tests/execution_paths.rs (probe in the audit)
+- Next: Tie the workload to its caller (parent-death signal) for local ephemeral runs only.
+
+**G-EXEC-1**
+
+- Current: Bundle workloads of node environments execute on the daemon host (applications no longer do).
+- Desired: The daemon coordinates; computers execute.
+- Impact: The daemon is both coordinator and executor.
+- Evidence: execution_paths
+- Next: Covered by G-ARCH-5 (blocked).
+
+**G-EXEC-2**
+
+- Current: No cancellation or timeout controls in the UI; jobs have timeouts in the API.
+- Desired: Cancel/retry for every job from every surface.
+- Impact: Stuck builds need the CLI or waiting.
+- Evidence: api: POST /compute/jobs/{job}/cancel has no computer-level route
+- Next: Add cancel for computer jobs and operations.
 
 ### Providers
 
@@ -135,24 +210,6 @@ because every later capability inherits them.
 - Impact: Dead-end options.
 - Evidence: placement_refusals
 - Next: Hide unavailable options using GET /targets; implement persistent volumes and public endpoints.
-
-### Execution
-
-**G-EXEC-1**
-
-- Current: Bundle workloads of node environments execute on the daemon host (applications no longer do).
-- Desired: The daemon coordinates; computers execute.
-- Impact: The daemon is both coordinator and executor.
-- Evidence: execution_paths
-- Next: Covered by G-ARCH-5.
-
-**G-EXEC-2**
-
-- Current: No cancellation or timeout controls in the UI; jobs have timeouts in the API.
-- Desired: Cancel/retry for every job from every surface.
-- Impact: Stuck builds need the CLI or waiting.
-- Evidence: api: POST /compute/jobs/{job}/cancel has no computer-level route
-- Next: Add cancel for computer jobs and operations.
 
 ### Projects
 
@@ -183,16 +240,6 @@ because every later capability inherits them.
 - Impact: Templates fail where binaries are absent.
 - Evidence: ui TEMPLATES
 - Next: Depends on container computers and volumes.
-
-### Deployment
-
-**G-DEP-1**
-
-- Current: A release restarts processes (downtime); bundle releases have zero-downtime switching.
-- Desired: Zero-downtime rollouts for computers.
-- Impact: Production updates interrupt traffic.
-- Evidence: zero-downtime
-- Next: Two instances behind a switched endpoint inside the computer.
 
 ### Releases
 
@@ -324,7 +371,7 @@ The gaps depend on each other. The path that respects the dependencies:
    - Done: decide the durable-state default (G-ARCH-3)
    - Done: browser tests and the UI certification in CI; fix the home-route regression (G-UI-2)
 2. **EXECUTION**
-   - One deployment model: retire or port node environments (G-ARCH-5, G-EXEC-1); applications are converged (G-ARCH-2)
+   - One deployment model: node environments converge once G-DEP-1, G-APP-1, G-RT-3, G-RT-4, G-DEP-2, G-POL-1 close (G-ARCH-5, blocked); applications are converged (G-ARCH-2)
    - Cancel/retry for computer jobs and operations (G-EXEC-2)
 3. **RUNTIME COVERAGE**
    - Container computers verified in CI, with ports and volumes (G-RT-1)

@@ -5,7 +5,9 @@ This is the architecture as the code has it at `69b70d9` (audited
 [audit.json](audit.json)). Where the code and the intended design differ,
 this page says what the code does and names the gap. Since that audit,
 applications converged on the canonical computer lifecycle (G-ARCH-2,
-[below](#applications-one-lifecycle-g-arch-2)).
+[below](#applications-one-lifecycle-g-arch-2)), and every remaining
+execution path was traced and given a disposition
+([every way Compute executes software](#every-way-compute-executes-software)).
 
 > **FeltDB owns durable state; Compute owns execution.** Compute keeps no
 > second durable database, reads targeted state through bounded, indexed
@@ -110,21 +112,24 @@ desired contents, changed by **GO** (one generation-fenced change),
 and **work sessions** recording who is working where. `compute init/deploy`
 applications are a compatibility name for exactly these records (below).
 Node environments and bundle projects are an earlier deployment model that
-still runs on the daemon host (gap G-ARCH-5).
+still runs on the daemon host (gap G-ARCH-5, blocked on named Computer
+capabilities; [every way Compute executes software](#every-way-compute-executes-software)).
 
 ## Where execution happens
 
 <!-- audit:execution_paths -->
 | Path | Where it executes | Authority | Durable record | Canonical job path |
 | --- | --- | --- | --- | --- |
-| `compute run` (local) | the caller's machine, in process | none (local user) | execution record + receipt on disk | no |
-| `compute pool run/submit`, `compute remote *` | the provider placement chose | provider: a target credential on compute serve; daemon /compute/* only behind the daemon API's scopes | provider job store | yes |
-| `compute session create/exec` (target sessions) | the target | target credential; owner = the control plane the credential names | target session/job stores | yes |
-| Computer operations (sync, install, build, start/stop, probe, inspect, publish steps) | the environment's computer | daemon controller | target jobs; evidence in FeltDB | yes |
+| `compute run` / `compute exec` (local) | the caller's machine, in the CLI's process tree (ephemeral) | none (the local user) | nothing; a receipt file only when asked (--receipt) | no |
+| `compute run` / `compute pool run` (a remote provider) | the provider placement chose, as one synchronous request (ephemeral) | the pool's credential for that provider | nothing on the caller; the receipt returns with the result | no |
+| `compute pool submit`, `compute remote *` | the provider placement chose (a target, or a daemon's node) | provider: a target credential on compute serve; daemon /compute/* only behind the daemon API's scopes | one-shot job in that provider's job store | yes |
+| `compute session create/exec` (raw target sessions) | the target | target credential; owner = the control plane the credential names | target session/job stores (no ComputerRecord, no desired state) | yes |
+| Computer operations (sync, install, build, start/stop, probe, inspect, import, publish steps) | the environment's computer | daemon controller | target jobs; evidence in FeltDB | yes |
 | `environment exec/run/build/test/propose` | the environment's computer | daemon scope + owner | target jobs; events in FeltDB | yes |
-| Bundle project workloads (services, tasks) and releases | THE DAEMON HOST (supervisor) | daemon scopes, no owner | Execution records in control state | no |
 | Applications (`compute deploy <dir>`, `compute application …`) | the application's computer on a target of the selected daemon's pool | daemon scope + owner (the computer's) | environment, computer, version, rollout in FeltDB; target jobs and receipts | yes |
-| Daemon /compute/* (node as provider) | the daemon host | daemon execute scope | daemon job store | yes |
+| Node-environment services (bundle projects, releases) | THE DAEMON HOST, supervised by `compute supervisor`; placement that selects anything else is refused | daemon scopes, no owner | deployments, workloads, executions, receipts in control state; unit registry on the daemon host | no |
+| Node-environment tasks (`compute workload run`, readiness tasks) | the provider placement chose: the daemon host by default, a target when the environment pins one — one synchronous request outside any session | daemon scopes, no owner | Execution and Receipt records in control state | no |
+| Daemon /compute/* (its node as a caller's provider) | the daemon host | daemon execute scope | one-shot runs; jobs in the daemon's job store | yes |
 <!-- /audit -->
 
 For environments with a computer, the daemon coordinates and records and
@@ -196,6 +201,188 @@ Gaps this does not paper over:
   then). Stored version artifacts are G-REL-1.
 - **Zero-downtime switching and ingress** remain node-model features
   (G-DEP-1, G-APP-1). Node environments themselves are G-ARCH-5.
+
+## Every way Compute executes software
+
+Traced from the code (`crates/compute-cli/tests/execution_paths.rs` fails
+when a new spawn, supervision, provider-service, or dispatch site appears
+without a classification here). There are two execution models and one
+legacy deployment model:
+
+```text
+                 ┌──────────────────────┐
+                 │   Durable workload   │   applications, versions/rollouts,
+                 │      deployment      │   computer contents, environment work
+                 └──────────┬───────────┘
+                            ▼
+                    Project → Version
+                            ▼
+                         Computer            ComputerRecord: placed, owned, fenced
+                            ▼
+                   Authenticated Target      target credential → session
+                            ▼
+                      Job / Execution        durable target job
+                    ┌───────┴───────┐
+                    ▼               ▼
+                 Endpoint        Receipt     the computer's port · the target's receipt
+
+ compute run  ──▶  the caller's machine (or one synchronous provider request)
+              ──▶  an ephemeral process      no record, no endpoint, no recovery
+              ──▶  a local, non-deployment receipt (only when asked)
+
+ node environments (G-ARCH-5, blocked) ──▶ the daemon host's supervisor
+```
+
+### Inventory
+
+| Path | Durable? | Authority | Execution host | Target session | Job | Endpoint | Receipt | Restart semantics | Disposition |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `compute run` / `compute exec`, local | no: nothing is written but a requested `--receipt` file | none (the local user) | the caller's machine, a child of the CLI | none | none | none by Compute (the workload may listen itself while it runs) | `compute.receipt@1`, `compute.local@1`, no scope | none: it ends with the CLI; a SIGKILLed CLI leaves it orphaned (G-EXEC-3) | **B** ephemeral |
+| `compute run` / `compute pool run`, remote provider | no | the pool's credential for that provider | the placed provider, one synchronous `Execute` request | none | none (not in a job store) | none | returned with the result | none | **B** ephemeral |
+| `compute pool submit`, `compute remote *` | the job record, until it ends | target credential (serve) or the daemon API's execute scope | the placed provider | none | a one-shot job in that provider's job store | none | the provider's receipt for the job | a job is not restarted; its record survives a provider restart (`durable_jobs_are_idempotent_owned_verifiable_and_restart_safe`) | **B** one-shot job primitive |
+| `compute session create/exec` (raw target sessions) | the session and its jobs, until destroyed or expired | target credential; owner = the credential's control plane | the target | yes | yes | session endpoints, if exposed | the target's, per job | none: no desired state, no reconciliation; a TTL unless claimed | **B** the substrate a Computer is built from; not a deployment |
+| Computer operations (sync, install, build, process start/stop/probe, import, publish, rollout) | yes | the daemon controller, for the environment's owner | the environment's computer | yes | yes | the computer's endpoint | the target's, per job; named by versions and rollouts | reconciled from FeltDB; unreachable/lost/replace; fenced | **A** canonical |
+| `environment exec/run/build/test/propose` | yes (evidence) | scope + owner | the environment's computer | yes | yes | — | the target's | jobs are durable on the target | **A** canonical |
+| Applications (`compute deploy`, `compute application …`) | yes | scope + owner | the application's computer | yes | yes | the computer's endpoint | the target's | the computer's | **A** canonical (G-ARCH-2) |
+| Node-environment services | yes: deployments, workloads, instances in control state | daemon scopes, no owner | **the daemon host** (`compute supervisor`; in-process in tests) | none | none | a daemon-host port, forwarded by the supervisor; ingress/domains | ExecutionRecord + ReceiptRecord in control state; `compute.deployment-receipt@1` | restart policy; the supervisor outlives the controller; a lost supervisor is replaced; never moved to another host | **D** blocked (G-ARCH-5) |
+| Node-environment tasks | yes: Execution/Receipt records | daemon scopes, no owner | the placed provider: the daemon host by default, **a target when the environment pins one**, as a synchronous request | none | none | — | ExecutionRecord + ReceiptRecord | recorded after a controller restart if it ended meanwhile | **D** blocked with the node model (G-ARCH-5) |
+| Daemon `/compute/*` (its node as a caller's provider) | job records | the daemon API's execute scope | the daemon host | none | one-shot jobs in the daemon's job store | none | the daemon's receipt for the job | as provider jobs | **B** one-shot job primitive |
+
+Everything else that starts a process starts Compute itself (the daemon,
+the target, the supervisor, an upgraded controller) or a tool (curl, npm,
+compilers, the FeltDB verifier, runtime acquisition, container engines
+behind a target's container sessions); none runs a workload.
+
+### Two execution models, one legacy model
+
+**Durable Computer execution** is the only way to deploy: Project →
+Version → Computer → authenticated target session → durable job →
+execution → evidence. It has desired state, an owner, placement, fencing,
+and recovery.
+
+**Ephemeral execution** is a primitive, kept on purpose:
+
+- `compute run` is owned by the caller, runs on the caller's machine (or as
+  one synchronous request to the provider placement chose), is not
+  durable, has no authority beyond the caller's, allocates no endpoint,
+  creates no deployment or control-plane record, does not survive the CLI,
+  is not expected to recover, and is portable only in that the same bundle
+  runs anywhere. Its receipt says `compute.local@1` and carries no
+  environment, deployment, or application scope
+  (`compute_run_is_ephemeral_local_execution`). It never masquerades as a
+  deployment. One defect: its workload survives a CLI killed outright
+  (G-EXEC-3).
+- One-shot jobs (`compute pool submit`, the daemon's `/compute/*`) and raw
+  target sessions are durable as records of work, not as deployments: no
+  desired state, no reconciliation, no restart.
+
+**Node environments** are a durable deployment model outside the Computer
+(G-ARCH-5, below).
+
+### Node environments, traced
+
+| Step | Node model (code) | Computer equivalent | Classification |
+| --- | --- | --- | --- |
+| Environment | `EnvironmentRecord` without `computer`; optional `provider` pin | `EnvironmentRecord` with `ComputerSpec` + `ComputerRecord` | LEGACY (two kinds of environment) |
+| Source | a content-addressed bundle stored with a `ProjectRevisionRecord` | a repository (or an imported source, `import_source`) + a `VersionRecord` | SUPPORTED_BY_COMPUTER |
+| Release | `DeploymentRecord` driven by the release controller (`release.rs`): admit, place, start, readiness, switch, drain | `RolloutRecord` driven by `rollout_step`: checkout, build, restart, health | SUPPORTED_BY_COMPUTER, except zero-downtime switching: COMPUTER_MISSING_CAPABILITY (G-DEP-1) |
+| Readiness | HTTP path, task, or process check with timeouts (`Readiness`) | TCP connect to the endpoint | COMPUTER_MISSING_CAPABILITY: readiness on `ProcessSpec` (G-DEP-2) |
+| Runtime | pinned catalog runtime acquired and verified on the host (`prepare_runtime`), distribution ID in the receipt | the target host's PATH | COMPUTER_MISSING_CAPABILITY: catalog runtimes in a computer (G-RT-3) |
+| Dependencies | dependency capsules materialized per execution | packages installed by commands | COMPUTER_MISSING_CAPABILITY: capsules in a computer (G-RT-4) |
+| Admission | every execution admitted against the daemon's and the environment's policy (`prepare`) | environment policy at computer placement; commands admitted by the target's own policy | COMPUTER_MISSING_CAPABILITY: per-command admission against the environment policy (G-POL-1) |
+| Placement | pool placement evaluated, then **refused** unless it selected the daemon's node (`execute.rs`: "services run on the daemon's own node") | computer placement over the pool's targets; the machine is where placement put it | LEGACY: a placement that is decided, not followed |
+| Supervisor / process | `compute supervisor` (`LocalDataPlane`) starts the workload through `LocalProvider::execute_controlled`, owns its PID, registry, and log directory | the target session; `START_PROCESS`/`PROBE_PROCESSES` jobs, pidfiles in the workspace | SUPPORTED_BY_COMPUTER |
+| Restart | restart policy (never, or on failure with backoff) | an exited process is started again | COMPUTER_MISSING_CAPABILITY: restart policy (G-DEP-2) |
+| Endpoint | a stable daemon-host port, instance ports, supervisor forwarding; ingress :80/:443, domains, ACME | the computer's endpoint: the target host and the process port | SUPPORTED for a stable endpoint; ingress/domains/TLS: COMPUTER_MISSING_CAPABILITY (G-APP-1) |
+| Logs | files in the daemon's log directory per start (`views.rs#logs`), task output in memory | the process log in the workspace, read by a job | SUPPORTED_BY_COMPUTER |
+| Receipt | `ReceiptRecord` + artifact in control state; `compute.deployment-receipt@1` | the target's receipt for the job, named by the rollout | LEGACY: a second evidence authority |
+| Authorization | route scopes only | scopes + the environment's owner | LEGACY: durable work without the Computer's owner boundary |
+| Recovery | the supervisor outlives the controller; a lost supervisor is replaced on the same host; workloads never move | unreachable / lost / replace onto any target; stale answers fenced | SUPPORTED_BY_COMPUTER (stronger) |
+| Local development convenience | none needed: `compute up` gives every daemon a target | — | — |
+
+No step needs privileged host access, host filesystem access, or
+daemon-local networking beyond the ports and ingress listed; nothing else
+was found.
+
+**Is a node environment a deployment?** Yes. It has durable desired state
+(environments, memberships, workloads), immutable revisions, versioned
+releases with rollback, stable endpoints and ingress, supervised restart,
+recovery after a controller restart, and receipts. It is not a local
+development convenience. It is therefore a second durable deployment
+authority, and it belongs in Project → Version → Computer → Execution. It
+cannot move there yet without losing the capabilities classified
+COMPUTER_MISSING_CAPABILITY above, so **G-ARCH-5 is BLOCKED** on G-DEP-1,
+G-APP-1, G-RT-3, G-RT-4, G-DEP-2, and G-POL-1. Until they close, the
+boundary is enforced (`crates/compute-environment/tests/execution_paths.rs`):
+a node service runs only on the daemon host, placement that selects a
+target is refused, a node task pinned to a target runs outside any session
+(recorded as the node model's evidence), and the node model never enters
+an environment with a Computer.
+
+### Supervisors
+
+| Supervisor | Supervises | Runs on | Owned by | State it owns | Start / stop / restart | Logs | Endpoints | Daemon dies | Machine dies | Evidence | Class |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Computer driver + target session (`daemon/computers.rs`, `START_PROCESS`, `STOP_PROCESS`, `PROBE_PROCESSES`) | a computer's processes | the target; the controller drives it | the environment's owner, through the controller | none in the daemon; observed state in FeltDB, pidfiles in the workspace | durable jobs; the probe restarts exited processes | the workspace (`.compute/processes/*.log`) | the process port on the target | processes keep running; drivers resume from FeltDB | lost → replace | target job receipts | COMPUTER_TARGET_SUPERVISOR |
+| `compute supervisor` (`LocalDataPlane` over a socket) | node-environment services | the daemon host | the daemon | a node-local unit registry (reattachment only), routes | `execute_controlled`; restart policy; kill on stop | the daemon's log directory | daemon-host ports and forwarding | keeps serving; reattached | everything stops; restarted on the same host when it returns | control-state ExecutionRecord/ReceiptRecord | DAEMON_HOST_SUPERVISOR (G-ARCH-5) |
+| In-process `LocalDataPlane` | the same, in the controller's process | the daemon host | the daemon | as above, in memory | as above | as above | as above | dies with it (`an_in_process_data_plane_is_reaped_not_duplicated`) | as above | as above | DAEMON_HOST_SUPERVISOR (tests, embedded) |
+
+### Authority
+
+```text
+Computer:   caller → operator credential + scope → environment owner (owned_environment)
+            → target credential → target session (owned by the control plane) → job
+Node:       caller → operator credential + scope → (no owner) → daemon host / placed provider
+Ephemeral:  caller → (local user) → the caller's machine
+Jobs:       caller → target credential or the daemon API's execute scope → provider job store
+```
+
+The node model is the one path that executes durable work without the
+Computer's owner boundary. It is not given another layer; it is blocked
+until it converges (G-ARCH-5).
+
+### Placement
+
+Computers: requested placement is where the machine is. `compute run` and
+one-shot jobs: the placed provider runs it. Node services: placement is
+evaluated and then **contradicted** — only the daemon's own node may run a
+service (a legacy shortcut, not a placement decision). Node tasks: the
+placed provider runs them, but outside any Computer or session.
+
+### Recovery
+
+| Path | Controller restart | Machine or process disappears | Evidence |
+| --- | --- | --- | --- |
+| Computer (and applications) | drivers resume from FeltDB; the target keeps the processes | unreachable keeps desired state and recovers the same machine; lost waits for replace; stale answers fenced | `computers.rs`: `an_unreachable_target_keeps_desired_state_and_recovers_the_same_machine`, `a_machine_or_session_that_disappears_is_lost_until_replaced`, `a_stale_answer_from_a_target_cannot_revive_a_lost_computer`; `applications.rs`: `an_application_follows_its_computer_through_target_failures` |
+| Node services | the supervisor keeps serving; the controller reattaches | a lost supervisor is replaced on the same host and its orphans cleaned up; a lost host is not replaced anywhere else | `recovery.rs`: `a_killed_controller_leaves_its_workloads_serving`, `a_controller_stopped_for_an_upgrade_keeps_its_workloads`, `a_lost_supervisor_is_replaced_and_its_orphans_are_cleaned_up` |
+| Node tasks | an execution that ended meanwhile is meant to be recorded once; in this audit's container (and on `main`) a second controller restart records it again (2 records, not 1) | — | `recovery.rs`: `an_execution_that_ends_while_the_controller_is_down_is_recorded_after_recovery` (failing in that environment; it passed in an earlier run, so it depends on the environment) |
+| `compute run` | not applicable (no controller) | ends with the CLI; orphaned if the CLI is killed outright (G-EXEC-3) | `compute_run_is_ephemeral_local_execution` |
+
+Node recovery is weaker: it is bound to one host, and its evidence can be
+recorded twice across controller restarts. Both have an ExecutionRecord-like
+trail; that does not make them equivalent.
+
+### Evidence
+
+| Workload | Chain | Authority |
+| --- | --- | --- |
+| Computer / applications | source → Version (commit, package digest, artifact) → Rollout → target job → the target's `compute.receipt@1` | canonical: the target issues it, FeltDB references it |
+| Node environments | bundle → ProjectRevision → Deployment → Execution → `ReceiptRecord` in control state, and `compute.deployment-receipt@1` | **a second evidence authority** (G-ARCH-5) |
+| `compute run` | bundle → local execution → a receipt file the caller asked for | local, non-deployment evidence |
+| One-shot jobs | bundle → job → the provider's receipt | the provider's job store |
+
+### Dispositions
+
+- **A. Converged:** computer operations, environment work, applications,
+  versions and rollouts.
+- **B. Preserved as ephemeral or one-shot:** `compute run`/`exec` (local
+  and remote), `compute pool submit`/`remote`, the daemon's `/compute/*`,
+  raw target sessions. None claims deployment semantics.
+- **C. Legacy/remove:** none can be removed without losing a capability;
+  the node model's legacy parts (placement contradiction, scope-only
+  authority, second evidence authority) go with G-ARCH-5.
+- **D. Blocked:** node-environment services and tasks — on G-DEP-1,
+  G-APP-1, G-RT-3, G-RT-4, G-DEP-2, G-POL-1.
 
 ## Durable state
 
@@ -295,6 +482,8 @@ that breaks one fails them.
 | 18 | A controller never runs on a model it would misuse, and the model is never downgraded. | `consumer.rs`: `the_upgrade_backs_up_migrates_and_verifies`, `a_newer_model_is_never_downgraded` |
 | 19 | A session is durable before any provider acts, keeps its identities across restarts, and a stale provider answer never revives it. | `compute-provider/tests/sessions.rs`: `a_session_is_durable_before_the_provider_answers_and_survives_a_restart_while_provisioning`, `a_ready_session_and_its_evidence_survive_a_restart`, `a_stale_provider_response_cannot_resurrect_a_destroyed_session`; `compute-cli/tests/sessions.rs` |
 | 20 | Session providers are executors, never authorities: every session operation is authorized and bound to its owner, and commands in a session are ordinary durable jobs. | `sessions.rs`: `every_operation_is_authorized_and_bound_to_its_owner`, `a_session_lives_its_whole_lifecycle_on_any_provider`, `a_provider_without_optional_capabilities_is_still_a_complete_provider`. Held by the provider contract and at the target: `compute serve` authenticates every request with a target credential, and the owner is the control plane it names (`a_target_is_controlled_only_by_the_control_planes_it_trusts`). |
+| 21 | Durable workload deployment and recovery execute through a Computer and its authenticated target session. The one exception, node environments, is held to its boundary until it converges (G-ARCH-5, blocked): daemon host only, placement never followed elsewhere, never inside a Computer environment. | `compute-environment/tests/applications.rs` (every canonical record exists for a deployment); `compute-environment/tests/execution_paths.rs` (the node boundary) |
+| 22 | Ephemeral local execution is identified as local and ephemeral and creates no durable deployment authority: no control-plane state, no deployment, no endpoint, no recovery, a local non-deployment receipt. Every spawn, supervision, provider-service, and dispatch site is classified. | `compute-cli/tests/execution_paths.rs`: `compute_run_is_ephemeral_local_execution`, `every_execution_site_is_classified` |
 
 ## Failure kinds
 
