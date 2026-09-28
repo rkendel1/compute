@@ -738,6 +738,15 @@ impl Daemon {
         &self,
         deployment_id: &str,
     ) -> Result<serde_json::Value, EnvironmentError> {
+        let bytes = self.deployment_receipt_bytes(deployment_id).await?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    /// The exact canonical bytes of a deployment receipt.
+    pub async fn deployment_receipt_bytes(
+        &self,
+        deployment_id: &str,
+    ) -> Result<Vec<u8>, EnvironmentError> {
         let deployment = self.get_required::<DeploymentRecord>(deployment_id).await?;
         let digest = deployment.value.receipt.ok_or_else(|| {
             EnvironmentError::NotFound(format!(
@@ -750,7 +759,7 @@ impl Daemon {
             .get(&digest)
             .await?
             .ok_or_else(|| EnvironmentError::NotFound(format!("receipt artifact {digest}")))?;
-        Ok(serde_json::from_slice(&bytes)?)
+        Ok(bytes)
     }
 
     /// Lifecycle events, oldest first.

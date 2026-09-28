@@ -1025,7 +1025,7 @@ fn remote_client(
     Ok(client)
 }
 
-/// This machine's daemon, started in the background when none runs.
+/// This machine's already-running daemon.
 async fn ensure_local_daemon(daemon: &DaemonLocation) -> compute_core::Result<DaemonClient> {
     let client = daemon.client()?;
     match client
@@ -1033,23 +1033,13 @@ async fn ensure_local_daemon(daemon: &DaemonLocation) -> compute_core::Result<Da
         .await
     {
         Ok(_) => return Ok(client),
-        Err(EnvironmentError::ControllerUnavailable(_)) if daemon.endpoint.is_none() => {}
+        Err(EnvironmentError::ControllerUnavailable(_)) if daemon.endpoint.is_none() => {
+            return Err(ComputeError::Runtime(
+                "no local Compute daemon is running; start one with `compute start`".into(),
+            ));
+        }
         Err(error) => return Err(crate::environment_cmd::error(error)),
     }
-    let status = std::process::Command::new(std::env::current_exe()?)
-        .args(["start", "--detach", "--insecure"])
-        .status()?;
-    if !status.success() {
-        return Err(ComputeError::Runtime(
-            "could not start the local Compute daemon".into(),
-        ));
-    }
-    let client = daemon.client()?;
-    client
-        .get::<compute_environment::DaemonStatus>("/status")
-        .await
-        .map_err(crate::environment_cmd::error)?;
-    Ok(client)
 }
 
 fn provider_error(host: &Host, error: EnvironmentError) -> ComputeError {

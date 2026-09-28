@@ -424,6 +424,14 @@ async fn a_release_moves_traffic_without_dropping_a_request() {
         .deployment_receipt_document(&started.deployment_id)
         .await
         .unwrap();
+    let receipt_bytes = daemon
+        .deployment_receipt_bytes(&started.deployment_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&receipt_bytes).unwrap(),
+        receipt
+    );
     assert_eq!(receipt["format"], "compute.deployment-receipt@1");
     assert_eq!(receipt["deployment_version"], 2);
     assert_eq!(receipt["application"]["name"], "site");
