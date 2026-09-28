@@ -802,6 +802,106 @@ async fn an_application_is_never_deployed_without_a_computer() {
     daemon.shutdown().await;
 }
 
+// ---- Sharing a host with the node model ------------------------------------
+
+/// A node environment's service and an application may share a host and the
+/// daemon's endpoint port range: the application never takes a port a node
+/// endpoint holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_application_never_takes_a_node_environment_endpoint_port() {
+    let target = Target::start();
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store.clone(), Some(pool(&target))).await;
+    daemon
+        .create_environment(EnvironmentDefinition {
+            name: "legacy".into(),
+            desired_state: DesiredState::Running,
+            env: Default::default(),
+            policy: None,
+            provider: None,
+        })
+        .await
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("main.py"),
+        "import os\nfrom http.server import HTTPServer, BaseHTTPRequestHandler\n\
+         class H(BaseHTTPRequestHandler):\n    def do_GET(self):\n        \
+         self.send_response(200); self.end_headers(); self.wfile.write(b'node')\n\
+         HTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()\n",
+    )
+    .unwrap();
+    let workload: WorkloadSpec = serde_json::from_value(serde_json::json!({
+        "version": "1", "runtime": "python", "entrypoint": "main.py", "network": "network",
+    }))
+    .unwrap();
+    let bundle = WorkloadBundle::create_from(workload, directory.path())
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    daemon
+        .register_revision(
+            "site",
+            RevisionDefinition {
+                revision: "v1".into(),
+                source: None,
+                workloads: vec![WorkloadDefinition {
+                    name: "web".into(),
+                    kind: WorkloadKind::Service,
+                    bundle,
+                    ports: vec![PortSpec {
+                        name: "http".into(),
+                        port: 8080,
+                    }],
+                    restart: RestartPolicy::Never,
+                    desired_state: DesiredState::Running,
+                    readiness: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    daemon
+        .deploy(DeployRequest {
+            project: "site".into(),
+            environment: "legacy".into(),
+            revision: Some("v1".into()),
+            ..DeployRequest::default()
+        })
+        .await
+        .unwrap();
+    let node_port = eventually("the node endpoint", async || {
+        daemon
+            .workload("legacy", "site", "web")
+            .await
+            .ok()?
+            .ports
+            .first()
+            .map(|binding| binding.host)
+    })
+    .await;
+    answers(&format!("http://127.0.0.1:{node_port}"), "node").await;
+
+    let application = deploy(&daemon, "neighbor", "alice", "app").await;
+    let computer = daemon
+        .computer(&application_environment("neighbor"))
+        .await
+        .unwrap();
+    let port = computer
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.process == "neighbor")
+        .unwrap()
+        .port;
+    assert_ne!(
+        port, node_port,
+        "the application took the node endpoint's port"
+    );
+    answers(&application.endpoint.clone().unwrap(), "app").await;
+    answers(&format!("http://127.0.0.1:{node_port}"), "node").await;
+    daemon.shutdown().await;
+}
+
 // ---- The compatibility API stays a thin adapter ---------------------------
 
 /// The application module resolves, invokes a canonical operation, and

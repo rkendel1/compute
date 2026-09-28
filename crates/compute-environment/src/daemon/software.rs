@@ -486,15 +486,29 @@ fn set(
 }
 
 impl Daemon {
-    /// The ports processes of every environment listen on.
+    /// The ports processes of every environment listen on, and the
+    /// endpoint ports node environments hold: computers and the node model
+    /// may share a host, and neither may take the other's port.
     pub(crate) async fn ports_in_use(&self) -> BTreeSet<u16> {
         let inner = self.inner.lock().await;
-        inner
-            .desired
+        let desired = &inner.desired;
+        desired
             .environments
             .values()
             .filter_map(|record| record.value.contents.as_ref())
             .flat_map(|contents| contents.processes.iter().filter_map(|process| process.port))
+            .chain(
+                desired
+                    .traffic
+                    .values()
+                    .map(|assignment| assignment.value.host_port),
+            )
+            .chain(
+                desired
+                    .workloads
+                    .values()
+                    .flat_map(|workload| workload.value.ports.iter().map(|binding| binding.host)),
+            )
             .collect()
     }
 

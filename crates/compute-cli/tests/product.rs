@@ -504,10 +504,9 @@ fn an_application_moves_from_source_to_a_placed_versioned_verifiable_deployment(
     // application's computer, the project's version, the rollout, and the
     // durable target job that started it.
     assert_eq!(v1["environment"], "application-hello-api");
-    let computer: Value = serde_json::from_slice(
-        &pool.api(0, "/environments/application-hello-api/computer"),
-    )
-    .unwrap();
+    let computer: Value =
+        serde_json::from_slice(&pool.api(0, "/environments/application-hello-api/computer"))
+            .unwrap();
     assert_eq!(computer["status"], "running", "{computer:#}");
     assert_eq!(computer["session_id"], v1["session_id"]);
     assert_eq!(computer["target"], v1["target"]);
@@ -520,12 +519,14 @@ fn an_application_moves_from_source_to_a_placed_versioned_verifiable_deployment(
     assert_eq!(rollout["status"], "active", "{rollout:#}");
     assert_eq!(rollout["version_id"], v1["version_id"]);
     let label = v1["deployment"]["canonical"]["version"].as_str().unwrap();
-    let published: Value = serde_json::from_slice(
-        &pool.api(0, &format!("/software/hello-api/versions/{label}")),
-    )
-    .unwrap();
+    let published: Value =
+        serde_json::from_slice(&pool.api(0, &format!("/software/hello-api/versions/{label}")))
+            .unwrap();
     assert_eq!(published["status"], "published", "{published:#}");
-    assert_eq!(published["artifact"]["artifact_id"], v1["artifact"]["artifact_id"]);
+    assert_eq!(
+        published["artifact"]["artifact_id"],
+        v1["artifact"]["artifact_id"]
+    );
     let job: Value = serde_json::from_slice(&pool.api(
         0,
         &format!(
@@ -537,10 +538,19 @@ fn an_application_moves_from_source_to_a_placed_versioned_verifiable_deployment(
     assert_eq!(job["job"]["status"], "succeeded", "{job:#}");
     // Nothing of the node model: no node environment named `applications`,
     // no bundle project, no daemon-host deployment.
-    let (status, _) = http_get(&pool.daemons[0].url, "/environments/applications", Some(TOKEN_A)).unwrap();
+    let (status, _) = http_get(
+        &pool.daemons[0].url,
+        "/environments/applications",
+        Some(TOKEN_A),
+    )
+    .unwrap();
     assert_eq!(status, 404);
     let deployments: Value = serde_json::from_slice(&pool.api(0, "/deployments")).unwrap();
-    assert_eq!(deployments.as_array().map(Vec::len), Some(0), "{deployments:#}");
+    assert_eq!(
+        deployments.as_array().map(Vec::len),
+        Some(0),
+        "{deployments:#}"
+    );
     // Placement evidence: the jobs-only provider was rejected for this
     // deployment, and provider-a proved it can host it.
     let placement = &v1["deployment"]["placement"];
@@ -569,7 +579,9 @@ fn an_application_moves_from_source_to_a_placed_versioned_verifiable_deployment(
     assert_eq!(v2["version"], 2);
     assert_eq!(v2["endpoint"], endpoint.as_str(), "the endpoint is stable");
     assert_eq!(v2["session_id"], v1["session_id"], "the same machine");
-    wait_until("v2 answers", || fetch(&endpoint).as_deref() == Some("Hello v2"));
+    wait_until("v2 answers", || {
+        fetch(&endpoint).as_deref() == Some("Hello v2")
+    });
     let history = pool.json(&["history", app, "--json"]);
     assert_eq!(version(&history, 2)["state"], "active");
     assert_eq!(version(&history, 1)["state"], "superseded");
@@ -826,10 +838,9 @@ fn a_portable_artifact_is_deployed_by_url_and_fetched_by_its_provider() {
     let label = deployed["deployment"]["canonical"]["version"]
         .as_str()
         .unwrap();
-    let published: Value = serde_json::from_slice(
-        &pool.api(1, &format!("/software/hello-http/versions/{label}")),
-    )
-    .unwrap();
+    let published: Value =
+        serde_json::from_slice(&pool.api(1, &format!("/software/hello-http/versions/{label}")))
+            .unwrap();
     assert_eq!(published["artifact"]["artifact_id"], artifact_id.as_str());
     assert_eq!(published["artifact"]["url"], url.as_str());
 }
