@@ -363,6 +363,9 @@ fn contents(url: &Path, revision: &str) -> EnvironmentContents {
             desired: ProcessDesired::Running,
             port: None,
             restart: 0,
+            readiness: None,
+            restart_policy: Default::default(),
+            max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
         }],
         projects: vec![],
         generation: 0,
@@ -748,6 +751,9 @@ async fn only_the_owner_changes_or_uses_a_computer() {
                     desired: ProcessDesired::Running,
                     port: None,
                     restart: 0,
+                    readiness: None,
+                    restart_policy: Default::default(),
+                    max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
                 },
             )
             .await
@@ -1285,6 +1291,9 @@ async fn drift_is_reconciled_and_processes_follow_their_desired_state() {
                 desired: ProcessDesired::Running,
                 port: None,
                 restart: 0,
+                readiness: None,
+                restart_policy: Default::default(),
+                max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
             },
         )
         .await
@@ -1401,6 +1410,9 @@ fn project_contents(url: &Path, revision: &str) -> EnvironmentContents {
             desired: ProcessDesired::Running,
             port: Some(18_555),
             restart: 0,
+            readiness: None,
+            restart_policy: Default::default(),
+            max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
         }],
         generation: 0,
     }

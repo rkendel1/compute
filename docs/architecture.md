@@ -286,13 +286,13 @@ and recovery.
 | Environment | `EnvironmentRecord` without `computer`; optional `provider` pin | `EnvironmentRecord` with `ComputerSpec` + `ComputerRecord` | LEGACY (two kinds of environment) |
 | Source | a content-addressed bundle stored with a `ProjectRevisionRecord` | a repository (or an imported source, `import_source`) + a `VersionRecord` | SUPPORTED_BY_COMPUTER |
 | Release | `DeploymentRecord` driven by the release controller (`release.rs`): admit, place, start, readiness, switch, drain | `RolloutRecord` driven by `rollout_step`: checkout, build, restart, health | SUPPORTED_BY_COMPUTER, except zero-downtime switching: COMPUTER_MISSING_CAPABILITY (G-DEP-1) |
-| Readiness | HTTP path, task, or process check with timeouts (`Readiness`) | TCP connect to the endpoint | COMPUTER_MISSING_CAPABILITY: readiness on `ProcessSpec` (G-DEP-2) |
+| Readiness | HTTP path, TCP port, task, or process check with timeouts (`Readiness`) | `ProcessSpec.readiness`: an HTTP request made by a probe job inside the computer, with a deadline; a process check is its `running` state | SUPPORTED_BY_COMPUTER for HTTP and process (G-DEP-2, closed); port and task readiness: COMPUTER_MISSING_CAPABILITY (G-DEP-3) |
 | Runtime | pinned catalog runtime acquired and verified on the host (`prepare_runtime`), distribution ID in the receipt | the target host's PATH | COMPUTER_MISSING_CAPABILITY: catalog runtimes in a computer (G-RT-3) |
 | Dependencies | dependency capsules materialized per execution | packages installed by commands | COMPUTER_MISSING_CAPABILITY: capsules in a computer (G-RT-4) |
 | Admission | every execution admitted against the daemon's and the environment's policy (`prepare`) | environment policy at computer placement; commands admitted by the target's own policy | COMPUTER_MISSING_CAPABILITY: per-command admission against the environment policy (G-POL-1) |
 | Placement | pool placement evaluated, then **refused** unless it selected the daemon's node (`execute.rs`: "services run on the daemon's own node") | computer placement over the pool's targets; the machine is where placement put it | LEGACY: a placement that is decided, not followed |
 | Supervisor / process | `compute supervisor` (`LocalDataPlane`) starts the workload through `LocalProvider::execute_controlled`, owns its PID, registry, and log directory | the target session; `START_PROCESS`/`PROBE_PROCESSES` jobs, pidfiles in the workspace | SUPPORTED_BY_COMPUTER |
-| Restart | restart policy (never, or on failure with backoff) | an exited process is started again | COMPUTER_MISSING_CAPABILITY: restart policy (G-DEP-2) |
+| Restart | restart policy (never, or on failure with backoff) | `ProcessSpec.restart_policy` (never, on_failure, always), bounded by `max_restarts` with a doubling backoff, each restart recorded before it runs | SUPPORTED_BY_COMPUTER (G-DEP-2, closed) |
 | Endpoint | a stable daemon-host port, instance ports, supervisor forwarding; ingress :80/:443, domains, ACME | the computer's endpoint: the target host and the process port | SUPPORTED for a stable endpoint; ingress/domains/TLS: COMPUTER_MISSING_CAPABILITY (G-APP-1) |
 | Logs | files in the daemon's log directory per start (`views.rs#logs`), task output in memory | the process log in the workspace, read by a job | SUPPORTED_BY_COMPUTER |
 | Receipt | `ReceiptRecord` + artifact in control state; `compute.deployment-receipt@1` | the target's receipt for the job, named by the rollout | LEGACY: a second evidence authority |
@@ -312,7 +312,8 @@ development convenience. It is therefore a second durable deployment
 authority, and it belongs in Project → Version → Computer → Execution. It
 cannot move there yet without losing the capabilities classified
 COMPUTER_MISSING_CAPABILITY above, so **G-ARCH-5 is BLOCKED** on G-DEP-1,
-G-APP-1, G-RT-3, G-RT-4, G-DEP-2, and G-POL-1. Until they close, the
+G-APP-1, G-RT-3, G-RT-4, G-DEP-3, and G-POL-1 (G-DEP-2, HTTP readiness
+and restart policy, is closed). Until they close, the
 boundary is enforced (`crates/compute-environment/tests/execution_paths.rs`):
 a node service runs only on the daemon host, placement that selects a
 target is refused, a node task pinned to a target runs outside any session
@@ -382,7 +383,7 @@ trail; that does not make them equivalent.
   the node model's legacy parts (placement contradiction, scope-only
   authority, second evidence authority) go with G-ARCH-5.
 - **D. Blocked:** node-environment services and tasks — on G-DEP-1,
-  G-APP-1, G-RT-3, G-RT-4, G-DEP-2, G-POL-1.
+  G-APP-1, G-RT-3, G-RT-4, G-DEP-3, G-POL-1.
 
 ## Durable state
 
@@ -484,6 +485,12 @@ that breaks one fails them.
 | 20 | Session providers are executors, never authorities: every session operation is authorized and bound to its owner, and commands in a session are ordinary durable jobs. | `sessions.rs`: `every_operation_is_authorized_and_bound_to_its_owner`, `a_session_lives_its_whole_lifecycle_on_any_provider`, `a_provider_without_optional_capabilities_is_still_a_complete_provider`. Held by the provider contract and at the target: `compute serve` authenticates every request with a target credential, and the owner is the control plane it names (`a_target_is_controlled_only_by_the_control_planes_it_trusts`). |
 | 21 | Durable workload deployment and recovery execute through a Computer and its authenticated target session. The one exception, node environments, is held to its boundary until it converges (G-ARCH-5, blocked): daemon host only, placement never followed elsewhere, never inside a Computer environment. | `compute-environment/tests/applications.rs` (every canonical record exists for a deployment); `compute-environment/tests/execution_paths.rs` (the node boundary) |
 | 22 | Ephemeral local execution is identified as local and ephemeral and creates no durable deployment authority: no control-plane state, no deployment, no endpoint, no recovery, a local non-deployment receipt. Every spawn, supervision, provider-service, and dispatch site is classified. | `compute-cli/tests/execution_paths.rs`: `compute_run_is_ephemeral_local_execution`, `every_execution_site_is_classified` |
+| 23 | A computer process has desired state (running or stopped) and observed state (starting, running, ready, unready, stopped, exited, failed), kept apart: every surface shows both, and a process is never more alive than its machine. | `compute-environment/tests/process_policy.rs`: every test reads `reality.processes`; `compute-cli/tests/computers.rs`: `readiness_and_restarts_are_shown_and_survive_controller_process_restarts` |
+| 24 | Readiness is explicit: a process with a readiness check is `ready` only when a request made inside its computer answered as expected; a started child process is `starting`, and a missed deadline is a recorded failure, never healthy. | `process_policy.rs`: `a_process_is_ready_only_when_its_readiness_request_answers`, `a_missed_readiness_deadline_is_evidenced_and_restarts_on_failure`; `daemon::computers` unit tests `readiness_is_what_a_check_inside_the_computer_answered`, `a_missed_readiness_deadline_is_a_recorded_failure_and_the_policy_decides` |
+| 25 | Automatic restarts are bounded: at most `max_restarts` in a row, each after a doubling backoff, then none until the process changes or someone asks. | `process_policy.rs`: `a_crash_loop_is_bounded`; unit test `automatic_restarts_are_counted_once_and_bounded` |
+| 26 | Stopped means stopped: a process stopped by its desired state (or with its computer) is never restarted automatically, whatever its restart policy, across controller restarts. | `process_policy.rs`: `an_explicit_stop_is_never_undone_by_a_restart_policy`; unit test `stopped_means_no_automatic_restart`; `compute-cli/tests/computers.rs` (across a controller process restart) |
+| 27 | A restart is recorded, fenced on the computer record, before its job runs, and only in the session that record names: a replaced or lost machine is never restarted into, and a replacement's count starts afresh. | `process_policy.rs`: `a_replaced_machine_is_never_restarted_into` |
+| 28 | Restart authority lives in control state, not in a controller: a controller that restarts neither loses a restart, counts one twice, nor duplicates a running process, and recovers a process that exited while no controller ran. | `process_policy.rs`: `restarts_are_durable_across_controller_restarts_and_never_duplicated` (control state reopened from disk); `compute-cli/tests/computers.rs`: `readiness_and_restarts_are_shown_and_survive_controller_process_restarts` (the controller as a separate process, stopped and started) |
 
 ## Failure kinds
 

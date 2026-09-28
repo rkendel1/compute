@@ -530,6 +530,40 @@ pub struct ComputerReality {
     pub since: Option<DateTime<Utc>>,
     /// What this means, and what to do about it.
     pub explanation: String,
+    /// Each process, desired and observed, told apart the same way.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub processes: BTreeMap<String, ProcessReality>,
+}
+
+/// A computer process: what is asked of it, what was last observed, and
+/// what its restart policy is doing about the difference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessReality {
+    /// `running` or `stopped`: what the environment asks for.
+    pub desired: String,
+    /// `pending` (not started yet), `starting`, `ready`, `unready`,
+    /// `running` (no readiness to check), `stopped`, `exited`, `failed`, or
+    /// the machine's own state when it is not confirmed (`unverified`,
+    /// `unreachable`, `lost`, `stopped`).
+    pub process: String,
+    /// `starting`, `ready`, or `unready`, for a process with a readiness
+    /// check; with what the last check got.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    pub restart_policy: compute_core::ProcessRestartPolicy,
+    /// Automatic restarts on this machine.
+    pub restarts: u64,
+    /// Restarts in a row that have not recovered it, and the bound.
+    pub attempts: u32,
+    pub max_restarts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_restart_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<compute_core::ProcessFailure>,
 }
 
 /// Summary row for `compute environment list` and the UI's first screen.

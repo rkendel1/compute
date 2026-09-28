@@ -56,7 +56,12 @@ pub const STATE_VERSION: &str = "compute.state@1";
 ///   a version's source was imported from), and operation steps name the
 ///   receipt of the job that did them (inside `steps`). Applications are
 ///   versions and rollouts of a project on their own computer.
-pub const MODEL_GENERATION: u32 = 8;
+/// - 9: computer process readiness and restart policy (inside their JSON):
+///   `Environment.contents` processes gain `readiness`, `restart_policy`,
+///   and `max_restarts`; `Computer.observed` processes gain the `starting`
+///   state, readiness, restart counts, the next restart, and the last
+///   failure.
+pub const MODEL_GENERATION: u32 = 9;
 
 /// A typed document of one collection.
 pub trait Document: Serialize + DeserializeOwned + Clone + Send + Sync {
@@ -1287,6 +1292,15 @@ pub mod events {
     pub const CONTENTS_APPLIED: &str = "environment.contents_applied";
     pub const CONTENTS_FAILED: &str = "environment.contents_failed";
     pub const CONTENTS_CONVERGED: &str = "environment.contents_converged";
+    /// A computer process answered its readiness request.
+    pub const PROCESS_READY: &str = "process.ready";
+    /// A ready computer process stopped answering as ready.
+    pub const PROCESS_UNREADY: &str = "process.unready";
+    /// A desired-running computer process exited, failed to start, or missed
+    /// its readiness deadline; the data says what its restart policy decided.
+    pub const PROCESS_FAILED: &str = "process.failed";
+    /// An automatic restart of a computer process, recorded before it runs.
+    pub const PROCESS_RESTARTING: &str = "process.restarting";
     pub const ENVIRONMENT_EXEC: &str = "environment.exec";
     pub const ENVIRONMENT_CONNECTED: &str = "environment.connected";
     pub const ENVIRONMENT_RECONCILE_REQUESTED: &str = "environment.reconcile_requested";

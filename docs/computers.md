@@ -181,8 +181,10 @@ the difference, in order:
 3. stop processes that are removed or wanted stopped; start (or restart)
    processes whose command, environment, or repository commit changed
    (`setsid`, pid and log under `.compute/processes/`);
-4. probe processes (every `computer_probe`, 15 s by default): a process
-   that died is started again, with its exit recorded.
+4. probe processes (every `computer_probe`, 15 s by default; every second
+   while one is not yet ready): exits, exit statuses, and readiness, from
+   inside the computer; a process that stopped running as it should is
+   restarted only as its restart policy says (below).
 
 Each job's result is written back per item, with its job and execution
 ID and its receipt (`OperationEvidence`). A failed item is recorded as
@@ -199,6 +201,108 @@ Ways to change contents, all authorized and recorded:
 | All at once | `compute environment contents apply myapp contents.json --expected-generation 7`: refused with `conflict` if someone changed them since generation 7 |
 | The UI | The environment page's **Computer** panel. Edits stay local to the page until **GO** submits the whole draft as one fenced change |
 | Programs | `POST /environments/{environment}/contents` with `expected_generation`; `updateComputeEnvironment` in `@compute/appport` |
+
+## Processes: readiness and restart policy
+
+A durable process in a computer has a desired state, an observed state, an
+HTTP readiness contract when it serves, and a bounded restart policy. All
+of it is in control state, so a controller that restarts carries on from
+the record.
+
+```json
+{
+  "name": "web", "command": ["npm", "start"], "port": 3000,
+  "readiness": { "path": "/health", "expect": "2xx", "request_timeout_seconds": 2, "deadline_seconds": 60 },
+  "restart_policy": "on_failure", "max_restarts": 5
+}
+```
+
+```sh
+compute environment process add myapp web --port 3000 \
+  --ready-path /health --ready-deadline 60 --restart on-failure -- npm start
+compute environment info myapp
+#   web   service   running   ready   4812   1   npm start
+#     readiness: ready (GET /health expects 2xx; last: HTTP 200)
+#     restart: on_failure (0 in a row of at most 5)
+#     last failure: web exited with status 143 (exited, …): restart 1 of 5 at …
+```
+
+**Before this (as audited).** `START_PROCESS` started a process with
+`setsid` and recorded its pid; `PROBE_PROCESSES` said only running or
+exited. An exited process was started again at the next probe, forever and
+uncounted; a failed start was never retried; nothing checked readiness (a
+rollout's health check was a TCP connect from the controller). Process
+state was `running`, `stopped`, `exited`, or `failed`.
+
+**Readiness.** `readiness` is an HTTP `GET` of `path` on the process's port
+(or `readiness.port`), made by the probe job *inside the computer*, so it
+checks the process as its machine reaches it. `expect` is a status (`204`)
+or a class (`2xx`, the default); redirects are not followed. The job uses
+`curl`, `python3`, or `wget`, whichever the computer has; a computer with
+none says so (`no HTTP client in the computer`) and the process never
+becomes ready. A started process is `starting` until a check answers as
+expected, then `ready`; a ready process that stops answering is `unready`.
+Starting or unready for longer than `deadline_seconds` is a failure. A
+process without `readiness` is `running`, never `ready`. A rollout's health
+check requires `ready` for a process that has a readiness check.
+
+**Restart policy.** When a desired-running process exits, fails to start,
+or misses its readiness deadline, Compute records the failure (reason,
+message, exit status, the job that established it) and what its policy
+decides:
+
+| Policy | Restarts after |
+| --- | --- |
+| `never` | nothing: it stays exited or failed |
+| `on_failure` | a non-zero or unknown exit status, a failed start, a missed readiness deadline; not a clean exit (status 0) |
+| `always` (default) | any of them, a clean exit included |
+
+Restarts are bounded: at most `max_restarts` (5 by default) in a row, after
+1, 2, 4, … seconds (at most a minute). Becoming ready, or running 30 s
+without a readiness check, ends the row. After the bound the process stays
+`failed` or `exited`, with why, until it changes or someone asks
+(`compute environment reconcile`, which starts it again with its count
+kept). A restart policy change applies in place; it restarts nothing.
+Stopped means stopped: a process whose desired state is `stopped` (or
+whose computer is stopped) is never restarted, whatever its policy.
+
+**State.** `observed.processes.<name>` holds `state` (`starting`,
+`running`, `stopped`, `exited`, `failed`), `readiness` (`starting`,
+`ready`, `unready`, since when, the last answer, the probe job),
+`restarts` (automatic restarts on this machine), `attempts` (restarts in a
+row), `retry_at` (the next restart), `last_failure`, and `started_at`.
+`reality.processes.<name>` is the account every surface shows: `desired`,
+`process` (`pending`, `starting`, `ready`, `unready`, `running`, `stopped`,
+`exited`, `failed`, or the machine's own state when it is not confirmed,
+such as `lost`), `readiness`, `restarts`, `next_restart_at`, and
+`last_failure`.
+
+| From | Event | To |
+| --- | --- | --- |
+| — / `exited` / `failed` / `stopped` | a start is decided: new or changed, due by its policy, resumed, or asked for; recorded, fenced | `starting` |
+| `starting` | its start job succeeds | `running` (readiness `starting` if it has a check) |
+| `starting` | its start job fails | `failed` (policy decides) |
+| `running`, readiness `starting` / `unready` | a check inside the computer answers as expected | readiness `ready` |
+| `running`, readiness `ready` | a check does not | readiness `unready` |
+| `running`, readiness `starting` / `unready` | past `deadline_seconds` | `failed` (still running, unready; policy decides) |
+| `running` | it is no longer running | `exited`, with its exit status (policy decides) |
+| any | desired `stopped` (or the computer stops) | `stopped`; nothing restarts it |
+
+**Recovery and fencing.** A start is recorded (`starting`) in the
+`Computer` record, fenced on the version the driver read, *before* its job
+runs; an automatic restart is counted in that same write, with a
+`process.restarting` event. A driver whose record moved on (another
+controller, a replaced or lost machine) writes nothing and so starts
+nothing, and a start job goes only to the session the committed record
+names. A controller that restarts finds a recorded start and runs it
+without deciding or counting it again; `START_PROCESS` ends whatever the
+pidfile names first, so a start never runs twice side by side. A running
+process is left alone; one that exited while no controller ran is found
+by the next probe and handled by its policy, its count continuing. A
+replacement machine starts with fresh process state: restarts are counted
+per machine. Failures, readiness changes, and restarts are events
+(`process.failed`, `process.ready`, `process.unready`,
+`process.restarting`) naming the target job whose receipt the target holds.
 
 ## Replacement
 

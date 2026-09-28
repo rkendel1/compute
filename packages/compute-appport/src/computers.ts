@@ -63,6 +63,37 @@ export interface ComputerReality {
   /** When it became unreachable or lost. */
   since?: string;
   explanation: string;
+  /** Each process, desired and observed, and what its restart policy is doing. */
+  processes?: Record<string, ProcessReality>;
+}
+
+/** A process's reality: what is asked of it, and what was last observed. */
+export interface ProcessReality {
+  desired: "running" | "stopped";
+  /** `pending`, `starting`, `ready`, `unready`, `running` (no readiness check), `stopped`, `exited`, `failed`, or the machine's own state when it is not confirmed. */
+  process: string;
+  readiness?: "starting" | "ready" | "unready";
+  /** What the last readiness request got: `HTTP 200`, `no answer`. */
+  readiness_detail?: string;
+  pid?: number;
+  restart_policy: ProcessRestartPolicy;
+  /** Automatic restarts on this machine. */
+  restarts: number;
+  /** Restarts in a row that have not recovered it, and their bound. */
+  attempts: number;
+  max_restarts: number;
+  next_restart_at?: string;
+  last_failure?: ProcessFailure;
+}
+
+/** Why a desired-running process stopped running as it should, and what its restart policy decided. */
+export interface ProcessFailure {
+  reason: "exited" | "start_failed" | "readiness_timeout";
+  message: string;
+  exit_code?: number;
+  decision: string;
+  at: string;
+  evidence: OperationEvidence;
 }
 
 export interface ComputerRequirements {
@@ -99,6 +130,28 @@ export interface ProcessSpec {
   desired?: "running" | "stopped";
   /** Published as an endpoint, and given to the process as `$PORT`. */
   port?: number;
+  /** The HTTP request, made inside the computer, that says it is ready. */
+  readiness?: HttpReadiness;
+  /** When Compute restarts it after it exits, fails to start, or misses its readiness deadline. Default `always`. */
+  restart_policy?: ProcessRestartPolicy;
+  /** Automatic restarts in a row that may fail before Compute stops. Default 5. */
+  max_restarts?: number;
+}
+
+/** A stopped-on-purpose process is never restarted, whatever its policy. */
+export type ProcessRestartPolicy = "never" | "on_failure" | "always";
+
+export interface HttpReadiness {
+  /** The path requested (`/health`); redirects are not followed. */
+  path: string;
+  /** Default: the process's port. */
+  port?: number;
+  /** A status (`204`) or a class (`2xx`, the default). */
+  expect?: string;
+  /** Default 2. */
+  request_timeout_seconds?: number;
+  /** How long it may be starting, or unready, before that is a failure. Default 60. */
+  deadline_seconds?: number;
 }
 
 /** Software in one of the environment's repositories, built and operated inside the computer. */
@@ -131,7 +184,18 @@ export interface OperationEvidence {
 export interface ObservedContents {
   repositories?: Record<string, { revision: string; commit?: string; fingerprint: string; evidence: OperationEvidence }>;
   packages?: Record<string, { fingerprint: string; evidence: OperationEvidence }>;
-  processes?: Record<string, { state: "running" | "stopped" | "exited" | "failed"; fingerprint: string; pid?: number; evidence: OperationEvidence }>;
+  processes?: Record<string, {
+    state: "starting" | "running" | "stopped" | "exited" | "failed";
+    fingerprint: string;
+    pid?: number;
+    evidence: OperationEvidence;
+    started_at?: string;
+    readiness?: { state: "starting" | "ready" | "unready"; since: string; detail?: string; evidence?: OperationEvidence };
+    restarts?: number;
+    attempts?: number;
+    retry_at?: string;
+    last_failure?: ProcessFailure;
+  }>;
   builds?: Record<string, { commit?: string; fingerprint: string; evidence: OperationEvidence }>;
   converged_generation: number;
   observed_at?: string;

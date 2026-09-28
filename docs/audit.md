@@ -967,7 +967,7 @@ next step:
 - Desired: Node workloads converged to Project → Version → Computer → target session → job → receipt; the node model retired.
 - Impact: A second durable deployment model remains (not for applications).
 - Evidence: execution_paths, crates/compute-environment/tests/execution_paths.rs
-- Next: Blocked: node environments are durable deployments (desired state, revisions, releases, rollback, stable endpoints, supervised restart, receipts) and should converge to Project → Version → Computer → Execution, but Computer lacks what they use: zero-downtime switching (G-DEP-1), ingress/domains/TLS to computer endpoints (G-APP-1), pinned catalog runtimes in a computer (G-RT-3), dependency capsules in a computer (G-RT-4), HTTP readiness and restart policy for computer processes (G-DEP-2), and per-command admission against the environment policy (G-POL-1). Until then the node model is held to its boundary: daemon host only, never in a computer environment (crates/compute-environment/tests/execution_paths.rs).
+- Next: Blocked: node environments are durable deployments (desired state, revisions, releases, rollback, stable endpoints, supervised restart, receipts) and should converge to Project → Version → Computer → Execution, but Computer lacks what they use: zero-downtime switching (G-DEP-1), ingress/domains/TLS to computer endpoints (G-APP-1), pinned catalog runtimes in a computer (G-RT-3), dependency capsules in a computer (G-RT-4), port and task readiness for computer processes (G-DEP-3; HTTP readiness and restart policy are in place, G-DEP-2), and per-command admission against the environment policy (G-POL-1). Until then the node model is held to its boundary: daemon host only, never in a computer environment (crates/compute-environment/tests/execution_paths.rs).
 
 **G-ARCH-3** (closed)
 
@@ -1021,13 +1021,21 @@ next step:
 
 ### Deployment
 
-**G-DEP-2**
+**G-DEP-2** (closed)
 
-- Current: Computer processes have no HTTP readiness path and no restart policy: a rollout's health check is a TCP connect, and an exited process is started again.
+- Was: Computer processes have no HTTP readiness path and no restart policy: a rollout's health check is a TCP connect, and an exited process is started again.
 - Desired: Readiness (HTTP path, task) and restart policy (never, on failure) on ProcessSpec.
 - Impact: Node releases gate traffic on HTTP readiness and honor restart policy (G-ARCH-5).
 - Evidence: crates/compute-environment/src/daemon/software.rs#rollout_step
-- Next: Add readiness and restart to ProcessSpec and the reconciler.
+- Next: Closed: a computer process has an HTTP readiness contract (path, port, expected status or class, request timeout, deadline) checked by a probe job inside the computer, and a bounded restart policy (never, on_failure, always; max_restarts in a row, doubling backoff). Starts are recorded before they run (fenced), restart counts and failures are durable evidence, and an explicit stop is never undone (crates/compute-environment/tests/process_policy.rs; crates/compute-cli/tests/computers.rs#readiness_and_restarts_are_shown_and_survive_controller_process_restarts). Port and task readiness remain: G-DEP-3.
+
+**G-DEP-3**
+
+- Current: A computer process has HTTP readiness (G-DEP-2) but not the node model's other readiness kinds: a TCP port accepting connections, or a task of the same revision exiting 0.
+- Desired: Port and task readiness on ProcessSpec, checked inside the computer as HTTP readiness is.
+- Impact: Node releases that gate on a port or a task cannot move to a computer unchanged (G-ARCH-5).
+- Evidence: crates/compute-state/src/model.rs#ReadinessCheck; crates/compute-core/src/computers.rs#HttpReadiness
+- Next: Add port and task checks beside HTTP in the probe job.
 
 **G-DEP-1**
 
@@ -1393,7 +1401,7 @@ releases. Underneath is a solid runtime-neutral workload engine
    - Done: decide the durable-state default (G-ARCH-3)
    - Done: browser tests and the UI certification in CI; fix the home-route regression (G-UI-2)
 2. **EXECUTION**
-   - One deployment model: node environments converge once G-DEP-1, G-APP-1, G-RT-3, G-RT-4, G-DEP-2, G-POL-1 close (G-ARCH-5, blocked); applications are converged (G-ARCH-2)
+   - One deployment model: node environments converge once G-DEP-1, G-APP-1, G-RT-3, G-RT-4, G-DEP-3, G-POL-1 close (G-ARCH-5, blocked); applications are converged (G-ARCH-2)
    - Cancel/retry for computer jobs and operations (G-EXEC-2)
 3. **RUNTIME COVERAGE**
    - Container computers verified in CI, with ports and volumes (G-RT-1)

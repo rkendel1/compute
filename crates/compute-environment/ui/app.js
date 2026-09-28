@@ -103,6 +103,21 @@ function state(value, text) {
   return h('span', { class: `state ${tone}` }, h('span', { class: 'glyph', 'aria-hidden': 'true' }, glyph), text || label);
 }
 
+/// A computer process as its reality says (`reality.processes`): ready is
+/// healthy, unready is not, and restarts and the last failure are shown.
+function processState(computer, name, seen) {
+  const reality = computer.reality && computer.reality.processes && computer.reality.processes[name];
+  if (!reality) return seen ? state(seen.state) : '—';
+  const word = reality.process;
+  const tone = { ready: 'healthy', unready: 'unhealthy' }[word] || word;
+  const label = (STATES[word] && word !== 'ready') ? STATES[word][2] : word[0].toUpperCase() + word.slice(1);
+  const details = [label];
+  if (reality.pid) details.push(`pid ${reality.pid}`);
+  if (reality.restarts) details.push(`${reality.restarts} restart${reality.restarts === 1 ? '' : 's'}`);
+  const failure = reality.last_failure;
+  return h('span', { title: failure ? `${failure.message}; ${failure.decision}` : '' }, state(tone, details.join(' · ')));
+}
+
 /// What Compute last established about a computer, in the API's one
 /// vocabulary (`reality.observed`): never what the environment wants of it.
 function observedOf(computer) {
@@ -520,7 +535,7 @@ async function environmentView(name) {
       return h('tr', { 'data-process': process.name },
         h('td', {}, h('strong', {}, process.name)),
         h('td', {}, process.kind || 'application'),
-        h('td', {}, seen ? state(seen.state) : '—'),
+        h('td', {}, processState(computer, process.name, seen)),
         h('td', { class: 'mono' }, endpoint && endpoint.url ? h('a', { href: endpoint.url, target: '_blank', rel: 'noopener' }, endpoint.url) : '—'),
         h('td', {},
           h('button', { disabled: !running, onclick: () => act(`Restarting ${process.name}`, () => api('POST', `/environments/${enc(name)}/processes/${enc(process.name)}/restart`)) }, 'Restart'), ' ',
@@ -840,7 +855,7 @@ async function workView(name) {
       h('td', {}, process.port ? String(process.port) : '—'),
       h('td', {}, h('select', { disabled: !live, 'aria-label': `${process.name} desired`, onchange: (event) => edit(name, draft, () => { process.desired = event.target.value; }) },
         ['running', 'stopped'].map((value) => h('option', { value, selected: (process.desired || 'running') === value }, value)))),
-      h('td', {}, seen ? state(seen.state, `${STATES[seen.state] ? STATES[seen.state][2] : seen.state}${seen.pid ? ` · pid ${seen.pid}` : ''}`) : '—'),
+      h('td', {}, processState(computer, process.name, seen)),
       h('td', {},
         h('button', { disabled: !running, onclick: () => showLog(name, process.name) }, 'Log'), ' ',
         h('button', { disabled: !running, 'data-restart': process.name, onclick: () => act(`Restarting ${process.name}`, () => api('POST', `/environments/${enc(name)}/processes/${enc(process.name)}/restart`)) }, 'Restart'), ' ',
