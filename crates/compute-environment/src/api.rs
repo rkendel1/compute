@@ -1314,9 +1314,10 @@ async fn route(
             created(to_value(Box::pin(daemon.promote(parse(body)?)).await?)?)
         }
         ("GET", ["deployments", id]) => ok(to_value(Box::pin(daemon.deployment(id)).await?)?),
-        ("GET", ["deployments", id, "receipt"]) => {
-            ok(Box::pin(daemon.deployment_receipt_document(id)).await?)
-        }
+        ("GET", ["deployments", id, "receipt"]) => Ok(Response::Bytes(
+            "application/json",
+            Box::pin(daemon.deployment_receipt_bytes(id)).await?,
+        )),
         ("POST", ["deployments", id, "rollback"]) => {
             ok(to_value(Box::pin(daemon.rollback(id)).await?)?)
         }
