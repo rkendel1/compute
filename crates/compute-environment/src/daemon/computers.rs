@@ -31,14 +31,15 @@ use compute_core::{
     EnvironmentContents, ObservedBuild, ObservedContents, ObservedPackage, ObservedProcess,
     ObservedReadiness, ObservedRepository, OperationEvidence, PackageSpec, ProcessDesired,
     ProcessFailure, ProcessRestartPolicy, ProcessSpec, ProcessState, ProjectSpec, ReadinessState,
-    RepositorySpec, RetiredSession, SessionCommand, SessionStatus, fingerprint,
+    RepositorySpec, RetiredSession, RuntimeLifecycleStatus, RuntimeResolution, SessionCommand,
+    SessionStatus, fingerprint,
 };
 use compute_placement::{
     AdmissionContext, DiscoveryMode, PlacementOutcome, PlacementPolicy, PlacementReport,
     PlacementRequirements, dispatch, place_with_policy,
 };
 use compute_policy::ExecutionContract;
-use compute_provider::{ProviderErrorKind, RemoteProvider, SessionCreateRequest};
+use compute_provider::{ComputeProvider, ProviderErrorKind, RemoteProvider, SessionCreateRequest};
 use compute_state::events;
 use compute_state::{ComputerRecord, EnvironmentRecord, Stored, ids};
 use serde::{Deserialize, Serialize};
@@ -156,6 +157,49 @@ pub(crate) fn process_env(
     }
     env.extend(process.env.clone());
     env
+}
+
+/// Ask the execution target for the runtime it can actually run, and make a
+/// catalog distribution executable there before returning its target-local
+/// executable. A versioned request is pinned: it never degrades to a host
+/// executable merely because one happens to be on PATH.
+async fn prepare_process_runtime(
+    client: &RemoteProvider,
+    requirement: &compute_core::ProviderRuntimeRequirement,
+) -> Result<(RuntimeResolution, Option<std::path::PathBuf>), String> {
+    let mut resolution = client
+        .resolve_runtime(requirement.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Some(distribution) = resolution.distribution.clone() {
+        let preparation = client
+            .prepare_runtime(distribution)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !preparation.verified || preparation.status != RuntimeLifecycleStatus::Ready {
+            return Err("the target did not verify and prepare the requested runtime".into());
+        }
+        let executable = preparation.executable.ok_or_else(|| {
+            "the target prepared the runtime without an executable path".to_owned()
+        })?;
+        resolution.status = RuntimeLifecycleStatus::Ready;
+        resolution.detail = None;
+        return Ok((resolution, Some(executable)));
+    }
+    if requirement.version.is_some() {
+        return Err(format!(
+            "the target has no pinned {} distribution matching {}",
+            requirement.runtime,
+            requirement.version.as_deref().unwrap_or_default()
+        ));
+    }
+    if !resolution.status.is_ready() {
+        return Err(resolution
+            .detail
+            .clone()
+            .unwrap_or_else(|| format!("the target cannot execute {}", requirement.runtime)));
+    }
+    Ok((resolution, None))
 }
 
 /// The desired fingerprint of a process: its spec, the commit of the
@@ -436,6 +480,8 @@ fn claim_start(
         fingerprint: wanted.to_owned(),
         pid: None,
         evidence: pending(now),
+        requested_runtime: None,
+        resolved_runtime: None,
         started_at: None,
         readiness: None,
         restarts: 0,
@@ -796,9 +842,11 @@ log="$root/.compute/processes/$name.log"
 exitfile="$root/.compute/processes/$name.exit"
 if [ -f "$pidfile" ]; then
   old="$(cat "$pidfile")"
-  kill -TERM "-$old" 2>/dev/null || kill -TERM "$old" 2>/dev/null || true
+  kill -TERM "$old" 2>/dev/null || true
+  kill -TERM "-$old" 2>/dev/null || true
   i=0
   while kill -0 "$old" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  kill -KILL "$old" 2>/dev/null || true
   kill -KILL "-$old" 2>/dev/null || true
   rm -f "$pidfile"
 fi
@@ -806,7 +854,9 @@ rm -f "$exitfile"
 if [ -n "$repository" ]; then cd "repos/$repository"; fi
 # The process runs under a small shell that records its exit status (for
 # the restart policy) and passes signals on to it.
-setsid sh -c '
+detach=""
+if command -v setsid >/dev/null 2>&1; then detach="setsid"; fi
+$detach sh -c '
 exitfile="$0"
 trap "kill -TERM \$child 2>/dev/null" TERM INT HUP
 "$@" &
@@ -833,9 +883,11 @@ fi
 const STOP_PROCESS: &str = r#"pidfile=".compute/processes/$1.pid"
 if [ -f "$pidfile" ]; then
   pid="$(cat "$pidfile")"
-  kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  kill -TERM "$pid" 2>/dev/null || true
+  kill -TERM "-$pid" 2>/dev/null || true
   i=0
   while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  kill -KILL "$pid" 2>/dev/null || true
   kill -KILL "-$pid" 2>/dev/null || true
   rm -f "$pidfile"
 fi
@@ -1247,6 +1299,8 @@ impl Daemon {
                         .and_then(|seen| seen.readiness.as_ref())
                         .and_then(|readiness| readiness.detail.clone()),
                     pid: seen.and_then(|seen| seen.pid),
+                    requested_runtime: spec.runtime.clone(),
+                    resolved_runtime: seen.and_then(|seen| seen.resolved_runtime.clone()),
                     restart_policy: spec.restart_policy,
                     restarts: seen.map_or(0, |seen| seen.restarts),
                     attempts: seen.map_or(0, |seen| seen.attempts),
@@ -3478,7 +3532,7 @@ impl Daemon {
                 if current.is_none_or(|seen| {
                     seen.state != ProcessState::Starting || seen.fingerprint != wanted
                 }) {
-                    let (claim, automatic) = claim_start(current, &wanted, now);
+                    let (mut claim, automatic) = claim_start(current, &wanted, now);
                     let event = automatic.then(|| {
                         (
                             events::PROCESS_RESTARTING,
@@ -3504,26 +3558,80 @@ impl Daemon {
                             }),
                         )
                     });
+                    claim.requested_runtime = process.runtime.clone();
+                    claim.resolved_runtime = None;
                     value.observed.processes.insert(process.name.clone(), claim);
                     return self.advance(stored, name, value, event).await;
                 }
-                let mut arguments = vec![
-                    process.name.clone(),
-                    process.repository.clone().unwrap_or_default(),
-                ];
-                arguments.extend(process.command.iter().cloned());
-                let mut command = script(START_PROCESS, arguments);
-                command.env = process_env(&process, &record.value.config);
-                let (evidence, output) = self
-                    .run_in_computer_command(client, session_id, command, Duration::from_secs(60))
-                    .await;
-                let now = Utc::now();
                 let mut seen = value
                     .observed
                     .processes
                     .get(&process.name)
                     .cloned()
                     .expect("the start was claimed");
+                let mut arguments = vec![
+                    process.name.clone(),
+                    process.repository.clone().unwrap_or_default(),
+                ];
+                let mut process_command = process.command.clone();
+                let runtime = match &process.runtime {
+                    Some(_) if value.provider_kind.as_deref() == Some("container") => Err(
+                        "container computers cannot use the target host's runtime store; the runtime must be available inside the container"
+                            .to_owned(),
+                    ),
+                    Some(requirement) => prepare_process_runtime(client, requirement).await,
+                    None => Ok((
+                        RuntimeResolution {
+                            requirement: compute_core::ProviderRuntimeRequirement {
+                                runtime: compute_core::RuntimeKind::Shell,
+                                version: None,
+                                platform: None,
+                            },
+                            status: RuntimeLifecycleStatus::Installed,
+                            distribution: None,
+                            detail: None,
+                        },
+                        None,
+                    )),
+                };
+                let runtime_error = match runtime {
+                    Ok((resolution, executable)) => {
+                        if process.runtime.is_some() {
+                            seen.resolved_runtime = Some(resolution);
+                        }
+                        if let Some(executable) = executable {
+                            process_command[0] = executable.display().to_string();
+                        }
+                        None
+                    }
+                    Err(error) => Some(error),
+                };
+                arguments.extend(process_command);
+                let mut command = script(START_PROCESS, arguments);
+                command.env = process_env(&process, &record.value.config);
+                command.runtime = seen.resolved_runtime.clone();
+                let (evidence, output) = match runtime_error {
+                    Some(error) => (
+                        OperationEvidence {
+                            job_id: String::new(),
+                            execution_id: String::new(),
+                            outcome: "failed".into(),
+                            at: Utc::now(),
+                            error: Some(error),
+                        },
+                        String::new(),
+                    ),
+                    None => {
+                        self.run_in_computer_command(
+                            client,
+                            session_id,
+                            command,
+                            Duration::from_secs(60),
+                        )
+                        .await
+                    }
+                };
+                let now = Utc::now();
                 seen.evidence = evidence.clone();
                 if evidence.outcome == "succeeded" {
                     seen.state = ProcessState::Running;
@@ -4372,6 +4480,7 @@ mod tests {
             processes: vec![ProcessSpec {
                 name: "api".into(),
                 kind: compute_core::ProcessKind::Application,
+                runtime: None,
                 command: vec!["./serve".into()],
                 repository: Some("app".into()),
                 env: BTreeMap::new(),
@@ -4418,6 +4527,8 @@ mod tests {
                 fingerprint: started.clone(),
                 pid: Some(1),
                 evidence: evidence(),
+                requested_runtime: None,
+                resolved_runtime: None,
                 started_at: None,
                 readiness: None,
                 restarts: 0,
@@ -4467,6 +4578,8 @@ mod tests {
                 fingerprint,
                 pid: None,
                 evidence: evidence(),
+                requested_runtime: None,
+                resolved_runtime: None,
                 started_at: None,
                 readiness: None,
                 restarts: 0,
@@ -4560,6 +4673,8 @@ mod tests {
                 fingerprint: started,
                 pid: Some(1),
                 evidence: evidence(),
+                requested_runtime: None,
+                resolved_runtime: None,
                 started_at: None,
                 readiness: None,
                 restarts: 0,

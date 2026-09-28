@@ -403,6 +403,7 @@ impl RuntimeManager {
                 distribution: distribution.clone(),
                 status: RuntimeLifecycleStatus::Ready,
                 verified: true,
+                executable: Some(self.root.join(&distribution.executable)),
                 steps: vec![step("status", "ready", Some("already prepared"))],
             });
         }
@@ -544,6 +545,7 @@ impl RuntimeManager {
             distribution: distribution.clone(),
             status: RuntimeLifecycleStatus::Ready,
             verified: true,
+            executable: Some(self.root.join(&distribution.executable)),
             steps: vec![
                 step("resolve", "complete", None),
                 step("acquire", "complete", None),

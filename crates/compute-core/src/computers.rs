@@ -126,8 +126,14 @@ impl std::fmt::Display for ComputerStatus {
 
 /// Features of a target's machine that are not resources or session
 /// capabilities: what the hardware and host software offer.
-pub const TARGET_FEATURES: [&str; 5] =
-    ["containers", "kvm", "firecracker", "gpu", "virtualization"];
+pub const TARGET_FEATURES: [&str; 6] = [
+    "containers",
+    "kvm",
+    "firecracker",
+    "gpu",
+    "virtualization",
+    "runtime_store_visible",
+];
 
 /// Validate target feature names, so a typo is never read as "not required".
 pub fn validate_target_features(features: &[String]) -> crate::Result<()> {
@@ -169,6 +175,11 @@ pub struct ComputerRequirements {
     /// Target features the machine must have (`kvm`, `firecracker`, ...).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<String>,
+    /// Runtimes processes in this computer require its target to be able to
+    /// resolve and execute. These supplement the shell runtime used to
+    /// provision the session itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtimes: Vec<crate::ProviderRuntimeRequirement>,
 }
 
 impl Default for ComputerRequirements {
@@ -182,6 +193,7 @@ impl Default for ComputerRequirements {
             isolation: Default::default(),
             capabilities: vec![],
             features: vec![],
+            runtimes: vec![],
         }
     }
 }
@@ -190,6 +202,16 @@ impl ComputerRequirements {
     pub fn validate(&self) -> crate::Result<()> {
         SessionCapabilities::validate_names(&self.capabilities)?;
         validate_target_features(&self.features)?;
+        if self.runtimes.iter().any(|runtime| {
+            runtime
+                .version
+                .as_deref()
+                .is_some_and(|version| version.trim().is_empty())
+        }) {
+            return Err(crate::ComputeError::InvalidWorkload(
+                "a computer runtime version cannot be empty".into(),
+            ));
+        }
         if self.cpu_count == Some(0) {
             return Err(crate::ComputeError::InvalidWorkload(
                 "a computer needs at least one CPU".into(),
@@ -298,6 +320,11 @@ pub struct ProcessSpec {
     pub name: String,
     #[serde(default)]
     pub kind: ProcessKind,
+    /// Runtime the target must resolve and prepare before starting this
+    /// process. Absent preserves the native/shell command behaviour: the
+    /// command is resolved inside the computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::ProviderRuntimeRequirement>,
     pub command: Vec<String>,
     /// Run inside this repository's checkout, and restart when its
     /// checkout moves to another commit.
@@ -615,6 +642,17 @@ impl EnvironmentContents {
                 return invalid(format!("process {} is listed twice", process.name));
             }
             valid_command("process", &process.name, &process.command)?;
+            if let Some(runtime) = &process.runtime
+                && runtime
+                    .version
+                    .as_deref()
+                    .is_some_and(|version| version.trim().is_empty())
+            {
+                return invalid(format!(
+                    "process {} has an empty runtime version",
+                    process.name
+                ));
+            }
             known(&process.repository, &format!("process {}", process.name))?;
             if process.port == Some(0) {
                 return invalid(format!("process {} has port 0", process.name));
@@ -826,6 +864,14 @@ pub struct ObservedProcess {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub evidence: OperationEvidence,
+    /// Durable intent copied from the process specification for operator
+    /// reality, including across controller restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_runtime: Option<crate::ProviderRuntimeRequirement>,
+    /// The target's resolution used for this start. A distribution here is
+    /// target-issued evidence; absence identifies an explicit host runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_runtime: Option<crate::RuntimeResolution>,
     /// When the running process was started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
@@ -1034,6 +1080,7 @@ mod tests {
         ProcessSpec {
             name: name.into(),
             kind: ProcessKind::Application,
+            runtime: None,
             command: vec!["./run".into()],
             repository: repository.map(Into::into),
             env: BTreeMap::new(),
@@ -1070,6 +1117,42 @@ mod tests {
         contents.repositories[0].revision = "main".into();
         contents.processes[0].name = "../x".into();
         assert!(contents.validate().is_err(), "path in a name");
+    }
+
+    #[test]
+    fn process_runtime_is_optional_persisted_intent() {
+        let legacy = process("api", None);
+        let legacy_json = serde_json::to_value(&legacy).unwrap();
+        assert!(legacy_json.get("runtime").is_none());
+        assert_eq!(
+            serde_json::from_value::<ProcessSpec>(legacy_json)
+                .unwrap()
+                .runtime,
+            None
+        );
+
+        let mut pinned = process("api", None);
+        pinned.runtime = Some(crate::ProviderRuntimeRequirement {
+            runtime: crate::RuntimeKind::Node,
+            version: Some("22.12".into()),
+            platform: Some(crate::PlatformIdentity {
+                os: "linux".into(),
+                architecture: "x86_64".into(),
+                runtime_abi: None,
+            }),
+        });
+        let encoded = serde_json::to_vec(&pinned).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ProcessSpec>(&encoded).unwrap(),
+            pinned
+        );
+
+        pinned.runtime.as_mut().unwrap().version = Some(" ".into());
+        let contents = EnvironmentContents {
+            processes: vec![pinned],
+            ..Default::default()
+        };
+        assert!(contents.validate().is_err(), "empty runtime version");
     }
 
     #[test]

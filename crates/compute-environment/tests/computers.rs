@@ -357,6 +357,7 @@ fn contents(url: &Path, revision: &str) -> EnvironmentContents {
         processes: vec![ProcessSpec {
             name: "api".into(),
             kind: ProcessKind::Application,
+            runtime: None,
             command: vec!["sh".into(), "serve.sh".into()],
             repository: Some("app".into()),
             env: BTreeMap::new(),
@@ -745,6 +746,7 @@ async fn only_the_owner_changes_or_uses_a_computer() {
                 ProcessSpec {
                     name: "x".into(),
                     kind: ProcessKind::Agent,
+                    runtime: None,
                     command: vec!["true".into()],
                     repository: None,
                     env: BTreeMap::new(),
@@ -1285,6 +1287,7 @@ async fn drift_is_reconciled_and_processes_follow_their_desired_state() {
             ProcessSpec {
                 name: "cache".into(),
                 kind: ProcessKind::Service,
+                runtime: None,
                 command: vec!["sleep".into(), "600".into()],
                 repository: None,
                 env: BTreeMap::new(),
@@ -1401,6 +1404,7 @@ fn project_contents(url: &Path, revision: &str) -> EnvironmentContents {
         processes: vec![ProcessSpec {
             name: "api".into(),
             kind: ProcessKind::Application,
+            runtime: None,
             command: shell(
                 "cat BUILT > \"$COMPUTE_SESSION_WORKSPACE/running-build\"; \
                  echo \"$PORT\" > \"$COMPUTE_SESSION_WORKSPACE/port\"; exec sleep 600",

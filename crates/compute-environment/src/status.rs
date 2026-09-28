@@ -554,6 +554,10 @@ pub struct ProcessReality {
     pub readiness_detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_runtime: Option<compute_core::ProviderRuntimeRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_runtime: Option<compute_core::RuntimeResolution>,
     pub restart_policy: compute_core::ProcessRestartPolicy,
     /// Automatic restarts on this machine.
     pub restarts: u64,

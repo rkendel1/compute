@@ -490,6 +490,10 @@ pub fn valid_session_reference(reference: &str) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct SessionCommand {
     pub command: Vec<String>,
+    /// Target-issued resolution for a runtime-aware Computer process. The
+    /// target seals it into the command job's canonical receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::RuntimeResolution>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     #[serde(
@@ -504,6 +508,7 @@ impl SessionCommand {
     pub fn new(command: Vec<String>) -> Self {
         Self {
             command,
+            runtime: None,
             env: BTreeMap::new(),
             timeout: None,
         }

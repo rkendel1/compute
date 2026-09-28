@@ -268,6 +268,7 @@ pub fn requirements(kind: RuntimeKind) -> PlacementRequirements {
             version: None,
             artifact_id: None,
         },
+        additional_runtimes: vec![],
         distribution: None,
         dependencies: None,
         isolation: IsolationProfile::Process,

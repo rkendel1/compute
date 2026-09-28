@@ -120,6 +120,11 @@ pub struct ArtifactRequirement {
 pub struct PlacementRequirements {
     pub requirements_version: String,
     pub runtime: RuntimeRequirement,
+    /// Runtimes needed by work that will run inside a session. They affect
+    /// target eligibility but are not the session readiness workload's
+    /// runtime and therefore are not dispatched as that workload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_runtimes: Vec<RuntimeRequirement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution: Option<DistributionRequirement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,9 +232,27 @@ impl PlacementRequirements {
             &capabilities,
         )?;
         let mut features = requirements.features.clone();
+        if !requirements.runtimes.is_empty() {
+            features.push(compute_provider::RUNTIME_STORE_SESSION_FEATURE.into());
+        }
         features.sort();
         features.dedup();
         placed.target_features = features;
+        placed.additional_runtimes = requirements
+            .runtimes
+            .iter()
+            .map(|runtime| RuntimeRequirement {
+                kind: runtime.runtime,
+                version: runtime.version.clone(),
+                artifact_id: None,
+            })
+            .collect();
+        placed
+            .additional_runtimes
+            .sort_by_key(|runtime| runtime.kind);
+        placed
+            .additional_runtimes
+            .dedup_by(|left, right| left.kind == right.kind && left.version == right.version);
         Ok((placed, create))
     }
 }
@@ -345,6 +368,7 @@ impl PlacementRequirements {
                 version: workload.runtime_version.clone(),
                 artifact_id: options.runtime_artifact_id.clone(),
             },
+            additional_runtimes: vec![],
             distribution: options
                 .distribution_id
                 .clone()

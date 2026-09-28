@@ -47,6 +47,9 @@ pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// How often expiry and interrupted transitions are reconciled.
 pub const DEFAULT_SESSION_SWEEP: Duration = Duration::from_secs(1);
+/// Placement feature advertised only when session processes can execute a
+/// path in the target's verified host runtime store.
+pub const RUNTIME_STORE_SESSION_FEATURE: &str = "runtime_store_visible";
 
 /// What a caller sends to create a session: the environment's execution
 /// contract as an ordinary provider request, and the session's own terms.
@@ -232,6 +235,7 @@ fn session_request(
     request.expected.workload_id = Some(bundle.workload_id().map_err(artifact_error)?);
     request.expected.bundle_id = Some(bundle.bundle_id().map_err(artifact_error)?);
     request.execution.isolation = Some(environment.isolation);
+    request.execution.process_runtime = command.runtime.clone();
     Ok(request)
 }
 
@@ -593,6 +597,10 @@ impl SessionManager {
     /// What this node's sessions support.
     pub fn capabilities(&self) -> SessionCapabilities {
         self.provider.capabilities()
+    }
+
+    pub fn provider_kind(&self) -> String {
+        self.provider.kind()
     }
 
     pub async fn create(

@@ -2241,6 +2241,10 @@ pub struct RuntimePreparation {
     pub distribution: RuntimeDistribution,
     pub status: RuntimeLifecycleStatus,
     pub verified: bool,
+    /// Executable in the target's prepared runtime store. It is meaningful
+    /// only to an execution on that same target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<PathBuf>,
     pub steps: Vec<RuntimePreparationStep>,
 }
 

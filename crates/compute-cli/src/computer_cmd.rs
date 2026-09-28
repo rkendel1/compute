@@ -11,8 +11,9 @@ use std::time::Duration;
 use clap::{Args, Subcommand};
 use compute_core::{
     ComputeError, ComputerLifecycle, ComputerRequirements, EnvironmentContents, HttpReadiness,
-    IsolationProfile, NetworkPolicy, PackageSpec, ProcessDesired, ProcessKind, ProcessSpec,
-    ProjectSpec, RepositorySpec, SessionCommand,
+    IsolationProfile, NetworkPolicy, PackageSpec, PlatformIdentity, ProcessDesired, ProcessKind,
+    ProcessSpec, ProjectSpec, ProviderRuntimeRequirement, RepositorySpec, RuntimeKind,
+    SessionCommand,
 };
 use compute_environment::client::DaemonClient;
 use compute_environment::{
@@ -95,6 +96,7 @@ impl ComputerArgs {
             isolation: self.isolation.unwrap_or_default(),
             capabilities: self.require.clone(),
             features: self.features.clone(),
+            runtimes: vec![],
         }
     }
 }
@@ -446,6 +448,17 @@ pub struct ProcessArgs {
     repository: Option<String>,
     #[arg(long = "env", value_parser = parse_pair)]
     env: Vec<(String, String)>,
+    /// Runtime the target must resolve for this process (`node`, `python`,
+    /// `jvm`, `dotnet`, ...). Without this, the command keeps using the
+    /// computer's ordinary PATH.
+    #[arg(long)]
+    runtime: Option<RuntimeKind>,
+    /// Version or constraint for a pinned runtime distribution.
+    #[arg(long, requires = "runtime")]
+    runtime_version: Option<String>,
+    /// Architecture required by the runtime (`x86_64`, `arm64`).
+    #[arg(long, requires = "runtime")]
+    runtime_architecture: Option<String>,
     /// Add it stopped.
     #[arg(long)]
     stopped: bool,
@@ -490,6 +503,18 @@ impl ProcessArgs {
         ProcessSpec {
             name: self.name.clone(),
             kind,
+            runtime: self.runtime.map(|runtime| ProviderRuntimeRequirement {
+                runtime,
+                version: self.runtime_version.clone(),
+                platform: self
+                    .runtime_architecture
+                    .as_ref()
+                    .map(|architecture| PlatformIdentity {
+                        architecture: architecture.clone(),
+                        runtime_abi: None,
+                        ..PlatformIdentity::current()
+                    }),
+            }),
             command: self.command.clone(),
             repository: self.repository.clone(),
             env: self.env.iter().cloned().collect(),

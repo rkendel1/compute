@@ -69,6 +69,7 @@ fn service(
     ProcessSpec {
         name: "web".into(),
         kind: ProcessKind::Service,
+        runtime: None,
         command: vec!["python3".into(), "-c".into(), SERVICE.into(), mode.into()],
         repository: None,
         env: BTreeMap::new(),

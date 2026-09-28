@@ -135,17 +135,13 @@ impl Reasons {
     }
 }
 
-/// Evaluate every matching dimension and report every incompatibility found.
-pub fn match_provider(
-    requirements: &PlacementRequirements,
+fn match_runtime(
+    requirement: &crate::RuntimeRequirement,
     descriptor: &ProviderDescriptor,
-) -> CapabilityMatch {
-    let mut reasons = Reasons(vec![]);
-    let runtime_kind = requirements.runtime.kind;
-    let offer = descriptor.runtime(runtime_kind);
-
-    // Runtime.
-    match offer {
+    reasons: &mut Reasons,
+) {
+    let runtime_kind = requirement.kind;
+    match descriptor.runtime(runtime_kind) {
         None if descriptor.unavailable_runtimes.contains(&runtime_kind) => reasons.push(
             ReasonCode::RuntimeUnavailable,
             json!(runtime_kind),
@@ -161,7 +157,7 @@ pub fn match_provider(
             None,
         ),
         Some(offer) => {
-            if let Some(version) = &requirements.runtime.version
+            if let Some(version) = &requirement.version
                 && !runtime_version_matches(runtime_kind, version, offer.effective_version())
             {
                 reasons.push(
@@ -171,7 +167,7 @@ pub fn match_provider(
                     None,
                 );
             }
-            if let Some(artifact) = &requirements.runtime.artifact_id
+            if let Some(artifact) = &requirement.artifact_id
                 && offer.artifact_id.as_ref() != Some(artifact)
             {
                 reasons.push(
@@ -182,6 +178,20 @@ pub fn match_provider(
                 );
             }
         }
+    }
+}
+
+/// Evaluate every matching dimension and report every incompatibility found.
+pub fn match_provider(
+    requirements: &PlacementRequirements,
+    descriptor: &ProviderDescriptor,
+) -> CapabilityMatch {
+    let mut reasons = Reasons(vec![]);
+    let runtime_kind = requirements.runtime.kind;
+    let offer = descriptor.runtime(runtime_kind);
+    match_runtime(&requirements.runtime, descriptor, &mut reasons);
+    for runtime in &requirements.additional_runtimes {
+        match_runtime(runtime, descriptor, &mut reasons);
     }
 
     // Distribution: identity is authoritative; runtime versions are not a

@@ -534,6 +534,7 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
         processes: vec![compute_core::ProcessSpec {
             name: "api".into(),
             kind: compute_core::ProcessKind::Application,
+            runtime: None,
             command: vec!["./serve".into()],
             repository: Some("app".into()),
             env: BTreeMap::new(),
@@ -626,6 +627,8 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
                         fingerprint: "sha256:p".into(),
                         pid: Some(42),
                         evidence: evidence.clone(),
+                        requested_runtime: None,
+                        resolved_runtime: None,
                         started_at: None,
                         readiness: None,
                         restarts: 0,

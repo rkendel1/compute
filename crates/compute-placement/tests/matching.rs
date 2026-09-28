@@ -33,6 +33,37 @@ fn exact_runtime_match_is_compatible() {
 }
 
 #[test]
+fn every_computer_process_runtime_affects_placement() {
+    let mut required = requirements(RuntimeKind::Shell);
+    required
+        .additional_runtimes
+        .push(compute_placement::RuntimeRequirement {
+            kind: RuntimeKind::Node,
+            version: Some("22.12".into()),
+            artifact_id: None,
+        });
+    let shell_only =
+        Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Shell]).descriptor("shell-only");
+    assert_eq!(
+        codes(&required, &shell_only),
+        vec![ReasonCode::RuntimeUnsupported]
+    );
+
+    let matching = Synthetic::new(
+        ProviderKind::Remote,
+        &[RuntimeKind::Shell, RuntimeKind::Node],
+    )
+    .descriptor("matching");
+    assert!(match_provider(&required, &matching).compatible);
+
+    required.additional_runtimes[0].version = Some("20".into());
+    assert_eq!(
+        codes(&required, &matching),
+        vec![ReasonCode::RuntimeVersionMismatch]
+    );
+}
+
+#[test]
 fn resource_availability_is_distinct_from_capacity_and_explained() {
     let mut provider = Synthetic::new(ProviderKind::Remote, &[RuntimeKind::Wasm]);
     provider.resources = compute_core::ProviderResourceInventory {
@@ -709,6 +740,44 @@ fn a_computer_architecture_is_a_placement_requirement() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn runtime_aware_computers_require_a_substrate_that_can_see_the_runtime_store() {
+    let mut computer = computer(&[], &[]);
+    computer
+        .runtimes
+        .push(compute_core::ProviderRuntimeRequirement {
+            runtime: RuntimeKind::Node,
+            version: Some("22.12".into()),
+            platform: None,
+        });
+    let (requirements, _) = compute_placement::PlacementRequirements::for_computer(
+        &computer,
+        compute_core::ComputerLifecycle::Persistent,
+    )
+    .unwrap();
+    assert!(
+        requirements
+            .target_features
+            .contains(&compute_provider::RUNTIME_STORE_SESSION_FEATURE.to_owned())
+    );
+
+    let mut container = Synthetic::new(
+        ProviderKind::Remote,
+        &[RuntimeKind::Shell, RuntimeKind::Node],
+    );
+    container.sessions = Some(compute_core::SessionCapabilities {
+        claim: true,
+        ..session_capabilities(true)
+    });
+    assert_eq!(
+        match_provider(&requirements, &container.descriptor("container")).codes(),
+        [ReasonCode::TargetFeatureUnsupported]
+    );
+
+    container.features = vec![compute_provider::RUNTIME_STORE_SESSION_FEATURE.into()];
+    assert!(match_provider(&requirements, &container.descriptor("workspace")).compatible);
 }
 
 #[test]

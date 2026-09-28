@@ -253,6 +253,15 @@ async fn an_application_deployment_is_the_canonical_computer_lifecycle() {
         computer.observed.processes[name].state,
         ProcessState::Running
     );
+    let resolved = computer.observed.processes[name]
+        .resolved_runtime
+        .as_ref()
+        .expect("target runtime resolution");
+    assert_eq!(
+        resolved.requirement.runtime,
+        compute_core::RuntimeKind::Python
+    );
+    assert!(resolved.status.is_ready());
     // ✓ Canonical endpoint: the computer's endpoint for the process.
     let endpoint = computer
         .endpoints
@@ -274,6 +283,15 @@ async fn an_application_deployment_is_the_canonical_computer_lifecycle() {
     assert_eq!(bytes, canonical.encoded_bytes().unwrap(), "exact bytes");
     let served: ExecutionReceipt = serde_json::from_slice(&bytes).unwrap();
     served.verify().unwrap();
+    let process_runtime = served
+        .process_runtime
+        .as_ref()
+        .expect("process runtime in canonical receipt");
+    assert_eq!(process_runtime, resolved);
+    assert!(
+        process_runtime.distribution.is_some(),
+        "pinned, not host PATH"
+    );
     assert_eq!(served.receipt_hash.0, receipt_id);
     assert_eq!(served.execution_id.0, records.execution_id.clone().unwrap());
     // ✓ Logs: the process's log, read by a job in the target session.
@@ -428,6 +446,16 @@ async fn an_application_deployment_is_the_canonical_computer_lifecycle() {
     .await;
     let history = daemon.application_deployments(name).await.unwrap();
     assert_eq!(history[0].state, ApplicationDeploymentState::Stopped);
+    let runtime_before_restart = daemon
+        .application(name)
+        .await
+        .unwrap()
+        .computer
+        .unwrap()
+        .observed
+        .processes[name]
+        .resolved_runtime
+        .clone();
 
     // A control-plane restart: a new controller on the same state finds the
     // same application, computer, session, versions, and evidence.
@@ -436,6 +464,11 @@ async fn an_application_deployment_is_the_canonical_computer_lifecycle() {
     let after = restarted.application(name).await.unwrap();
     assert_eq!(after.status, "stopped");
     assert_eq!(after.endpoint.as_deref(), Some(endpoint.as_str()));
+    assert_eq!(
+        after.computer.as_ref().unwrap().observed.processes[name].resolved_runtime,
+        runtime_before_restart,
+        "controller restart preserves target runtime identity"
+    );
     assert_eq!(
         after
             .deployments

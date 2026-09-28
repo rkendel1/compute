@@ -307,6 +307,7 @@ pub(crate) fn propose(
             processes.push(ProcessSpec {
                 name: name.clone(),
                 kind: ProcessKind::Application,
+                runtime: None,
                 command: shell(&command),
                 repository: Some(name.clone()),
                 env: BTreeMap::new(),
@@ -338,6 +339,7 @@ pub(crate) fn propose(
                 } else {
                     ProcessKind::Process
                 },
+                runtime: None,
                 command: shell(command),
                 repository: Some(name.clone()),
                 env: BTreeMap::new(),
@@ -362,6 +364,7 @@ pub(crate) fn propose(
         services.push(ProcessSpec {
             name: "database".into(),
             kind: ProcessKind::Service,
+            runtime: None,
             command: shell("postgres -D .compute/postgres -p $PORT"),
             repository: None,
             env: BTreeMap::new(),
@@ -378,6 +381,7 @@ pub(crate) fn propose(
         services.push(ProcessSpec {
             name: "redis".into(),
             kind: ProcessKind::Service,
+            runtime: None,
             command: shell("redis-server --port $PORT"),
             repository: None,
             env: BTreeMap::new(),
@@ -2243,6 +2247,7 @@ mod tests {
         let process = ProcessSpec {
             name: "web".into(),
             kind: ProcessKind::Application,
+            runtime: None,
             command: vec!["./serve".into()],
             repository: Some("web".into()),
             env: BTreeMap::new(),

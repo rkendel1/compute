@@ -193,6 +193,11 @@ pub struct ExecutionReceipt {
     /// Product-level application this execution belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application: Option<crate::ApplicationIdentity>,
+    /// Runtime the same target resolved and prepared for a Computer process
+    /// started by this session execution. `runtime` remains the shell that
+    /// performed the supervised start; this records what the process runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_runtime: Option<crate::RuntimeResolution>,
     /// Placement decision that routed this execution to its provider. Absent
     /// for executions that were not placed through a provider pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -399,6 +404,8 @@ struct ReceiptBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     application: &'a Option<crate::ApplicationIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    process_runtime: &'a Option<crate::RuntimeResolution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     placement: &'a Option<ReceiptPlacement>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reservation: &'a Option<ReceiptReservation>,
@@ -522,6 +529,43 @@ impl ExecutionReceipt {
         }
         if let Some(application) = &self.application {
             application.verify()?;
+        }
+        if let Some(runtime) = &self.process_runtime {
+            if !runtime.status.is_ready() {
+                return Err(invalid("process runtime in a receipt is not executable"));
+            }
+            if runtime
+                .requirement
+                .version
+                .as_deref()
+                .is_some_and(|version| version.trim().is_empty())
+            {
+                return Err(invalid("process runtime has an empty version"));
+            }
+            if let Some(distribution) = &runtime.distribution {
+                distribution.validate()?;
+                if distribution.runtime != runtime.requirement.runtime
+                    || runtime
+                        .requirement
+                        .version
+                        .as_deref()
+                        .is_some_and(|version| {
+                            !crate::runtime_version_matches(
+                                runtime.requirement.runtime,
+                                version,
+                                &distribution.version,
+                            )
+                        })
+                {
+                    return Err(invalid(
+                        "process runtime distribution does not satisfy its requirement",
+                    ));
+                }
+            } else if runtime.status != crate::RuntimeLifecycleStatus::Installed {
+                return Err(invalid(
+                    "process runtime is ready without distribution or host evidence",
+                ));
+            }
         }
         if let Some(reservation) = &self.reservation {
             crate::ReservationId::parse(reservation.reservation_id.0.clone())?;
@@ -662,6 +706,7 @@ impl ExecutionReceipt {
             provider: &self.provider,
             provider_protocol: &self.provider_protocol,
             application: &self.application,
+            process_runtime: &self.process_runtime,
             placement: &self.placement,
             reservation: &self.reservation,
             scope: &self.scope,
@@ -788,6 +833,7 @@ pub fn create_execution_receipt(
         provider: None,
         provider_protocol: None,
         application: None,
+        process_runtime: None,
         placement: None,
         reservation: None,
         scope: None,

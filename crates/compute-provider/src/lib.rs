@@ -40,9 +40,10 @@ pub use credentials::{
 pub use runtime::RuntimeCatalog;
 pub use sessions::{
     DEFAULT_SESSION_SWEEP, DEFAULT_SESSION_TTL, EnvironmentState, ProviderConnection,
-    ProvisionRequest, ProvisionedSession, SESSION_READINESS_SCRIPT, SessionCreateRequest,
-    SessionEnvironment, SessionEnvironmentSpec, SessionManager, SessionProvider,
-    WorkspaceSessionProvider, command_in_directory, environment_bundle, shell_request, unsupported,
+    ProvisionRequest, ProvisionedSession, RUNTIME_STORE_SESSION_FEATURE, SESSION_READINESS_SCRIPT,
+    SessionCreateRequest, SessionEnvironment, SessionEnvironmentSpec, SessionManager,
+    SessionProvider, WorkspaceSessionProvider, command_in_directory, environment_bundle,
+    shell_request, unsupported,
 };
 #[doc(hidden)]
 pub mod testing;
@@ -223,6 +224,10 @@ pub struct ExecutionOptions {
     /// portable request hash and sealed into jobs and receipts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application: Option<compute_core::ApplicationIdentity>,
+    /// Runtime resolved by this target for a Computer process launched by
+    /// the otherwise-shell session job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_runtime: Option<compute_core::RuntimeResolution>,
     /// Caller execution policy, intersected with the provider's own. It can
     /// only restrict; it is part of the request hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -871,6 +876,57 @@ impl LocalProvider {
         EffectivePolicy::compose(&sources)
     }
 
+    async fn validate_process_runtime(
+        &self,
+        resolution: &RuntimeResolution,
+    ) -> Result<(), ProviderError> {
+        let invalid = |message: &str| {
+            ProviderError::new(ProviderErrorKind::EvidenceInvalid, message.to_owned())
+        };
+        match &resolution.distribution {
+            Some(distribution) => {
+                let status = self.runtimes.status(distribution);
+                let requirement = &resolution.requirement;
+                if distribution.runtime != requirement.runtime
+                    || requirement.version.as_deref().is_some_and(|version| {
+                        !compute_core::runtime_version_matches(
+                            requirement.runtime,
+                            version,
+                            &distribution.version,
+                        )
+                    })
+                    || requirement.platform.as_ref().is_some_and(|platform| {
+                        platform.os != distribution.platform.os
+                            || platform.architecture != distribution.platform.architecture
+                    })
+                    || status.distribution.as_ref() != Some(distribution)
+                    || status.status != RuntimeLifecycleStatus::Ready
+                    || resolution.status != RuntimeLifecycleStatus::Ready
+                {
+                    return Err(invalid(
+                        "Computer process runtime is not the target's prepared distribution",
+                    ));
+                }
+            }
+            None => {
+                let actual = <Self as ComputeProvider>::resolve_runtime(
+                    self,
+                    resolution.requirement.clone(),
+                )
+                .await?;
+                if actual.distribution.is_some()
+                    || actual.status != RuntimeLifecycleStatus::Installed
+                    || resolution.status != RuntimeLifecycleStatus::Installed
+                {
+                    return Err(invalid(
+                        "Computer process host runtime is not the target's executable resolution",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Capability check, reported as a status rather than an error so that
     /// admission can carry it beside the policy evaluation.
     async fn capability_status(
@@ -1095,6 +1151,9 @@ impl LocalProvider {
         admission: Admission,
         control: Option<&compute_core::ExecutionControl>,
     ) -> Result<ExecuteResponse, ProviderError> {
+        if let Some(runtime) = &request.execution.process_runtime {
+            self.validate_process_runtime(runtime).await?;
+        }
         // Re-evaluate under the admitted snapshot, not the current policy:
         // the decision must reproduce exactly, and must be an admission.
         if admission.policy.policy.policy_id() != admission.policy.policy_id
@@ -1192,6 +1251,7 @@ impl LocalProvider {
             receipt.placement = request.execution.placement.clone();
             receipt.scope = request.execution.scope.clone();
             receipt.application = request.execution.application.clone();
+            receipt.process_runtime = request.execution.process_runtime.clone();
             receipt.bind_admission(&summary);
             receipt.seal().map_err(classify_compute_error)?;
         }
@@ -2305,6 +2365,18 @@ impl RemoteService {
                                 .as_ref()
                                 .map(|sessions| sessions.capabilities());
                             value.target_features = self.state.config.target_features.clone();
+                            if self
+                                .state
+                                .sessions
+                                .as_ref()
+                                .is_some_and(|sessions| sessions.provider_kind() == "workspace")
+                            {
+                                value
+                                    .target_features
+                                    .push(RUNTIME_STORE_SESSION_FEATURE.into());
+                                value.target_features.sort();
+                                value.target_features.dedup();
+                            }
                             value.authentication =
                                 Some(self.state.config.authorizer.authentication().to_owned());
                             value.resources.available = ResourceVector {

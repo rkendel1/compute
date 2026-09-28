@@ -142,7 +142,7 @@ pub fn kill_processes(workspace: &Path) {
     let _ = std::process::Command::new("sh")
         .arg("-c")
         .arg(
-            "for f in \"$1\"/.compute/processes/*.pid; do [ -e \"$f\" ] && kill -KILL -\"$(cat \"$f\")\" 2>/dev/null; done; true",
+            "for f in \"$1\"/.compute/processes/*.pid; do [ -e \"$f\" ] || continue; p=$(cat \"$f\"); kill -TERM \"$p\" 2>/dev/null; kill -TERM -\"$p\" 2>/dev/null; done; sleep 0.2; for f in \"$1\"/.compute/processes/*.pid; do [ -e \"$f\" ] || continue; p=$(cat \"$f\"); kill -KILL \"$p\" 2>/dev/null; kill -KILL -\"$p\" 2>/dev/null; done; true",
         )
         .arg("kill")
         .arg(workspace)

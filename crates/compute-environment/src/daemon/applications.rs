@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use compute_core::{
     ApplicationIdentity, ComputerLifecycle, ComputerRequirements, ComputerStatus, InputSource,
-    ProcessDesired, ProcessKind, ProcessSpec, ProcessState, ProjectSpec, RepositorySpec,
-    RuntimeKind, WorkloadBundle,
+    PlatformIdentity, ProcessDesired, ProcessKind, ProcessSpec, ProcessState, ProjectSpec,
+    ProviderRuntimeRequirement, RepositorySpec, RuntimeKind, WorkloadBundle,
 };
 use compute_state::{RolloutKind, RolloutRecord, RolloutStatus, VersionRecord, VersionStatus};
 
@@ -311,6 +311,7 @@ impl Daemon {
                     let process = ProcessSpec {
                         name: name.to_owned(),
                         kind: ProcessKind::Application,
+                        runtime: Some(runtime_requirement(&bundle)),
                         command: command.clone(),
                         repository: Some(name.to_owned()),
                         env: process_env(&bundle),
@@ -729,13 +730,29 @@ fn requirements(bundle: &WorkloadBundle) -> ComputerRequirements {
             .or(workload.resources.memory_bytes),
         architecture: workload.architecture.clone(),
         network: workload.network.clone(),
+        runtimes: vec![runtime_requirement(bundle)],
         ..Default::default()
     }
 }
 
-/// The command a computer runs the application with: its runtime, from the
-/// target host, as every computer process runs. Computers have no pinned
-/// runtime catalog, so runtimes that need one are refused, not emulated.
+fn runtime_requirement(bundle: &WorkloadBundle) -> ProviderRuntimeRequirement {
+    let workload = &bundle.workload;
+    ProviderRuntimeRequirement {
+        runtime: workload.runtime,
+        version: workload.runtime_version.clone(),
+        platform: workload
+            .architecture
+            .as_ref()
+            .map(|architecture| PlatformIdentity {
+                architecture: architecture.clone(),
+                runtime_abi: None,
+                ..PlatformIdentity::current()
+            }),
+    }
+}
+
+/// The command a computer asks its target to start. Reconciliation replaces
+/// its first word with the executable the same target resolved and prepared.
 fn process_command(bundle: &WorkloadBundle) -> Result<Vec<String>, EnvironmentError> {
     let workload = &bundle.workload;
     if bundle.dependency_capsule.is_some() {
@@ -745,25 +762,19 @@ fn process_command(bundle: &WorkloadBundle) -> Result<Vec<String>, EnvironmentEr
     }
     let entrypoint = workload.entrypoint.display().to_string();
     let mut command: Vec<String> = match workload.runtime {
-        RuntimeKind::Python => vec![
-            "sh".into(),
-            "-c".into(),
-            r#"exec "$(command -v python3 || command -v python)" "$@""#.into(),
-            "python".into(),
-            entrypoint,
-        ],
+        RuntimeKind::Python => vec!["python".into(), entrypoint],
         RuntimeKind::Node => vec!["node".into(), entrypoint],
         RuntimeKind::Bun => vec!["bun".into(), entrypoint],
         RuntimeKind::Deno => vec!["deno".into(), "run".into(), "-A".into(), entrypoint],
         RuntimeKind::Ruby => vec!["ruby".into(), entrypoint],
         RuntimeKind::Php => vec!["php".into(), entrypoint],
+        RuntimeKind::Jvm => vec!["java".into(), "-jar".into(), entrypoint],
+        RuntimeKind::Dotnet => vec!["dotnet".into(), entrypoint],
         RuntimeKind::Shell => vec!["sh".into(), entrypoint],
         RuntimeKind::Native => vec![format!("./{entrypoint}")],
-        other => {
+        RuntimeKind::Wasm => {
             return Err(EnvironmentError::Invalid(format!(
-                "a {} application cannot run on a computer yet: computers run the target's own runtimes, and {} needs Compute's pinned runtime",
-                other.as_str(),
-                other.as_str()
+                "a wasm application cannot run as a Computer process: the process model requires a persistent OS process; run it as a WASM workload instead"
             )));
         }
     };
@@ -919,10 +930,40 @@ async fn resolve_application(
 mod tests {
     use super::*;
 
+    fn bundle(runtime: RuntimeKind, entrypoint: &str) -> WorkloadBundle {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join(entrypoint), b"fixture").unwrap();
+        let workload: compute_core::WorkloadSpec = serde_json::from_value(serde_json::json!({
+            "version": "1",
+            "runtime": runtime,
+            "entrypoint": entrypoint,
+        }))
+        .unwrap();
+        WorkloadBundle::create_from(workload, directory.path()).unwrap()
+    }
+
     #[test]
     fn versions_parse() {
         assert_eq!(parse_version("v3"), Some(3));
         assert_eq!(parse_version("3"), Some(3));
         assert_eq!(parse_version("rol_abc"), None);
+    }
+
+    #[test]
+    fn applications_express_jvm_and_dotnet_as_target_runtime_requirements() {
+        let jvm = bundle(RuntimeKind::Jvm, "app.jar");
+        assert_eq!(process_command(&jvm).unwrap(), ["java", "-jar", "app.jar"]);
+        assert_eq!(runtime_requirement(&jvm).runtime, RuntimeKind::Jvm);
+
+        let dotnet = bundle(RuntimeKind::Dotnet, "app.dll");
+        assert_eq!(process_command(&dotnet).unwrap(), ["dotnet", "app.dll"]);
+        assert_eq!(runtime_requirement(&dotnet).runtime, RuntimeKind::Dotnet);
+    }
+
+    #[test]
+    fn wasm_is_not_misrepresented_as_a_persistent_os_process() {
+        let wasm = bundle(RuntimeKind::Wasm, "app.wasm");
+        let error = process_command(&wasm).unwrap_err().to_string();
+        assert!(error.contains("persistent OS process"), "{error}");
     }
 }
