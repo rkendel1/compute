@@ -781,6 +781,40 @@ fn runtime_aware_computers_require_a_substrate_that_can_see_the_runtime_store() 
 }
 
 #[test]
+fn a_process_runtime_platform_is_a_computer_placement_constraint() {
+    let mut computer = computer(&[], &[]);
+    computer
+        .runtimes
+        .push(compute_core::ProviderRuntimeRequirement {
+            runtime: RuntimeKind::Jvm,
+            version: Some("21".into()),
+            platform: Some(PlatformIdentity {
+                os: "linux".into(),
+                architecture: "aarch64".into(),
+                runtime_abi: None,
+            }),
+        });
+    let (requirements, _) = compute_placement::PlacementRequirements::for_computer(
+        &computer,
+        compute_core::ComputerLifecycle::Ephemeral,
+    )
+    .unwrap();
+    assert_eq!(
+        requirements.platform.as_ref().map(PlatformIdentity::label),
+        Some("linux-aarch64".into())
+    );
+    let x86 = host(
+        &[compute_provider::RUNTIME_STORE_SESSION_FEATURE],
+        session_capabilities(true),
+    );
+    let codes = match_provider(&requirements, &x86).codes();
+    assert!(
+        codes.contains(&ReasonCode::ArchitectureMismatch),
+        "{codes:?}"
+    );
+}
+
+#[test]
 fn a_target_is_described_by_what_it_can_host() {
     let record = compute_placement::DiscoveryRecord {
         provider_id: "firecracker-host".into(),

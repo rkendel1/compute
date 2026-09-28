@@ -561,10 +561,17 @@ impl ExecutionReceipt {
                         "process runtime distribution does not satisfy its requirement",
                     ));
                 }
-            } else if runtime.status != crate::RuntimeLifecycleStatus::Installed {
-                return Err(invalid(
-                    "process runtime is ready without distribution or host evidence",
-                ));
+            } else {
+                if runtime.requirement.version.is_some() {
+                    return Err(invalid(
+                        "pinned process runtime has host evidence instead of a distribution",
+                    ));
+                }
+                if runtime.status != crate::RuntimeLifecycleStatus::Installed {
+                    return Err(invalid(
+                        "process runtime is ready without distribution or host evidence",
+                    ));
+                }
             }
         }
         if let Some(reservation) = &self.reservation {
@@ -1306,6 +1313,23 @@ mod tests {
             Some(sha256_identity(b"runtime-artifact").as_str())
         );
         first.verify().unwrap();
+
+        let mut pinned_host = first.clone();
+        pinned_host.process_runtime = Some(crate::RuntimeResolution {
+            requirement: crate::ProviderRuntimeRequirement {
+                runtime: RuntimeKind::Python,
+                version: Some("3.13".into()),
+                platform: None,
+            },
+            status: crate::RuntimeLifecycleStatus::Installed,
+            distribution: None,
+            detail: None,
+        });
+        pinned_host.seal().unwrap();
+        assert!(
+            pinned_host.verify().is_err(),
+            "a pinned process runtime needs distribution evidence"
+        );
 
         let mut changed = second;
         changed.execution_id = ExecutionId::parse("exec_test_2").unwrap();

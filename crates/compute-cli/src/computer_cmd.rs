@@ -457,8 +457,12 @@ pub struct ProcessArgs {
     #[arg(long, requires = "runtime")]
     runtime_version: Option<String>,
     /// Architecture required by the runtime (`x86_64`, `arm64`).
-    #[arg(long, requires = "runtime")]
+    #[arg(long, requires_all = ["runtime", "runtime_os"])]
     runtime_architecture: Option<String>,
+    /// Operating system required by the runtime (`linux`, `macos`). Must be
+    /// explicit because the CLI machine is not necessarily the target.
+    #[arg(long, requires_all = ["runtime", "runtime_architecture"])]
+    runtime_os: Option<String>,
     /// Add it stopped.
     #[arg(long)]
     stopped: bool,
@@ -509,10 +513,11 @@ impl ProcessArgs {
                 platform: self
                     .runtime_architecture
                     .as_ref()
-                    .map(|architecture| PlatformIdentity {
+                    .zip(self.runtime_os.as_ref())
+                    .map(|(architecture, os)| PlatformIdentity {
+                        os: os.clone(),
                         architecture: architecture.clone(),
                         runtime_abi: None,
-                        ..PlatformIdentity::current()
                     }),
             }),
             command: self.command.clone(),
