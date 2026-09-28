@@ -216,6 +216,16 @@ pub struct ExecutionReceipt {
     /// for executions that were not described by a project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<crate::ReceiptProject>,
+    /// The stack (declared desired environment) this execution was asked to
+    /// realize, with each component's declared, resolved, materialized, and
+    /// verified state. Absent when no stack was selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<crate::ReceiptStack>,
+    /// The application bundle this execution ran with — the application that
+    /// runs on the stack's environment: declared, resolved, and what the
+    /// target's platform package verified. Absent when none was declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_bundle: Option<crate::ReceiptAppBundle>,
     /// Identity of the exact policy snapshot admission evaluated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_id: Option<String>,
@@ -418,6 +428,10 @@ struct ReceiptBody<'a> {
     scope: &'a Option<ReceiptScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
     project: &'a Option<crate::ReceiptProject>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stack: &'a Option<crate::ReceiptStack>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app_bundle: &'a Option<crate::ReceiptAppBundle>,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_id: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -638,6 +652,12 @@ impl ExecutionReceipt {
         if let Some(project) = &self.project {
             project.verify(self)?;
         }
+        if let Some(stack) = &self.stack {
+            stack.verify(self)?;
+        }
+        if let Some(app) = &self.app_bundle {
+            app.verify(self)?;
+        }
         match (&self.policy_id, &self.admission_id, &self.admission_status) {
             (None, None, None) => {}
             (Some(policy), Some(admission), Some(status)) => {
@@ -728,6 +748,8 @@ impl ExecutionReceipt {
             reservation: &self.reservation,
             scope: &self.scope,
             project: &self.project,
+            stack: &self.stack,
+            app_bundle: &self.app_bundle,
             policy_id: &self.policy_id,
             admission_id: &self.admission_id,
             admission_status: &self.admission_status,
@@ -856,6 +878,8 @@ pub fn create_execution_receipt(
         reservation: None,
         scope: None,
         project: None,
+        stack: None,
+        app_bundle: None,
         policy_id: None,
         admission_id: None,
         admission_status: None,

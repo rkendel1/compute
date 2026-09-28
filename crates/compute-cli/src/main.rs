@@ -30,6 +30,7 @@ mod pool;
 mod project_run;
 mod receipt;
 mod session_cmd;
+mod stack_run;
 mod version_cmd;
 mod work_cmd;
 
@@ -562,6 +563,14 @@ struct RunCommand {
     /// Run this PAX project command instead of its default.
     #[arg(long = "command")]
     project_command: Option<String>,
+    /// Realize this stack (a name in ./stacks, or a path) for the project.
+    #[arg(long)]
+    stack: Option<String>,
+    /// Reference the --deps capsule by identity instead of embedding it (for
+    /// capsules too large to send): the target must hold it in its
+    /// $COMPUTE_DEPENDENCY_CACHE as `<digest>.deps`.
+    #[arg(long, requires = "deps")]
+    deps_by_reference: bool,
     /// Load a versioned portable workload specification.
     #[arg(long)]
     workload: Option<PathBuf>,
@@ -751,6 +760,11 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     && command.bundle.is_none());
             if project_mode && command.project.is_none() {
                 command.project = Some(PathBuf::from("."));
+            }
+            if !project_mode && command.stack.is_some() {
+                return Err(compute_core::ComputeError::InvalidWorkload(
+                    "--stack applies to a PAX project run; it requires --project or no PATH".into(),
+                ));
             }
             if !project_mode && command.project_command.is_some() {
                 return Err(compute_core::ComputeError::InvalidWorkload(
@@ -1938,6 +1952,8 @@ async fn run_with_provider(command: RunCommand) -> compute_core::Result<()> {
         path: command.path,
         project: command.project,
         project_command: command.project_command,
+        stack: command.stack,
+        deps_by_reference: command.deps_by_reference,
         bundle: command.bundle,
         provider,
         placement_policy: command.placement_policy,

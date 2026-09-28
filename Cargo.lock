@@ -584,7 +584,9 @@ dependencies = [
  "compute-core",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

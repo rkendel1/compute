@@ -76,6 +76,9 @@ pub struct DependencyNeed {
     pub name: String,
     pub specifier: String,
     pub group: DependencyGroup,
+    /// What asked for it when it is not the project itself: `stack:<name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 impl DependencyNeed {
@@ -91,6 +94,92 @@ impl DependencyNeed {
         let parts: Vec<_> = core.split('.').collect();
         (parts.len() == 3 && parts.iter().all(|part| numeric(part))).then_some(spec)
     }
+}
+
+/// A `major.minor.patch` version with any `-pre`/`+build` suffix kept apart.
+fn parse_version(text: &str) -> Option<([u64; 3], bool)> {
+    let core = text.split(['-', '+']).next()?;
+    let prerelease = text.len() > core.len() && text[core.len()..].starts_with('-');
+    let mut numbers = [0_u64; 3];
+    let mut parts = core.split('.');
+    for slot in &mut numbers {
+        *slot = parts.next()?.parse().ok()?;
+    }
+    parts.next().is_none().then_some((numbers, prerelease))
+}
+
+/// Whether `text` is a plain `major.minor.patch` version, optionally with a
+/// `-pre` or `+build` suffix.
+pub fn is_version(text: &str) -> bool {
+    parse_version(text).is_some()
+}
+
+/// A possibly partial version (`1`, `1.2`, `1.2.3`) and how many parts it had.
+fn parse_partial(text: &str) -> Option<([u64; 3], usize)> {
+    let mut numbers = [0_u64; 3];
+    let mut count = 0;
+    for part in text.split('.') {
+        if count == 3 || part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        numbers[count] = part.parse().ok()?;
+        count += 1;
+    }
+    (count > 0).then_some((numbers, count))
+}
+
+/// Whether `version` satisfies one version constraint: an exact
+/// `major.minor.patch`, or `=`, `>=`, `>`, `<=`, `<`, `^`, `~` with a
+/// version. `None` when the constraint is outside this grammar (a tag, a
+/// union, a wildcard): callers must not treat that as satisfied *or*
+/// unsatisfied.
+pub fn version_satisfies(constraint: &str, version: &str) -> Option<bool> {
+    let constraint = constraint.trim();
+    let (actual, prerelease) = parse_version(version.trim())?;
+    let operator_end = constraint
+        .find(|c: char| c.is_ascii_digit())
+        .unwrap_or(constraint.len());
+    let (operator, wanted) = constraint.split_at(operator_end);
+    let operator = operator.trim();
+    if operator.is_empty() || operator == "=" {
+        let (exact, _) = parse_version(wanted.trim())?;
+        return Some(actual == exact && !prerelease || constraint_text_equals(wanted, version));
+    }
+    let (base, parts) = parse_partial(wanted.trim())?;
+    // A prerelease satisfies only what names it exactly.
+    if prerelease {
+        return Some(false);
+    }
+    let above = |floor: [u64; 3]| actual >= floor;
+    Some(match operator {
+        ">=" => above(base),
+        ">" => actual > base,
+        "<=" => actual <= base,
+        "<" => actual < base,
+        "^" => {
+            let ceiling = if base[0] > 0 || parts == 1 {
+                [base[0] + 1, 0, 0]
+            } else if base[1] > 0 || parts == 2 {
+                [0, base[1] + 1, 0]
+            } else {
+                [0, 0, base[2] + 1]
+            };
+            above(base) && actual < ceiling
+        }
+        "~" => {
+            let ceiling = if parts == 1 {
+                [base[0] + 1, 0, 0]
+            } else {
+                [base[0], base[1] + 1, 0]
+            };
+            above(base) && actual < ceiling
+        }
+        _ => return None,
+    })
+}
+
+fn constraint_text_equals(wanted: &str, version: &str) -> bool {
+    wanted.trim() == version.trim()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -478,7 +567,7 @@ fn platform_verification(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         BoundaryStatus, DistributionIdentity, ExecutionRequest, ExecutionResult, ExecutionStatus,
@@ -488,7 +577,7 @@ mod tests {
     };
     use std::time::Duration;
 
-    fn receipt() -> ExecutionReceipt {
+    pub(crate) fn receipt() -> ExecutionReceipt {
         let request = ExecutionRequest {
             runtime: RuntimeSpec {
                 kind: RuntimeKind::Python,
@@ -761,11 +850,41 @@ mod tests {
     }
 
     #[test]
+    fn version_constraints_are_evaluated_or_declared_unknown() {
+        let yes = |c: &str, v: &str| assert_eq!(version_satisfies(c, v), Some(true), "{c} {v}");
+        let no = |c: &str, v: &str| assert_eq!(version_satisfies(c, v), Some(false), "{c} {v}");
+        yes("1.3.0", "1.3.0");
+        yes("=1.3.0", "1.3.0");
+        no("1.3.0", "1.3.1");
+        yes("^4.17.0", "4.17.21");
+        yes("^4.17.0", "4.99.0");
+        no("^4.17.0", "5.0.0");
+        no("^4.17.0", "4.16.9");
+        yes("^0.2.3", "0.2.9");
+        no("^0.2.3", "0.3.0");
+        no("^0.0.3", "0.0.4");
+        yes("~1.2.3", "1.2.9");
+        no("~1.2.3", "1.3.0");
+        yes(">=22", "22.12.0");
+        yes(">= 20.17", "24.18.0");
+        no(">=24", "22.12.0");
+        yes("<2", "1.9.9");
+        no(">1.0.0", "1.0.0");
+        no("^1.0.0", "1.2.0-beta");
+        yes("1.2.3-beta", "1.2.3-beta");
+        for unknown in ["latest", "*", "1.x", "^1 || ^2", "workspace:*", ""] {
+            assert_eq!(version_satisfies(unknown, "1.2.3"), None, "{unknown}");
+        }
+        assert_eq!(version_satisfies("^1.0.0", "not-a-version"), None);
+    }
+
+    #[test]
     fn dependency_pins_are_exact_versions_only() {
         let need = |specifier: &str| DependencyNeed {
             name: "x".into(),
             specifier: specifier.into(),
             group: DependencyGroup::Runtime,
+            origin: None,
         };
         assert_eq!(need("1.2.3").pinned_version(), Some("1.2.3"));
         assert_eq!(need("=1.2.3").pinned_version(), Some("1.2.3"));

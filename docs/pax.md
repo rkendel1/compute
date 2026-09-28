@@ -182,6 +182,13 @@ keeps no PAX cache, database, or sidecar file, and a project run writes nothing
 but the receipt you ask for. `COMPUTE_PAX` selects the `pax` executable (default:
 `pax` on `PATH`); it selects a program, not state.
 
+## Stacks
+
+A project can also run on a configured Computer: a **stack** is a versioned,
+declarative environment (`stacks/<name>/stack.toml`) whose packages join the
+project's requirements, and an application bundle the project declares runs on
+it. PAX still describes only the project; see [stacks.md](stacks.md).
+
 ## Not yet supported
 
 - **Target-advertised tools.** No Compute target reports the tools it has, so a

@@ -77,6 +77,39 @@ pub fn inspect(path: &Path, json: bool) -> Result<()> {
                 );
             }
         }
+        if let Some(stack) = &receipt.stack {
+            let identity = &stack.binding.identity;
+            println!("Stack");
+            println!("  Name:        {} {}", identity.name, identity.version);
+            println!("  Fingerprint: {}", identity.fingerprint);
+            for (component, evidence) in stack.binding.components.iter().zip(&stack.components) {
+                println!(
+                    "  {:<18} {}",
+                    component.declared.name,
+                    evidence.state(&component.declared).label()
+                );
+                for gate in &evidence.gates {
+                    println!(
+                        "      {}: {:?}: {}",
+                        gate.check, gate.verification.status, gate.verification.evidence
+                    );
+                }
+            }
+        }
+        if let Some(app) = &receipt.app_bundle {
+            println!("Application bundle");
+            println!(
+                "  Application: {} ({})",
+                app.binding.declared.application,
+                app.state().label()
+            );
+            for gate in &app.gates {
+                println!(
+                    "      {}: {:?}: {}",
+                    gate.check, gate.verification.status, gate.verification.evidence
+                );
+            }
+        }
         println!("Distribution");
         println!("  ID:          {}", receipt.distribution.id);
         println!("  Platform:    {}", receipt.distribution.platform);

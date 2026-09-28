@@ -239,6 +239,7 @@ impl PaxObservation {
                     name,
                     specifier,
                     group,
+                    origin: None,
                 });
             }
         }

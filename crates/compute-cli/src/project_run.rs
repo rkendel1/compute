@@ -19,6 +19,8 @@ use crate::pool::PlacementArtifact;
 pub(crate) struct ProjectRun {
     pub resolved: direct::ResolvedDirect,
     pub binding: ProjectBinding,
+    pub stack: Option<compute_core::StackBinding>,
+    pub app_bundle: Option<compute_core::AppBundleBinding>,
 }
 
 pub(crate) fn error(error: ProjectError) -> ComputeError {
@@ -32,8 +34,14 @@ pub(crate) fn resolve(
     policy: &crate::admission::PolicyLocation,
 ) -> compute_core::Result<ProjectRun> {
     let project = artifact.project.as_deref().expect("project mode");
-    let discovered =
+    let mut discovered =
         compute_project::discover(project, &PaxExecutable::from_environment()).map_err(error)?;
+    // A stack joins the project's requirements before anything is planned:
+    // it is not a branch in execution, it is more requirements.
+    let stack = crate::stack_run::select(artifact.stack.as_deref(), Some(&discovered.root))?;
+    if let Some(stack) = &stack {
+        stack.apply(&mut discovered.requirements).map_err(error)?;
+    }
     let selection = match &artifact.project_command {
         Some(name) => CommandSelection::Named(name.clone()),
         None => CommandSelection::Default,
@@ -101,7 +109,50 @@ pub(crate) fn resolve(
         },
     )
     .map_err(error)?;
-    Ok(ProjectRun { resolved, binding })
+    let stack = match &stack {
+        None => None,
+        Some(stack) => {
+            let supplied: Vec<String> = resolved.workload.env.keys().cloned().collect();
+            crate::stack_run::require_credentials(stack, &supplied).map_err(error)?;
+            let bound = stack
+                .bind(resolved.dependency_capsule.as_ref())
+                .map_err(error)?;
+            crate::stack_run::require_realizable(&bound).map_err(error)?;
+            Some(bound)
+        }
+    };
+    // The application that runs on this environment is the project's, not
+    // the stack's: it is declared in `compute.toml` `[artifact]` and found
+    // among the files supplied to the workload.
+    let app_bundle = match compute_project::declared_bundle(&resolved.root).map_err(error)? {
+        None => None,
+        Some(declaration) => {
+            let files = crate::stack_run::supplied_files(&resolved.workload, &resolved.root)?;
+            let bound = compute_project::bind_bundle(declaration, &files);
+            if bound.resolved.is_none() {
+                let declared = &bound.declared;
+                return Err(error(
+                    ProjectError::new(
+                        FailureKind::RequirementsUnresolved,
+                        format!(
+                            "the application bundle `{}` was not found among the supplied files; supply its manifest and module with --input",
+                            declared.application
+                        ),
+                    )
+                    .require("application", declared.application.clone())
+                    .require("module format", declared.abi.clone())
+                    .found("supplied files", files.len().to_string()),
+                ));
+            }
+            Some(bound)
+        }
+    };
+    Ok(ProjectRun {
+        resolved,
+        binding,
+        stack,
+        app_bundle,
+    })
 }
 
 /// Why no target can run the project: what it requires, what each target

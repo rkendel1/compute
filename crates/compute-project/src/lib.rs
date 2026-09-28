@@ -8,13 +8,23 @@
 //! Nothing here is authoritative state: every result is a pure function of
 //! the project directory and the tool's observation of it.
 
+mod app_bundle;
 mod error;
 mod pax;
 mod plan;
+mod stack;
 
+pub use app_bundle::{
+    APP_BUNDLE_PROTOCOL, SuppliedFile, bind_bundle, declared_bundle, has_platform_package,
+    parse_inspection, resolve_bundle,
+};
 pub use error::{FailureKind, ProjectError};
 pub use pax::{PAX_ENV, PAX_SCHEMA_VERSION, PAX_SOURCE, PaxExecutable, PaxObservation, PaxSource};
 pub use plan::{
     CommandSelection, DiscoveredProject, EnvironmentInputs, SelectedCommand, discover, materialize,
     select_command,
+};
+pub use stack::{
+    Component, PROBE, PROBE_ENTRYPOINT, STACK_FILE, STACKS_ENV, Stack, WASM_PROBE,
+    WASM_PROBE_ENTRYPOINT, find_stack, parse_probe_report, probe_identity, wasm_probe_identity,
 };

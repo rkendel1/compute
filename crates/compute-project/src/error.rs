@@ -23,6 +23,12 @@ pub enum FailureKind {
     RuntimeUnavailable,
     /// A required dependency is not available.
     DependencyUnavailable,
+    /// A stack manifest is malformed, or declares something unknown.
+    StackInvalid,
+    /// A stack component cannot be realized on the target it needs.
+    StackComponentUnsupported,
+    /// A credential the stack references was not supplied.
+    CredentialUnavailable,
     /// The workload ran and failed.
     ExecutionFailed,
     /// The receipt does not prove what the requirements need.
@@ -39,6 +45,9 @@ impl FailureKind {
             Self::EnvironmentMaterializationFailed => "environment_materialization_failed",
             Self::RuntimeUnavailable => "runtime_unavailable",
             Self::DependencyUnavailable => "dependency_unavailable",
+            Self::StackInvalid => "stack_invalid",
+            Self::StackComponentUnsupported => "stack_component_unsupported",
+            Self::CredentialUnavailable => "credential_unavailable",
             Self::ExecutionFailed => "execution_failed",
             Self::ReceiptEvidenceIncomplete => "receipt_evidence_incomplete",
         }

@@ -284,7 +284,7 @@ pub fn materialize(
                 ),
             );
             for dependency in needed.iter().take(8) {
-                error = error.require(&dependency.name, dependency.specifier.clone());
+                error = error.require(&needed_label(dependency), dependency.specifier.clone());
             }
             return Err(error.found("capsule", "none"));
         }
@@ -307,17 +307,21 @@ pub fn materialize(
                     .dependencies
                     .iter()
                     .find(|entry| entry.name == dependency.name);
-                let satisfied = match (entry, dependency.pinned_version()) {
-                    (None, _) => false,
-                    (Some(entry), Some(pin)) => entry.version == pin,
-                    (Some(_), None) => true,
+                // A constraint outside the version grammar (a tag, a union)
+                // cannot be evaluated: presence is then all that is checked.
+                let satisfied = match entry {
+                    None => false,
+                    Some(entry) => {
+                        compute_core::version_satisfies(&dependency.specifier, &entry.version)
+                            .unwrap_or(true)
+                    }
                 };
                 if !satisfied {
                     missing = true;
                     failure = failure
-                        .require(&dependency.name, dependency.specifier.clone())
+                        .require(&needed_label(dependency), dependency.specifier.clone())
                         .found(
-                            &dependency.name,
+                            &needed_label(dependency),
                             entry.map_or("absent".to_owned(), |entry| entry.version.clone()),
                         );
                 }
@@ -372,4 +376,12 @@ pub fn materialize(
             environment_names,
         },
     })
+}
+
+/// A dependency's name, and what asked for it when that is not the project.
+fn needed_label(dependency: &compute_core::DependencyNeed) -> String {
+    match &dependency.origin {
+        Some(origin) => format!("{} ({origin})", dependency.name),
+        None => dependency.name.clone(),
+    }
 }

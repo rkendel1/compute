@@ -348,3 +348,84 @@ fn no_eligible_target_is_an_explicit_unsupported_result() {
     assert!(report.compatible_providers.is_empty());
     assert!(!codes(&report, "a").is_empty() && !codes(&report, "b").is_empty());
 }
+
+/// What `compute run` asks of placement for a project whose application
+/// bundle runs on WASM: the bundle's runtime joins the workload's.
+fn with_application_runtime(mut required: PlacementRequirements) -> PlacementRequirements {
+    required
+        .additional_runtimes
+        .push(compute_placement::RuntimeRequirement {
+            kind: RuntimeKind::Wasm,
+            version: None,
+            artifact_id: None,
+        });
+    required
+}
+
+#[test]
+fn a_computer_without_wasm_is_rejected_for_a_project_whose_application_needs_it() {
+    let (pax, root) = node_project();
+    let required = with_application_runtime(Project::default().requirements(&pax, root.path()));
+    let report = outcome(
+        &required,
+        &[
+            ("node-only", 50, remote(&[RuntimeKind::Node])),
+            (
+                "node-and-wasm",
+                0,
+                remote(&[RuntimeKind::Node, RuntimeKind::Wasm]),
+            ),
+            ("wasm-only", 100, remote(&[RuntimeKind::Wasm])),
+        ],
+    );
+    // The higher-priority Computers are rejected for what they lack, and the
+    // reason is recorded rather than the application being left out.
+    assert_eq!(
+        report.selected.as_ref().unwrap().provider_id,
+        "node-and-wasm"
+    );
+    assert_eq!(
+        codes(&report, "node-only"),
+        [ReasonCode::RuntimeUnsupported]
+    );
+    assert_eq!(
+        codes(&report, "wasm-only"),
+        [ReasonCode::RuntimeUnsupported]
+    );
+    let reason = &report
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "node-only")
+        .unwrap()
+        .reasons[0];
+    assert_eq!(reason.required, serde_json::json!("wasm"));
+
+    // With only the incapable Computers, the result is an explicit refusal.
+    let report = outcome(&required, &[("node-only", 0, remote(&[RuntimeKind::Node]))]);
+    assert_eq!(report.outcome, PlacementOutcome::PlacementFailed);
+    assert!(report.selected.is_none());
+}
+
+#[test]
+fn the_same_requirements_place_on_several_computers_and_reject_others() {
+    // The stack/application requirements do not assume one Computer: every
+    // candidate is evaluated, and eligibility is per Computer.
+    let (pax, root) = node_project();
+    let required = with_application_runtime(Project::default().requirements(&pax, root.path()));
+    let mut arm = remote(&[RuntimeKind::Node, RuntimeKind::Wasm]);
+    arm.platform = "macos-arm64".into();
+    let report = outcome(
+        &required,
+        &[
+            (
+                "hetzner",
+                0,
+                remote(&[RuntimeKind::Node, RuntimeKind::Wasm]),
+            ),
+            ("macbook", 0, arm),
+            ("bare", 0, remote(&[RuntimeKind::Node])),
+        ],
+    );
+    assert_eq!(report.compatible_providers, ["hetzner", "macbook"]);
+    assert_eq!(codes(&report, "bare"), [ReasonCode::RuntimeUnsupported]);
+}
