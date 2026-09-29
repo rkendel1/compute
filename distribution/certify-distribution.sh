@@ -19,17 +19,25 @@ cleanup() {
   rm -rf "$temporary"
 }
 trap cleanup EXIT HUP INT TERM
-COMPUTE_DISTRIBUTION_ROOT="$distribution" COMPUTE_REQUIRE_ALL_RUNTIMES=1 \
-  "$distribution/bin/compute" certify --json > "$temporary/bare.json"
+if ! COMPUTE_DISTRIBUTION_ROOT="$distribution" COMPUTE_REQUIRE_ALL_RUNTIMES=1 \
+  "$distribution/bin/compute" certify --json > "$temporary/bare.json"; then
+  cat "$temporary/bare.json" >&2
+  echo "bare distribution certification failed" >&2
+  exit 1
+fi
 
 image="compute-certification:${COMPUTE_CERTIFICATION_TAG:-local}"
 docker build \
   -f distribution/Dockerfile \
   --build-arg COMPUTE_DISTRIBUTION="$distribution" \
   -t "$image" .
-docker run --rm \
+if ! docker run --rm \
   -e COMPUTE_REQUIRE_ALL_RUNTIMES=1 \
-  "$image" certify --json > "$temporary/docker.json"
+  "$image" certify --json > "$temporary/docker.json"; then
+  cat "$temporary/docker.json" >&2
+  echo "container distribution certification failed" >&2
+  exit 1
+fi
 
 cat > "$temporary/main.py" <<'PY'
 import os
