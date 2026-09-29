@@ -16,6 +16,10 @@ policy_container=
 cleanup() {
   if [ -n "$job_container" ]; then docker rm -f "$job_container" >/dev/null 2>&1 || true; fi
   if [ -n "$policy_container" ]; then docker rm -f "$policy_container" >/dev/null 2>&1 || true; fi
+  if [ -n "${image:-}" ] && [ -d "$temporary/jobs" ]; then
+    docker run --rm --entrypoint /bin/chmod -v "$temporary:/cleanup" \
+      "$image" -R a+rwX /cleanup >/dev/null 2>&1 || true
+  fi
   rm -rf "$temporary"
 }
 trap cleanup EXIT HUP INT TERM
@@ -71,8 +75,7 @@ COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" bundle cre
 mkdir "$temporary/jobs"
 start_job_server() {
   job_port=$(free_host_port)
-  job_container=$(docker run --rm -d \
-    --user "$(id -u):$(id -g)" \
+  job_container=$(docker run -d \
     -p "127.0.0.1:$job_port:8080/tcp" \
     -v "$temporary/jobs:/jobs" \
     "$image" serve --insecure-unauthenticated \
@@ -216,8 +219,7 @@ JSON
 "$distribution/bin/compute" policy validate "$temporary/policy/production.json" --json \
   > "$temporary/policy/validation.json"
 policy_port=$(free_host_port)
-policy_container=$(docker run --rm -d \
-  --user "$(id -u):$(id -g)" \
+policy_container=$(docker run -d \
   -p "127.0.0.1:$policy_port:8080/tcp" \
   -v "$temporary/policy:/policy:ro" \
   "$image" serve --insecure-unauthenticated \
