@@ -575,6 +575,9 @@ requirements, finds a target that satisfies them, and executes it with a
 receipt that proves what happened. See [docs/pax.md](docs/pax.md). A **stack**
 (`stacks/`, [docs/stacks.md](docs/stacks.md)) is a versioned, declarative
 environment a Computer is configured with; applications then run on it.
+The evaluation of persistence, checkpoints, forks, and related primitives (design
+only, not implemented) is in
+[docs/opencomputer-evaluation.md](docs/opencomputer-evaluation.md).
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for the complete inspection workflow
 and the direct Cargo escape hatch.
