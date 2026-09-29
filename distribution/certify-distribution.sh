@@ -58,7 +58,8 @@ cat > "$temporary/workload.json" <<'JSON'
 JSON
 
 free_host_port() {
-  "$distribution/runtimes/python/bin/python3" -c \
+  PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+    "$distribution/runtimes/python/bin/python3" -c \
     'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
 }
 
@@ -71,6 +72,7 @@ mkdir "$temporary/jobs"
 start_job_server() {
   job_port=$(free_host_port)
   job_container=$(docker run --rm -d \
+    --user "$(id -u):$(id -g)" \
     -p "127.0.0.1:$job_port:8080/tcp" \
     -v "$temporary/jobs:/jobs" \
     "$image" serve --insecure-unauthenticated \
@@ -215,6 +217,7 @@ JSON
   > "$temporary/policy/validation.json"
 policy_port=$(free_host_port)
 policy_container=$(docker run --rm -d \
+  --user "$(id -u):$(id -g)" \
   -p "127.0.0.1:$policy_port:8080/tcp" \
   -v "$temporary/policy:/policy:ro" \
   "$image" serve --insecure-unauthenticated \
