@@ -3283,7 +3283,7 @@ async fn a_workspace_that_changes_while_it_is_captured_is_refused() {
     .await;
     let refused = daemon.export_workspace("busy", "alice").await;
     assert!(
-        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("changed while it was captured")),
+        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if changed_while_captured(reason)),
         "{refused:?}"
     );
     // A fork captures through the same path, so it is refused too, and
@@ -3300,7 +3300,7 @@ async fn a_workspace_that_changes_while_it_is_captured_is_refused() {
         )
         .await;
     assert!(
-        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("changed while it was captured")),
+        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if changed_while_captured(reason)),
         "{refused:?}"
     );
     assert!(daemon.computer("busy-copy").await.is_err());
@@ -3649,6 +3649,13 @@ async fn a_replacement_that_fails_before_the_handoff_leaves_the_old_computer_cur
             .unwrap()
             .verified
     );
+}
+
+/// A workspace written to during capture is refused, and either of two
+/// checks may notice first: the archiver's own, or the before/after digest.
+fn changed_while_captured(reason: &str) -> bool {
+    reason.contains("changed while it was captured")
+        || reason.contains("file changed as we read it")
 }
 
 fn fork_of(name: &str) -> ForkRequest {
@@ -4480,7 +4487,7 @@ async fn only_the_owner_checkpoints_and_a_changing_workspace_is_refused() {
         .checkpoint_environment("busy", "alice", no_parent())
         .await;
     assert!(
-        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("changed while it was captured")),
+        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if changed_while_captured(reason)),
         "{refused:?}"
     );
     assert!(
