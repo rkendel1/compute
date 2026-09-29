@@ -80,9 +80,16 @@ start_job_server() {
     --max-concurrent-jobs 1)
   job_provider="http://127.0.0.1:$job_port"
   attempts=0
-  until "$distribution/bin/compute" remote health --provider "$job_provider" --json >/dev/null 2>&1; do
+  until "$distribution/bin/compute" remote health --provider "$job_provider" --json \
+    >/dev/null 2>"$temporary/job-health.err"; do
     attempts=$((attempts + 1))
-    if [ "$attempts" -ge 50 ]; then echo "Compute job server did not become healthy" >&2; exit 1; fi
+    if [ "$attempts" -ge 50 ]; then
+      echo "Compute job server did not become healthy" >&2
+      cat "$temporary/job-health.err" >&2
+      docker port "$job_container" >&2 || true
+      docker logs "$job_container" >&2 || true
+      exit 1
+    fi
     sleep 0.1
   done
 }
@@ -207,9 +214,16 @@ policy_container=$(docker run --rm -d \
   --policy /policy/production.json)
 policy_provider="http://127.0.0.1:$policy_port"
 attempts=0
-until "$distribution/bin/compute" remote health --provider "$policy_provider" --json >/dev/null 2>&1; do
+until "$distribution/bin/compute" remote health --provider "$policy_provider" --json \
+  >/dev/null 2>"$temporary/policy-health.err"; do
   attempts=$((attempts + 1))
-  if [ "$attempts" -ge 50 ]; then echo "policy server did not become healthy" >&2; exit 1; fi
+  if [ "$attempts" -ge 50 ]; then
+    echo "policy server did not become healthy" >&2
+    cat "$temporary/policy-health.err" >&2
+    docker port "$policy_container" >&2 || true
+    docker logs "$policy_container" >&2 || true
+    exit 1
+  fi
   sleep 0.1
 done
 "$distribution/bin/compute" remote capabilities --provider "$policy_provider" --json \
