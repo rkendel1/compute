@@ -745,7 +745,7 @@ pub struct LocalProvider {
 }
 
 fn provider_compute(runtimes: &RuntimeManager) -> Compute {
-    if compute_core::paths::installation_root().is_some() {
+    if uses_installed_distribution() {
         // A certified installation already owns an immutable, complete runtime
         // bundle. Provider state must not shadow it with the mutable managed
         // runtime store.
@@ -753,6 +753,10 @@ fn provider_compute(runtimes: &RuntimeManager) -> Compute {
     } else {
         Compute::with_distribution_root(runtimes.root().to_path_buf())
     }
+}
+
+fn uses_installed_distribution() -> bool {
+    compute_core::paths::installation_root().is_some()
 }
 
 impl Default for LocalProvider {
@@ -1395,6 +1399,7 @@ impl ComputeProvider for LocalProvider {
             .inventory()
             .await
             .map_err(classify_compute_error)?;
+        let installed_distribution = uses_installed_distribution();
         for entry in &mut inventory.runtimes {
             if entry.available && entry.compatible {
                 entry.lifecycle = Some(
@@ -1404,6 +1409,12 @@ impl ComputeProvider for LocalProvider {
                         RuntimeLifecycleStatus::Installed
                     },
                 );
+            }
+            // A certified installation is already the complete immutable
+            // runtime store. Its inventory must not be replaced by the
+            // mutable provider catalog or advertised as needing preparation.
+            if installed_distribution {
+                continue;
             }
             let resolution = self.runtimes.resolve(
                 ProviderRuntimeRequirement {
@@ -1515,6 +1526,31 @@ impl ComputeProvider for LocalProvider {
                 distribution: None,
                 detail: Some("runtime is restricted by provider policy".into()),
             });
+        }
+        if uses_installed_distribution() {
+            return match self
+                .compute
+                .runtime(requirement.runtime, requirement.version.as_deref())
+                .await
+            {
+                Ok(installed) if installed.available && installed.compatible => {
+                    Ok(RuntimeResolution {
+                        requirement,
+                        status: RuntimeLifecycleStatus::Ready,
+                        distribution: None,
+                        detail: None,
+                    })
+                }
+                Ok(installed) => Ok(RuntimeResolution {
+                    requirement,
+                    status: RuntimeLifecycleStatus::Unsupported,
+                    distribution: None,
+                    detail: installed.remediation.or(Some(
+                        "runtime is unavailable in the installed Compute distribution".into(),
+                    )),
+                }),
+                Err(error) => Err(classify_compute_error(error)),
+            };
         }
         let capabilities = self
             .compute
