@@ -1027,15 +1027,25 @@ impl LocalProvider {
 
     async fn facts(&self, bundle: &WorkloadBundle) -> ProviderFacts {
         let distribution = self.compute.installed_distribution_identity().ok();
-        let installed_version = self
-            .compute
-            .runtime(bundle.workload.runtime, None)
-            .await
-            .ok()
-            .and_then(|runtime| runtime.version);
-        let runtime_version = if uses_installed_distribution() {
-            installed_version
+        let installed_distribution = uses_installed_distribution();
+        let runtime_version = if installed_distribution {
+            // Inventory versions come from the installed manifest. Runtime
+            // availability versions are observed banner text and belong in
+            // receipts, not deterministic admission facts.
+            self.compute.inventory().await.ok().and_then(|inventory| {
+                inventory
+                    .runtimes
+                    .into_iter()
+                    .find(|runtime| runtime.id == bundle.workload.runtime)
+                    .map(|runtime| runtime.version)
+            })
         } else {
+            let installed_version = self
+                .compute
+                .runtime(bundle.workload.runtime, None)
+                .await
+                .ok()
+                .and_then(|runtime| runtime.version);
             self.runtimes
                 .resolve(
                     ProviderRuntimeRequirement {
