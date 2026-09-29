@@ -177,6 +177,23 @@ struct RuntimeManifest {
     runtimes: BTreeMap<String, PreparedRuntime>,
 }
 
+fn inherit_installed_distribution(manifest: &mut RuntimeManifest, root: &Path) {
+    let Ok(bytes) = fs::read(root.join("runtime-manifest.json")) else {
+        return;
+    };
+    let Ok(installed) = serde_json::from_slice::<RuntimeManifest>(&bytes) else {
+        return;
+    };
+    manifest.schema_version = installed.schema_version;
+    manifest.compute_version = installed.compute_version;
+    manifest.distribution_id = installed.distribution_id;
+    manifest.distribution_version = installed.distribution_version;
+    manifest.platform = installed.platform;
+    manifest.os = installed.os;
+    manifest.architecture = installed.architecture;
+    manifest.runtime_lock_sha256 = installed.runtime_lock_sha256;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PreparedRuntime {
     version: String,
@@ -509,9 +526,12 @@ impl RuntimeManager {
             fs::rename(&staged_runtime, &target).map_err(io_error)?;
         }
 
-        let mut manifest = self
+        let prepared_runtimes = self
             .read_manifest()
-            .unwrap_or_else(|_| self.empty_manifest());
+            .map(|manifest| manifest.runtimes)
+            .unwrap_or_default();
+        let mut manifest = self.empty_manifest();
+        manifest.runtimes = prepared_runtimes;
         manifest.runtimes.insert(
             distribution.runtime.as_str().into(),
             PreparedRuntime {
@@ -573,7 +593,7 @@ impl RuntimeManager {
             "runtime_lock": lock_identity,
         }))
         .expect("source distribution descriptor serializes");
-        RuntimeManifest {
+        let mut manifest = RuntimeManifest {
             schema_version: 2,
             compute_version: env!("CARGO_PKG_VERSION").into(),
             distribution_id: sha256_identity(&descriptor),
@@ -601,7 +621,17 @@ impl RuntimeManager {
                 })
             },
             runtimes: BTreeMap::new(),
+        };
+        // A provider runtime store is mutable state, not an installation. Its
+        // prepared artifacts retain their own identities, while provider
+        // capabilities and receipts must name the immutable Compute
+        // distribution that is actually running them.
+        if let Some(root) = compute_core::paths::installation_root()
+            && root != self.root
+        {
+            inherit_installed_distribution(&mut manifest, &root);
         }
+        manifest
     }
 
     fn read_manifest(&self) -> Result<RuntimeManifest, ProviderError> {
@@ -934,6 +964,29 @@ mod tests {
             let error = RuntimeCatalog::from_bytes(document.as_bytes().to_vec()).unwrap_err();
             assert!(error.message.contains(refusal), "{}", error.message);
         }
+    }
+
+    #[test]
+    fn a_runtime_store_inherits_the_installed_distribution_identity() {
+        let (_directory, manager, _distribution) = fixture();
+        let installation = tempfile::tempdir().unwrap();
+        let mut installed = manager.empty_manifest();
+        installed.distribution_id = format!("sha256:{}", "a".repeat(64));
+        installed.distribution_version = "compute-0.1.1-linux-x86_64".into();
+        installed.certification_status = "pass".into();
+        write_json_atomic(
+            &installation.path().join("runtime-manifest.json"),
+            &installed,
+        )
+        .unwrap();
+
+        let mut store = manager.empty_manifest();
+        let store_status = store.certification_status.clone();
+        inherit_installed_distribution(&mut store, installation.path());
+
+        assert_eq!(store.distribution_id, installed.distribution_id);
+        assert_eq!(store.distribution_version, installed.distribution_version);
+        assert_eq!(store.certification_status, store_status);
     }
 
     #[test]
