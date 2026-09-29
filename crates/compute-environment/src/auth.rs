@@ -87,7 +87,8 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
         ("GET", ["audit", ..]) | ("GET", ["auth", "credentials", ..]) => Scope::Admin,
         ("GET", _) => Scope::Read,
         ("POST", ["environments", _, "projects", _, "workloads", _, "run"])
-        | ("POST", ["environments", _, "exec" | "connect" | "run" | "propose"]) => Scope::Execute,
+        | ("POST", ["environments", _, "exec" | "connect" | "run" | "propose"])
+        | ("POST", ["environments", _, "workspace", "export" | "verify"]) => Scope::Execute,
         // Versions and their rollouts are deployments.
         ("POST", ["software", _, "versions" | "deploy" | "promote" | "rollback"]) => {
             Scope::Deploy
@@ -118,9 +119,10 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
             [
                 "environments",
                 _,
-                "reconcile" | "replace" | "config" | "lifecycle",
+                "reconcile" | "replace" | "config" | "lifecycle" | "clone",
             ],
         )
+        | ("POST", ["environments", _, "workspace", "seed"])
         // Work sessions: a way into an environment, or a temporary one.
         | ("POST", ["sessions"])
         | ("DELETE", ["sessions", _])

@@ -550,3 +550,7 @@ The full inventory, with status and evidence for each claim, is
 [audit.md](audit.md); the runtime and provider coverage is in
 [runtime-matrix.md](runtime-matrix.md) and
 [provider-matrix.md](provider-matrix.md).
+
+## Design: GitHub control plane
+
+How a GitHub Actions control plane (Factory) sits over Compute without Compute learning GitHub: [factory-control-plane.md](factory-control-plane.md), with [local-ci-audit.md](local-ci-audit.md), [github-runner-protocol.md](github-runner-protocol.md) and [factory-compute-gaps.md](factory-compute-gaps.md). Design only; nothing is implemented.

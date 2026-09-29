@@ -42,6 +42,12 @@ struct Steered {
     capabilities: SessionCapabilities,
     provisions: AtomicUsize,
     fail_provision: AtomicBool,
+    /// Refuse any command whose text contains this (a fault to inject).
+    fail_exec_containing: std::sync::Mutex<Option<String>>,
+    /// Called (once, then cleared) before any command whose text contains
+    /// the marker, with the workspace directory the command runs in.
+    tamper: std::sync::Mutex<Option<(String, Box<dyn Fn(&Path) + Send + Sync>)>>,
+    root: PathBuf,
     gate: Option<Arc<Semaphore>>,
 }
 
@@ -56,6 +62,9 @@ impl Steered {
             capabilities,
             provisions: AtomicUsize::new(0),
             fail_provision: AtomicBool::new(false),
+            fail_exec_containing: std::sync::Mutex::new(None),
+            tamper: std::sync::Mutex::new(None),
+            root: root.to_path_buf(),
             gate,
         })
     }
@@ -102,6 +111,24 @@ impl SessionProvider for Steered {
         environment: &SessionEnvironment,
         command: &SessionCommand,
     ) -> Result<ProviderRequest, ProviderError> {
+        if let Some(marker) = self.fail_exec_containing.lock().unwrap().as_deref()
+            && command.command.iter().any(|part| part.contains(marker))
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProviderUnavailable,
+                "an injected fault",
+            ));
+        }
+        let due = {
+            let mut tamper = self.tamper.lock().unwrap();
+            let matched = tamper.as_ref().is_some_and(|(marker, _)| {
+                command.command.iter().any(|part| part.contains(marker))
+            });
+            if matched { tamper.take() } else { None }
+        };
+        if let Some((_, tamper)) = due {
+            tamper(&self.root.join(&environment.provider_session_id));
+        }
         self.inner.exec(environment, command).await
     }
     async fn destroy(&self, id: &str) -> Result<(), ProviderError> {
@@ -308,6 +335,7 @@ async fn start_daemon(
     config.computer_probe = Duration::from_millis(400);
     config.computer_liveness = Duration::from_millis(300);
     config.computer_liveness_timeout = Duration::from_secs(3);
+    config.replacement_deadline = Duration::from_secs(20);
     let seed = (std::process::id() % 400) as u16 * 20;
     config.port_range = (41000 + seed, 41000 + seed + 9);
     config.instance_port_range = (49000 + seed, 49000 + seed + 9);
@@ -322,7 +350,14 @@ fn repository() -> (tempfile::TempDir, PathBuf) {
     std::fs::create_dir_all(&source).unwrap();
     let git = |arguments: &[&str]| {
         let status = std::process::Command::new("git")
-            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args(arguments)
             .current_dir(&source)
             .env_remove("GIT_DIR")
@@ -2839,4 +2874,975 @@ async fn a_stale_answer_from_a_target_cannot_revive_a_lost_computer() {
         "a stale answer revived the computer: {history:?}"
     );
     daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cloning_an_environment_seeds_a_new_computer_with_the_same_workload_state() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+
+    daemon
+        .create_computer_environment(
+            definition(
+                "origin",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    let origin = computer_where(&daemon, "origin", "the origin to converge", |view| {
+        view.converged
+    })
+    .await;
+
+    // State a workload wrote that no declared content owns.
+    run(
+        &daemon,
+        "origin",
+        "alice",
+        &[
+            "sh",
+            "-c",
+            "mkdir -p data/nested && printf hello > data/notes.txt && printf deep > data/nested/x.bin && mkdir empty",
+        ],
+    )
+    .await;
+
+    let report = daemon
+        .clone_environment(
+            "origin",
+            "alice",
+            CloneRequest {
+                name: "copy".into(),
+                target: None,
+                copy_config: false,
+            },
+        )
+        .await
+        .unwrap();
+
+    // The seed was proven inside the new computer, before anything started.
+    assert!(report.workspace_verified);
+    assert!(report.workspace.starts_with("sha256:"));
+    assert!(report.files >= 3, "{report:#?}");
+    assert!(report.jobs.len() >= 4, "export, upload, extract, verify");
+
+    // Same workload state, in a different computer.
+    let copy = report.computer;
+    assert!(copy.converged);
+    assert_ne!(copy.session_id, origin.session_id, "a new machine");
+    assert_ne!(
+        copy.machine
+            .as_ref()
+            .map(|machine| machine.resource.clone()),
+        origin
+            .machine
+            .as_ref()
+            .map(|machine| machine.resource.clone())
+    );
+    let (notes, _) = run(&daemon, "copy", "alice", &["cat", "data/notes.txt"]).await;
+    assert_eq!(notes, "hello");
+    let (deep, _) = run(&daemon, "copy", "alice", &["cat", "data/nested/x.bin"]).await;
+    assert_eq!(deep, "deep");
+    let (empty, _) = run(
+        &daemon,
+        "copy",
+        "alice",
+        &["sh", "-c", "test -d empty && echo yes"],
+    )
+    .await;
+    assert_eq!(empty.trim(), "yes");
+
+    // Declared contents were re-derived, not copied: same commit, and the
+    // process runs in the clone under its own pid.
+    let (from, to) = &report.repositories["app"];
+    assert!(from.is_some() && from == to, "{:?}", report.repositories);
+    assert_eq!(copy.observed.processes["api"].state, ProcessState::Running);
+    assert_ne!(
+        copy.observed.processes["api"].pid,
+        origin.observed.processes["api"].pid
+    );
+    let (version, _) = run(&daemon, "copy", "alice", &["cat", "running-version"]).await;
+    assert_eq!(version, "v1");
+
+    // Configuration values stay behind unless asked for; their names are reported.
+    assert_eq!(report.omitted_config, vec!["APP_ENV".to_string()]);
+    assert!(copy.config.is_empty());
+
+    // The clone is evidenced, and the origin was not disturbed.
+    let recorded = events(&daemon, "copy").await;
+    let cloned = recorded
+        .iter()
+        .find(|(_, data)| data["command"] == "clone")
+        .expect("a clone event");
+    assert_eq!(cloned.1["source"], "origin");
+    assert_eq!(cloned.1["workspace"], report.workspace.as_str());
+    let still = daemon.computer("origin").await.unwrap();
+    assert_eq!(still.session_id, origin.session_id);
+    assert!(still.converged);
+
+    // Only the owner clones; a name is not reused.
+    assert!(
+        daemon
+            .clone_environment(
+                "origin",
+                "mallory",
+                CloneRequest {
+                    name: "theirs".into(),
+                    target: None,
+                    copy_config: false
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert!(daemon.computer("theirs").await.is_err());
+    assert!(matches!(
+        daemon
+            .clone_environment(
+                "origin",
+                "alice",
+                CloneRequest {
+                    name: "copy".into(),
+                    target: None,
+                    copy_config: false
+                }
+            )
+            .await,
+        Err(EnvironmentError::Conflict(_))
+    ));
+
+    // What cannot travel is refused before anything is created.
+    run(
+        &daemon,
+        "origin",
+        "alice",
+        &["ln", "-s", "/etc/passwd", "link"],
+    )
+    .await;
+    let refused = daemon
+        .clone_environment(
+            "origin",
+            "alice",
+            CloneRequest {
+                name: "linked".into(),
+                target: None,
+                copy_config: false,
+            },
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("unsupported entry")),
+        "{refused:?}"
+    );
+    assert!(
+        daemon.computer("linked").await.is_err(),
+        "nothing was created"
+    );
+}
+
+fn empty_contents() -> EnvironmentContents {
+    EnvironmentContents::default()
+}
+
+async fn running_computer(daemon: &Arc<Daemon>, name: &str) -> ComputerView {
+    computer_where(daemon, name, "the computer to run", |view| {
+        view.status == compute_core::ComputerStatus::Running
+    })
+    .await
+}
+
+async fn sh(daemon: &Arc<Daemon>, name: &str, script: &str) -> String {
+    run(daemon, name, "alice", &["sh", "-c", script]).await.0
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_state_is_exported_seeded_and_verified_without_clone() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    let create = |name: &'static str, contents: EnvironmentContents| {
+        let daemon = daemon.clone();
+        async move {
+            daemon
+                .create_computer_environment(
+                    definition(
+                        name,
+                        ComputerLifecycle::Persistent,
+                        requirements(),
+                        contents,
+                    ),
+                    "alice",
+                )
+                .await
+                .unwrap();
+            running_computer(&daemon, name).await
+        }
+    };
+
+    // A workspace with a repository (declared state), nested files, an empty
+    // directory, an executable, and files no declared content owns.
+    create("origin", contents(&source, "v1")).await;
+    computer_where(&daemon, "origin", "converge", |view| view.converged).await;
+    sh(
+        &daemon,
+        "origin",
+        "mkdir -p data/nested empty && printf hello > data/notes.txt && printf deep > data/nested/x.bin \\
+         && printf '#!/bin/sh\\necho hi\\n' > run.sh && chmod +x run.sh && printf mod >> repos/app/untracked.txt",
+    )
+    .await;
+
+    let export = daemon.export_workspace("origin", "alice").await.unwrap();
+    assert_eq!(export.identity, "compute.workspace@1");
+    assert!(export.digest.starts_with("sha256:"));
+    assert_eq!(
+        export.directories, 1,
+        "only the empty directory is recorded"
+    );
+    assert!(export.files >= 4, "{export:#?}");
+    assert!(!export.job_id.is_empty());
+
+    // Seed a second, empty workspace from it: no clone involved.
+    create("dest", empty_contents()).await;
+    let empty = daemon
+        .verify_workspace("dest", "alice", WorkspaceVerifyRequest { digest: None })
+        .await
+        .unwrap();
+    assert!(!empty.verified && empty.expected.is_none());
+    assert_ne!(empty.digest, export.digest);
+    let seed = daemon
+        .seed_workspace(
+            "dest",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: export.archive.clone(),
+                digest: Some(export.digest.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(seed.verified);
+    assert_eq!(seed.digest, export.digest);
+    assert_eq!(seed.files, export.files);
+
+    // Verified, and identical workspaces have identical digests.
+    let verify = |name: &'static str, digest: String| {
+        let daemon = daemon.clone();
+        async move {
+            daemon
+                .verify_workspace(
+                    name,
+                    "alice",
+                    WorkspaceVerifyRequest {
+                        digest: Some(digest),
+                    },
+                )
+                .await
+                .unwrap()
+        }
+    };
+    assert!(verify("dest", export.digest.clone()).await.verified);
+    assert!(verify("origin", export.digest.clone()).await.verified);
+
+    // The contents arrived; the repository (declared state) did not.
+    assert_eq!(
+        sh(&daemon, "dest", "cat data/notes.txt data/nested/x.bin").await,
+        "hellodeep"
+    );
+    assert_eq!(
+        sh(&daemon, "dest", "test -x run.sh && echo x || echo -")
+            .await
+            .trim(),
+        "x"
+    );
+    assert_eq!(
+        sh(&daemon, "dest", "test -d empty && echo yes")
+            .await
+            .trim(),
+        "yes"
+    );
+    assert_eq!(
+        sh(&daemon, "dest", "test -e repos && echo held || echo none")
+            .await
+            .trim(),
+        "none",
+        "declared repositories are not part of a workspace"
+    );
+
+    // Every part of the identity matters; nothing else does.
+    for (change, undo) in [
+        ("printf x > extra", "rm extra"),
+        (
+            "printf changed > data/notes.txt",
+            "printf hello > data/notes.txt",
+        ),
+        ("chmod -x run.sh", "chmod +x run.sh"),
+        ("rmdir empty", "mkdir empty"),
+        ("mkdir another", "rmdir another"),
+        (
+            "mv data/notes.txt data/moved.txt",
+            "mv data/moved.txt data/notes.txt",
+        ),
+    ] {
+        sh(&daemon, "dest", change).await;
+        let differs = verify("dest", export.digest.clone()).await;
+        assert!(!differs.verified, "{change}");
+        assert_ne!(differs.digest, export.digest, "{change}");
+        sh(&daemon, "dest", undo).await;
+        assert!(
+            verify("dest", export.digest.clone()).await.verified,
+            "{undo}"
+        );
+    }
+    // Permissions, timestamps and non-empty directories are not identity.
+    sh(
+        &daemon,
+        "dest",
+        "chmod 640 data/notes.txt && touch -t 200001010000 data/notes.txt",
+    )
+    .await;
+    assert!(verify("dest", export.digest.clone()).await.verified);
+    sh(&daemon, "dest", "chmod 644 data/notes.txt").await;
+
+    // A seed needs an empty workspace, and leaves what is there alone.
+    let again = daemon
+        .seed_workspace(
+            "dest",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: export.archive.clone(),
+                digest: None,
+            },
+        )
+        .await;
+    assert!(again.is_err(), "{again:?}");
+    assert!(
+        verify("dest", export.digest.clone()).await.verified,
+        "nothing was disturbed"
+    );
+
+    // A digest that is not the archive's is refused before anything is sent.
+    create("dest2", empty_contents()).await;
+    let untouched = daemon
+        .verify_workspace("dest2", "alice", WorkspaceVerifyRequest { digest: None })
+        .await
+        .unwrap()
+        .digest;
+    let wrong = format!("sha256:{}", "0".repeat(64));
+    let mismatch = daemon
+        .seed_workspace(
+            "dest2",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: export.archive.clone(),
+                digest: Some(wrong),
+            },
+        )
+        .await;
+    assert!(
+        matches!(mismatch, Err(EnvironmentError::Conflict(_))),
+        "{mismatch:?}"
+    );
+    // A corrupted archive is another workspace or unreadable; never seeded.
+    let mut corrupted = export.archive.clone();
+    let middle = corrupted.len() / 2;
+    corrupted[middle] ^= 0xff;
+    let refused = daemon
+        .seed_workspace(
+            "dest2",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: corrupted,
+                digest: Some(export.digest.clone()),
+            },
+        )
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    let truncated = daemon
+        .seed_workspace(
+            "dest2",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: export.archive[..export.archive.len() / 2].to_vec(),
+                digest: None,
+            },
+        )
+        .await;
+    assert!(truncated.is_err(), "{truncated:?}");
+    let oversized = daemon
+        .seed_workspace(
+            "dest2",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: vec![0; compute_environment::daemon::WORKSPACE_ARCHIVE_LIMIT + 1],
+                digest: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(oversized, Err(EnvironmentError::Invalid(_))),
+        "{oversized:?}"
+    );
+    assert_eq!(
+        daemon
+            .verify_workspace("dest2", "alice", WorkspaceVerifyRequest { digest: None })
+            .await
+            .unwrap()
+            .digest,
+        untouched,
+        "every refused seed left the workspace empty"
+    );
+
+    // Portable state: the same export seeds a third and a fourth computer,
+    // one of them ephemeral with different requirements. The primitive does
+    // not know or care what the destination is for.
+    let seeded = daemon
+        .seed_workspace(
+            "dest2",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: export.archive.clone(),
+                digest: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(seeded.digest, export.digest);
+    daemon
+        .create_computer_environment(
+            definition(
+                "dest3",
+                ComputerLifecycle::Ephemeral,
+                ComputerRequirements {
+                    memory_bytes: Some(128 << 20),
+                    ..requirements()
+                },
+                empty_contents(),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    running_computer(&daemon, "dest3").await;
+    let third = daemon
+        .seed_workspace(
+            "dest3",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: export.archive.clone(),
+                digest: Some(export.digest.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(third.verified);
+    for name in ["origin", "dest", "dest2", "dest3"] {
+        assert!(verify(name, export.digest.clone()).await.verified, "{name}");
+    }
+
+    // Only the owner exports, seeds, or verifies.
+    assert!(daemon.export_workspace("origin", "mallory").await.is_err());
+    assert!(
+        daemon
+            .seed_workspace(
+                "dest2",
+                "mallory",
+                WorkspaceSeedRequest {
+                    archive: export.archive.clone(),
+                    digest: None
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        daemon
+            .verify_workspace("origin", "mallory", WorkspaceVerifyRequest { digest: None })
+            .await
+            .is_err()
+    );
+
+    // Unsupported entries are refused, by export and by verify.
+    sh(&daemon, "origin", "ln -s /etc/passwd link").await;
+    let linked = daemon.export_workspace("origin", "alice").await;
+    assert!(
+        matches!(&linked, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("unsupported entry")),
+        "{linked:?}"
+    );
+    assert!(
+        daemon
+            .verify_workspace("origin", "alice", WorkspaceVerifyRequest { digest: None })
+            .await
+            .is_err()
+    );
+    sh(&daemon, "origin", "rm link").await;
+    assert!(daemon.export_workspace("origin", "alice").await.is_ok());
+
+    // Each operation is evidenced.
+    let recorded = events(&daemon, "dest").await;
+    for command in ["workspace.seed", "workspace.verify"] {
+        assert!(
+            recorded.iter().any(|(_, data)| data["command"] == command),
+            "{command}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_workspace_that_changes_while_it_is_captured_is_refused() {
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    let mut busy = EnvironmentContents::default();
+    busy.processes.push(ProcessSpec {
+        name: "writer".into(),
+        kind: ProcessKind::Process,
+        runtime: None,
+        command: vec![
+            "sh".into(),
+            "-c".into(),
+            "i=0; while [ $i -lt 3000 ]; do i=$((i+1)); : > \"tick$i\"; sleep 0.01; done".into(),
+        ],
+        repository: None,
+        env: BTreeMap::new(),
+        desired: ProcessDesired::Running,
+        port: None,
+        restart: 0,
+        readiness: None,
+        restart_policy: Default::default(),
+        max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
+    });
+    daemon
+        .create_computer_environment(
+            definition("busy", ComputerLifecycle::Persistent, requirements(), busy),
+            "alice",
+        )
+        .await
+        .unwrap();
+    computer_where(&daemon, "busy", "the writer to run", |view| view.converged).await;
+    eventually("the writer to be writing", async || {
+        let count = sh(&daemon, "busy", "ls | grep -c '^tick' || true").await;
+        (count.trim().parse::<u32>().unwrap_or(0) > 5).then_some(())
+    })
+    .await;
+    let refused = daemon.export_workspace("busy", "alice").await;
+    assert!(
+        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("changed while it was captured")),
+        "{refused:?}"
+    );
+    // A workspace process outlives its test unless it is stopped.
+    daemon
+        .set_process("busy", "alice", "writer", ProcessDesired::Stopped)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_clone_never_leaves_an_unverified_environment_running() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let steered = Steered::new(workspaces.path(), full(), None);
+    let target = Target::start(steered.clone(), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    daemon
+        .create_computer_environment(
+            definition(
+                "origin",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    computer_where(&daemon, "origin", "converge", |view| view.converged).await;
+
+    // The seed's extraction fails on the new computer.
+    *steered.fail_exec_containing.lock().unwrap() = Some("tar -xf".into());
+    let failed = daemon
+        .clone_environment(
+            "origin",
+            "alice",
+            CloneRequest {
+                name: "copy".into(),
+                target: None,
+                copy_config: false,
+            },
+        )
+        .await;
+    let Err(EnvironmentError::Conflict(reason)) = &failed else {
+        panic!("{failed:?}")
+    };
+    assert!(
+        reason.contains("while seeding") && reason.contains("unverified"),
+        "{reason}"
+    );
+
+    // The environment exists, its workspace is unverified, and reality says
+    // it is not running: no contents ever ran.
+    let view = computer_where(&daemon, "copy", "the clone to stop", |view| {
+        view.reality.observed == "stopped"
+    })
+    .await;
+    assert_eq!(view.reality.desired, "stopped");
+    assert!(view.desired.processes.is_empty(), "nothing was applied");
+    let recorded = events(&daemon, "copy").await;
+    let failure = recorded
+        .iter()
+        .find(|(_, data)| data["command"] == "clone" && data["outcome"] == "failed")
+        .expect("the failure is recorded");
+    assert_eq!(failure.1["phase"], "seeding");
+    assert_eq!(failure.1["workspace_verified"], false);
+    // The source is untouched.
+    assert!(daemon.computer("origin").await.unwrap().converged);
+}
+
+/// The identity of a computer's machine, and of what it holds.
+struct Facts {
+    environment_id: String,
+    session: String,
+    resource: String,
+}
+
+fn facts(view: &ComputerView) -> Facts {
+    Facts {
+        environment_id: view.environment_id.clone(),
+        session: view.session_id.clone().unwrap(),
+        resource: view.machine.as_ref().unwrap().resource.clone().unwrap(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replacing_a_computer_keeps_the_environment_and_its_workspace() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    daemon
+        .create_computer_environment(
+            definition(
+                "app",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    let first = computer_where(&daemon, "app", "converge", |view| view.converged).await;
+    sh(
+        &daemon,
+        "app",
+        "mkdir -p data/nested empty && printf hello > data/notes.txt && printf deep > data/nested/x.bin \\
+         && printf '#!/bin/sh\\necho hi\\n' > run.sh && chmod +x run.sh",
+    )
+    .await;
+    let digest = daemon
+        .verify_workspace("app", "alice", WorkspaceVerifyRequest { digest: None })
+        .await
+        .unwrap()
+        .digest;
+    let before = facts(&first);
+    let old_pid = first.observed.processes["api"].pid;
+
+    // Names ending the candidate suffix are reserved.
+    let reserved = daemon
+        .create_computer_environment(
+            definition(
+                "x--replacing",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                empty_contents(),
+            ),
+            "alice",
+        )
+        .await;
+    assert!(
+        matches!(reserved, Err(EnvironmentError::Invalid(_))),
+        "{reserved:?}"
+    );
+
+    let bigger = ComputerRequirements {
+        cpu_count: Some(2),
+        ..requirements()
+    };
+    let replaced = daemon
+        .replace_computer("app", "alice", bigger.clone())
+        .await
+        .unwrap();
+
+    // The Environment survives; the Computer does not.
+    let after = facts(&replaced);
+    assert_eq!(after.environment_id, before.environment_id);
+    assert_ne!(after.session, before.session);
+    assert_ne!(after.resource, before.resource);
+    assert_eq!(replaced.requirements, bigger);
+    assert_eq!(
+        (replaced.spec_generation, replaced.running_generation),
+        (2, 2)
+    );
+    assert_eq!(replaced.owner, first.owner);
+    assert_eq!(
+        replaced.desired, first.desired,
+        "declared contents are untouched"
+    );
+    assert_eq!(replaced.config, first.config);
+
+    // The workspace is the one that was captured, verified on the new machine.
+    let verified = daemon
+        .verify_workspace(
+            "app",
+            "alice",
+            WorkspaceVerifyRequest {
+                digest: Some(digest.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(verified.verified, "{verified:?}");
+    assert_eq!(
+        sh(&daemon, "app", "cat data/notes.txt data/nested/x.bin").await,
+        "hellodeep"
+    );
+    assert_eq!(
+        sh(&daemon, "app", "test -x run.sh && echo x").await.trim(),
+        "x"
+    );
+    assert_eq!(
+        sh(&daemon, "app", "test -d empty && echo yes").await.trim(),
+        "yes"
+    );
+
+    // Reality: converged and running, the process on the new machine.
+    let now = computer_where(&daemon, "app", "running and converged", |view| {
+        view.converged && view.reality.observed == "running"
+    })
+    .await;
+    assert_eq!(now.observed.processes["api"].state, ProcessState::Running);
+    assert_ne!(now.observed.processes["api"].pid, old_pid);
+    assert_eq!(sh(&daemon, "app", "cat running-version").await, "v1");
+
+    // The old machine is retired: its session does not survive.
+    eventually("the old session to end", async || {
+        target
+            .client()
+            .session(&before.session)
+            .await
+            .ok()
+            .filter(|s| s.status.is_terminal())
+    })
+    .await;
+    // The candidate is gone; nothing of it outlives a successful replacement.
+    assert!(daemon.computer("app--replacing").await.is_err());
+    assert_eq!(target.provider.provisions.load(Ordering::SeqCst), 2);
+
+    // The evidence tells the truth about the handoff.
+    let recorded = events(&daemon, "app").await;
+    let handoff = recorded
+        .iter()
+        .find(|(kind, _)| kind == "computer.replaced")
+        .expect("the handoff is recorded");
+    assert_eq!(handoff.1["from_session"], before.session.as_str());
+    assert_eq!(handoff.1["to_session"], after.session.as_str());
+    assert_eq!(handoff.1["workspace"], digest.as_str());
+    assert_eq!(handoff.1["workspace_verified"], true);
+    assert!(handoff.1["jobs"].as_array().unwrap().len() >= 4);
+
+    // And it can be done again: the candidate name is free.
+    let again = daemon
+        .replace_computer("app", "alice", bigger)
+        .await
+        .unwrap();
+    assert_ne!(again.session_id.as_deref(), Some(after.session.as_str()));
+    assert_eq!((again.spec_generation, again.running_generation), (3, 3));
+    assert!(
+        daemon
+            .verify_workspace(
+                "app",
+                "alice",
+                WorkspaceVerifyRequest {
+                    digest: Some(digest)
+                }
+            )
+            .await
+            .unwrap()
+            .verified
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replacement_that_fails_before_the_handoff_leaves_the_old_computer_current() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let steered = Steered::new(workspaces.path(), full(), None);
+    let target = Target::start(steered.clone(), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    daemon
+        .create_computer_environment(
+            definition(
+                "app",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    let first = computer_where(&daemon, "app", "converge", |view| view.converged).await;
+    sh(
+        &daemon,
+        "app",
+        "mkdir data && printf hello > data/notes.txt",
+    )
+    .await;
+    let digest = daemon
+        .verify_workspace("app", "alice", WorkspaceVerifyRequest { digest: None })
+        .await
+        .unwrap()
+        .digest;
+    let before = facts(&first);
+    let pid = first.observed.processes["api"].pid;
+
+    // Every failure below must leave: A current, converged, running the same
+    // process, with the same workspace; and the candidate stopped and not ready.
+    let assert_old_is_current =
+        |phase: &'static str, failed: Result<ComputerView, EnvironmentError>| {
+            let daemon = daemon.clone();
+            let digest = digest.clone();
+            let session = before.session.clone();
+            async move {
+                let Err(EnvironmentError::Conflict(reason)) = &failed else {
+                    panic!("{phase}: {failed:?}")
+                };
+                assert!(reason.contains(&format!("while {phase}")), "{reason}");
+                assert!(
+                    reason.contains("remains current") && reason.contains("unverified"),
+                    "{reason}"
+                );
+                let current = daemon.computer("app").await.unwrap();
+                assert_eq!(current.session_id.as_deref(), Some(session.as_str()));
+                assert!(current.converged);
+                assert_eq!(current.observed.processes["api"].pid, pid);
+                assert!(
+                    daemon
+                        .verify_workspace(
+                            "app",
+                            "alice",
+                            WorkspaceVerifyRequest {
+                                digest: Some(digest)
+                            }
+                        )
+                        .await
+                        .unwrap()
+                        .verified,
+                    "{phase}: the old workspace is untouched"
+                );
+                // The candidate is stopped, never presented as running or ready.
+                let candidate =
+                    computer_where(&daemon, "app--replacing", "the candidate to stop", |view| {
+                        view.reality.observed == "stopped"
+                    })
+                    .await;
+                assert_eq!(candidate.reality.desired, "stopped");
+                let recorded = events(&daemon, "app").await;
+                let failure = recorded
+                    .iter()
+                    .rev()
+                    .find(|(_, data)| data["command"] == "replace" && data["outcome"] == "failed")
+                    .expect("the failure is recorded on the environment");
+                assert_eq!(failure.1["phase"], phase);
+                assert_eq!(failure.1["workspace_verified"], false);
+                assert!(
+                    !recorded.iter().any(|(kind, _)| kind == "computer.replaced"),
+                    "no handoff"
+                );
+            }
+        };
+
+    // Seed failure.
+    *steered.fail_exec_containing.lock().unwrap() = Some("tar -xf".into());
+    let failed = daemon
+        .replace_computer("app", "alice", requirements())
+        .await;
+    assert_old_is_current("seeding", failed).await;
+    *steered.fail_exec_containing.lock().unwrap() = None;
+
+    // Verification failure: the seeded workspace is not the archive's.
+    *steered.tamper.lock().unwrap() = Some((
+        "workspace_check\ndigest".into(),
+        Box::new(|workspace: &Path| std::fs::write(workspace.join("stray"), "x").unwrap()),
+    ));
+    let failed = daemon
+        .replace_computer("app", "alice", requirements())
+        .await;
+    assert_old_is_current("seeding", failed).await;
+
+    // The source changed after it was captured: what would move is not what
+    // was captured, so nothing moves.
+    let source_workspace = workspaces.path().join(&before.resource);
+    *steered.tamper.lock().unwrap() = Some((
+        "tar -xf".into(),
+        Box::new(move |_| std::fs::write(source_workspace.join("late"), "x").unwrap()),
+    ));
+    let failed = daemon
+        .replace_computer("app", "alice", requirements())
+        .await;
+    assert!(
+        matches!(&failed, Err(EnvironmentError::Conflict(reason)) if reason.contains("no longer the")),
+        "{failed:?}"
+    );
+    sh(&daemon, "app", "rm late").await;
+    assert_old_is_current("verifying the source", failed).await;
+
+    // Reconcile failure: the declared contents cannot be brought up on the
+    // new machine, so it is not presented as ready and nothing moves.
+    *steered.fail_exec_containing.lock().unwrap() = Some("git fetch".into());
+    let failed = daemon
+        .replace_computer("app", "alice", requirements())
+        .await;
+    assert_old_is_current("reconciling", failed).await;
+    *steered.fail_exec_containing.lock().unwrap() = None;
+
+    // A later replacement clears the leftover candidate and succeeds.
+    let replaced = daemon
+        .replace_computer("app", "alice", requirements())
+        .await
+        .unwrap();
+    assert_ne!(
+        replaced.session_id.as_deref(),
+        Some(before.session.as_str())
+    );
+    computer_where(&daemon, "app", "the replacement to converge", |view| {
+        view.converged
+    })
+    .await;
+    assert!(daemon.computer("app--replacing").await.is_err());
+    assert!(
+        daemon
+            .verify_workspace(
+                "app",
+                "alice",
+                WorkspaceVerifyRequest {
+                    digest: Some(digest)
+                }
+            )
+            .await
+            .unwrap()
+            .verified
+    );
 }

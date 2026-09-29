@@ -494,6 +494,10 @@ route declares a scope; unknown routes need `admin`.
 | POST | `/environments/{environment}/processes/{process}/stop` | Operate | no | no | no | no |
 | POST | `/environments/{environment}/reconcile` | Operate | yes | yes | yes | no |
 | POST | `/environments/{environment}/replace` | Operate | yes | yes | yes | no |
+| POST | `/environments/{environment}/clone` | Operate | no | yes | no | no |
+| POST | `/environments/{environment}/workspace/export` | Execute | no | yes | no | no |
+| POST | `/environments/{environment}/workspace/seed` | Operate | no | yes | no | no |
+| POST | `/environments/{environment}/workspace/verify` | Execute | no | yes | no | no |
 | POST | `/environments/{environment}/exec` | Execute | yes | yes | yes | no |
 | POST | `/environments/{environment}/connect` | Execute | no | yes | yes | no |
 | GET | `/environments/{environment}/jobs/{job}` | Read | yes | yes | yes | no |
