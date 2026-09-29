@@ -22,6 +22,7 @@ mod sandbox;
 pub struct ProcessRuntime {
     kind: RuntimeKind,
     distribution_root: Option<PathBuf>,
+    distribution_required: bool,
 }
 
 impl ProcessRuntime {
@@ -29,6 +30,7 @@ impl ProcessRuntime {
         Self {
             kind,
             distribution_root: None,
+            distribution_required: false,
         }
     }
 
@@ -36,6 +38,15 @@ impl ProcessRuntime {
         Self {
             kind,
             distribution_root: Some(root),
+            distribution_required: false,
+        }
+    }
+
+    pub fn with_required_distribution_root(kind: RuntimeKind, root: PathBuf) -> Self {
+        Self {
+            kind,
+            distribution_root: Some(root),
+            distribution_required: true,
         }
     }
 
@@ -82,10 +93,15 @@ impl ProcessRuntime {
 
     fn distribution_root(&self) -> Option<std::result::Result<PathBuf, String>> {
         if let Some(root) = &self.distribution_root {
-            return root
-                .join("runtime-manifest.json")
-                .is_file()
-                .then(|| Ok(root.clone()));
+            if root.join("runtime-manifest.json").is_file() {
+                return Some(Ok(root.clone()));
+            }
+            return self.distribution_required.then(|| {
+                Err(format!(
+                    "COMPUTE_DISTRIBUTION_ROOT does not contain runtime-manifest.json: {}",
+                    root.display()
+                ))
+            });
         }
         distribution_root()
     }
@@ -233,22 +249,17 @@ struct DistributionRuntime {
 }
 
 fn distribution_root() -> Option<std::result::Result<PathBuf, String>> {
-    if let Some(root) = std::env::var_os("COMPUTE_HOME") {
-        let root = PathBuf::from(root);
+    if let Some(root) = compute_core::paths::installation_root() {
         return Some(if root.join("runtime-manifest.json").is_file() {
             Ok(root)
         } else {
             Err(format!(
-                "COMPUTE_HOME does not contain runtime-manifest.json: {}",
+                "COMPUTE_DISTRIBUTION_ROOT does not contain runtime-manifest.json: {}",
                 root.display()
             ))
         });
     }
-    let executable = std::env::current_exe().ok()?;
-    let root = executable.parent()?.parent()?.to_path_buf();
-    root.join("runtime-manifest.json")
-        .is_file()
-        .then_some(Ok(root))
+    None
 }
 
 fn discover_distribution_runtime(root: &Path, definition: &RuntimeDefinition) -> DiscoveredRuntime {
@@ -1159,6 +1170,24 @@ mod tests {
     fn process_runtime_can_be_constructed() {
         let runtime = ProcessRuntime::new(RuntimeKind::Python);
         assert_eq!(runtime.kind(), RuntimeKind::Python);
+    }
+
+    #[test]
+    fn explicit_distribution_root_never_falls_back_to_the_host() {
+        let root = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .join("missing-distribution");
+        let runtime = ProcessRuntime::with_required_distribution_root(RuntimeKind::Shell, root);
+        let discovered = runtime.discover();
+        assert!(!discovered.available);
+        assert_eq!(discovered.source, RuntimeSource::Distribution);
+        assert!(
+            discovered
+                .remediation
+                .unwrap()
+                .contains("COMPUTE_DISTRIBUTION_ROOT does not contain runtime-manifest.json")
+        );
     }
 
     #[cfg(unix)]

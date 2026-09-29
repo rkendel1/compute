@@ -45,16 +45,25 @@ impl Default for Compute {
 
 impl Compute {
     pub fn new() -> Self {
-        Self::with_optional_distribution_root(distribution_root())
+        Self::with_optional_distribution_root(distribution_root(), true)
     }
 
     pub fn with_distribution_root(root: PathBuf) -> Self {
-        Self::with_optional_distribution_root(Some(root))
+        Self::with_optional_distribution_root(Some(root), false)
     }
 
-    fn with_optional_distribution_root(distribution_root: Option<PathBuf>) -> Self {
+    fn with_optional_distribution_root(
+        distribution_root: Option<PathBuf>,
+        distribution_required: bool,
+    ) -> Self {
         let process = |kind| -> Box<dyn RuntimeAdapter> {
             match &distribution_root {
+                Some(root) if distribution_required => Box::new(
+                    compute_runtime_process::ProcessRuntime::with_required_distribution_root(
+                        kind,
+                        root.clone(),
+                    ),
+                ),
                 Some(root) => Box::new(
                     compute_runtime_process::ProcessRuntime::with_distribution_root(
                         kind,
@@ -1115,12 +1124,7 @@ fn prefixed_digest(value: &str) -> Result<String> {
 }
 
 fn distribution_root() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("COMPUTE_HOME") {
-        return Some(root.into());
-    }
-    let executable = std::env::current_exe().ok()?;
-    let root = executable.parent()?.parent()?.to_path_buf();
-    root.join("runtime-manifest.json").is_file().then_some(root)
+    compute_core::paths::installation_root()
 }
 
 /// A payload tree's identity, hashed again only when any entry's path,

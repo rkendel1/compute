@@ -20,6 +20,7 @@ pub mod executables;
 pub mod host;
 pub use host::{HostEnforcement, HostProfile};
 mod dependencies;
+pub mod paths;
 pub use dependencies::*;
 mod project;
 pub use project::*;

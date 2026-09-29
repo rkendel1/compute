@@ -191,6 +191,86 @@ fn distribution_build_is_reproducible_and_verify_detects_tampering() {
 }
 
 #[test]
+fn installed_distribution_is_discovered_from_any_working_directory() {
+    let temporary = tempfile::tempdir().unwrap();
+    let version = "1.37.0";
+    let artifact = format!("#!/bin/sh\necho 'BusyBox v{version}'\n");
+    let artifact_path = temporary.path().join("shell");
+    std::fs::write(&artifact_path, &artifact).unwrap();
+    let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let lock_path = temporary.path().join("runtime-lock.json");
+    write_json(
+        &lock_path,
+        serde_json::json!({
+            "schema_version": 2,
+            "runtimes": {
+                "shell": {
+                    "version": version,
+                    "executable": "runtimes/shell/bin/sh",
+                    "artifacts": {
+                        (platform): {
+                            "url": format!("file://{}", artifact_path.display()),
+                            "sha256": sha256(artifact.as_bytes()),
+                            "format": "file",
+                            "install": [{
+                                "source": "artifact",
+                                "destination": "runtimes/shell/bin/sh"
+                            }]
+                        }
+                    }
+                },
+                "wasm": { "version": "embedded", "executable": "<embedded>" }
+            }
+        }),
+    );
+    let cache = temporary.path().join("cache/sha256");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join(sha256(artifact.as_bytes())), artifact).unwrap();
+    let installation = temporary.path().join("installation");
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "distribution",
+            "build",
+            "--offline",
+            "--output",
+            installation.to_str().unwrap(),
+            "--cache",
+            temporary.path().join("cache").to_str().unwrap(),
+            "--lock",
+            lock_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let unrelated = temporary.path().join("unrelated-working-directory");
+    let state = temporary.path().join("state");
+    std::fs::create_dir(&unrelated).unwrap();
+    let output = std::process::Command::new(installation.join("bin/compute"))
+        .current_dir(&unrelated)
+        .env_remove("COMPUTE_DISTRIBUTION_ROOT")
+        .env("COMPUTE_HOME", &state)
+        .args(["doctor", "--runtimes-only", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let shell = report["runtimes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|runtime| runtime["runtime"] == "shell")
+        .unwrap();
+    assert_eq!(shell["availability"]["source"], "compute-distribution");
+    assert!(shell["availability"]["available"].as_bool().unwrap());
+    assert_ne!(state, installation);
+}
+
+#[test]
 fn distribution_offline_cache_miss_and_wrong_platform_fail_explicitly() {
     let temporary = tempfile::tempdir().unwrap();
     let artifact = b"#!/bin/sh\necho fixture 1.2.3\n";
@@ -640,7 +720,7 @@ fn certification_report_detects_a_broken_assembled_distribution() {
 
     let output = Command::cargo_bin("compute")
         .unwrap()
-        .env("COMPUTE_HOME", root.path())
+        .env("COMPUTE_DISTRIBUTION_ROOT", root.path())
         .args(["certify", "--internal-clean-environment", "--json"])
         .output()
         .unwrap();
@@ -1070,7 +1150,7 @@ fn direct_paths_and_configuration_fail_closed() {
 /// `compute` whose managed runtimes come from a host-backed fixture catalog
 /// (`$COMPUTE_RUNTIME_CATALOG`), so no test downloads a runtime. The pinned
 /// Python is prepared once into a runtime store that is also the Compute
-/// distribution the CLI sees (`$COMPUTE_HOME`), so capsules are created,
+/// distribution the CLI sees (`$COMPUTE_DISTRIBUTION_ROOT`), so capsules are created,
 /// verified, placed, and executed against the one pinned runtime.
 fn compute_with_fixture_runtimes() -> Command {
     static FIXTURE: std::sync::OnceLock<(std::path::PathBuf, std::path::PathBuf)> =
@@ -1104,7 +1184,7 @@ fn compute_with_fixture_runtimes() -> Command {
     command
         .env("COMPUTE_RUNTIME_CATALOG", catalog)
         .env("COMPUTE_RUNTIME_STORE", store)
-        .env("COMPUTE_HOME", store);
+        .env("COMPUTE_DISTRIBUTION_ROOT", store);
     command
 }
 

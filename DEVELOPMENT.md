@@ -99,7 +99,7 @@ Pinned runtime metadata lives only in `distribution/runtime-lock.json`.
 `distribution/assemble.sh` validates a prepared payload tree, emits the
 machine-readable distribution manifest, normalizes archive metadata, and
 produces the input consumed unchanged by `distribution/Dockerfile`. See
-`distribution/README.md` for the payload layout. Set `COMPUTE_HOME` to an
+`distribution/README.md` for the payload layout. Set `COMPUTE_DISTRIBUTION_ROOT` to an
 assembled root to exercise official fail-closed resolution locally; leaving
 it unset permits explicitly labeled host-development discovery.
 

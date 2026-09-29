@@ -1,5 +1,8 @@
 name: distribution-certification
 
+permissions:
+  contents: write
+
 on:
   workflow_call:
   workflow_dispatch:
@@ -29,3 +32,36 @@ jobs:
           diff -u compute-distribution-first/runtime-manifest.json compute-distribution/runtime-manifest.json
           diff -u compute-distribution-first/runtime-inventory.json compute-distribution/runtime-inventory.json
           cmp compute-distribution-first.tar compute-distribution.tar
+      - name: Package the certified artifact
+        id: package
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "compute-cli") | .version')
+          fi
+          package_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "compute-cli") | .version')
+          test "$version" = "$package_version"
+          asset="compute-$version-linux-x86_64.tar.gz"
+          gzip -n -9 -c compute-distribution.tar > "$asset"
+          gzip -dc "$asset" | cmp - compute-distribution.tar
+          sha256sum "$asset" > "$asset.sha256"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: certified-compute-linux-x86_64
+          path: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.package.outputs.asset }}.sha256
+          if-no-files-found: error
+      - name: Publish the certified release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.package.outputs.asset }}.sha256
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

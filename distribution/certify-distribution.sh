@@ -19,7 +19,7 @@ cleanup() {
   rm -rf "$temporary"
 }
 trap cleanup EXIT HUP INT TERM
-COMPUTE_HOME="$distribution" COMPUTE_REQUIRE_ALL_RUNTIMES=1 \
+COMPUTE_DISTRIBUTION_ROOT="$distribution" COMPUTE_REQUIRE_ALL_RUNTIMES=1 \
   "$distribution/bin/compute" certify --json > "$temporary/bare.json"
 
 image="compute-certification:${COMPUTE_CERTIFICATION_TAG:-local}"
@@ -49,7 +49,7 @@ cat > "$temporary/workload.json" <<'JSON'
 }
 JSON
 
-COMPUTE_HOME="$distribution" "$distribution/bin/compute" bundle create \
+COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" bundle create \
   --workload "$temporary/workload.json" \
   --output "$temporary/workload.compute" \
   --json > "$temporary/bundle.json"
@@ -97,7 +97,7 @@ job_id=$(jq -r .job_id "$temporary/job-submission.json")
 distribution_id=$(jq -r .distribution_id "$distribution/runtime-manifest.json")
 mkdir "$temporary/pool" "$temporary/pool/resolved"
 printf "VALUE = 'pooled'\n" > "$temporary/pool/resolved/pool_dependency.py"
-COMPUTE_HOME="$distribution" "$distribution/bin/compute" deps create \
+COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" deps create \
   --runtime python --resolved "$temporary/pool/resolved" \
   --output "$temporary/pool/deps.capsule" --json > "$temporary/pool/deps.json"
 capsule_id=$(jq -r .capsule_id "$temporary/pool/deps.json")
@@ -109,7 +109,7 @@ cat > "$temporary/pool/workload.json" <<JSON
 {"version":"1","runtime":"python","entrypoint":"main.py","network":"network",
  "resources":{"timeout_ms":30000},"dependencies":{"capsule":"$capsule_id"}}
 JSON
-COMPUTE_HOME="$distribution" "$distribution/bin/compute" bundle create \
+COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" bundle create \
   --workload "$temporary/pool/workload.json" --deps "$temporary/pool/deps.capsule" \
   --output "$temporary/pool/workload.compute" --json > "$temporary/pool/bundle.json"
 cat > "$temporary/pool/compute-pool.toml" <<TOML
@@ -123,7 +123,7 @@ endpoint = "$job_provider"
 priority = 10
 TOML
 pool() {
-  COMPUTE_HOME="$distribution" "$distribution/bin/compute" "$@" \
+  COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" "$@" \
     --pool-config "$temporary/pool/compute-pool.toml" \
     --capability-cache "$temporary/pool/capabilities.json"
 }
@@ -225,7 +225,7 @@ cat > "$temporary/policy/denied.json" <<'JSON'
 {"version":"1","runtime":"node","entrypoint":"denied.js","network":"network",
  "resources":{"timeout_ms":1000}}
 JSON
-COMPUTE_HOME="$distribution" "$distribution/bin/compute" bundle create \
+COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" bundle create \
   --workload "$temporary/policy/denied.json" \
   --output "$temporary/policy/denied.compute" --json >/dev/null
 for denied in "$temporary/slow.compute" "$temporary/policy/denied.compute"; do
@@ -264,7 +264,7 @@ PY
 cat > "$temporary/slow-workload.json" <<'JSON'
 {"version":"1","runtime":"python","entrypoint":"slow.py","network":"network"}
 JSON
-COMPUTE_HOME="$distribution" "$distribution/bin/compute" bundle create \
+COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" bundle create \
   --workload "$temporary/slow-workload.json" \
   --output "$temporary/slow.compute" --json >/dev/null
 "$distribution/bin/compute" remote submit --provider "$job_provider" \
@@ -277,7 +277,7 @@ queued_job_id=$(jq -r .job_id "$temporary/queued-job.json")
   "$queued_job_id" --json > "$temporary/job-cancellation.json"
 jq -e '.cancellation.requested == true' "$temporary/job-cancellation.json" >/dev/null
 
-COMPUTE_HOME="$distribution" "$distribution/bin/compute" run \
+COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" run \
   --workload "$temporary/workload.json" \
   --receipt "$temporary/bare-receipt.json" \
   --json > "$temporary/bare-execution.json"

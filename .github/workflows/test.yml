@@ -36,6 +36,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Workspace tests
         run: cargo test --workspace --locked
+      - name: Installer contract
+        run: distribution/tests/installer.sh
       - name: Product acceptance
         run: cargo test --locked -p compute-cli --test product -- --nocapture
       - uses: actions/setup-node@v4

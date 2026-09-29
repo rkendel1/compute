@@ -345,12 +345,7 @@ pub fn doctor_provenance() -> BTreeMap<String, serde_json::Value> {
 }
 
 fn distribution_root() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("COMPUTE_HOME") {
-        return Some(PathBuf::from(root));
-    }
-    let executable = std::env::current_exe().ok()?;
-    let root = executable.parent()?.parent()?.to_path_buf();
-    root.join("runtime-manifest.json").is_file().then_some(root)
+    compute_core::paths::installation_root()
 }
 
 pub(crate) fn verify_root(root: &Path) -> VerificationReport {
@@ -695,7 +690,7 @@ fn prepare_certification(
 fn run_distribution_command(root: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new(root.join("bin/compute"))
         .args(args)
-        .env("COMPUTE_HOME", root)
+        .env("COMPUTE_DISTRIBUTION_ROOT", root)
         .env("COMPUTE_REQUIRE_ALL_RUNTIMES", "1")
         .status()
         .map_err(error)?;

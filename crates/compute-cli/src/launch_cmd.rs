@@ -80,12 +80,7 @@ fn setting(value: Option<String>, variable: &str, default: &str) -> String {
 }
 
 fn home() -> compute_core::Result<PathBuf> {
-    if let Ok(home) = std::env::var("COMPUTE_HOME") {
-        return Ok(PathBuf::from(home));
-    }
-    let base = std::env::var("HOME")
-        .map_err(|_| ComputeError::Runtime("set HOME or COMPUTE_HOME".into()))?;
-    Ok(PathBuf::from(base).join(".compute"))
+    compute_core::paths::state_root()
 }
 
 fn answers(address: &str) -> bool {

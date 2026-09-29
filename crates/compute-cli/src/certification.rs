@@ -171,7 +171,7 @@ pub fn spawn_clean_certification(json: bool) -> compute_core::Result<()> {
         .env("TMPDIR", &tmp)
         .env("LANG", "C.UTF-8")
         .env("LC_ALL", "C.UTF-8")
-        .env("COMPUTE_HOME", &root)
+        .env("COMPUTE_DISTRIBUTION_ROOT", &root)
         .env("COMPUTE_CERTIFICATION_CLEAN", "1")
         .env("COMPUTE_HOST_SECRET", "must-not-leak");
     if std::env::var("COMPUTE_REQUIRE_ALL_RUNTIMES").as_deref() == Ok("1") {
@@ -1065,7 +1065,7 @@ fn certify_appport(
         .arg("--bundle-id")
         .arg(bundle_id)
         .env_clear()
-        .env("COMPUTE_HOME", root)
+        .env("COMPUTE_DISTRIBUTION_ROOT", root)
         .env("PATH", root.join("bin"))
         .output()
         .map_err(|error| format!("run AppPort certification: {error}"))?;
@@ -1179,26 +1179,18 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
 }
 
 fn distribution_root() -> compute_core::Result<PathBuf> {
-    if let Some(root) = std::env::var_os("COMPUTE_HOME") {
-        let root = PathBuf::from(root);
+    if let Some(root) = compute_core::paths::installation_root() {
         if root.join("runtime-manifest.json").is_file() {
             return Ok(root);
         }
+        return Err(compute_core::ComputeError::Runtime(format!(
+            "COMPUTE_DISTRIBUTION_ROOT does not contain runtime-manifest.json: {}",
+            root.display()
+        )));
     }
-    let executable = std::env::current_exe()?;
-    let root = executable
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| {
-            compute_core::ComputeError::Runtime("cannot locate distribution root".into())
-        })?
-        .to_path_buf();
-    if !root.join("runtime-manifest.json").is_file() {
-        return Err(compute_core::ComputeError::Runtime(
-            "compute certify requires an assembled distribution".into(),
-        ));
-    }
-    Ok(root)
+    Err(compute_core::ComputeError::Runtime(
+        "compute certify requires an assembled distribution".into(),
+    ))
 }
 
 fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, String> {

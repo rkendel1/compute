@@ -67,5 +67,8 @@ receipt evidence after excluding timestamps, execution IDs, and receipt hashes.
 
 A source checkout is a development environment: runtimes may be missing and
 `compute doctor` reports host reality. It cannot claim universal certification.
-An assembled distribution is rooted by `COMPUTE_HOME`, carries provenance for
+An assembled distribution is rooted by `COMPUTE_DISTRIBUTION_ROOT` (or is
+discovered relative to its `bin/compute` executable), carries provenance for
 all pinned payloads, and is the only environment accepted by `compute certify`.
+`COMPUTE_HOME` is separate: it contains mutable per-user state and defaults to
+`~/.compute`. Replacing either tree never replaces the other.

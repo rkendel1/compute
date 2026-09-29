@@ -4,6 +4,23 @@
 It exposes a single CLI and library interface for inspecting runtimes
 and running workloads across WASM and common process-backed runtimes.
 
+## Install
+
+The supported product distribution is currently Linux x86_64:
+
+```sh
+curl -fsSL https://get.compute.dev | sh
+compute --version
+compute
+```
+
+The installer verifies the certified GitHub Release archive and installs its
+pinned runtime bundle without root access. Run it again to upgrade; mutable
+state in `~/.compute` is preserved. See [Installing Compute](docs/installation.md)
+for locations, version pinning, verification, and the installation/state
+contract. `cargo install` is not equivalent because it does not install the
+certified runtime bundle.
+
 Each execution returns a machine-readable result with a unique
 `execution_id`, lifecycle states, exit status, captured output, artifacts,
 and structured errors. `compute run ... --json` and `compute exec ... --json`
