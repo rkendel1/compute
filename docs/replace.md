@@ -42,7 +42,7 @@ handoff between two machines of one environment**.
 
 The smallest way to close it without a new store is to let the controller
 prepare the second machine as it prepares any machine, in a record of its own
-(an environment whose name ends `--replacing`, reserved for this), and to make
+(an environment whose name ends `--candidate`, reserved for this; see [fork.md](fork.md) for what a candidate is and is not), and to make
 the handoff a single fenced transaction over four records: E's environment
 (fenced, with its new requirements), E's computer (the machine binding
 swapped), and the candidate's environment and computer (deleted). No field,

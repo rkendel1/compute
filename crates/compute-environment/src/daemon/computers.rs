@@ -977,10 +977,10 @@ impl Daemon {
     ) -> Result<EnvironmentView, EnvironmentError> {
         // A name that ends this way is a replacement candidate: only a
         // replacement creates one.
-        if super::replace::is_candidate(&definition.name) {
+        if super::candidate::is_candidate(&definition.name) {
             return Err(EnvironmentError::Invalid(format!(
                 "names ending {:?} are reserved for replacement candidates",
-                super::replace::CANDIDATE_SUFFIX
+                super::candidate::CANDIDATE_SUFFIX
             )));
         }
         self.create_computer_environment_inner(definition, operator)

@@ -481,6 +481,30 @@ app compute {
     index record_id using hash(record_id)
   }
 
+  // Generation 10: captured workspace state. Immutable once written; the
+  // bytes are an artifact, named by artifact_id.
+  collection Checkpoint {
+    checkpoint_id: text
+    environment_id: text
+    environment: text
+    owner: text
+    status: enum(ready)
+    format: text
+    computer_generation: integer
+    contents_generation: integer
+    artifact_id: text
+    workspace_digest: text
+    parent_checkpoint_id: text?
+    size: integer
+    files: integer
+    directories: integer
+    capture_job_id: text
+    created_at: datetime
+    index environment_id using hash(environment_id)
+    record_id: text?
+    index record_id using hash(record_id)
+  }
+
   policy Project {
     read: authenticated
     write: authenticated
@@ -578,6 +602,10 @@ app compute {
     write: authenticated
   }
   policy Rollout {
+    read: authenticated
+    write: authenticated
+  }
+  policy Checkpoint {
     read: authenticated
     write: authenticated
   }

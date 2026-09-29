@@ -119,10 +119,11 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
             [
                 "environments",
                 _,
-                "reconcile" | "replace" | "config" | "lifecycle" | "clone",
+                "reconcile" | "replace" | "config" | "lifecycle" | "fork" | "checkpoint",
             ],
         )
         | ("POST", ["environments", _, "workspace", "seed"])
+        | ("POST", ["checkpoints", _, "restore"])
         // Work sessions: a way into an environment, or a temporary one.
         | ("POST", ["sessions"])
         | ("DELETE", ["sessions", _])
