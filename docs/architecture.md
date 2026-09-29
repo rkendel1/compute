@@ -103,6 +103,7 @@ workload in-process with the local provider (or submits it to a pool with
 | **Service** | Three things: (a) a process of kind service in a computer; (b) a bundle workload of kind service; (c) a registered shared service (`compute service register`). | `crates/compute-core/src/computers.rs; crates/compute-environment/src/model.rs#WorkloadKind` | Three meanings. |
 | **Execution job** | A durable job in a provider's job store (filesystem on the target), with a result and a receipt. Computer operations reference jobs by id; FeltDB stores the references and events, not the jobs. | `crates/compute-provider/src/jobs.rs` | Daemon node executions are Execution records in control state; target jobs are not. |
 | **Version / Rollout** | Version: a published commit + package digest + assembly + step evidence. Rollout: a version made real in an environment (deploy/promote/rollback) with steps. | `crates/compute-state/src/model.rs#VersionRecord,RolloutRecord` | Parallel to bundle Revisions/Deployments of node environments; application versions ARE rollouts. |
+| **Checkpoint** | A Checkpoint record in control state: immutable captured workspace state (`compute.checkpoint@1`), named by its content, whose bytes are an artifact in the artifact store. Not an environment, computer, session, or authority. | `crates/compute-state/src/model.rs#CheckpointRecord; crates/compute-environment/src/checkpoint.rs` | Not a machine snapshot, a process checkpoint, or a provider snapshot; `ControlState::snapshot` is unrelated. |
 <!-- /audit -->
 
 The complete model the product presents is: **a computer** (an environment
@@ -111,6 +112,31 @@ desired contents, changed by **GO** (one generation-fenced change),
 **versions** published from one environment and **rolled out** to others,
 and **work sessions** recording who is working where. `compute init/deploy`
 applications are a compatibility name for exactly these records (below).
+### Three kinds of state
+
+| Kind | Where it lives | Authority |
+| --- | --- | --- |
+| **Declared** | The Environment record in FeltDB: contents, configuration, policy, requirements | The environment |
+| **Observed** | Reality and evidence: the Computer record, jobs, receipts, events | What the controller and targets proved |
+| **Captured** | A Checkpoint record in FeltDB plus its immutable artifact (`compute.checkpoint@1`) | None. It is evidence of a past state, never a source of truth |
+
+**Checkpoint invariant.** A Checkpoint is immutable portable captured state
+derived from a verified Environment state. It is not an Environment, Computer,
+Session, or authority boundary. See [checkpoint.md](checkpoint.md).
+
+### How state moves
+
+| Operation | Moves | Identity |
+| --- | --- | --- |
+| **Clone** (superseded by fork) | transient Environment → Environment transfer | new environment |
+| [**Replace**](replace.md) | Environment → new Computer | same environment, new computer |
+| [**Fork**](fork.md) | Environment → independent Environment | new environment, new computer |
+| [**Checkpoint**](checkpoint.md) | Environment → durable portable captured state | none: creates no environment or computer |
+| **Restore** (next) | durable captured state → Environment / Computer | same environment (replacement) or new environment (fork) |
+
+Export/seed/verify ([workspace.md](workspace.md)) is the transient transfer
+every row above is built on; a checkpoint is what makes that state durable.
+
 Node environments and bundle projects are an earlier deployment model that
 still runs on the daemon host (gap G-ARCH-5, blocked on named Computer
 capabilities; [every way Compute executes software](#every-way-compute-executes-software)).

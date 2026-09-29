@@ -2724,6 +2724,26 @@
    "tests": []
   },
   {
+   "command": "compute environment checkpoint",
+   "about": "Capture a checkpoint: immutable, verified, portable workspace state held as a durable artifact",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": null,
+   "tests": []
+  },
+  {
+   "command": "compute environment checkpoints",
+   "about": "List an environment's checkpoints, or show one and validate its artifact",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": null,
+   "tests": []
+  },
+  {
    "command": "compute environment workspace export",
    "about": "Write the computer's workspace to a file and print its digest",
    "help_defect": null,
@@ -4107,6 +4127,33 @@
    "method": "POST",
    "path": "/environments/{environment}/fork",
    "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/checkpoint",
+   "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/checkpoints",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/checkpoints/{checkpoint}",
+   "scope": "Read",
    "ui": false,
    "cli": true,
    "appport": false,

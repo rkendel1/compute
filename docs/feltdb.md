@@ -117,6 +117,11 @@ not index `_id`, `In`, ranges, or orderings. So:
   first, limited by FeltDB), and `status` on both, so a restarted
   controller resumes the operations in flight with one indexed equality
   each.
+- **Checkpoints** (generation 10). `Checkpoint.environment_id` is indexed:
+  an environment's checkpoints are one indexed equality, newest first and
+  limited by FeltDB; a checkpoint is read by identity (`ckp_` + its artifact
+  digest). The bytes are an artifact (`Artifact`/`ArtifactChunk`), never a
+  separate store.
 - **Work sessions** (generation 5). `WorkSession.environment_id` and
   `WorkSession.owner` are indexed: an environment's sessions, and an
   operator's, are one indexed equality, newest first and limited by

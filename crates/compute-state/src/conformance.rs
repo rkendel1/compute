@@ -674,6 +674,30 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
         },
     )
     .await;
+    let artifact = format!("sha256:{run:0>64}");
+    round_trip(
+        state,
+        &ids::checkpoint(&artifact),
+        CheckpointRecord {
+            checkpoint_id: ids::checkpoint(&artifact),
+            environment_id: format!("env_computer{run}"),
+            environment: format!("computer{run}"),
+            owner: "operator-1".into(),
+            status: CheckpointStatus::Ready,
+            format: "compute.checkpoint@1".into(),
+            computer_generation: 2,
+            contents_generation: 3,
+            artifact_id: artifact.clone(),
+            workspace_digest: "sha256:tree".into(),
+            parent_checkpoint_id: Some("ckp_parent".into()),
+            size: 1024,
+            files: 3,
+            directories: 1,
+            capture_job_id: "job_1".into(),
+            created_at: now,
+        },
+    )
+    .await;
     let step = compute_core::OperationStep {
         name: "Build".into(),
         status: compute_core::StepStatus::Succeeded,

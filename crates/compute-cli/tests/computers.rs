@@ -868,3 +868,74 @@ fn readiness_and_restarts_are_shown_and_survive_controller_process_restarts() {
     let starts = cli.ok(&["environment", "exec", "myapp", "--", "cat", "starts.log"]);
     assert_eq!(starts.lines().count(), 3);
 }
+
+/// Checkpoint and fork through the CLI: the same verified workspace state,
+/// durable in one and a new environment in the other.
+#[test]
+fn a_checkpoint_and_a_fork_carry_the_same_verified_workspace_from_the_cli() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().to_path_buf();
+    let (_target, cli, _listen) = controller_with_target(&root);
+    cli.ok(&[
+        "environment",
+        "create",
+        "myapp",
+        "--cpu",
+        "1",
+        "--memory",
+        "64Mi",
+        "--persistent",
+    ]);
+    cli.computer_until("running", |view| view["reality"]["observed"] == "running");
+    cli.ok(&[
+        "environment",
+        "exec",
+        "myapp",
+        "--",
+        "sh",
+        "-c",
+        "mkdir -p data && printf hello > data/notes.txt",
+    ]);
+    let workspace = cli.json(&["environment", "workspace", "verify", "myapp", "--json"]);
+    let digest = workspace["digest"].as_str().unwrap().to_owned();
+
+    let text = cli.ok(&["environment", "checkpoint", "myapp"]);
+    assert!(text.contains("Checkpoint ckp_"), "{text}");
+    assert!(text.contains(&digest), "{text}");
+    assert!(text.contains("compute.checkpoint@1"), "{text}");
+    assert!(text.contains("Verified:  true"), "{text}");
+    let captured = cli.json(&["environment", "checkpoint", "myapp", "--json"]);
+    assert_eq!(
+        captured["existing"], true,
+        "the same state, the same checkpoint"
+    );
+    let id = captured["checkpoint_id"].as_str().unwrap().to_owned();
+    assert_eq!(captured["workspace"], digest.as_str());
+
+    let listed = cli.json(&["environment", "checkpoints", "myapp", "--json"]);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["checkpoint_id"], id.as_str());
+    let shown = cli.json(&["environment", "checkpoints", "myapp", &id, "--json"]);
+    assert_eq!(shown["valid"], true, "{shown}");
+    assert_eq!(shown["workspace_digest"], digest.as_str());
+    let text = cli.ok(&["environment", "checkpoints", "myapp", &id]);
+    assert!(text.contains("Valid:     true"), "{text}");
+    let refused = cli.run(&["environment", "checkpoints", "myapp", "ckp_missing"]);
+    assert!(!refused.status.success());
+
+    // A fork carries the same state into a new environment.
+    let forked = cli.json(&["environment", "fork", "myapp", "copy", "--json"]);
+    assert_eq!(forked["workspace"], digest.as_str());
+    assert_eq!(forked["workspace_verified"], true);
+    assert_eq!(forked["environment"], "copy");
+    let origin = cli.json(&["environment", "computer", "myapp", "--json"]);
+    assert_ne!(
+        forked["computer"]["environment_id"],
+        origin["environment_id"]
+    );
+    assert_ne!(forked["computer"]["session_id"], origin["session_id"]);
+    assert_eq!(
+        cli.ok(&["environment", "exec", "copy", "--", "cat", "data/notes.txt"]),
+        "hello"
+    );
+}

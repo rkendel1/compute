@@ -14,6 +14,7 @@
 
 mod applications;
 mod candidate;
+mod checkpoint;
 mod computers;
 mod deploy;
 mod execute;
@@ -37,6 +38,7 @@ mod workspace;
 pub use applications::application_environment;
 pub use computers::{ComputerExec, ComputerJob};
 pub use views::EventFilter;
+pub(crate) use workspace::{ArchivedWorkspace, read_workspace};
 pub use workspace::{WORKSPACE_ARCHIVE_LIMIT, WORKSPACE_IDENTITY};
 
 /// A bundle's memory limit, wall-time limit, network policy, required CPUs,

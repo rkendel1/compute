@@ -11,7 +11,7 @@ test('every Compute collection is in the model with an access policy', () => {
   const manifest = JSON.parse(compile());
   const collections = manifest.collections.map((collection) => collection.name).sort();
   assert.deepEqual(collections, [
-    'Artifact', 'ArtifactChunk', 'Audit', 'Certificate', 'Computer', 'Deployment', 'DnsRecord', 'Domain', 'Environment', 'EnvironmentProject', 'Event', 'Execution',
+    'Artifact', 'ArtifactChunk', 'Audit', 'Certificate', 'Checkpoint', 'Computer', 'Deployment', 'DnsRecord', 'Domain', 'Environment', 'EnvironmentProject', 'Event', 'Execution',
     'OperatorCredential', 'Project', 'ProjectRevision', 'Provider', 'Receipt', 'Rollout', 'Service', 'TrafficAssignment', 'Version', 'WorkSession', 'Workload', 'WorkloadInstance', 'WorkloadStatus',
   ]);
   assert.deepEqual(manifest.policies.map((policy) => policy.resource).sort(), collections);

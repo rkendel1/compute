@@ -100,7 +100,8 @@ digest() { workspace_digest | sum | cut -d' ' -f1; }
 "#;
 
 /// Export. Argument: the archive limit. Prints the archive as one base64
-/// line, the archive's own digest, and the workspace digest. The workspace
+/// line, the archive's own digest, the workspace digest, and the platform
+/// (`uname -s`-`uname -m`) it was read on. The workspace
 /// digest is taken before *and after* the archive is made: a workspace that
 /// changed in between is refused, whatever `tar` noticed.
 const EXPORT_TAIL: &str = r#"
@@ -115,6 +116,7 @@ if [ "$before" != "$after" ]; then echo "the workspace changed while it was capt
 base64 <"$tmp" | tr -d '\n'; echo
 sum <"$tmp" | cut -d' ' -f1
 echo "$before"
+echo "$(uname -s)-$(uname -m)"
 "#;
 
 /// Verify: print the workspace digest.
@@ -163,14 +165,68 @@ pub(crate) struct WorkspaceIdentity {
     pub bytes: u64,
 }
 
+/// A regular file of a workspace archive.
+#[derive(Debug, Clone)]
+pub(crate) struct ArchivedFile {
+    pub executable: bool,
+    /// Hex SHA-256 of `data`.
+    pub sha256: String,
+    pub data: Vec<u8>,
+}
+
+/// A validated workspace archive, read without extracting it: the files at
+/// safe relative paths, and the directories the identity records (the empty
+/// ones). The single implementation of the portable workspace rules; the
+/// checkpoint artifact is built from it, never from the raw archive.
+#[derive(Debug, Clone)]
+pub(crate) struct ArchivedWorkspace {
+    pub files: BTreeMap<String, ArchivedFile>,
+    pub empty_directories: Vec<String>,
+}
+
+impl ArchivedWorkspace {
+    /// The text that is hashed (see the module documentation).
+    pub(crate) fn identity_text(&self) -> String {
+        let mut text = format!("{WORKSPACE_IDENTITY}\n");
+        for name in &self.empty_directories {
+            text.push_str(&format!("dir {name}\n"));
+        }
+        for (name, file) in &self.files {
+            text.push_str(&format!(
+                "file {} {} {name}\n",
+                if file.executable { 'x' } else { '-' },
+                file.sha256
+            ));
+        }
+        text
+    }
+
+    pub(crate) fn identity(&self) -> WorkspaceIdentity {
+        WorkspaceIdentity {
+            digest: compute_core::sha256_identity(self.identity_text().as_bytes()),
+            files: self.files.len(),
+            directories: self.empty_directories.len(),
+            bytes: self.files.values().map(|file| file.data.len() as u64).sum(),
+        }
+    }
+}
+
 /// Validate an archive against the contract and compute its digest without
 /// extracting it. Only regular files and directories are accepted, at safe
 /// relative paths, holding nothing the workspace excludes.
 pub(crate) fn identify(archive: &[u8]) -> Result<WorkspaceIdentity, EnvironmentError> {
+    read_workspace(archive).map(|workspace| workspace.identity())
+}
+
+/// Read and validate a workspace archive; see [`ArchivedWorkspace`]. Refuses
+/// anything that is not a regular file or a directory (links of either kind,
+/// devices, pipes), unsafe, absolute, or escaping paths, control characters,
+/// controller or re-derived state, a path given twice, and a path that is both a
+/// file and a directory.
+pub(crate) fn read_workspace(archive: &[u8]) -> Result<ArchivedWorkspace, EnvironmentError> {
     let bad = |what: String| EnvironmentError::Invalid(format!("the workspace archive {what}"));
-    let mut files = BTreeMap::<String, (bool, String)>::new();
+    let mut files = BTreeMap::<String, ArchivedFile>::new();
     let mut directories = BTreeSet::<String>::new();
-    let mut bytes = 0u64;
     let mut tar = tar::Archive::new(archive);
     for entry in tar
         .entries()
@@ -225,20 +281,20 @@ pub(crate) fn identify(archive: &[u8]) -> Result<WorkspaceIdentity, EnvironmentE
         entry
             .read_to_end(&mut data)
             .map_err(|error| bad(format!("is truncated: {error}")))?;
-        bytes += data.len() as u64;
-        let digest = compute_core::sha256_identity(&data);
-        if files
-            .insert(
-                name.clone(),
-                (executable, digest.trim_start_matches("sha256:").to_owned()),
-            )
-            .is_some()
-        {
+        let sha256 = compute_core::sha256_identity(&data)
+            .trim_start_matches("sha256:")
+            .to_owned();
+        let file = ArchivedFile {
+            executable,
+            sha256,
+            data,
+        };
+        if files.insert(name.clone(), file).is_some() {
             return Err(bad(format!("holds {name} twice")));
         }
     }
     // A directory is recorded only when it is empty: one that holds anything
-    // is implied by what it holds.
+    // is implied by what it holds. A path cannot be a file and a directory.
     let mut parents = BTreeSet::<&str>::new();
     for name in files
         .keys()
@@ -247,29 +303,26 @@ pub(crate) fn identify(archive: &[u8]) -> Result<WorkspaceIdentity, EnvironmentE
     {
         let mut rest = name;
         while let Some((parent, _)) = rest.rsplit_once('/') {
+            if files.contains_key(parent) {
+                return Err(bad(format!(
+                    "holds {parent} as both a file and a directory"
+                )));
+            }
             parents.insert(parent);
             rest = parent;
         }
     }
-    let empty = directories
+    if let Some(name) = directories.iter().find(|name| files.contains_key(*name)) {
+        return Err(bad(format!("holds {name} as both a file and a directory")));
+    }
+    let empty_directories = directories
         .iter()
         .filter(|name| !parents.contains(name.as_str()))
+        .cloned()
         .collect::<Vec<_>>();
-    let mut text = format!("{WORKSPACE_IDENTITY}\n");
-    for name in &empty {
-        text.push_str(&format!("dir {name}\n"));
-    }
-    for (name, (executable, digest)) in &files {
-        text.push_str(&format!(
-            "file {} {digest} {name}\n",
-            if *executable { 'x' } else { '-' }
-        ));
-    }
-    Ok(WorkspaceIdentity {
-        digest: compute_core::sha256_identity(text.as_bytes()),
-        files: files.len(),
-        directories: empty.len(),
-        bytes,
+    Ok(ArchivedWorkspace {
+        files,
+        empty_directories,
     })
 }
 
@@ -306,9 +359,13 @@ impl Daemon {
             return Err(failed(evidence.error.clone().unwrap_or_default()));
         }
         let mut lines = output.lines();
-        let (Some(encoded), Some(archive_digest), Some(observed), None) =
-            (lines.next(), lines.next(), lines.next(), lines.next())
-        else {
+        let (Some(encoded), Some(archive_digest), Some(observed), Some(platform), None) = (
+            lines.next(),
+            lines.next(),
+            lines.next(),
+            lines.next(),
+            lines.next(),
+        ) else {
             return Err(failed("the output was cut short".into()));
         };
         let archive = base64::engine::general_purpose::STANDARD
@@ -330,6 +387,7 @@ impl Daemon {
             files: identity.files,
             directories: identity.directories,
             bytes: identity.bytes,
+            platform: platform.trim().to_owned(),
             job_id: evidence.job_id.clone(),
             archive,
         };

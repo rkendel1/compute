@@ -61,7 +61,11 @@ pub const STATE_VERSION: &str = "compute.state@1";
 ///   and `max_restarts`; `Computer.observed` processes gain the `starting`
 ///   state, readiness, restart counts, the next restart, and the last
 ///   failure.
-pub const MODEL_GENERATION: u32 = 9;
+/// - 10: checkpoints: the `Checkpoint` collection (immutable captured
+///   workspace state: the record of a `compute.checkpoint@1` artifact held in
+///   the artifact store, with its provenance and lineage). Additive: no
+///   existing collection or field changed.
+pub const MODEL_GENERATION: u32 = 10;
 
 /// A typed document of one collection.
 pub trait Document: Serialize + DeserializeOwned + Clone + Send + Sync {
@@ -337,6 +341,51 @@ pub struct ComputerRecord {
     pub expires_at: Option<DateTime<Utc>>,
 }
 document!(ComputerRecord, Computer);
+
+/// Whether a checkpoint's artifact can be used. A capture that did not verify
+/// is never recorded, so a record exists only once it is `Ready`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointStatus {
+    Ready,
+}
+
+/// Captured state: an immutable, verified, portable capture of an
+/// environment's workspace (`compute.checkpoint@1`). Declared state is the
+/// environment's; observed state is Reality's; this is neither. It is not an
+/// environment, a computer, a session, or an authority boundary, and it never
+/// changes once written. The bytes are an artifact in the artifact store,
+/// named here by digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointRecord {
+    /// `ckp_` + the artifact digest, so it derives from content alone.
+    pub checkpoint_id: String,
+    pub environment_id: String,
+    pub environment: String,
+    /// The operator who captured it, and owned the environment.
+    pub owner: String,
+    pub status: CheckpointStatus,
+    /// `compute.checkpoint@1`.
+    pub format: String,
+    /// The computer requirements generation the capture came from.
+    pub computer_generation: u64,
+    /// The declared contents generation at capture: provenance, never authority.
+    pub contents_generation: u64,
+    /// The artifact's digest in the artifact store.
+    pub artifact_id: String,
+    /// The workspace digest (`compute.workspace@1`).
+    pub workspace_digest: String,
+    /// The checkpoint this one was derived from. Lineage, not authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_checkpoint_id: Option<String>,
+    pub size: u64,
+    pub files: u64,
+    pub directories: u64,
+    /// The durable job that captured the workspace; its receipt is the evidence.
+    pub capture_job_id: String,
+    pub created_at: DateTime<Utc>,
+}
+document!(CheckpointRecord, Checkpoint);
 
 /// How a work session relates to its environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1281,6 +1330,10 @@ pub mod events {
     pub const COMPUTER_EXPIRED: &str = "computer.expired";
     pub const COMPUTER_REPLACING: &str = "computer.replacing";
     pub const COMPUTER_REPLACED: &str = "computer.replaced";
+    /// A checkpoint was captured, verified, and recorded.
+    pub const CHECKPOINT_CAPTURED: &str = "checkpoint.captured";
+    /// A capture failed before anything was recorded.
+    pub const CHECKPOINT_FAILED: &str = "checkpoint.failed";
     pub const COMPUTER_ORPHAN_DESTROYED: &str = "computer.orphan_destroyed";
     pub const COMPUTER_ENVIRONMENT_LOST: &str = "computer.environment_lost";
     /// The controller could not confirm the computer with its target.
@@ -1372,6 +1425,12 @@ pub mod ids {
     /// An environment has at most one computer record.
     pub fn computer(environment_id: &str) -> String {
         format!("cmp_{}", short_digest(&[environment_id]))
+    }
+
+    /// A checkpoint is named by its artifact: the same captured state has the
+    /// same identity.
+    pub fn checkpoint(artifact_digest: &str) -> String {
+        format!("ckp_{}", short_digest(&[artifact_digest]))
     }
 
     /// A version of a project: one per label.
@@ -1481,5 +1540,6 @@ pub fn decode_document(
         C::WorkSession => decode::<WorkSessionRecord>(value),
         C::Version => decode::<VersionRecord>(value),
         C::Rollout => decode::<RolloutRecord>(value),
+        C::Checkpoint => decode::<CheckpointRecord>(value),
     }
 }

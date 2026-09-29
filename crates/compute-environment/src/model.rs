@@ -225,6 +225,10 @@ pub struct WorkspaceExport {
     /// Empty directories, the only ones the identity records.
     pub directories: usize,
     pub bytes: u64,
+    /// Where it was read: `Linux-x86_64`. Provenance for a reader of the
+    /// archive, never part of its identity.
+    #[serde(default)]
+    pub platform: String,
     pub job_id: String,
     #[serde(with = "compute_core::bytes_json")]
     pub archive: Vec<u8>,
@@ -606,4 +610,54 @@ pub struct RollbackRequest {
     pub environment: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+}
+
+/// Capture a checkpoint of an environment's workspace.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointRequest {
+    /// The checkpoint this one is derived from, when it is: recorded as
+    /// lineage. It must be a checkpoint of the same environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+}
+
+/// What a capture did and what it verified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointReport {
+    pub environment: String,
+    pub checkpoint_id: String,
+    /// The format of the artifact: `compute.checkpoint@1`.
+    pub format: String,
+    /// The workspace digest (`compute.workspace@1`) the artifact reproduces.
+    pub workspace: String,
+    /// The artifact's digest in the artifact store.
+    pub artifact: String,
+    pub size: u64,
+    pub files: usize,
+    pub directories: usize,
+    pub computer_generation: u64,
+    pub contents_generation: u64,
+    pub platform: String,
+    pub parent: Option<String>,
+    /// The state was already captured: this is the existing checkpoint,
+    /// unchanged. A checkpoint is named by its content.
+    pub existing: bool,
+    /// The artifact was read back from the store and validated.
+    pub verified: bool,
+    /// The durable job that read the workspace; its receipt is the evidence.
+    pub job_id: String,
+}
+
+/// A checkpoint record and, when asked for, whether its artifact still
+/// validates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointView {
+    #[serde(flatten)]
+    pub checkpoint: compute_state::CheckpointRecord,
+    /// `Some` only where the artifact was read and validated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
 }

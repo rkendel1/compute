@@ -79,7 +79,8 @@ are refused at the export, before anything is created. There is no rollback.
 
 ## Not built
 
-Checkpoint (making the exported state durable and addressable), restore, and
-streaming artifacts. The 8 MiB `WORKSPACE_ARCHIVE_LIMIT` bounds the workspace
+Restore, and streaming artifacts. [Checkpoint](checkpoint.md) makes the same
+portable state durable; fork keeps the direct export/seed path, which stays
+the fast path for a transient transfer. The 8 MiB `WORKSPACE_ARCHIVE_LIMIT` bounds the workspace
 that can be forked; a larger one is refused at the export. That is a
 documented limit, not a reason to build streaming here.

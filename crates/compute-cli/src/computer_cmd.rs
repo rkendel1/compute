@@ -229,6 +229,26 @@ pub enum ComputerCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Capture a checkpoint: immutable, verified, portable workspace state,
+    /// held as a durable artifact. Not a machine snapshot: no process,
+    /// memory, session, or credential is captured.
+    Checkpoint {
+        environment: String,
+        /// The checkpoint this one is derived from (recorded as lineage).
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List an environment's checkpoints, or show one and validate its
+    /// artifact.
+    Checkpoints {
+        environment: String,
+        /// Show this checkpoint and validate its artifact.
+        checkpoint: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Workspace state: export a computer's workspace, seed an empty one,
     /// verify one against a digest. See docs/workspace.md.
     #[command(subcommand)]
@@ -836,6 +856,105 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                 print_computer(&report.computer, false);
             }
         }
+        ComputerCommands::Checkpoint {
+            environment,
+            parent,
+            json,
+        } => {
+            let report: compute_environment::CheckpointReport = client
+                .post(
+                    &format!("/environments/{environment}/checkpoint"),
+                    Some(&compute_environment::CheckpointRequest { parent }),
+                )
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&report);
+            } else {
+                println!(
+                    "Checkpoint {} of {}",
+                    report.checkpoint_id, report.environment
+                );
+                println!(
+                    "Workspace: {} ({} files, {} empty directories)",
+                    report.workspace, report.files, report.directories
+                );
+                println!(
+                    "Artifact:  {} ({}, {} bytes)",
+                    report.artifact, report.format, report.size
+                );
+                if let Some(parent) = &report.parent {
+                    println!("Parent:    {parent}");
+                }
+                println!(
+                    "Verified:  {} (read back from the artifact store and validated); operation job {} succeeded{}",
+                    report.verified,
+                    report.job_id,
+                    if report.existing {
+                        "; this state was already checkpointed"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
+        ComputerCommands::Checkpoints {
+            environment,
+            checkpoint,
+            json,
+        } => match checkpoint {
+            Some(checkpoint) => {
+                let view: compute_environment::CheckpointView = client
+                    .get(&format!(
+                        "/environments/{environment}/checkpoints/{checkpoint}"
+                    ))
+                    .await
+                    .map_err(error)?;
+                if json {
+                    print_json(&view);
+                } else {
+                    let record = &view.checkpoint;
+                    println!(
+                        "Checkpoint {} of {}",
+                        record.checkpoint_id, record.environment
+                    );
+                    println!("Workspace: {}", record.workspace_digest);
+                    println!(
+                        "Artifact:  {} ({}, {} bytes)",
+                        record.artifact_id, record.format, record.size
+                    );
+                    println!(
+                        "Valid:     {}{}",
+                        view.valid.unwrap_or(false),
+                        view.invalid_reason
+                            .map(|why| format!(" ({why})"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+            None => {
+                let views: Vec<compute_environment::CheckpointView> = client
+                    .get(&format!("/environments/{environment}/checkpoints"))
+                    .await
+                    .map_err(error)?;
+                if json {
+                    print_json(&views);
+                } else if views.is_empty() {
+                    println!("No checkpoints.");
+                } else {
+                    for view in views {
+                        let record = view.checkpoint;
+                        println!(
+                            "{}  {}  {} files  {}",
+                            record.checkpoint_id,
+                            record.workspace_digest,
+                            record.files,
+                            record.created_at
+                        );
+                    }
+                }
+            }
+        },
         ComputerCommands::Workspace(command) => workspace(client, command).await?,
         ComputerCommands::Repo(command) => match command {
             RepoCommands::Add(args) | RepoCommands::Update(args) => {

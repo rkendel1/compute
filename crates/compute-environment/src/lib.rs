@@ -18,6 +18,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod checkpoint;
 pub mod client;
 pub mod daemon;
 pub mod dataplane;

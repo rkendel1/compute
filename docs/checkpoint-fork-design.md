@@ -1,7 +1,12 @@
 # Checkpoint, restore, and fork
 
-**Status:** design. Nothing here is implemented; Phase 1 of
-[implementation-plan.md](implementation-plan.md) is the first step. Read
+**Status:** design, partly built. Capture is implemented as
+[checkpoint.md](checkpoint.md), on a different foundation from the one below:
+the canonical artifact is built in Rust from the validated workspace archive
+([workspace.md](workspace.md)) and stored in the existing artifact store, with
+no archiver job and no new provider method. Restore, retention, quiesce and
+provider capabilities remain design. [fork.md](fork.md) is implemented over
+export/seed/verify, not over checkpoints. Read
 [opencomputer-evaluation.md](opencomputer-evaluation.md) for the context and
 [persistent-environments.md](persistent-environments.md) for what survives
 what today.

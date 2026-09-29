@@ -324,10 +324,18 @@ async fn start_daemon(
     store: Arc<dyn StateStore>,
     pool: PoolConfig,
 ) -> (Arc<Daemon>, tempfile::TempDir) {
-    let node = tempfile::tempdir().unwrap();
     let artifacts = Arc::new(compute_state::StateArtifacts::new(
         compute_state::ControlState::new(store.clone()),
     ));
+    start_daemon_with(store, artifacts, pool).await
+}
+
+async fn start_daemon_with(
+    store: Arc<dyn StateStore>,
+    artifacts: Arc<dyn compute_state::ArtifactStore>,
+    pool: PoolConfig,
+) -> (Arc<Daemon>, tempfile::TempDir) {
+    let node = tempfile::tempdir().unwrap();
     let mut config = DaemonConfig::new(node.path(), store, artifacts);
     config.provider = Arc::new(common::provider());
     config.pool = Some(pool);
@@ -3982,4 +3990,636 @@ async fn a_failed_fork_creates_nothing_and_poisons_no_name() {
         daemon.computer("origin").await.unwrap().session_id,
         origin.session_id
     );
+}
+
+// ---- checkpoints ---------------------------------------------------------------
+
+/// An artifact store that can be made to fail, corrupt, or hang.
+struct FaultyArtifacts {
+    inner: compute_state::StateArtifacts,
+    fail_put: AtomicBool,
+    corrupt_get: AtomicBool,
+    hang_put: AtomicBool,
+    put_started: AtomicBool,
+}
+
+impl FaultyArtifacts {
+    fn new(store: &Arc<dyn StateStore>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: compute_state::StateArtifacts::new(compute_state::ControlState::new(
+                store.clone(),
+            )),
+            fail_put: AtomicBool::new(false),
+            corrupt_get: AtomicBool::new(false),
+            hang_put: AtomicBool::new(false),
+            put_started: AtomicBool::new(false),
+        })
+    }
+}
+
+#[async_trait]
+impl compute_state::ArtifactStore for FaultyArtifacts {
+    async fn put(&self, kind: &str, bytes: &[u8]) -> Result<String, compute_state::StateError> {
+        self.put_started.store(true, Ordering::SeqCst);
+        while self.hang_put.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if self.fail_put.load(Ordering::SeqCst) {
+            return Err(compute_state::StateError::Invalid(
+                "artifact store is down".into(),
+            ));
+        }
+        self.inner.put(kind, bytes).await
+    }
+
+    async fn get(&self, digest: &str) -> Result<Option<Vec<u8>>, compute_state::StateError> {
+        let mut bytes = self.inner.get(digest).await?;
+        if self.corrupt_get.load(Ordering::SeqCst)
+            && let Some(bytes) = bytes.as_mut()
+        {
+            let middle = bytes.len() / 2;
+            bytes[middle] ^= 0xff;
+        }
+        Ok(bytes)
+    }
+
+    fn location(&self) -> String {
+        self.inner.location()
+    }
+}
+
+/// A state store that refuses to record a checkpoint while told to.
+struct FailingState {
+    inner: MemoryState,
+    fail_checkpoint: AtomicBool,
+}
+
+impl FailingState {
+    fn refuses(&self, writes: &[compute_state::Write]) -> bool {
+        self.fail_checkpoint.load(Ordering::SeqCst)
+            && writes.iter().any(|write| {
+                matches!(write, compute_state::Write::Create { collection, .. }
+                    if *collection == compute_state::Collection::Checkpoint)
+            })
+    }
+}
+
+#[async_trait]
+impl StateStore for FailingState {
+    fn backend(&self) -> compute_state::BackendInfo {
+        self.inner.backend()
+    }
+    async fn get(
+        &self,
+        collection: compute_state::Collection,
+        id: &str,
+    ) -> Result<Option<compute_state::Record>, compute_state::StateError> {
+        self.inner.get(collection, id).await
+    }
+    async fn query(
+        &self,
+        query: &compute_state::Query,
+    ) -> Result<Vec<compute_state::Record>, compute_state::StateError> {
+        self.inner.query(query).await
+    }
+    async fn commit(
+        &self,
+        writes: Vec<compute_state::Write>,
+    ) -> Result<(), compute_state::StateError> {
+        if self.refuses(&writes) {
+            return Err(compute_state::StateError::Unavailable(
+                "state is down".into(),
+            ));
+        }
+        self.inner.commit(writes).await
+    }
+    async fn commit_tracked(
+        &self,
+        writes: Vec<compute_state::Write>,
+    ) -> Result<Option<(u64, u64)>, compute_state::StateError> {
+        if self.refuses(&writes) {
+            return Err(compute_state::StateError::Unavailable(
+                "state is down".into(),
+            ));
+        }
+        self.inner.commit_tracked(writes).await
+    }
+    async fn revision(&self) -> Result<Option<compute_state::Revision>, compute_state::StateError> {
+        self.inner.revision().await
+    }
+    fn take_transitions(&self) -> Option<Vec<compute_state::Transition>> {
+        self.inner.take_transitions()
+    }
+}
+
+fn no_parent() -> CheckpointRequest {
+    CheckpointRequest::default()
+}
+
+async fn records(daemon: &Arc<Daemon>, name: &str) -> Vec<compute_state::CheckpointRecord> {
+    daemon
+        .checkpoints(name, "alice")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|view| view.checkpoint)
+        .collect()
+}
+
+async fn artifact_bytes(artifacts: &Arc<FaultyArtifacts>, id: &str) -> Vec<u8> {
+    compute_state::ArtifactStore::get(artifacts.as_ref(), id)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+type World = (
+    Arc<Daemon>,
+    Arc<FaultyArtifacts>,
+    Arc<FailingState>,
+    Target,
+    tempfile::TempDir,
+    tempfile::TempDir,
+);
+
+/// A daemon over a memory state with a faulty artifact store and a state
+/// store that can refuse a checkpoint, and an environment holding state.
+async fn checkpoint_world(source: &Path) -> World {
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let state = Arc::new(FailingState {
+        inner: MemoryState::new(),
+        fail_checkpoint: AtomicBool::new(false),
+    });
+    let store: Arc<dyn StateStore> = state.clone();
+    let artifacts = FaultyArtifacts::new(&store);
+    let (daemon, node) =
+        start_daemon_with(store, artifacts.clone(), pool(&[("target-a", &target)])).await;
+    let mut origin = definition(
+        "origin",
+        ComputerLifecycle::Persistent,
+        requirements(),
+        contents(source, "v1"),
+    );
+    origin
+        .env
+        .insert("API_TOKEN".into(), "s3cret-token-value".into());
+    daemon
+        .create_computer_environment(origin, "alice")
+        .await
+        .unwrap();
+    computer_where(&daemon, "origin", "the origin to converge", |view| {
+        view.converged
+    })
+    .await;
+    sh(
+        &daemon,
+        "origin",
+        "mkdir -p data/nested empty && printf hello > data/notes.txt && printf deep > data/nested/x.bin && printf '#!/bin/sh\\necho hi\\n' > run.sh && chmod +x run.sh",
+    )
+    .await;
+    (daemon, artifacts, state, target, workspaces, node)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_checkpoint_is_immutable_captured_state_not_machine_state() {
+    let (_repositories, source) = repository();
+    let (daemon, artifacts, _state, _target, _workspaces, _node) = checkpoint_world(&source).await;
+    let origin = daemon.computer("origin").await.unwrap();
+    let digest = digest_of(&daemon, "origin").await;
+    let pid = origin.observed.processes["api"].pid;
+
+    let report = daemon
+        .checkpoint_environment("origin", "alice", no_parent())
+        .await
+        .unwrap();
+
+    // Captured state, tied to the environment it came from.
+    assert_eq!(report.workspace, digest, "the verified source digest");
+    assert!(report.verified && !report.existing);
+    assert_eq!(report.format, "compute.checkpoint@1");
+    assert!(report.checkpoint_id.starts_with("ckp_"));
+    assert_eq!(report.contents_generation, origin.desired.generation);
+    assert_eq!(report.computer_generation, origin.spec_generation);
+    assert!(report.platform.contains('-'), "{report:?}");
+    let listed = records(&daemon, "origin").await;
+    assert_eq!(listed.len(), 1);
+    let record = listed[0].clone();
+    assert_eq!(record.checkpoint_id, report.checkpoint_id);
+    assert_eq!(record.environment_id, origin.environment_id);
+    assert_eq!(record.owner, "alice");
+    assert_eq!(record.workspace_digest, digest);
+    assert_eq!(record.artifact_id, report.artifact);
+    assert_eq!(record.capture_job_id, report.job_id);
+
+    // The artifact reopens and validates, and its identity is its content.
+    let bytes = artifact_bytes(&artifacts, &record.artifact_id).await;
+    let valid = compute_environment::checkpoint::validate(&bytes).unwrap();
+    assert_eq!(valid.artifact_digest, record.artifact_id);
+    assert_eq!(valid.checkpoint_id, record.checkpoint_id);
+    assert_eq!(valid.manifest.tree_digest, digest);
+    assert_eq!(valid.manifest.source.environment_id, origin.environment_id);
+    let viewed = daemon
+        .checkpoint("origin", "alice", &record.checkpoint_id)
+        .await
+        .unwrap();
+    assert_eq!(viewed.valid, Some(true), "{viewed:?}");
+
+    // Workspace state, not machine state: files, with the executable bit and
+    // the empty directory; not process state, re-derived repositories,
+    // controller state, or configuration values.
+    let files = compute_environment::checkpoint::Checkpoint::read_files(&bytes).unwrap();
+    assert_eq!(files["data/notes.txt"].1, b"hello");
+    assert!(files["run.sh"].0, "executable bit");
+    assert!(valid.manifest.entries.iter().any(|entry| matches!(entry,
+        compute_environment::checkpoint::Entry::Directory { path } if path == "empty")));
+    assert!(
+        files
+            .keys()
+            .all(|path| !path.starts_with("repos/") && !path.starts_with(".compute/processes")),
+        "{:?}",
+        files.keys()
+    );
+    assert!(!String::from_utf8_lossy(&bytes).contains("s3cret-token-value"));
+    assert_eq!(valid.manifest.exclusions.paths.len(), 2);
+
+    // The environment was not disturbed, and the capture is evidenced.
+    let still = daemon.computer("origin").await.unwrap();
+    assert_eq!(still.session_id, origin.session_id);
+    assert_eq!(
+        still.observed.processes["api"].pid, pid,
+        "the process was not touched"
+    );
+    assert!(still.converged);
+    assert_eq!(digest_of(&daemon, "origin").await, digest);
+    let recorded = events(&daemon, "origin").await;
+    let captured = recorded
+        .iter()
+        .find(|(kind, _)| kind == "checkpoint.captured")
+        .expect("the capture is evidenced");
+    assert_eq!(captured.1["checkpoint_id"], record.checkpoint_id.as_str());
+    assert_eq!(captured.1["job_id"], report.job_id.as_str());
+    assert_eq!(captured.1["workspace"], digest.as_str());
+    assert!(
+        recorded
+            .iter()
+            .any(|(_, data)| data["command"] == "workspace.export"
+                && data["job_id"] == report.job_id.as_str())
+    );
+
+    // The same state is the same checkpoint: named by content, never rewritten.
+    let again = daemon
+        .checkpoint_environment("origin", "alice", no_parent())
+        .await
+        .unwrap();
+    assert!(again.existing);
+    assert_eq!(again.checkpoint_id, report.checkpoint_id);
+    assert_eq!(again.artifact, report.artifact);
+    assert_eq!(records(&daemon, "origin").await, vec![record.clone()]);
+
+    // Mutate the environment: the checkpoint does not move.
+    sh(
+        &daemon,
+        "origin",
+        "printf changed > data/notes.txt && printf new > data/new.txt && rm run.sh",
+    )
+    .await;
+    assert_ne!(digest_of(&daemon, "origin").await, digest);
+    assert_eq!(
+        artifact_bytes(&artifacts, &record.artifact_id).await,
+        bytes,
+        "immutable"
+    );
+    assert_eq!(records(&daemon, "origin").await, vec![record.clone()]);
+    assert_eq!(
+        daemon
+            .checkpoint("origin", "alice", &record.checkpoint_id)
+            .await
+            .unwrap()
+            .valid,
+        Some(true)
+    );
+
+    // Lineage: C1 has independent children, and no authority passes down.
+    let child = |parent: &str| CheckpointRequest {
+        parent: Some(parent.into()),
+    };
+    let c2 = daemon
+        .checkpoint_environment("origin", "alice", child(&record.checkpoint_id))
+        .await
+        .unwrap();
+    sh(&daemon, "origin", "printf more > data/more.txt").await;
+    let c3 = daemon
+        .checkpoint_environment("origin", "alice", child(&record.checkpoint_id))
+        .await
+        .unwrap();
+    assert_ne!(c2.checkpoint_id, c3.checkpoint_id);
+    assert_eq!(c2.parent.as_deref(), Some(record.checkpoint_id.as_str()));
+    assert_eq!(c3.parent.as_deref(), Some(record.checkpoint_id.as_str()));
+    assert_ne!(c2.workspace, c3.workspace);
+    assert_eq!(records(&daemon, "origin").await.len(), 3);
+    assert_eq!(artifact_bytes(&artifacts, &record.artifact_id).await, bytes);
+    let unknown = daemon
+        .checkpoint_environment("origin", "alice", child("ckp_nope"))
+        .await;
+    assert!(
+        matches!(unknown, Err(EnvironmentError::NotFound(_))),
+        "{unknown:?}"
+    );
+
+    // The same tree on another machine is the same tree: only provenance moves.
+    daemon
+        .replace_computer("origin", "alice", requirements())
+        .await
+        .unwrap();
+    computer_where(&daemon, "origin", "the replacement to converge", |view| {
+        view.converged
+    })
+    .await;
+    let moved = daemon
+        .checkpoint_environment("origin", "alice", no_parent())
+        .await
+        .unwrap();
+    assert_eq!(moved.workspace, digest_of(&daemon, "origin").await);
+    assert_eq!(moved.computer_generation, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_checkpoint_of_an_unsafe_workspace_is_refused_and_nothing_is_recorded() {
+    let (_repositories, source) = repository();
+    let (daemon, _artifacts, _state, _target, _workspaces, _node) = checkpoint_world(&source).await;
+    for (what, make, remove) in [
+        ("a symbolic link", "ln -s /etc/passwd link", "rm link"),
+        ("a hard link", "ln data/notes.txt data/twin", "rm data/twin"),
+        ("a special file", "mkfifo pipe", "rm pipe"),
+        (
+            "a control character",
+            "printf x > \"$(printf 'a\\001b')\"",
+            "rm -f a*b",
+        ),
+    ] {
+        sh(&daemon, "origin", make).await;
+        let refused = daemon
+            .checkpoint_environment("origin", "alice", no_parent())
+            .await;
+        assert!(refused.is_err(), "{what}: {refused:?}");
+        assert!(
+            records(&daemon, "origin").await.is_empty(),
+            "{what}: nothing is published"
+        );
+        let failure = events(&daemon, "origin")
+            .await
+            .into_iter()
+            .rev()
+            .find(|(kind, _)| kind == "checkpoint.failed")
+            .expect("the refusal is evidenced");
+        assert_eq!(failure.1["published"], false, "{what}");
+        sh(&daemon, "origin", remove).await;
+    }
+    // The environment is not poisoned: the next capture succeeds.
+    let report = daemon
+        .checkpoint_environment("origin", "alice", no_parent())
+        .await
+        .unwrap();
+    assert!(report.verified);
+    assert_eq!(records(&daemon, "origin").await.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_the_owner_checkpoints_and_a_changing_workspace_is_refused() {
+    let (_repositories, source) = repository();
+    let (daemon, _artifacts, _state, _target, _workspaces, _node) = checkpoint_world(&source).await;
+    let refused = daemon
+        .checkpoint_environment("origin", "mallory", no_parent())
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(records(&daemon, "origin").await.is_empty());
+    assert!(
+        !events(&daemon, "origin")
+            .await
+            .iter()
+            .any(|(kind, _)| kind.starts_with("checkpoint."))
+    );
+    assert!(daemon.checkpoints("origin", "mallory").await.is_err());
+    assert!(
+        daemon
+            .checkpoint("origin", "mallory", "ckp_x")
+            .await
+            .is_err()
+    );
+    assert!(daemon.computer("origin").await.unwrap().converged);
+
+    // A workspace written to while it is captured is not captured.
+    let mut busy = EnvironmentContents::default();
+    busy.processes.push(ProcessSpec {
+        name: "writer".into(),
+        kind: ProcessKind::Process,
+        runtime: None,
+        command: vec![
+            "sh".into(),
+            "-c".into(),
+            "i=0; while [ $i -lt 3000 ]; do i=$((i+1)); : > \"tick$i\"; sleep 0.01; done".into(),
+        ],
+        repository: None,
+        env: BTreeMap::new(),
+        desired: ProcessDesired::Running,
+        port: None,
+        restart: 0,
+        readiness: None,
+        restart_policy: Default::default(),
+        max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
+    });
+    daemon
+        .create_computer_environment(
+            definition("busy", ComputerLifecycle::Persistent, requirements(), busy),
+            "alice",
+        )
+        .await
+        .unwrap();
+    computer_where(&daemon, "busy", "the writer to run", |view| view.converged).await;
+    eventually("the writer to be writing", async || {
+        let count = sh(&daemon, "busy", "ls | grep -c '^tick' || true").await;
+        (count.trim().parse::<u32>().unwrap_or(0) > 5).then_some(())
+    })
+    .await;
+    let refused = daemon
+        .checkpoint_environment("busy", "alice", no_parent())
+        .await;
+    assert!(
+        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("changed while it was captured")),
+        "{refused:?}"
+    );
+    assert!(
+        records(&daemon, "busy").await.is_empty(),
+        "no usable checkpoint"
+    );
+    assert!(
+        daemon.computer("busy").await.unwrap().converged,
+        "the source is unchanged"
+    );
+    daemon
+        .set_process("busy", "alice", "writer", ProcessDesired::Stopped)
+        .await
+        .unwrap();
+    eventually("the writer to stop", async || {
+        let before = sh(&daemon, "busy", "ls | wc -l").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        (sh(&daemon, "busy", "ls | wc -l").await == before).then_some(())
+    })
+    .await;
+    assert!(
+        daemon
+            .checkpoint_environment("busy", "alice", no_parent())
+            .await
+            .unwrap()
+            .verified
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_capture_publishes_nothing_and_never_poisons_the_next() {
+    let (_repositories, source) = repository();
+    let (daemon, artifacts, state, _target, _workspaces, _node) = checkpoint_world(&source).await;
+    let failed_at = async |phase: &str, failed: Result<CheckpointReport, EnvironmentError>| {
+        assert!(failed.is_err(), "{phase}: {failed:?}");
+        assert!(
+            records(&daemon, "origin").await.is_empty(),
+            "{phase}: nothing is published"
+        );
+        let failure = events(&daemon, "origin")
+            .await
+            .into_iter()
+            .rev()
+            .find(|(kind, data)| kind == "checkpoint.failed" && data["phase"] == phase)
+            .unwrap_or_else(|| panic!("{phase}: the failure is evidenced"));
+        assert_eq!(failure.1["published"], false);
+        assert!(
+            daemon.computer("origin").await.unwrap().converged,
+            "{phase}: the source is unharmed"
+        );
+    };
+
+    // The artifact cannot be written.
+    artifacts.fail_put.store(true, Ordering::SeqCst);
+    failed_at(
+        "storing the artifact",
+        daemon
+            .checkpoint_environment("origin", "alice", no_parent())
+            .await,
+    )
+    .await;
+    artifacts.fail_put.store(false, Ordering::SeqCst);
+
+    // What was stored does not read back valid.
+    artifacts.corrupt_get.store(true, Ordering::SeqCst);
+    failed_at(
+        "verifying the stored artifact",
+        daemon
+            .checkpoint_environment("origin", "alice", no_parent())
+            .await,
+    )
+    .await;
+    artifacts.corrupt_get.store(false, Ordering::SeqCst);
+
+    // The record cannot be persisted: the artifact exists, unreferenced.
+    state.fail_checkpoint.store(true, Ordering::SeqCst);
+    failed_at(
+        "publishing",
+        daemon
+            .checkpoint_environment("origin", "alice", no_parent())
+            .await,
+    )
+    .await;
+    state.fail_checkpoint.store(false, Ordering::SeqCst);
+
+    // A retry succeeds, and is a first capture: nothing was ever published.
+    let report = daemon
+        .checkpoint_environment("origin", "alice", no_parent())
+        .await
+        .unwrap();
+    assert!(report.verified && !report.existing);
+    assert_eq!(records(&daemon, "origin").await.len(), 1);
+
+    // A record never vouches for bytes that no longer validate.
+    artifacts.corrupt_get.store(true, Ordering::SeqCst);
+    let view = daemon
+        .checkpoint("origin", "alice", &report.checkpoint_id)
+        .await
+        .unwrap();
+    assert_eq!(view.valid, Some(false), "{view:?}");
+    assert!(view.invalid_reason.is_some());
+    artifacts.corrupt_get.store(false, Ordering::SeqCst);
+    assert_eq!(
+        daemon
+            .checkpoint("origin", "alice", &report.checkpoint_id)
+            .await
+            .unwrap()
+            .valid,
+        Some(true)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_capture_interrupted_by_a_restart_publishes_nothing() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let artifacts = FaultyArtifacts::new(&store);
+    let (first, _node) = start_daemon_with(
+        store.clone(),
+        artifacts.clone(),
+        pool(&[("target-a", &target)]),
+    )
+    .await;
+    first
+        .create_computer_environment(
+            definition(
+                "origin",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    computer_where(&first, "origin", "converge", |view| view.converged).await;
+
+    // The capture is in flight (the artifact is being stored) when the
+    // controller goes away.
+    artifacts.hang_put.store(true, Ordering::SeqCst);
+    let capture = {
+        let first = first.clone();
+        tokio::spawn(async move {
+            first
+                .checkpoint_environment("origin", "alice", no_parent())
+                .await
+        })
+    };
+    eventually("the capture to reach the store", async || {
+        artifacts.put_started.load(Ordering::SeqCst).then_some(())
+    })
+    .await;
+    first.shutdown().await;
+    capture.abort();
+    drop(first);
+    artifacts.hang_put.store(false, Ordering::SeqCst);
+
+    // A new controller finds no checkpoint, the environment intact, and can
+    // capture.
+    let (second, _node) =
+        start_daemon_with(store, artifacts.clone(), pool(&[("target-a", &target)])).await;
+    computer_where(&second, "origin", "the environment to converge", |view| {
+        view.converged
+    })
+    .await;
+    assert!(records(&second, "origin").await.is_empty());
+    let report = second
+        .checkpoint_environment("origin", "alice", no_parent())
+        .await
+        .unwrap();
+    assert!(report.verified && !report.existing);
+    assert_eq!(records(&second, "origin").await.len(), 1);
+    second.shutdown().await;
 }

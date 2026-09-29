@@ -126,6 +126,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/environments/{environment}/reconcile"),
     ("POST", "/environments/{environment}/replace"),
     ("POST", "/environments/{environment}/fork"),
+    ("POST", "/environments/{environment}/checkpoint"),
+    ("GET", "/environments/{environment}/checkpoints"),
+    (
+        "GET",
+        "/environments/{environment}/checkpoints/{checkpoint}",
+    ),
     ("POST", "/environments/{environment}/workspace/export"),
     ("POST", "/environments/{environment}/workspace/seed"),
     ("POST", "/environments/{environment}/workspace/verify"),
@@ -1060,6 +1066,16 @@ async fn route(
         )?),
         ("POST", ["environments", id, "fork"]) => created(to_value(
             Box::pin(daemon.fork_environment(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "checkpoint"]) => created(to_value(
+            Box::pin(daemon.checkpoint_environment(id, &principal.operator_id, parse(body)?))
+                .await?,
+        )?),
+        ("GET", ["environments", id, "checkpoints"]) => ok(to_value(
+            Box::pin(daemon.checkpoints(id, &principal.operator_id)).await?,
+        )?),
+        ("GET", ["environments", id, "checkpoints", checkpoint]) => ok(to_value(
+            Box::pin(daemon.checkpoint(id, &principal.operator_id, checkpoint)).await?,
         )?),
         ("POST", ["environments", id, "workspace", "export"]) => ok(to_value(
             Box::pin(daemon.export_workspace(id, &principal.operator_id)).await?,
