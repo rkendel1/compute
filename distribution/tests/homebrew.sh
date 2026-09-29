@@ -14,7 +14,10 @@ configured_checksum=abcdef0123456789abcdef0123456789abcdef0123456789abcdef012345
 formula="$work/tap/Formula/compute.rb"
 ruby -c "$formula" | grep -q 'Syntax OK'
 grep -q "releases/download/v$version/compute-$version-linux-x86_64.tar.gz" "$formula"
-grep -q "version \"$version\"" "$formula"
+if grep -q '^  version ' "$formula"; then
+  echo "formula must let Homebrew derive the version from the release URL" >&2
+  exit 1
+fi
 grep -q "sha256 \"$checksum\"" "$formula"
 grep -q 'depends_on :linux' "$formula"
 grep -q 'depends_on arch: :x86_64' "$formula"

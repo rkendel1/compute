@@ -25,10 +25,6 @@ jobs:
         with:
           core: true
           cask: false
-      - name: Tap this checkout
-        run: |
-          brew untap rkendel1/compute || true
-          brew tap rkendel1/compute "$GITHUB_WORKSPACE"
       - name: Validate formula
         run: |
           brew audit --strict --online rkendel1/compute/compute
@@ -57,7 +53,13 @@ jobs:
         shell: bash
         run: |
           if git cat-file -e HEAD^:Formula/compute.rb 2>/dev/null; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+            previous=$(git show HEAD^:Formula/compute.rb | sed -n 's#.*releases/download/v\([^/]*\)/.*#\1#p')
+            current=$(sed -n 's#.*releases/download/v\([^/]*\)/.*#\1#p' Formula/compute.rb)
+            if [[ -n "$previous" && -n "$current" && "$previous" != "$current" ]]; then
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
@@ -73,8 +75,6 @@ jobs:
           COMPUTE_HOME: ${{ runner.temp }}/compute-state
         shell: bash
         run: |
-          brew untap rkendel1/compute || true
-          brew tap rkendel1/compute "$GITHUB_WORKSPACE"
           tap=$(brew --repository rkendel1/compute)
           git -C "$tap" show HEAD^:Formula/compute.rb > "$tap/Formula/compute.rb"
           brew install --build-from-source rkendel1/compute/compute
@@ -83,7 +83,7 @@ jobs:
           git -C "$tap" checkout HEAD -- Formula/compute.rb
           brew upgrade --build-from-source rkendel1/compute/compute
           test "$(cat "$COMPUTE_HOME/homebrew-upgrade")" = "durable state"
-          expected=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$tap/Formula/compute.rb")
+          expected=$(sed -n 's#.*releases/download/v\([^/]*\)/.*#\1#p' "$tap/Formula/compute.rb")
           test "$(compute --version)" = "compute $expected"
           compute distribution verify "$(brew --prefix compute)/libexec"
 
@@ -101,8 +101,6 @@ jobs:
           COMPUTE_HOME: ${{ runner.temp }}/compute-state
         shell: bash
         run: |
-          brew untap rkendel1/compute || true
-          brew tap rkendel1/compute "$GITHUB_WORKSPACE"
           brew install --build-from-source rkendel1/compute/compute
           mkdir -p "$COMPUTE_HOME"
           printf 'base state\n' > "$COMPUTE_HOME/base-to-configured"
