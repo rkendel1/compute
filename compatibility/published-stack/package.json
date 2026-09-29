@@ -1,0 +1,24 @@
+{
+  "name": "compute-published-stack-compatibility",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "verify": "node verify.mjs"
+  },
+  "dependencies": {
+    "@appport/core": "1.0.3",
+    "@appport/github": "1.0.2",
+    "@appport/runtime": "0.4.6",
+    "@appport/server": "1.0.2",
+    "@appport/services": "0.4.6",
+    "@appport/transport-http": "1.0.2",
+    "@appport/transport-inprocess": "1.0.2",
+    "@appport/transport-websocket": "1.0.2",
+    "@authboundry/core": "1.15.3",
+    "@feltdb/core": "0.11.9"
+  }
+}

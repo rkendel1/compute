@@ -1,0 +1,21 @@
+{
+  "format": "compute.base-compatibility@1",
+  "compute": "0.1.1",
+  "platform": "linux-x86_64",
+  "distribution": {
+    "release": "https://github.com/rkendel1/compute/releases/tag/v0.1.1",
+    "asset": "compute-0.1.1-linux-x86_64.tar.gz",
+    "checksum": "release-asset:.sha256"
+  },
+  "homebrew": {
+    "tap": "rkendel1/compute",
+    "formula": "compute",
+    "must_consume_release_asset": true
+  },
+  "state": {
+    "owner": "compute",
+    "root": "COMPUTE_HOME",
+    "separate_from_installation": true
+  },
+  "ecosystem_packages_required": []
+}

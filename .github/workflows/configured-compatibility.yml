@@ -1,0 +1,45 @@
+name: configured-compatibility
+
+on:
+  pull_request:
+    paths:
+      - compatibility/published-stack/**
+      - .github/workflows/configured-compatibility.yml
+      - docs/compatibility.md
+  push:
+    branches: [main]
+    paths:
+      - compatibility/published-stack/**
+      - .github/workflows/configured-compatibility.yml
+      - docs/compatibility.md
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  published-registry-stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: compatibility/published-stack/package-lock.json
+          registry-url: https://registry.npmjs.org
+      - name: Install only the locked published artifacts
+        working-directory: compatibility/published-stack
+        run: npm ci --ignore-scripts
+      - name: Verify package, contract, and runtime compatibility
+        working-directory: compatibility/published-stack
+        env:
+          COMPUTE_COMPATIBILITY_EVIDENCE: evidence.json
+        run: npm run verify
+      - uses: actions/upload-artifact@v4
+        with:
+          name: configured-compute-compatibility-evidence
+          path: compatibility/published-stack/evidence.json
+          if-no-files-found: error

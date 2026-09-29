@@ -571,6 +571,72 @@ pub struct ProposeRequest {
     pub name: Option<String>,
 }
 
+/// Provider-neutral, immutable Git source produced by a capability provider.
+/// Compute deliberately owns this shape rather than importing a GitHub,
+/// GitLab, or other provider package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRepositorySource {
+    pub source: GitSourceProtocol,
+    pub url: String,
+    pub owner: String,
+    pub repository: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub commit: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitSourceProtocol {
+    Git,
+}
+
+impl GitRepositorySource {
+    /// Convert a provider result into Compute's existing generic repository
+    /// proposal request. The immutable commit wins over a movable branch.
+    pub fn propose(self) -> Result<ProposeRequest, String> {
+        if self.url.trim().is_empty() || self.repository.trim().is_empty() {
+            return Err("Git source URL and repository must be non-empty".into());
+        }
+        if !matches!(self.commit.len(), 40 | 64)
+            || !self.commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("Git source commit must be a full hexadecimal object ID".into());
+        }
+        Ok(ProposeRequest {
+            url: self.url,
+            revision: Some(self.commit),
+            name: Some(self.repository),
+        })
+    }
+}
+
+#[cfg(test)]
+mod git_source_tests {
+    use super::*;
+
+    #[test]
+    fn a_provider_neutral_git_source_becomes_an_immutable_compute_source() {
+        let source: GitRepositorySource = serde_json::from_value(serde_json::json!({
+            "source": "git",
+            "url": "https://example.test/owner/project.git",
+            "owner": "owner",
+            "repository": "project",
+            "ref": "main",
+            "commit": "0123456789abcdef0123456789abcdef01234567"
+        }))
+        .unwrap();
+        let request = source.propose().unwrap();
+        assert_eq!(request.url, "https://example.test/owner/project.git");
+        assert_eq!(request.name.as_deref(), Some("project"));
+        assert_eq!(
+            request.revision.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+    }
+}
+
 /// Publish a version of a project from the environment it is developed in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
