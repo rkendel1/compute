@@ -57,6 +57,11 @@ cat > "$temporary/workload.json" <<'JSON'
 }
 JSON
 
+free_host_port() {
+  "$distribution/runtimes/python/bin/python3" -c \
+    'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+
 COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" bundle create \
   --workload "$temporary/workload.json" \
   --output "$temporary/workload.compute" \
@@ -64,15 +69,15 @@ COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" bundle cre
 
 mkdir "$temporary/jobs"
 start_job_server() {
+  job_port=$(free_host_port)
   job_container=$(docker run --rm -d \
-    -p 127.0.0.1:0:8080/tcp \
+    -p "127.0.0.1:$job_port:8080/tcp" \
     -v "$temporary/jobs:/jobs" \
     "$image" serve \
     --listen 0.0.0.0:8080 \
     --public-url http://compute-docker:8080 \
     --job-store /jobs \
     --max-concurrent-jobs 1)
-  job_port=$(docker port "$job_container" 8080/tcp | sed 's/.*://')
   job_provider="http://127.0.0.1:$job_port"
   attempts=0
   until "$distribution/bin/compute" remote health --provider "$job_provider" --json >/dev/null 2>&1; do
@@ -191,15 +196,15 @@ cat > "$temporary/policy/production.json" <<'JSON'
 JSON
 "$distribution/bin/compute" policy validate "$temporary/policy/production.json" --json \
   > "$temporary/policy/validation.json"
+policy_port=$(free_host_port)
 policy_container=$(docker run --rm -d \
-  -p 127.0.0.1:0:8080/tcp \
+  -p "127.0.0.1:$policy_port:8080/tcp" \
   -v "$temporary/policy:/policy:ro" \
   "$image" serve \
   --listen 0.0.0.0:8080 \
   --public-url http://compute-policy:8080 \
   --job-store /tmp/jobs \
   --policy /policy/production.json)
-policy_port=$(docker port "$policy_container" 8080/tcp | sed 's/.*://')
 policy_provider="http://127.0.0.1:$policy_port"
 attempts=0
 until "$distribution/bin/compute" remote health --provider "$policy_provider" --json >/dev/null 2>&1; do
