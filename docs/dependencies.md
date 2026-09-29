@@ -78,6 +78,14 @@ embedded capsule bytes, while the workload identity covers the capsule ID.
 Offline execution requires no package manager, cache, registry, or network
 lookup.
 
+## Layout for npm packages
+
+Put npm's `node_modules/` directory *inside* the resolved directory you pass to
+`compute deps create` (install with `--no-bin-links`; capsules refuse symbolic
+links). The capsule then unpacks as `dependencies/node_modules/…`, so packages
+and ES modules find their own dependencies. A flat layout (the contents of
+`node_modules/` at the root) suits code that resolves through `NODE_PATH`.
+
 ## Referenced capsules
 
 An explicit workload may reference a capsule without embedding it. Place the
@@ -87,6 +95,11 @@ that cache:
 ```text
 $COMPUTE_DEPENDENCY_CACHE/<64-character-sha256-digest>.deps
 ```
+
+A project run references its capsule with `compute run --deps FILE
+--deps-by-reference` (the request then carries only the identity). A capsule
+embedded in a request is limited by the target's request size (64 MiB
+encoded, about 17 MiB of files), so large capsules are referenced.
 
 If the exact artifact is absent, execution fails with `dependency_missing`.
 Compute never falls back to a project directory, host site-packages,

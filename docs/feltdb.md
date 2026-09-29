@@ -15,7 +15,7 @@ reads filtered in Compute are prohibited on production controller paths.**
         │                       │
  ephemeral working state   durable authority
         │                       │
-     controller             FeltDB 0.11.8
+     controller             FeltDB 0.11.9
         │                       │
         └───────────┬───────────┘
                     │
@@ -44,12 +44,14 @@ The launcher never chooses a model of its own: it uses what `[state]` (or
 `--state`) says, and without configuration uses the file backend and says
 it is local development.
 
-This page is the contract between them. The certification that the
-contract holds is [feltdb-0.11.8-consumer-certification.md](feltdb-0.11.8-consumer-certification.md).
+This page is the contract between them. The most recent checked-in full
+certification evidence is the prior
+[FeltDB 0.11.8 report](feltdb-0.11.8-consumer-certification.md); CI runs the
+0.11.9 consumer suite against the server source shipped in that release.
 
 ## Version
 
-Compute is certified against `@feltdb/core` **0.11.8**. The version is
+Compute is certified against `@feltdb/core` **0.11.9**. The version is
 declared once, as `CERTIFIED_FELTDB_VERSION` in
 `crates/compute-state-feltdb/src/lib.rs`, and:
 
@@ -115,6 +117,11 @@ not index `_id`, `In`, ranges, or orderings. So:
   first, limited by FeltDB), and `status` on both, so a restarted
   controller resumes the operations in flight with one indexed equality
   each.
+- **Checkpoints** (generation 10). `Checkpoint.environment_id` is indexed:
+  an environment's checkpoints are one indexed equality, newest first and
+  limited by FeltDB; a checkpoint is read by identity (`ckp_` + its artifact
+  digest). The bytes are an artifact (`Artifact`/`ArtifactChunk`), never a
+  separate store.
 - **Work sessions** (generation 5). `WorkSession.environment_id` and
   `WorkSession.owner` are indexed: an environment's sessions, and an
   operator's, are one indexed equality, newest first and limited by

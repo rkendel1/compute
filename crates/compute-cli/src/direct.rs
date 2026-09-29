@@ -61,6 +61,12 @@ struct ProjectConfig {
     policy: Option<toml::Value>,
     /// Server configuration; read by `compute serve`.
     server: Option<toml::Value>,
+    /// The stack a project runs with (`[stack] name`); read by the stack
+    /// selector, which owns its meaning.
+    stack: Option<toml::Value>,
+    /// The application bundle the project runs (`[artifact]`); read by the
+    /// bundle resolver, which owns its meaning.
+    artifact: Option<toml::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]

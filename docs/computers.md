@@ -312,12 +312,28 @@ The requirements are the only thing that provisions a new machine:
 compute environment replace myapp --cpu 8 --memory 16Gi
 ```
 
-Replacement increments `spec_generation`, checks that a target can host
-the new requirements (refusing, with reasons, before anything changes),
-and records `computer.replacing`. The controller places and provisions
-the new machine, reconciles the same desired contents onto it, and only
-then retires the old session (`retired`, with the time and reason). A
-provider answer about the old generation can no longer change the record.
+With no flags the computer is replaced with one that meets the
+requirements it already has.
+
+**A running computer is replaced without losing its workspace, and without
+the old machine ever being switched off first.** The old computer stays
+current and untouched while a replacement is prepared alongside it: the
+workspace is exported and seeded onto the new machine and verified
+([workspace.md](workspace.md)), the declared contents are applied and
+reconciled there, and the source is re-measured. Only then does one fenced
+transaction hand the new machine to the environment's computer record and
+retire the old session. If anything fails before that, the old computer
+remains current, and the new one is stopped and inert. See
+[replace.md](replace.md).
+
+A computer that cannot be exported from (`lost`, `unreachable`, `failed`,
+`stopped`) has no workspace to preserve. It is replaced the older way:
+`spec_generation` increments, a target is checked (refusing, with reasons,
+before anything changes), `computer.replacing` is recorded, and the
+controller provisions a new machine and reconciles the same desired contents
+onto it. Only what is declared survives that. In both cases the old session
+becomes a retired session (torn down, never reused) and a provider answer
+about it can no longer change the record.
 
 ## Durability and fencing
 
@@ -389,6 +405,11 @@ with `resume_unsupported`, rather than replacing it silently).
 | `POST` | `/environments/{environment}/processes/{process}/start` \| `stop` | Set one process's desired state |
 | `POST` | `/environments/{environment}/reconcile` | Retry failed items and probe now |
 | `POST` | `/environments/{environment}/replace` | New requirements: a new machine |
+| `POST` | `/environments/{environment}/fork` | A new environment from this one's workspace files, declared contents, and policy ([fork.md](fork.md)) |
+| `POST` | `/environments/{environment}/checkpoint` | Capture immutable, verified, portable workspace state ([checkpoint.md](checkpoint.md)) |
+| `GET` | `/environments/{environment}/checkpoints[/{checkpoint}]` | An environment's checkpoints; one, with its artifact validated |
+| `POST` | `/checkpoints/{checkpoint}/restore` | A new environment on a new computer from a checkpoint's workspace and its source's declared state ([restore.md](restore.md)) |
+| `POST` | `/environments/{environment}/workspace/export` \| `seed` \| `verify` | Portable workspace state: export a computer's workspace, seed an empty one, verify one against a digest ([workspace.md](workspace.md)) |
 | `POST` | `/environments/{environment}/exec` | Run a command as a durable job |
 | `GET` | `/environments/{environment}/jobs/{job}` | That job and its result |
 | `GET` | `/environments/{environment}/logs` | The computer's logs, or one process's (`?process=api&limit=200`) |

@@ -1,0 +1,1035 @@
+{
+  "protocol": "AppPort/application-bundle/1",
+  "packageReference": "dev.appboundry.portal@1.0.0",
+  "application": {
+    "id": "dev.appboundry.portal",
+    "name": "AppBoundry",
+    "version": "1.0.0"
+  },
+  "appBoundryApplicationId": "dev.appboundry.portal",
+  "contractFingerprint": "9a7c9cc951e3c01f6baebda381faa54fa730bfd6128aa5e69cb364fc4e577ccc",
+  "verification": {
+    "protocol": "AppPort/application-package-verification/1",
+    "ready": true,
+    "errors": [],
+    "warnings": [],
+    "provides": [
+      {
+        "name": "portal.open",
+        "version": 1
+      },
+      {
+        "name": "portal.session",
+        "version": 1
+      },
+      {
+        "name": "portal.proof",
+        "version": 1
+      },
+      {
+        "name": "portal.recovery",
+        "version": 1
+      },
+      {
+        "name": "product.snapshot",
+        "version": 1
+      },
+      {
+        "name": "applications.create",
+        "version": 1
+      },
+      {
+        "name": "applications.lifecycle",
+        "version": 1
+      },
+      {
+        "name": "providers.list",
+        "version": 1
+      },
+      {
+        "name": "providers.configure",
+        "version": 1
+      },
+      {
+        "name": "providers.validate",
+        "version": 1
+      },
+      {
+        "name": "policies.list",
+        "version": 1
+      },
+      {
+        "name": "policies.configure",
+        "version": 1
+      },
+      {
+        "name": "policies.evaluate",
+        "version": 1
+      },
+      {
+        "name": "applications.list",
+        "version": 1
+      },
+      {
+        "name": "applications.get",
+        "version": 1
+      },
+      {
+        "name": "applications.deploy",
+        "version": 1
+      },
+      {
+        "name": "applications.start",
+        "version": 1
+      },
+      {
+        "name": "applications.stop",
+        "version": 1
+      },
+      {
+        "name": "applications.restart",
+        "version": 1
+      },
+      {
+        "name": "applications.invoke",
+        "version": 1
+      },
+      {
+        "name": "applications.usage",
+        "version": 1
+      },
+      {
+        "name": "applications.activity",
+        "version": 1
+      }
+    ],
+    "requires": [
+      {
+        "name": "identity.session.create",
+        "version": 1
+      },
+      {
+        "name": "identity.session.current",
+        "version": 1
+      },
+      {
+        "name": "request.context.current",
+        "version": 1
+      },
+      {
+        "name": "feltdb.documents",
+        "version": 1
+      },
+      {
+        "name": "github.repositories.list",
+        "version": 1
+      }
+    ],
+    "implementations": [
+      {
+        "capability": "portal.open@1",
+        "status": "bound"
+      },
+      {
+        "capability": "portal.session@1",
+        "status": "bound"
+      },
+      {
+        "capability": "portal.proof@1",
+        "status": "bound"
+      },
+      {
+        "capability": "portal.recovery@1",
+        "status": "bound"
+      },
+      {
+        "capability": "product.snapshot@1",
+        "status": "bound"
+      },
+      {
+        "capability": "applications.create@1",
+        "status": "bound"
+      },
+      {
+        "capability": "applications.lifecycle@1",
+        "status": "bound"
+      },
+      {
+        "capability": "providers.list@1",
+        "status": "bound"
+      },
+      {
+        "capability": "providers.configure@1",
+        "status": "bound"
+      },
+      {
+        "capability": "providers.validate@1",
+        "status": "bound"
+      },
+      {
+        "capability": "policies.list@1",
+        "status": "bound"
+      },
+      {
+        "capability": "policies.configure@1",
+        "status": "bound"
+      },
+      {
+        "capability": "policies.evaluate@1",
+        "status": "bound"
+      },
+      {
+        "capability": "applications.list@1",
+        "status": "bound"
+      },
+      {
+        "capability": "applications.get@1",
+        "status": "bound"
+      },
+      {
+        "capability": "applications.deploy@1",
+        "status": "bound"
+      },
+      {
+        "capability": "applications.start@1",
+        "status": "bound"
+      },
+      {
+        "capability": "applications.stop@1",
+        "status": "bound"
+      },
+      {
+        "capability": "applications.restart@1",
+        "status": "bound"
+      },
+      {
+        "capability": "applications.invoke@1",
+        "status": "bound"
+      },
+      {
+        "capability": "applications.usage@1",
+        "status": "bound"
+      },
+      {
+        "capability": "applications.activity@1",
+        "status": "bound"
+      }
+    ]
+  },
+  "artifact": {
+    "path": "application.wasm",
+    "format": "wasm/1",
+    "hash": "fef9a8b0ef770d37fcfe41f1547bff26e173e42bef767b3936ccd3ef8c2eb3ad"
+  },
+  "contract": {
+    "protocol": "AppBoundry/contract/1",
+    "application": {
+      "id": "dev.appboundry.portal",
+      "name": "AppBoundry",
+      "version": "1.0.0"
+    },
+    "contractRevision": 1,
+    "contractFingerprint": "9a7c9cc951e3c01f6baebda381faa54fa730bfd6128aa5e69cb364fc4e577ccc",
+    "metadata": {
+      "appboundry": {
+        "state": {
+          "schema": "appboundry-portal/v1",
+          "compatibleWith": [
+            "appboundry-portal/v1"
+          ]
+        },
+        "configuration": {
+          "storageCollection": "appboundry-control-plane"
+        },
+        "resourceLimits": {
+          "maxRequestBytes": 67108864,
+          "wasmExecutionUnits": 1,
+          "memoryMb": 128
+        },
+        "networking": "denied",
+        "durableState": {
+          "engine": "FeltDB",
+          "mode": "external",
+          "interface": "@feltdb/appport durable application state"
+        },
+        "executionModel": "AppBoundry shared AppPort host",
+        "requiredProviders": [
+          {
+            "provider": "identity",
+            "capability": "identity.session.create",
+            "version": 1,
+            "required": true
+          },
+          {
+            "provider": "identity",
+            "capability": "identity.session.current",
+            "version": 1,
+            "required": true
+          },
+          {
+            "provider": "request-context",
+            "capability": "request.context.current",
+            "version": 1,
+            "required": true
+          },
+          {
+            "provider": "feltdb",
+            "capability": "feltdb.documents",
+            "version": 1,
+            "required": true
+          },
+          {
+            "provider": "github",
+            "capability": "github.repositories.list",
+            "version": 1,
+            "required": true
+          }
+        ],
+        "http": {
+          "routes": [
+            {
+              "method": "GET",
+              "pattern": "/portal",
+              "capability": "portal.open@1",
+              "status": 200
+            },
+            {
+              "method": "GET",
+              "pattern": "/api/session",
+              "capability": "portal.session@1",
+              "status": 200
+            },
+            {
+              "method": "POST",
+              "pattern": "/api/provider-proof",
+              "capability": "portal.proof@1",
+              "status": 200
+            },
+            {
+              "method": "POST",
+              "pattern": "/api/provider-recovery",
+              "capability": "portal.recovery@1",
+              "status": 200
+            },
+            {
+              "method": "GET",
+              "pattern": "/api/product",
+              "capability": "product.snapshot@1",
+              "status": 200
+            },
+            {
+              "method": "GET",
+              "pattern": "/api/host/applications",
+              "capability": "applications.list@1",
+              "status": 200
+            },
+            {
+              "method": "POST",
+              "pattern": "/api/host/applications",
+              "capability": "applications.deploy@1",
+              "status": 201
+            },
+            {
+              "method": "GET",
+              "pattern": "/api/host/usage",
+              "capability": "applications.usage@1",
+              "status": 200
+            },
+            {
+              "method": "GET",
+              "pattern": "/api/host/activity",
+              "capability": "applications.activity@1",
+              "status": 200
+            },
+            {
+              "method": "POST",
+              "pattern": "/api/product/applications",
+              "capability": "applications.create@1",
+              "status": 201
+            },
+            {
+              "method": "POST",
+              "pattern": "/api/product/applications/:id/lifecycle",
+              "capability": "applications.lifecycle@1",
+              "status": 200
+            },
+            {
+              "method": "GET",
+              "pattern": "/api/product/providers",
+              "capability": "providers.list@1",
+              "status": 200
+            },
+            {
+              "method": "POST",
+              "pattern": "/api/product/providers",
+              "capability": "providers.configure@1",
+              "status": 201
+            },
+            {
+              "method": "POST",
+              "pattern": "/api/product/providers/validate",
+              "capability": "providers.validate@1",
+              "status": 200
+            },
+            {
+              "method": "GET",
+              "pattern": "/api/product/policies",
+              "capability": "policies.list@1",
+              "status": 200
+            },
+            {
+              "method": "POST",
+              "pattern": "/api/product/policies",
+              "capability": "policies.configure@1",
+              "status": 201
+            },
+            {
+              "method": "POST",
+              "pattern": "/api/product/policies/evaluate",
+              "capability": "policies.evaluate@1",
+              "status": 200
+            }
+          ]
+        }
+      }
+    },
+    "provides": [
+      {
+        "name": "applications.activity",
+        "version": 1,
+        "kind": "request",
+        "description": "Read AppBoundry application activity.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.read"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "applications.create",
+        "version": 1,
+        "kind": "request",
+        "description": "Create an AppBoundry Cloud application record through durable provider state.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.manage"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "applications.deploy",
+        "version": 1,
+        "kind": "request",
+        "description": "Deploy an AppPort .app bundle into managed AppBoundry execution.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.manage"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "applications.get",
+        "version": 1,
+        "kind": "request",
+        "description": "Get one deployed AppBoundry application.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.read"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "applications.invoke",
+        "version": 1,
+        "kind": "request",
+        "description": "Invoke another application's capability through the AppPort boundary.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.manage"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "applications.lifecycle",
+        "version": 1,
+        "kind": "request",
+        "description": "Change an AppBoundry Cloud application's product lifecycle through durable provider state.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.manage"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "applications.list",
+        "version": 1,
+        "kind": "request",
+        "description": "List applications known to the AppBoundry host.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.read"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "applications.restart",
+        "version": 1,
+        "kind": "request",
+        "description": "Restart a deployed AppBoundry application.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.manage"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "applications.start",
+        "version": 1,
+        "kind": "request",
+        "description": "Start a deployed AppBoundry application.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.manage"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "applications.stop",
+        "version": 1,
+        "kind": "request",
+        "description": "Stop a deployed AppBoundry application.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.manage"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "applications.usage",
+        "version": 1,
+        "kind": "request",
+        "description": "Read managed usage recorded for AppBoundry applications.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.read"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "policies.configure",
+        "version": 1,
+        "kind": "request",
+        "description": "Configure a durable product policy.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.manage"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "policies.evaluate",
+        "version": 1,
+        "kind": "request",
+        "description": "Evaluate product policy state from durable provider records.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.read"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "policies.list",
+        "version": 1,
+        "kind": "request",
+        "description": "List product policy records.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.read"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "portal.open",
+        "version": 1,
+        "kind": "request",
+        "description": "Render the AppBoundry portal through the AppPort boundary.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.portal"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "portal.proof",
+        "version": 1,
+        "kind": "request",
+        "description": "Exercise the portal's identity, request context, durable state, and GitHub providers in one artifact-owned operation.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.portal"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "portal.recovery",
+        "version": 1,
+        "kind": "request",
+        "description": "Read previously committed provider-backed portal state after platform recovery.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.portal"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "portal.session",
+        "version": 1,
+        "kind": "request",
+        "description": "Resolve the current portal identity through the configured identity provider.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.portal"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "product.snapshot",
+        "version": 1,
+        "kind": "request",
+        "description": "Project the durable AppBoundry Cloud product state through provider contracts.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.portal"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "providers.configure",
+        "version": 1,
+        "kind": "request",
+        "description": "Configure a product provider without embedding its credentials in the artifact.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.manage"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "providers.list",
+        "version": 1,
+        "kind": "request",
+        "description": "List provider configurations owned by the AppBoundry Cloud product.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.read"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      },
+      {
+        "name": "providers.validate",
+        "version": 1,
+        "kind": "request",
+        "description": "Validate the configured GitHub provider across its provider boundary.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "authorization": [
+          "appboundry.manage"
+        ],
+        "idempotency": "unsupported",
+        "concurrency": {
+          "mode": "parallel"
+        },
+        "emits": [],
+        "deprecated": false
+      }
+    ],
+    "requires": [
+      {
+        "name": "feltdb.documents",
+        "version": 1
+      },
+      {
+        "name": "github.repositories.list",
+        "version": 1
+      },
+      {
+        "name": "identity.session.create",
+        "version": 1
+      },
+      {
+        "name": "identity.session.current",
+        "version": 1
+      },
+      {
+        "name": "request.context.current",
+        "version": 1
+      }
+    ]
+  },
+  "implementation": {
+    "protocol": "AppPort/runtime-implementation/1",
+    "applicationId": "dev.appboundry.portal",
+    "implementationId": "impl-dev-appboundry-portal",
+    "sourceId": "npm:@appport/appboundry@1.0.7",
+    "implements": [
+      {
+        "name": "applications.activity",
+        "version": 1
+      },
+      {
+        "name": "applications.create",
+        "version": 1
+      },
+      {
+        "name": "applications.deploy",
+        "version": 1
+      },
+      {
+        "name": "applications.get",
+        "version": 1
+      },
+      {
+        "name": "applications.invoke",
+        "version": 1
+      },
+      {
+        "name": "applications.lifecycle",
+        "version": 1
+      },
+      {
+        "name": "applications.list",
+        "version": 1
+      },
+      {
+        "name": "applications.restart",
+        "version": 1
+      },
+      {
+        "name": "applications.start",
+        "version": 1
+      },
+      {
+        "name": "applications.stop",
+        "version": 1
+      },
+      {
+        "name": "applications.usage",
+        "version": 1
+      },
+      {
+        "name": "policies.configure",
+        "version": 1
+      },
+      {
+        "name": "policies.evaluate",
+        "version": 1
+      },
+      {
+        "name": "policies.list",
+        "version": 1
+      },
+      {
+        "name": "portal.open",
+        "version": 1
+      },
+      {
+        "name": "portal.proof",
+        "version": 1
+      },
+      {
+        "name": "portal.recovery",
+        "version": 1
+      },
+      {
+        "name": "portal.session",
+        "version": 1
+      },
+      {
+        "name": "product.snapshot",
+        "version": 1
+      },
+      {
+        "name": "providers.configure",
+        "version": 1
+      },
+      {
+        "name": "providers.list",
+        "version": 1
+      },
+      {
+        "name": "providers.validate",
+        "version": 1
+      }
+    ],
+    "runtime": {
+      "engine": "wasm",
+      "artifactHash": "fef9a8b0ef770d37fcfe41f1547bff26e173e42bef767b3936ccd3ef8c2eb3ad"
+    }
+  },
+  "immutable": true,
+  "packageIdentity": {
+    "reference": "dev.appboundry.portal@1.0.0",
+    "algorithm": "sha256",
+    "digest": "cae5adb5eca65a3fd857cc5810b53a5581127d7e6a9fbe8ebd489350933e9624",
+    "contentAddress": "sha256:cae5adb5eca65a3fd857cc5810b53a5581127d7e6a9fbe8ebd489350933e9624",
+    "immutable": true
+  }
+}

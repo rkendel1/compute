@@ -141,6 +141,38 @@ pub async fn create(
 }
 
 #[derive(Subcommand, Debug)]
+pub enum WorkspaceCommands {
+    /// Write the computer's workspace to a file and print its digest.
+    Export {
+        environment: String,
+        /// The archive to write.
+        #[arg(long, short)]
+        output: std::path::PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Seed the computer's empty workspace from an archive, and prove it landed.
+    Seed {
+        environment: String,
+        archive: std::path::PathBuf,
+        /// Refuse the archive unless it holds exactly this workspace.
+        #[arg(long)]
+        digest: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Measure the computer's workspace, and compare it with a digest.
+    Verify {
+        environment: String,
+        /// The digest it should have. Without one, only measure.
+        #[arg(long)]
+        digest: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ComputerCommands {
     /// Show an environment's computer: desired against observed contents.
     Computer {
@@ -181,6 +213,59 @@ pub enum ComputerCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Fork the environment: a new environment on a new computer, from this
+    /// one's workspace files, declared contents, and policy (never its
+    /// configuration values, sessions, or machine).
+    Fork {
+        environment: String,
+        /// The new environment's name.
+        name: String,
+        /// Constrain placement of the new computer to one target.
+        #[arg(long)]
+        target: Option<String>,
+        /// Also copy configuration values (they may be credentials).
+        #[arg(long)]
+        copy_config: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Capture a checkpoint: immutable, verified, portable workspace state,
+    /// held as a durable artifact. Not a machine snapshot: no process,
+    /// memory, session, or credential is captured.
+    Checkpoint {
+        environment: String,
+        /// The checkpoint this one is derived from (recorded as lineage).
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore a checkpoint into a new environment on a new computer: its
+    /// workspace, verified, with the declared state of the environment it came
+    /// from. Restores no process, session, credential, or machine.
+    Restore {
+        checkpoint: String,
+        /// The new environment's name.
+        name: String,
+        /// Constrain placement of the new computer to one target.
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List an environment's checkpoints, or show one and validate its
+    /// artifact.
+    Checkpoints {
+        environment: String,
+        /// Show this checkpoint and validate its artifact.
+        checkpoint: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Workspace state: export a computer's workspace, seed an empty one,
+    /// verify one against a digest. See docs/workspace.md.
+    #[command(subcommand)]
+    Workspace(WorkspaceCommands),
     /// Repositories checked out in the computer.
     #[command(subcommand)]
     Repo(RepoCommands),
@@ -457,8 +542,12 @@ pub struct ProcessArgs {
     #[arg(long, requires = "runtime")]
     runtime_version: Option<String>,
     /// Architecture required by the runtime (`x86_64`, `arm64`).
-    #[arg(long, requires = "runtime")]
+    #[arg(long, requires_all = ["runtime", "runtime_os"])]
     runtime_architecture: Option<String>,
+    /// Operating system required by the runtime (`linux`, `macos`). Must be
+    /// explicit because the CLI machine is not necessarily the target.
+    #[arg(long, requires_all = ["runtime", "runtime_architecture"])]
+    runtime_os: Option<String>,
     /// Add it stopped.
     #[arg(long)]
     stopped: bool,
@@ -509,10 +598,11 @@ impl ProcessArgs {
                 platform: self
                     .runtime_architecture
                     .as_ref()
-                    .map(|architecture| PlatformIdentity {
+                    .zip(self.runtime_os.as_ref())
+                    .map(|(architecture, os)| PlatformIdentity {
+                        os: os.clone(),
                         architecture: architecture.clone(),
                         runtime_abi: None,
-                        ..PlatformIdentity::current()
                     }),
             }),
             command: self.command.clone(),
@@ -553,6 +643,94 @@ pub enum ContentsCommands {
         #[arg(long)]
         json: bool,
     },
+}
+
+async fn workspace(client: &DaemonClient, command: WorkspaceCommands) -> compute_core::Result<()> {
+    use compute_environment::*;
+    match command {
+        WorkspaceCommands::Export {
+            environment,
+            output,
+            json,
+        } => {
+            let export: WorkspaceExport = client
+                .post::<(), _>(
+                    &format!("/environments/{environment}/workspace/export"),
+                    None,
+                )
+                .await
+                .map_err(error)?;
+            std::fs::write(&output, &export.archive)?;
+            if json {
+                print_json(&serde_json::json!({
+                    "digest": export.digest, "archive_digest": export.archive_digest,
+                    "files": export.files, "directories": export.directories,
+                    "bytes": export.bytes, "job_id": export.job_id, "archive": output,
+                }));
+            } else {
+                println!("Workspace {}", export.digest);
+                println!(
+                    "Wrote {} ({} files, {} empty directories, {} bytes of content)",
+                    output.display(),
+                    export.files,
+                    export.directories,
+                    export.bytes
+                );
+            }
+        }
+        WorkspaceCommands::Seed {
+            environment,
+            archive,
+            digest,
+            json,
+        } => {
+            let seed: WorkspaceSeed = client
+                .post(
+                    &format!("/environments/{environment}/workspace/seed"),
+                    Some(&WorkspaceSeedRequest {
+                        archive: std::fs::read(&archive)?,
+                        digest,
+                    }),
+                )
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&seed);
+            } else {
+                println!(
+                    "Seeded {environment}: {} files, workspace {} (verified inside the computer)",
+                    seed.files, seed.digest
+                );
+            }
+        }
+        WorkspaceCommands::Verify {
+            environment,
+            digest,
+            json,
+        } => {
+            let result: WorkspaceVerification = client
+                .post(
+                    &format!("/environments/{environment}/workspace/verify"),
+                    Some(&WorkspaceVerifyRequest { digest }),
+                )
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&result);
+            } else {
+                println!("Workspace {}", result.digest);
+                match &result.expected {
+                    Some(expected) if result.verified => println!("Matches {expected}"),
+                    Some(expected) => println!("MISMATCH: expected {expected}"),
+                    None => {}
+                }
+            }
+            if result.expected.is_some() && !result.verified {
+                std::process::exit(1);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_core::Result<()> {
@@ -629,15 +807,210 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
             computer,
             json,
         } => {
+            // Without requirement flags the computer is replaced with one that
+            // meets the requirements it already has.
+            let requirements = if computer.requested() {
+                computer.requirements()
+            } else {
+                let current: ComputerView = client
+                    .get(&format!("/environments/{environment}/computer"))
+                    .await
+                    .map_err(error)?;
+                current.requirements
+            };
             let view: ComputerView = client
                 .post(
                     &format!("/environments/{environment}/replace"),
-                    Some(&computer.requirements()),
+                    Some(&requirements),
                 )
                 .await
                 .map_err(error)?;
             print_computer(&view, json);
         }
+        ComputerCommands::Fork {
+            environment,
+            name,
+            target,
+            copy_config,
+            json,
+        } => {
+            let report: compute_environment::ForkReport = client
+                .post(
+                    &format!("/environments/{environment}/fork"),
+                    Some(&compute_environment::ForkRequest {
+                        name,
+                        target,
+                        copy_config,
+                    }),
+                )
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&report);
+            } else {
+                println!("Forked {} into {}", report.source, report.environment);
+                println!(
+                    "Seeded:   {} files, {} bytes, workspace {} (verified inside the new computer)",
+                    report.files, report.bytes, report.workspace
+                );
+                for (name, (from, to)) in &report.repositories {
+                    println!(
+                        "Repo:     {name} {} -> {}",
+                        from.as_deref().unwrap_or("-"),
+                        to.as_deref().unwrap_or("-")
+                    );
+                }
+                if !report.omitted_config.is_empty() {
+                    println!(
+                        "Config:   {} not copied (use --copy-config)",
+                        report.omitted_config.join(", ")
+                    );
+                }
+                print_computer(&report.computer, false);
+            }
+        }
+        ComputerCommands::Checkpoint {
+            environment,
+            parent,
+            json,
+        } => {
+            let report: compute_environment::CheckpointReport = client
+                .post(
+                    &format!("/environments/{environment}/checkpoint"),
+                    Some(&compute_environment::CheckpointRequest { parent }),
+                )
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&report);
+            } else {
+                println!(
+                    "Checkpoint {} of {}",
+                    report.checkpoint_id, report.environment
+                );
+                println!(
+                    "Workspace: {} ({} files, {} empty directories)",
+                    report.workspace, report.files, report.directories
+                );
+                println!(
+                    "Artifact:  {} ({}, {} bytes)",
+                    report.artifact, report.format, report.size
+                );
+                if let Some(parent) = &report.parent {
+                    println!("Parent:    {parent}");
+                }
+                println!(
+                    "Verified:  {} (read back from the artifact store and validated); operation job {} succeeded{}",
+                    report.verified,
+                    report.job_id,
+                    if report.existing {
+                        "; this state was already checkpointed"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
+        ComputerCommands::Restore {
+            checkpoint,
+            name,
+            target,
+            json,
+        } => {
+            let report: compute_environment::RestoreReport = client
+                .post(
+                    &format!("/checkpoints/{checkpoint}/restore"),
+                    Some(&compute_environment::RestoreRequest { name, target }),
+                )
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&report);
+            } else {
+                println!(
+                    "Restored checkpoint {} into {}",
+                    report.checkpoint_id, report.environment
+                );
+                println!(
+                    "From:        {} (declared state {})",
+                    report.source, report.declared_state
+                );
+                println!(
+                    "Environment: {}  Computer: {}",
+                    report.environment_id, report.computer_id
+                );
+                println!(
+                    "Workspace:   {} ({} files, {} bytes), verified inside the new computer: {}",
+                    report.workspace, report.files, report.bytes, report.workspace_verified
+                );
+                if !report.omitted_config.is_empty() {
+                    println!(
+                        "Config:      {} not restored",
+                        report.omitted_config.join(", ")
+                    );
+                }
+                println!("Operation:   {} durable jobs succeeded", report.jobs.len());
+                print_computer(&report.computer, false);
+            }
+        }
+        ComputerCommands::Checkpoints {
+            environment,
+            checkpoint,
+            json,
+        } => match checkpoint {
+            Some(checkpoint) => {
+                let view: compute_environment::CheckpointView = client
+                    .get(&format!(
+                        "/environments/{environment}/checkpoints/{checkpoint}"
+                    ))
+                    .await
+                    .map_err(error)?;
+                if json {
+                    print_json(&view);
+                } else {
+                    let record = &view.checkpoint;
+                    println!(
+                        "Checkpoint {} of {}",
+                        record.checkpoint_id, record.environment
+                    );
+                    println!("Workspace: {}", record.workspace_digest);
+                    println!(
+                        "Artifact:  {} ({}, {} bytes)",
+                        record.artifact_id, record.format, record.size
+                    );
+                    println!(
+                        "Valid:     {}{}",
+                        view.valid.unwrap_or(false),
+                        view.invalid_reason
+                            .map(|why| format!(" ({why})"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+            None => {
+                let views: Vec<compute_environment::CheckpointView> = client
+                    .get(&format!("/environments/{environment}/checkpoints"))
+                    .await
+                    .map_err(error)?;
+                if json {
+                    print_json(&views);
+                } else if views.is_empty() {
+                    println!("No checkpoints.");
+                } else {
+                    for view in views {
+                        let record = view.checkpoint;
+                        println!(
+                            "{}  {}  {} files  {}",
+                            record.checkpoint_id,
+                            record.workspace_digest,
+                            record.files,
+                            record.created_at
+                        );
+                    }
+                }
+            }
+        },
+        ComputerCommands::Workspace(command) => workspace(client, command).await?,
         ComputerCommands::Repo(command) => match command {
             RepoCommands::Add(args) | RepoCommands::Update(args) => {
                 let view: ComputerView = client

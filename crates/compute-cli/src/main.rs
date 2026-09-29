@@ -27,8 +27,10 @@ mod placement_certification;
 mod policy_certification;
 mod policy_cmd;
 mod pool;
+mod project_run;
 mod receipt;
 mod session_cmd;
+mod stack_run;
 mod version_cmd;
 mod work_cmd;
 
@@ -550,11 +552,25 @@ struct RuntimeCommand {
 
 #[derive(Args, Debug)]
 struct RunCommand {
-    #[arg(
-        required_unless_present_any = ["workload", "bundle"],
-        conflicts_with_all = ["workload", "bundle"]
-    )]
+    /// A script, directory, or workload to run. With no PATH, --workload, or
+    /// --bundle, Compute discovers the PAX project in the current directory.
+    #[arg(conflicts_with_all = ["workload", "bundle", "project"])]
     path: Option<PathBuf>,
+    /// Run the PAX project at this directory: discover its requirements,
+    /// place it on a target that satisfies them, and execute it.
+    #[arg(long, conflicts_with_all = ["workload", "bundle"])]
+    project: Option<PathBuf>,
+    /// Run this PAX project command instead of its default.
+    #[arg(long = "command")]
+    project_command: Option<String>,
+    /// Realize this stack (a name in ./stacks, or a path) for the project.
+    #[arg(long)]
+    stack: Option<String>,
+    /// Reference the --deps capsule by identity instead of embedding it (for
+    /// capsules too large to send): the target must hold it in its
+    /// $COMPUTE_DEPENDENCY_CACHE as `<digest>.deps`.
+    #[arg(long, requires = "deps")]
+    deps_by_reference: bool,
     /// Load a versioned portable workload specification.
     #[arg(long)]
     workload: Option<PathBuf>,
@@ -735,7 +751,30 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Init(command) => application::init(command)?,
         Commands::Application(command) => application::command(*command).await?,
         Commands::Run(command) => {
-            let command = *command;
+            let mut command = *command;
+            // A PAX project run: `--project`, or no target of any kind, which
+            // discovers the project in the current directory.
+            let project_mode = command.project.is_some()
+                || (command.path.is_none()
+                    && command.workload.is_none()
+                    && command.bundle.is_none());
+            if project_mode && command.project.is_none() {
+                command.project = Some(PathBuf::from("."));
+            }
+            if !project_mode && command.stack.is_some() {
+                return Err(compute_core::ComputeError::InvalidWorkload(
+                    "--stack applies to a PAX project run; it requires --project or no PATH".into(),
+                ));
+            }
+            if !project_mode && command.project_command.is_some() {
+                return Err(compute_core::ComputeError::InvalidWorkload(
+                    "--command selects a PAX project command; it requires --project or no PATH"
+                        .into(),
+                ));
+            }
+            if project_mode {
+                return run_with_provider(command).await;
+            }
             let explicit_placement = command.provider.is_some()
                 || command.placement_policy.is_some()
                 || command.prefer_provider.is_some();
@@ -1911,6 +1950,10 @@ async fn run_with_provider(command: RunCommand) -> compute_core::Result<()> {
     let provider = command.provider.clone();
     let artifact = pool::PlacementArtifact {
         path: command.path,
+        project: command.project,
+        project_command: command.project_command,
+        stack: command.stack,
+        deps_by_reference: command.deps_by_reference,
         bundle: command.bundle,
         provider,
         placement_policy: command.placement_policy,

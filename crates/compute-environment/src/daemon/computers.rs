@@ -239,6 +239,23 @@ fn process_fingerprint(
     }
 }
 
+fn requirements_for_contents(
+    requirements: &ComputerRequirements,
+    contents: Option<&EnvironmentContents>,
+) -> ComputerRequirements {
+    let mut effective = requirements.clone();
+    for runtime in contents
+        .into_iter()
+        .flat_map(|contents| &contents.processes)
+        .filter_map(|process| process.runtime.clone())
+    {
+        if !effective.runtimes.contains(&runtime) {
+            effective.runtimes.push(runtime);
+        }
+    }
+    effective
+}
+
 fn package_fingerprint(package: &PackageSpec, observed: &ObservedContents) -> String {
     let commit = package
         .repository
@@ -958,6 +975,23 @@ impl Daemon {
         definition: ComputerEnvironmentDefinition,
         operator: &str,
     ) -> Result<EnvironmentView, EnvironmentError> {
+        // A name that ends this way is a replacement candidate: only a
+        // replacement creates one.
+        if super::candidate::is_candidate(&definition.name) {
+            return Err(EnvironmentError::Invalid(format!(
+                "names ending {:?} are reserved for replacement candidates",
+                super::candidate::CANDIDATE_SUFFIX
+            )));
+        }
+        self.create_computer_environment_inner(definition, operator)
+            .await
+    }
+
+    pub(crate) async fn create_computer_environment_inner(
+        self: &Arc<Self>,
+        definition: ComputerEnvironmentDefinition,
+        operator: &str,
+    ) -> Result<EnvironmentView, EnvironmentError> {
         validate_name("environment", &definition.name)?;
         validate_env("environment", &definition.env)?;
         if let Some(policy) = &definition.policy {
@@ -1106,6 +1140,13 @@ impl Daemon {
     /// The computer's view, for any operator that may read environments.
     pub async fn computer(&self, environment: &str) -> Result<ComputerView, EnvironmentError> {
         self.refresh_for_read().await?;
+        self.computer_from_desired(environment).await
+    }
+
+    async fn computer_from_desired(
+        &self,
+        environment: &str,
+    ) -> Result<ComputerView, EnvironmentError> {
         let record = self
             .inner
             .lock()
@@ -1117,6 +1158,14 @@ impl Daemon {
         self.computer_view_of(&record).await.ok_or_else(|| {
             EnvironmentError::NotFound(format!("environment {environment} has no computer"))
         })
+    }
+
+    pub(crate) async fn fresh_computer_view(
+        &self,
+        environment: &str,
+    ) -> Result<ComputerView, EnvironmentError> {
+        self.refresh().await?;
+        self.computer_from_desired(environment).await
     }
 
     pub(crate) async fn computer_view_of(
@@ -1512,7 +1561,7 @@ impl Daemon {
         }
         self.computer_wake.notify_waiters();
         self.changed().await;
-        self.computer(environment).await
+        self.fresh_computer_view(environment).await
     }
 
     /// Replace the desired contents at once (what GO sends), optionally
@@ -1816,12 +1865,16 @@ impl Daemon {
         }
         self.computer_wake.notify_waiters();
         self.changed().await;
-        self.computer(environment).await
+        self.fresh_computer_view(environment).await
     }
 
-    /// Replace the computer with one that meets new requirements. This is
-    /// the one change that provisions a new machine, so it is explicit.
-    pub async fn replace_computer(
+    /// Replace a computer that cannot be exported from (lost, unreachable,
+    /// failed, stopped) with one that meets new requirements: the
+    /// controller provisions a new machine for the same declared contents
+    /// and retires the old session. Nothing is preserved but what is
+    /// declared; a running computer is replaced by
+    /// [`Daemon::replace_computer`], which preserves the workspace.
+    pub(crate) async fn request_replacement(
         self: &Arc<Self>,
         environment: &str,
         operator: &str,
@@ -1857,7 +1910,7 @@ impl Daemon {
         self.apply(change).await?;
         self.computer_wake.notify_waiters();
         self.changed().await;
-        self.computer(environment).await
+        self.fresh_computer_view(environment).await
     }
 
     /// Destroy the computer. The environment and the computer's record stay
@@ -1892,7 +1945,7 @@ impl Daemon {
         }
         self.computer_wake.notify_waiters();
         self.changed().await;
-        self.computer(environment).await
+        self.fresh_computer_view(environment).await
     }
 
     /// The target client and session of a running computer.
@@ -2025,33 +2078,17 @@ impl Daemon {
         })
     }
 
-    /// Import a source tree (a tar archive) into the running computer as
-    /// the next revision of a repository in its workspace, through durable
-    /// jobs on its target, and return the commit. The repository is named
-    /// by [`imported_source`] as a repository URL: syncing, building,
-    /// publishing, and deploying it are the ordinary operations.
-    pub async fn import_source(
-        self: &Arc<Self>,
-        environment: &str,
-        operator: &str,
-        repository: &str,
+    /// Carry an archive into the computer as base64 chunks under a fresh
+    /// import directory, through durable jobs on its target. Returns the
+    /// import ID, the archive's digest, and the jobs that carried it.
+    pub(crate) async fn upload_archive(
+        &self,
+        client: &RemoteProvider,
+        session_id: &str,
         archive: &[u8],
-        message: &str,
-    ) -> Result<String, EnvironmentError> {
+        what: &str,
+    ) -> Result<(String, String, Vec<String>), EnvironmentError> {
         use base64::Engine as _;
-        let record = self.owned_environment(environment, operator).await?;
-        self.require_live(&record).await?;
-        compute_core::EnvironmentContents {
-            repositories: vec![RepositorySpec {
-                name: repository.to_owned(),
-                url: imported_source(repository),
-                revision: "main".into(),
-                sync: 0,
-            }],
-            ..Default::default()
-        }
-        .validate()?;
-        let (computer, client, session_id) = self.running(&record).await?;
         let import = crate::auth::hex(&crate::auth::random::<8>()?);
         let digest = compute_core::sha256_identity(archive);
         let encoded = base64::engine::general_purpose::STANDARD.encode(archive);
@@ -2069,17 +2106,54 @@ impl Daemon {
                     .insert(format!("COMPUTE_IMPORT_{index}"), value.clone());
             }
             let (evidence, _) = self
-                .run_in_computer_command(&client, &session_id, command, Duration::from_secs(300))
+                .run_in_computer_command(client, session_id, command, Duration::from_secs(300))
                 .await;
             if evidence.outcome != "succeeded" {
                 return Err(EnvironmentError::RuntimeUnavailable(format!(
-                    "importing {repository} into {environment} failed (job {}): {}",
+                    "{what} failed (job {}): {}",
                     evidence.job_id,
                     evidence.error.unwrap_or_default()
                 )));
             }
             jobs.push(evidence.job_id);
         }
+        Ok((import, digest, jobs))
+    }
+
+    /// Import a source tree (a tar archive) into the running computer as
+    /// the next revision of a repository in its workspace, through durable
+    /// jobs on its target, and return the commit. The repository is named
+    /// by [`imported_source`] as a repository URL: syncing, building,
+    /// publishing, and deploying it are the ordinary operations.
+    pub async fn import_source(
+        self: &Arc<Self>,
+        environment: &str,
+        operator: &str,
+        repository: &str,
+        archive: &[u8],
+        message: &str,
+    ) -> Result<String, EnvironmentError> {
+        let record = self.owned_environment(environment, operator).await?;
+        self.require_live(&record).await?;
+        compute_core::EnvironmentContents {
+            repositories: vec![RepositorySpec {
+                name: repository.to_owned(),
+                url: imported_source(repository),
+                revision: "main".into(),
+                sync: 0,
+            }],
+            ..Default::default()
+        }
+        .validate()?;
+        let (computer, client, session_id) = self.running(&record).await?;
+        let (import, digest, mut jobs) = self
+            .upload_archive(
+                &client,
+                &session_id,
+                archive,
+                &format!("importing {repository} into {environment}"),
+            )
+            .await?;
         let (evidence, output) = self
             .run_in_computer_command(
                 &client,
@@ -2253,8 +2327,13 @@ impl Daemon {
         spec: &ComputerSpec,
         target: Option<&str>,
     ) -> Result<(PlacementReport, SessionCreateRequest), EnvironmentError> {
+        // ProcessSpec is the durable runtime intent. Derive placement needs
+        // from the current contents so callers cannot accidentally place a
+        // runtime-aware process using only the session shell requirement.
+        let computer_requirements =
+            requirements_for_contents(&spec.requirements, environment.contents.as_ref());
         let (requirements, create) =
-            PlacementRequirements::for_computer(&spec.requirements, spec.lifecycle)
+            PlacementRequirements::for_computer(&computer_requirements, spec.lifecycle)
                 .map_err(|error| EnvironmentError::Invalid(error.to_string()))?;
         let bundle = create.environment().map_err(target_error)?;
         let contract = ExecutionContract::from_bundle(&bundle, Some(requirements.isolation))
@@ -3596,21 +3675,18 @@ impl Daemon {
                 };
                 let runtime_error = match runtime {
                     Ok((resolution, executable)) => {
-                        if process.runtime.is_some() {
-                            seen.resolved_runtime = Some(resolution);
-                        }
                         if let Some(executable) = executable {
                             process_command[0] = executable.display().to_string();
                         }
-                        None
+                        (process.runtime.is_some().then_some(resolution), None)
                     }
-                    Err(error) => Some(error),
+                    Err(error) => (None, Some(error)),
                 };
                 arguments.extend(process_command);
                 let mut command = script(START_PROCESS, arguments);
                 command.env = process_env(&process, &record.value.config);
-                command.runtime = seen.resolved_runtime.clone();
-                let (evidence, output) = match runtime_error {
+                command.runtime = runtime_error.0.clone();
+                let (mut evidence, output) = match runtime_error.1 {
                     Some(error) => (
                         OperationEvidence {
                             job_id: String::new(),
@@ -3631,6 +3707,45 @@ impl Daemon {
                         .await
                     }
                 };
+                if let Some(expected) = runtime_error.0
+                    && !evidence.job_id.is_empty()
+                {
+                    let execution_succeeded = evidence.outcome == "succeeded";
+                    match tokio::time::timeout(
+                        self.config.computer_liveness_timeout,
+                        client.job_receipt(&evidence.job_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(receipt))
+                            if receipt.receipt.process_runtime.as_ref() == Some(&expected) =>
+                        {
+                            // Reality is derived from the authenticated, verified target
+                            // receipt, not from the controller's pre-execution request.
+                            seen.resolved_runtime = receipt.receipt.process_runtime;
+                        }
+                        Ok(Ok(_)) => {
+                            evidence.outcome = "failed".into();
+                            evidence.error = Some(
+                                "the target receipt does not contain the runtime it executed"
+                                    .into(),
+                            );
+                        }
+                        Ok(Err(error)) if execution_succeeded => {
+                            evidence.outcome = "failed".into();
+                            evidence.error = Some(format!(
+                                "the target runtime receipt could not be verified: {error}"
+                            ));
+                        }
+                        Err(_) if execution_succeeded => {
+                            evidence.outcome = "failed".into();
+                            evidence.error = Some(
+                                "the target did not return the runtime receipt in time".into(),
+                            );
+                        }
+                        Ok(Err(_)) | Err(_) => {}
+                    }
+                }
                 let now = Utc::now();
                 seen.evidence = evidence.clone();
                 if evidence.outcome == "succeeded" {
@@ -4494,6 +4609,23 @@ mod tests {
             projects: vec![],
             generation: 1,
         }
+    }
+
+    #[test]
+    fn process_runtime_intent_is_derived_into_computer_placement() {
+        let mut desired = contents();
+        let runtime = compute_core::ProviderRuntimeRequirement {
+            runtime: compute_core::RuntimeKind::Jvm,
+            version: Some("21".into()),
+            platform: Some(compute_core::PlatformIdentity {
+                os: "linux".into(),
+                architecture: "x86_64".into(),
+                runtime_abi: None,
+            }),
+        };
+        desired.processes[0].runtime = Some(runtime.clone());
+        let effective = requirements_for_contents(&ComputerRequirements::default(), Some(&desired));
+        assert_eq!(effective.runtimes, [runtime]);
     }
 
     #[test]

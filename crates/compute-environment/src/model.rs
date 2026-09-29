@@ -18,6 +18,7 @@ pub use compute_state::{
 };
 
 use crate::EnvironmentError;
+use crate::status::ComputerView;
 
 pub const ENVIRONMENT_VERSION: &str = "compute.environment@1";
 
@@ -171,6 +172,107 @@ pub struct ComputerEnvironmentDefinition {
     pub computer: ComputerRequest,
     #[serde(default)]
     pub contents: compute_core::EnvironmentContents,
+}
+
+/// Fork an environment: a new environment, on a new computer, from the
+/// source's portable state: its workspace files, declared contents, and
+/// policy. Never its configuration values, sessions, or machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkRequest {
+    /// The new environment's name.
+    pub name: String,
+    /// Constrain placement of the new computer; placement chooses when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Copy the source's configuration *values*. Off by default, because
+    /// configuration is where credentials live; the names left behind are
+    /// reported.
+    #[serde(default)]
+    pub copy_config: bool,
+}
+
+/// What a fork did and what it verified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkReport {
+    pub source: String,
+    pub environment: String,
+    /// The workspace digest (`compute.workspace@1`) carried and verified.
+    pub workspace: String,
+    pub archive: String,
+    pub files: usize,
+    pub directories: usize,
+    pub bytes: u64,
+    pub workspace_verified: bool,
+    /// The declared repositories: `(source commit, fork commit)`.
+    pub repositories: BTreeMap<String, (Option<String>, Option<String>)>,
+    /// Configuration names not copied.
+    pub omitted_config: Vec<String>,
+    /// The durable jobs that did the work, in order.
+    pub jobs: Vec<String>,
+    /// The fork's computer once its contents converged.
+    pub computer: ComputerView,
+}
+
+/// A computer's workspace, exported: the archive and its identity
+/// (`compute.workspace@1`, see `docs/workspace.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceExport {
+    pub identity: String,
+    pub digest: String,
+    pub archive_digest: String,
+    pub files: usize,
+    /// Empty directories, the only ones the identity records.
+    pub directories: usize,
+    pub bytes: u64,
+    /// Where it was read: `Linux-x86_64`. Provenance for a reader of the
+    /// archive, never part of its identity.
+    #[serde(default)]
+    pub platform: String,
+    pub job_id: String,
+    #[serde(with = "compute_core::bytes_json")]
+    pub archive: Vec<u8>,
+}
+
+/// Seed an empty workspace from an archive. If `digest` is given the archive
+/// must hold exactly that workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceSeedRequest {
+    #[serde(with = "compute_core::bytes_json")]
+    pub archive: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSeed {
+    pub digest: String,
+    pub files: usize,
+    pub directories: usize,
+    /// The digest recomputed inside the computer matched.
+    pub verified: bool,
+    pub jobs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceVerifyRequest {
+    /// The digest the workspace should have. Absent: only measure it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+/// A workspace measured, and compared when a digest was expected. A mismatch
+/// is a result (`verified: false`), not an error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceVerification {
+    /// What the computer's workspace is.
+    pub digest: String,
+    pub expected: Option<String>,
+    /// An expected digest was given and equals `digest`.
+    pub verified: bool,
+    pub job_id: String,
 }
 
 /// Replace an environment's desired contents, optionally only if they are
@@ -508,4 +610,97 @@ pub struct RollbackRequest {
     pub environment: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+}
+
+/// Capture a checkpoint of an environment's workspace.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointRequest {
+    /// The checkpoint this one is derived from, when it is: recorded as
+    /// lineage. It must be a checkpoint of the same environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+}
+
+/// What a capture did and what it verified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointReport {
+    pub environment: String,
+    pub checkpoint_id: String,
+    /// The format of the artifact: `compute.checkpoint@1`.
+    pub format: String,
+    /// The workspace digest (`compute.workspace@1`) the artifact reproduces.
+    pub workspace: String,
+    /// The artifact's digest in the artifact store.
+    pub artifact: String,
+    pub size: u64,
+    pub files: usize,
+    pub directories: usize,
+    pub computer_generation: u64,
+    pub contents_generation: u64,
+    pub platform: String,
+    pub parent: Option<String>,
+    /// The state was already captured: this is the existing checkpoint,
+    /// unchanged. A checkpoint is named by its content.
+    pub existing: bool,
+    /// The artifact was read back from the store and validated.
+    pub verified: bool,
+    /// The durable job that read the workspace; its receipt is the evidence.
+    pub job_id: String,
+}
+
+/// A checkpoint record and, when asked for, whether its artifact still
+/// validates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointView {
+    #[serde(flatten)]
+    pub checkpoint: compute_state::CheckpointRecord,
+    /// `Some` only where the artifact was read and validated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
+}
+
+/// Restore a checkpoint into a new environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreRequest {
+    /// The new environment's name.
+    pub name: String,
+    /// Constrain placement of the new computer; placement chooses when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+/// What a restore consumed, created, and verified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoreReport {
+    /// The checkpoint consumed: input state, never an authority.
+    pub checkpoint_id: String,
+    pub artifact: String,
+    /// The environment the checkpoint was captured from, and whose declared
+    /// state the new environment inherited.
+    pub source: String,
+    pub environment: String,
+    pub environment_id: String,
+    pub computer_id: String,
+    /// The workspace digest (`compute.workspace@1`) restored and verified.
+    pub workspace: String,
+    pub files: usize,
+    pub directories: usize,
+    pub bytes: u64,
+    /// The seeded workspace was measured inside the new computer and matches.
+    pub workspace_verified: bool,
+    /// The declared contents generation at capture, and the one applied.
+    pub captured_contents_generation: u64,
+    pub applied_contents_generation: u64,
+    /// `matches the state at capture` or `changed since capture`.
+    pub declared_state: String,
+    /// Configuration names not restored: values are never restored.
+    pub omitted_config: Vec<String>,
+    /// The durable jobs that did the work, in order.
+    pub jobs: Vec<String>,
+    /// The new computer once its declared contents converged.
+    pub computer: ComputerView,
 }

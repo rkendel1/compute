@@ -125,6 +125,17 @@ pub const ROUTES: &[(&str, &str)] = &[
     ),
     ("POST", "/environments/{environment}/reconcile"),
     ("POST", "/environments/{environment}/replace"),
+    ("POST", "/environments/{environment}/fork"),
+    ("POST", "/environments/{environment}/checkpoint"),
+    ("POST", "/checkpoints/{checkpoint}/restore"),
+    ("GET", "/environments/{environment}/checkpoints"),
+    (
+        "GET",
+        "/environments/{environment}/checkpoints/{checkpoint}",
+    ),
+    ("POST", "/environments/{environment}/workspace/export"),
+    ("POST", "/environments/{environment}/workspace/seed"),
+    ("POST", "/environments/{environment}/workspace/verify"),
     ("POST", "/environments/{environment}/exec"),
     ("POST", "/environments/{environment}/connect"),
     ("GET", "/environments/{environment}/jobs/{job}"),
@@ -1053,6 +1064,31 @@ async fn route(
         )?),
         ("POST", ["environments", id, "replace"]) => ok(to_value(
             Box::pin(daemon.replace_computer(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "fork"]) => created(to_value(
+            Box::pin(daemon.fork_environment(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["checkpoints", id, "restore"]) => created(to_value(
+            Box::pin(daemon.restore_checkpoint(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "checkpoint"]) => created(to_value(
+            Box::pin(daemon.checkpoint_environment(id, &principal.operator_id, parse(body)?))
+                .await?,
+        )?),
+        ("GET", ["environments", id, "checkpoints"]) => ok(to_value(
+            Box::pin(daemon.checkpoints(id, &principal.operator_id)).await?,
+        )?),
+        ("GET", ["environments", id, "checkpoints", checkpoint]) => ok(to_value(
+            Box::pin(daemon.checkpoint(id, &principal.operator_id, checkpoint)).await?,
+        )?),
+        ("POST", ["environments", id, "workspace", "export"]) => ok(to_value(
+            Box::pin(daemon.export_workspace(id, &principal.operator_id)).await?,
+        )?),
+        ("POST", ["environments", id, "workspace", "seed"]) => ok(to_value(
+            Box::pin(daemon.seed_workspace(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "workspace", "verify"]) => ok(to_value(
+            Box::pin(daemon.verify_workspace(id, &principal.operator_id, parse(body)?)).await?,
         )?),
         ("POST", ["environments", id, "exec"]) => created(to_value(
             Box::pin(daemon.computer_exec(id, &principal.operator_id, parse(body)?)).await?,

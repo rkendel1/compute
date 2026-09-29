@@ -211,6 +211,21 @@ pub struct ExecutionReceipt {
     /// it ran inside a Compute environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ReceiptScope>,
+    /// The project this execution ran, with its requirements declared,
+    /// resolved, and verified against this receipt's own evidence. Absent
+    /// for executions that were not described by a project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<crate::ReceiptProject>,
+    /// The stack (declared desired environment) this execution was asked to
+    /// realize, with each component's declared, resolved, materialized, and
+    /// verified state. Absent when no stack was selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<crate::ReceiptStack>,
+    /// The application bundle this execution ran with — the application that
+    /// runs on the stack's environment: declared, resolved, and what the
+    /// target's platform package verified. Absent when none was declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_bundle: Option<crate::ReceiptAppBundle>,
     /// Identity of the exact policy snapshot admission evaluated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_id: Option<String>,
@@ -412,6 +427,12 @@ struct ReceiptBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: &'a Option<ReceiptScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    project: &'a Option<crate::ReceiptProject>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stack: &'a Option<crate::ReceiptStack>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app_bundle: &'a Option<crate::ReceiptAppBundle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     policy_id: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     admission_id: &'a Option<String>,
@@ -561,10 +582,17 @@ impl ExecutionReceipt {
                         "process runtime distribution does not satisfy its requirement",
                     ));
                 }
-            } else if runtime.status != crate::RuntimeLifecycleStatus::Installed {
-                return Err(invalid(
-                    "process runtime is ready without distribution or host evidence",
-                ));
+            } else {
+                if runtime.requirement.version.is_some() {
+                    return Err(invalid(
+                        "pinned process runtime has host evidence instead of a distribution",
+                    ));
+                }
+                if runtime.status != crate::RuntimeLifecycleStatus::Installed {
+                    return Err(invalid(
+                        "process runtime is ready without distribution or host evidence",
+                    ));
+                }
             }
         }
         if let Some(reservation) = &self.reservation {
@@ -620,6 +648,15 @@ impl ExecutionReceipt {
         }
         if let Some(scope) = &self.scope {
             scope.validate()?;
+        }
+        if let Some(project) = &self.project {
+            project.verify(self)?;
+        }
+        if let Some(stack) = &self.stack {
+            stack.verify(self)?;
+        }
+        if let Some(app) = &self.app_bundle {
+            app.verify(self)?;
         }
         match (&self.policy_id, &self.admission_id, &self.admission_status) {
             (None, None, None) => {}
@@ -710,6 +747,9 @@ impl ExecutionReceipt {
             placement: &self.placement,
             reservation: &self.reservation,
             scope: &self.scope,
+            project: &self.project,
+            stack: &self.stack,
+            app_bundle: &self.app_bundle,
             policy_id: &self.policy_id,
             admission_id: &self.admission_id,
             admission_status: &self.admission_status,
@@ -837,6 +877,9 @@ pub fn create_execution_receipt(
         placement: None,
         reservation: None,
         scope: None,
+        project: None,
+        stack: None,
+        app_bundle: None,
         policy_id: None,
         admission_id: None,
         admission_status: None,
@@ -1306,6 +1349,23 @@ mod tests {
             Some(sha256_identity(b"runtime-artifact").as_str())
         );
         first.verify().unwrap();
+
+        let mut pinned_host = first.clone();
+        pinned_host.process_runtime = Some(crate::RuntimeResolution {
+            requirement: crate::ProviderRuntimeRequirement {
+                runtime: RuntimeKind::Python,
+                version: Some("3.13".into()),
+                platform: None,
+            },
+            status: crate::RuntimeLifecycleStatus::Installed,
+            distribution: None,
+            detail: None,
+        });
+        pinned_host.seal().unwrap();
+        assert!(
+            pinned_host.verify().is_err(),
+            "a pinned process runtime needs distribution evidence"
+        );
 
         let mut changed = second;
         changed.execution_id = ExecutionId::parse("exec_test_2").unwrap();

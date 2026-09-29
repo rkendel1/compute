@@ -103,6 +103,7 @@ workload in-process with the local provider (or submits it to a pool with
 | **Service** | Three things: (a) a process of kind service in a computer; (b) a bundle workload of kind service; (c) a registered shared service (`compute service register`). | `crates/compute-core/src/computers.rs; crates/compute-environment/src/model.rs#WorkloadKind` | Three meanings. |
 | **Execution job** | A durable job in a provider's job store (filesystem on the target), with a result and a receipt. Computer operations reference jobs by id; FeltDB stores the references and events, not the jobs. | `crates/compute-provider/src/jobs.rs` | Daemon node executions are Execution records in control state; target jobs are not. |
 | **Version / Rollout** | Version: a published commit + package digest + assembly + step evidence. Rollout: a version made real in an environment (deploy/promote/rollback) with steps. | `crates/compute-state/src/model.rs#VersionRecord,RolloutRecord` | Parallel to bundle Revisions/Deployments of node environments; application versions ARE rollouts. |
+| **Checkpoint** | A Checkpoint record in control state: immutable captured workspace state (`compute.checkpoint@1`), named by its content, whose bytes are an artifact in the artifact store. Not an environment, computer, session, or authority. | `crates/compute-state/src/model.rs#CheckpointRecord; crates/compute-environment/src/checkpoint.rs` | Not a machine snapshot, a process checkpoint, or a provider snapshot; `ControlState::snapshot` is unrelated. |
 <!-- /audit -->
 
 The complete model the product presents is: **a computer** (an environment
@@ -111,6 +112,35 @@ desired contents, changed by **GO** (one generation-fenced change),
 **versions** published from one environment and **rolled out** to others,
 and **work sessions** recording who is working where. `compute init/deploy`
 applications are a compatibility name for exactly these records (below).
+### Three kinds of state
+
+| Kind | Where it lives | Authority |
+| --- | --- | --- |
+| **Declared** | The Environment record in FeltDB: contents, configuration, policy, requirements | The environment |
+| **Observed** | Reality and evidence: the Computer record, jobs, receipts, events | What the controller and targets proved |
+| **Captured** | A Checkpoint record in FeltDB plus its immutable artifact (`compute.checkpoint@1`) | None. It is evidence of a past state, never a source of truth |
+
+**Checkpoint invariant.** A Checkpoint is immutable portable captured state
+derived from a verified Environment state. It is not an Environment, Computer,
+Session, or authority boundary. See [checkpoint.md](checkpoint.md).
+
+### How state moves
+
+| Operation | Moves | Identity |
+| --- | --- | --- |
+| **Clone** (superseded by fork) | transient Environment → Environment transfer | new environment |
+| [**Replace**](replace.md) | Environment → new Computer | same environment, new computer |
+| [**Fork**](fork.md) | Environment → independent Environment | new environment, new computer |
+| [**Checkpoint**](checkpoint.md) | Environment → durable portable captured state | none: creates no environment or computer |
+| [**Restore**](restore.md) | durable captured state → new Environment and Computer | new environment, new computer. Into an existing environment: not built (checkpoint + replace) |
+
+Export/seed/verify ([workspace.md](workspace.md)) is the transient transfer
+every row above is built on; a checkpoint is what makes that state durable.
+
+> Restore creates fresh execution identity from immutable captured state. It
+> does not restore machine identity, process identity, session identity,
+> credentials, provider identity, or authority.
+
 Node environments and bundle projects are an earlier deployment model that
 still runs on the daemon host (gap G-ARCH-5, blocked on named Computer
 capabilities; [every way Compute executes software](#every-way-compute-executes-software)).
@@ -240,6 +270,7 @@ legacy deployment model:
 | Path | Durable? | Authority | Execution host | Target session | Job | Endpoint | Receipt | Restart semantics | Disposition |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `compute run` / `compute exec`, local | no: nothing is written but a requested `--receipt` file | none (the local user) | the caller's machine, a child of the CLI | none | none | none by Compute (the workload may listen itself while it runs) | `compute.receipt@1`, `compute.local@1`, no scope | none: it ends with the CLI; a SIGKILLed CLI leaves it orphaned (G-EXEC-3) | **B** ephemeral |
+| `compute run` in a PAX project (`--project`, or no path) | no: as the rows above and below, placed like `compute run PATH` | none | the placed provider | none | none | none | as the placed provider's, plus the `project` block ([pax.md](pax.md)) | none | **B** ephemeral |
 | `compute run` / `compute pool run`, remote provider | no | the pool's credential for that provider | the placed provider, one synchronous `Execute` request | none | none (not in a job store) | none | returned with the result | none | **B** ephemeral |
 | `compute pool submit`, `compute remote *` | the job record, until it ends | target credential (serve) or the daemon API's execute scope | the placed provider | none | a one-shot job in that provider's job store | none | the provider's receipt for the job | a job is not restarted; its record survives a provider restart (`durable_jobs_are_idempotent_owned_verifiable_and_restart_safe`) | **B** one-shot job primitive |
 | `compute session create/exec` (raw target sessions) | the session and its jobs, until destroyed or expired | target credential; owner = the credential's control plane | the target | yes | yes | session endpoints, if exposed | the target's, per job | none: no desired state, no reconciliation; a TTL unless claimed | **B** the substrate a Computer is built from; not a deployment |
@@ -252,8 +283,9 @@ legacy deployment model:
 
 Everything else that starts a process starts Compute itself (the daemon,
 the target, the supervisor, an upgraded controller) or a tool (curl, npm,
-compilers, the FeltDB verifier, runtime acquisition, container engines
-behind a target's container sessions); none runs a workload.
+compilers, the FeltDB verifier, the read-only `pax` project observer,
+runtime acquisition, container engines behind a target's container
+sessions); none runs a workload.
 
 ### Two execution models, one legacy model
 
@@ -491,9 +523,9 @@ that breaks one fails them.
 | 24 | Readiness is explicit: a process with a readiness check is `ready` only when a request made inside its computer answered as expected; a started child process is `starting`, and a missed deadline is a recorded failure, never healthy. | `process_policy.rs`: `a_process_is_ready_only_when_its_readiness_request_answers`, `a_missed_readiness_deadline_is_evidenced_and_restarts_on_failure`; `daemon::computers` unit tests `readiness_is_what_a_check_inside_the_computer_answered`, `a_missed_readiness_deadline_is_a_recorded_failure_and_the_policy_decides` |
 | 25 | Automatic restarts are bounded: at most `max_restarts` in a row, each after a doubling backoff, then none until the process changes or someone asks. | `process_policy.rs`: `a_crash_loop_is_bounded`; unit test `automatic_restarts_are_counted_once_and_bounded` |
 | 26 | Runtime intent is durable process state; placement requires an executable target offer, target resolution/preparation is authoritative, pinned requests never fall back to PATH, and the canonical target receipt records what was resolved. Container sessions cannot claim host-store runtimes, and runtime-aware applications still use the Computer lifecycle. | `compute-core::computers::process_runtime_is_optional_persisted_intent`; `compute-placement/tests/matching.rs::every_computer_process_runtime_affects_placement`; `compute-provider::runtime` lifecycle tests; `compute-environment/tests/applications.rs::an_application_deployment_is_the_canonical_computer_lifecycle`; execution-site allowlists |
-| 26 | Stopped means stopped: a process stopped by its desired state (or with its computer) is never restarted automatically, whatever its restart policy, across controller restarts. | `process_policy.rs`: `an_explicit_stop_is_never_undone_by_a_restart_policy`; unit test `stopped_means_no_automatic_restart`; `compute-cli/tests/computers.rs` (across a controller process restart) |
-| 27 | A restart is recorded, fenced on the computer record, before its job runs, and only in the session that record names: a replaced or lost machine is never restarted into, and a replacement's count starts afresh. | `process_policy.rs`: `a_replaced_machine_is_never_restarted_into` |
-| 28 | Restart authority lives in control state, not in a controller: a controller that restarts neither loses a restart, counts one twice, nor duplicates a running process, and recovers a process that exited while no controller ran. | `process_policy.rs`: `restarts_are_durable_across_controller_restarts_and_never_duplicated` (control state reopened from disk); `compute-cli/tests/computers.rs`: `readiness_and_restarts_are_shown_and_survive_controller_process_restarts` (the controller as a separate process, stopped and started) |
+| 27 | Stopped means stopped: a process stopped by its desired state (or with its computer) is never restarted automatically, whatever its restart policy, across controller restarts. | `process_policy.rs`: `an_explicit_stop_is_never_undone_by_a_restart_policy`; unit test `stopped_means_no_automatic_restart`; `compute-cli/tests/computers.rs` (across a controller process restart) |
+| 28 | A restart is recorded, fenced on the computer record, before its job runs, and only in the session that record names: a replaced or lost machine is never restarted into, and a replacement's count starts afresh. | `process_policy.rs`: `a_replaced_machine_is_never_restarted_into` |
+| 29 | Restart authority lives in control state, not in a controller: a controller that restarts neither loses a restart, counts one twice, nor duplicates a running process, and recovers a process that exited while no controller ran. | `process_policy.rs`: `restarts_are_durable_across_controller_restarts_and_never_duplicated` (control state reopened from disk); `compute-cli/tests/computers.rs`: `readiness_and_restarts_are_shown_and_survive_controller_process_restarts` (the controller as a separate process, stopped and started) |
 
 ## Failure kinds
 
@@ -548,3 +580,7 @@ The full inventory, with status and evidence for each claim, is
 [audit.md](audit.md); the runtime and provider coverage is in
 [runtime-matrix.md](runtime-matrix.md) and
 [provider-matrix.md](provider-matrix.md).
+
+## Design: GitHub control plane
+
+How a GitHub Actions control plane (Factory) sits over Compute without Compute learning GitHub: [factory-control-plane.md](factory-control-plane.md), with [local-ci-audit.md](local-ci-audit.md), [github-runner-protocol.md](github-runner-protocol.md) and [factory-compute-gaps.md](factory-compute-gaps.md). Design only; nothing is implemented.

@@ -211,8 +211,25 @@ pub enum PoolCommands {
 
 #[derive(Args, Debug, Default)]
 pub struct PlacementArtifact {
-    #[arg(required_unless_present = "bundle", conflicts_with = "bundle")]
+    #[arg(
+        required_unless_present_any = ["bundle", "project"],
+        conflicts_with_all = ["bundle", "project"]
+    )]
     pub path: Option<PathBuf>,
+    /// Run the PAX project at this directory: its requirements decide which
+    /// targets are eligible.
+    #[arg(long, conflicts_with = "bundle")]
+    pub project: Option<PathBuf>,
+    /// The PAX project command to run instead of its default.
+    #[arg(long = "command", requires = "project")]
+    pub project_command: Option<String>,
+    /// Realize this stack (a name in ./stacks, or a path) for the project:
+    /// its components are requirements, and are verified on the Computer.
+    #[arg(long, requires = "project")]
+    pub stack: Option<String>,
+    /// Reference the capsule by identity instead of embedding it.
+    #[arg(long, requires = "deps")]
+    pub deps_by_reference: bool,
     #[arg(long)]
     pub bundle: Option<PathBuf>,
     /// Strict provider selection. The provider must be eligible; no fallback.
@@ -767,7 +784,30 @@ pub(crate) fn prepare(
     artifact: &PlacementArtifact,
     policy: &crate::admission::PolicyLocation,
 ) -> compute_core::Result<(WorkloadBundle, ProviderRequest, direct::DirectPlacement)> {
-    let (bundle, placement) = if let Some(path) = &artifact.bundle {
+    let mut project = None;
+    let mut stack = None;
+    let mut app_bundle = None;
+    let (bundle, placement) = if artifact.project.is_some() {
+        let run = crate::project_run::resolve(artifact, policy)?;
+        let placement = run.resolved.placement.clone();
+        project = Some(run.binding);
+        stack = run.stack;
+        app_bundle = run.app_bundle;
+        // A referenced capsule is pinned by identity in the workload and
+        // held by the target; only an embedded one travels in the bundle.
+        let embedded = run
+            .resolved
+            .dependency_capsule
+            .filter(|_| !artifact.deps_by_reference);
+        (
+            WorkloadBundle::create_from_with_capsule(
+                run.resolved.workload,
+                &run.resolved.root,
+                embedded,
+            )?,
+            placement,
+        )
+    } else if let Some(path) = &artifact.bundle {
         if artifact.runtime.is_some()
             || !artifact.env.is_empty()
             || artifact.env_file.is_some()
@@ -825,6 +865,9 @@ pub(crate) fn prepare(
         .as_ref()
         .map(DependencyCapsule::capsule_id)
         .transpose()?;
+    request.execution.project = project;
+    request.execution.stack = stack;
+    request.execution.app_bundle = app_bundle;
     Ok((bundle, request, placement))
 }
 
@@ -834,7 +877,30 @@ pub(crate) async fn evaluate(
     artifact: &PlacementArtifact,
     submission: SubmissionMode,
 ) -> compute_core::Result<(ProviderPool, PlacementReport, ProviderRequest)> {
-    let (bundle, mut request, configured_placement) = prepare(artifact, policy)?;
+    let (bundle, request, configured_placement) = prepare(artifact, policy)?;
+    evaluate_bundle(
+        location,
+        policy,
+        artifact,
+        &bundle,
+        request,
+        &configured_placement,
+        submission,
+    )
+    .await
+}
+
+/// Place an already-built bundle. `artifact` supplies the caller's placement
+/// choices (provider, policy, isolation, platform, ...).
+pub(crate) async fn evaluate_bundle(
+    location: &PoolLocation,
+    policy: &crate::admission::PolicyLocation,
+    artifact: &PlacementArtifact,
+    bundle: &WorkloadBundle,
+    mut request: ProviderRequest,
+    configured_placement: &direct::DirectPlacement,
+    submission: SubmissionMode,
+) -> compute_core::Result<(ProviderPool, PlacementReport, ProviderRequest)> {
     // Placement pins these identities, so they are part of the request whose
     // exact size the requirements record.
     request.expected.distribution_id = artifact.distribution.clone();
@@ -844,8 +910,8 @@ pub(crate) async fn evaluate(
             .unwrap_or(bundle.workload.isolation.profile),
     );
     let request_bytes = serde_json::to_vec(&request)?.len() as u64;
-    let requirements = PlacementRequirements::from_bundle(
-        &bundle,
+    let mut requirements = PlacementRequirements::from_bundle(
+        bundle,
         request_bytes,
         submission,
         &RequirementOptions {
@@ -856,8 +922,28 @@ pub(crate) async fn evaluate(
         },
     )
     .map_err(placement_error)?;
+    // The application bundle needs its runtime on the Computer too. A
+    // Computer without it is incompatible, with the reason recorded; the
+    // application is never silently left out.
+    if let Some(app) = &request.execution.app_bundle {
+        let kind = app.declared.runtime;
+        if kind != requirements.runtime.kind
+            && !requirements
+                .additional_runtimes
+                .iter()
+                .any(|needed| needed.kind == kind)
+        {
+            requirements
+                .additional_runtimes
+                .push(compute_placement::RuntimeRequirement {
+                    kind,
+                    version: None,
+                    artifact_id: None,
+                });
+        }
+    }
     let contract =
-        compute_policy::ExecutionContract::from_bundle(&bundle, Some(requirements.isolation))
+        compute_policy::ExecutionContract::from_bundle(bundle, Some(requirements.isolation))
             .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
     let admission = compute_placement::AdmissionContext::new(&policy.sources()?, contract);
     let pool = location.pool()?;
@@ -1104,7 +1190,8 @@ pub async fn pool(command: PoolCommand) -> compute_core::Result<()> {
             }
             let (pool, report, request) =
                 evaluate(&location, &policy, &artifact, SubmissionMode::Synchronous).await?;
-            if !placed(&report, artifact.json) {
+            let project = request.execution.project.clone();
+            if !placed_for(&report, project.as_ref(), artifact.json) {
                 std::process::exit(PLACEMENT_FAILED_EXIT);
             }
             let selected = report.selected.as_ref().expect("placed");
@@ -1131,31 +1218,70 @@ pub async fn pool(command: PoolCommand) -> compute_core::Result<()> {
                 );
                 eprintln!("Isolation: {}", report.requirements.isolation);
                 eprintln!("Network: {}", report.requirements.network);
+                if let Some(project) = &project {
+                    eprintln!(
+                        "Project: {} ({}), requirements {}",
+                        project.identity.name, project.identity.source, project.requirements_id
+                    );
+                }
             }
-            let remote_jobs = pool
-                .member(&selected.provider_id)
-                .and_then(|member| member.jobs.clone());
-            let (result, job_id) = if let Some(jobs) = remote_jobs {
-                let submission = match dispatch::submit(&pool, &report, request, None).await {
-                    Ok(submission) => submission,
-                    Err(error) => return dispatch_failure(&error, artifact.json),
-                };
-                let job_id = submission.job.job_id;
-                let result = wait_for_result(&jobs, &job_id.0).await?;
-                let receipt = result.result.receipt.as_ref().ok_or_else(|| {
-                    ComputeError::InvalidReceipt("the provider returned no receipt".into())
+            let mut request = request;
+            if request.execution.stack.is_some() || request.execution.app_bundle.is_some() {
+                if let Some(binding) = &request.execution.stack {
+                    let excluded = binding.unsupported_on(&selected.platform);
+                    if !excluded.is_empty() {
+                        let mut failure = compute_project::ProjectError::new(
+                            compute_project::FailureKind::StackComponentUnsupported,
+                            format!(
+                                "stack `{}` cannot be realized on {}; nothing was executed",
+                                binding.identity.name, selected.provider_id
+                            ),
+                        );
+                        for (name, reason) in excluded {
+                            failure = failure.require(&name, reason);
+                        }
+                        return Err(crate::project_run::error(failure.found(
+                            "target",
+                            format!("{} ({})", selected.provider_id, selected.platform.label()),
+                        )));
+                    }
+                }
+                let bundle = WorkloadBundle::from_bytes(match &request.artifact {
+                    compute_provider::ArtifactTransport::Bundle { data } => data,
+                    _ => unreachable!("project runs are bundles"),
                 })?;
-                report
-                    .verify_receipt(receipt)
-                    .map_err(ComputeError::InvalidReceipt)?;
-                (result.result, Some(job_id))
-            } else {
-                let response = match dispatch::execute(&pool, &report, request).await {
-                    Ok(response) => response,
-                    Err(error) => return dispatch_failure(&error, artifact.json),
-                };
-                (response.result, None)
-            };
+                let files = crate::stack_run::files_of_bundle(&bundle);
+                let probed = crate::stack_run::probe(
+                    &location,
+                    &policy,
+                    Some(&selected.provider_id),
+                    crate::stack_run::ProbePlan {
+                        stack: request.execution.stack.as_ref(),
+                        app: request.execution.app_bundle.as_ref(),
+                        capsule: bundle.dependency_capsule.as_ref(),
+                        capsule_id: bundle
+                            .workload
+                            .dependencies
+                            .as_ref()
+                            .map(|dependencies| dependencies.capsule.as_str()),
+                        like: Some(&bundle.workload),
+                        files: &files,
+                        inputs: &bundle.workload.inputs,
+                    },
+                )
+                .await?;
+                if let Some(stack) = request.execution.stack.as_mut() {
+                    stack.probes = probed.package_probe.into_iter().collect();
+                }
+                if let Some(app) = request.execution.app_bundle.as_mut() {
+                    app.runtime_probe = probed.runtime_probe;
+                    app.inspection = probed.inspection;
+                }
+            }
+            let (result, job_id) = execute_placed(&pool, &report, request, artifact.json).await?;
+            if project.is_some() {
+                crate::project_run::require_project_evidence(&result)?;
+            }
             if let Some(path) = &artifact.receipt {
                 let receipt = result.receipt.as_ref().expect("verified by dispatch");
                 std::fs::write(path, receipt.encoded_bytes()?)?;
@@ -1228,6 +1354,47 @@ pub async fn pool(command: PoolCommand) -> compute_core::Result<()> {
     Ok(())
 }
 
+/// Execute a placed request on the provider placement selected: a durable
+/// job on a remote target, a synchronous request otherwise. Dispatch never
+/// substitutes another provider.
+pub(crate) async fn execute_placed(
+    pool: &ProviderPool,
+    report: &PlacementReport,
+    request: ProviderRequest,
+    json: bool,
+) -> compute_core::Result<(compute_core::ExecutionResult, Option<compute_core::JobId>)> {
+    let selected = report.selected.as_ref().expect("placed");
+    let remote_jobs = pool
+        .member(&selected.provider_id)
+        .and_then(|member| member.jobs.clone());
+    if let Some(jobs) = remote_jobs {
+        let submission = match dispatch::submit(pool, report, request, None).await {
+            Ok(submission) => submission,
+            Err(error) => {
+                dispatch_failure(&error, json)?;
+                unreachable!("a dispatch failure is an error")
+            }
+        };
+        let job_id = submission.job.job_id;
+        let result = wait_for_result(&jobs, &job_id.0).await?;
+        let receipt = result.result.receipt.as_ref().ok_or_else(|| {
+            ComputeError::InvalidReceipt("the provider returned no receipt".into())
+        })?;
+        report
+            .verify_receipt(receipt)
+            .map_err(ComputeError::InvalidReceipt)?;
+        Ok((result.result, Some(job_id)))
+    } else {
+        match dispatch::execute(pool, report, request).await {
+            Ok(response) => Ok((response.result, None)),
+            Err(error) => {
+                dispatch_failure(&error, json)?;
+                unreachable!("a dispatch failure is an error")
+            }
+        }
+    }
+}
+
 async fn wait_for_result(
     provider: &RemoteProvider,
     job_id: &str,
@@ -1251,11 +1418,27 @@ async fn wait_for_result(
 
 /// Report a failed placement. Returns whether a provider was selected.
 pub(crate) fn placed(report: &PlacementReport, json: bool) -> bool {
+    placed_for(report, None, json)
+}
+
+/// Like [`placed`]; a project's failure also reports what it required and
+/// what each target offered.
+pub(crate) fn placed_for(
+    report: &PlacementReport,
+    project: Option<&compute_core::ProjectBinding>,
+    json: bool,
+) -> bool {
     if report.outcome == PlacementOutcome::Placed {
         return true;
     }
+    let project_failure =
+        project.map(|binding| crate::project_run::placement_failure(binding, report));
     if json {
-        print_json(&serde_json::json!({ "placement": report }));
+        let mut value = serde_json::json!({ "placement": report });
+        if let Some(failure) = &project_failure {
+            value["project_failure"] = serde_json::to_value(failure).unwrap_or_default();
+        }
+        print_json(&value);
     }
     let failure = report.failure.as_ref();
     eprintln!(
@@ -1312,6 +1495,9 @@ pub(crate) fn placed(report: &PlacementReport, json: bool) -> bool {
                     .unwrap_or_default()
             );
         }
+    }
+    if let Some(failure) = &project_failure {
+        eprintln!("{failure}");
     }
     false
 }

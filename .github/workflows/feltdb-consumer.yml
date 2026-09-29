@@ -42,8 +42,8 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/previous"
           cd "$RUNNER_TEMP/previous"
-          npm pack @feltdb/core@0.11.7 >/dev/null
-          tar xzf feltdb-core-0.11.7.tgz
+          npm pack @feltdb/core@0.11.8 >/dev/null
+          tar xzf feltdb-core-0.11.8.tgz
           CARGO_TARGET_DIR="$RUNNER_TEMP/feltdb-previous" cargo build --release --manifest-path package/dist/create/server-source/Cargo.toml -p feltdb-server
           echo "FELTDB_PREVIOUS_SERVER_BIN=$RUNNER_TEMP/feltdb-previous/release/feltdb-server" >> "$GITHUB_ENV"
 

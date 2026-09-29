@@ -9,7 +9,10 @@ development operations, while Cargo remains authoritative for Rust execution.
 Install the current `pax` executable using the instructions in the
 [PAX repository](https://github.com/rkendel1/pax). Do not vendor the binary
 or add PAX as a Cargo dependency. No Compute-specific PAX configuration is
-required.
+required. (Compute also observes *user* projects through PAX at run time; that
+boundary is described in [docs/pax.md](docs/pax.md). Its tests never need `pax`;
+`PAX_BIN=… cargo test -p compute-cli --test pax_project -- --ignored` runs one
+against the real executable.)
 
 ## Project inspection
 
