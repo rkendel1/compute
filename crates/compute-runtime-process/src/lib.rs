@@ -1197,12 +1197,13 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let definition = runtime_definition(RuntimeKind::Ruby);
+        let compute_version = env!("CARGO_PKG_VERSION");
         let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
         let manifest = serde_json::json!({
             "schema_version": 2,
-            "compute_version": "0.1.0",
+            "compute_version": compute_version,
             "distribution_id": "sha256:test",
-            "distribution_version": format!("compute-0.1.0-{platform}"),
+            "distribution_version": format!("compute-{compute_version}-{platform}"),
             "platform": platform,
             "os": std::env::consts::OS,
             "architecture": std::env::consts::ARCH,
