@@ -26,7 +26,9 @@ jobs:
           core: true
           cask: false
       - name: Tap this checkout
-        run: brew tap rkendel1/compute "$GITHUB_WORKSPACE"
+        run: |
+          brew untap rkendel1/compute || true
+          brew tap rkendel1/compute "$GITHUB_WORKSPACE"
       - name: Validate formula
         run: |
           brew audit --strict --online rkendel1/compute/compute
@@ -71,6 +73,7 @@ jobs:
           COMPUTE_HOME: ${{ runner.temp }}/compute-state
         shell: bash
         run: |
+          brew untap rkendel1/compute || true
           brew tap rkendel1/compute "$GITHUB_WORKSPACE"
           tap=$(brew --repository rkendel1/compute)
           git -C "$tap" show HEAD^:Formula/compute.rb > "$tap/Formula/compute.rb"
@@ -98,6 +101,7 @@ jobs:
           COMPUTE_HOME: ${{ runner.temp }}/compute-state
         shell: bash
         run: |
+          brew untap rkendel1/compute || true
           brew tap rkendel1/compute "$GITHUB_WORKSPACE"
           brew install --build-from-source rkendel1/compute/compute
           mkdir -p "$COMPUTE_HOME"
