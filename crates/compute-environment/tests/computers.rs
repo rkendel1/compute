@@ -253,7 +253,21 @@ impl Target {
 
     /// Lose every session record, as a target whose store was wiped does.
     fn wipe_sessions(&self) {
-        std::fs::remove_dir_all(self.stores.path().join("sessions")).unwrap();
+        let sessions = self.stores.path().join("sessions");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::fs::remove_dir_all(&sessions) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::DirectoryNotEmpty
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("could not wipe {}: {error}", sessions.display()),
+            }
+        }
     }
 
     fn client(&self) -> RemoteProvider {

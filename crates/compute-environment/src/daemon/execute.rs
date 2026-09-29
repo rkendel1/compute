@@ -117,7 +117,17 @@ impl Daemon {
             .map_err(|error| EnvironmentError::Invalid(error.to_string()))?;
         let context =
             AdmissionContext::new(&self.policy_sources(&target.environment.value)?, contract);
-        let explicit = target.environment.value.provider.as_deref();
+        // Services are supervised by this control-plane node and their
+        // endpoints route into its data plane. Constrain placement before
+        // choosing a provider; rejecting a remote winner afterward makes
+        // recovery depend on pool ordering.
+        let explicit = if target.workload.kind == WorkloadKind::Service
+            && target.environment.value.provider.is_none()
+        {
+            Some("local")
+        } else {
+            target.environment.value.provider.as_deref()
+        };
         let records = {
             let mut cache = self.cache.lock().await;
             self.pool

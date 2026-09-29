@@ -37,6 +37,13 @@ reuses what runs; `compute down` stops both and keeps the state
 (`$COMPUTE_HOME`, default `~/.compute`). The control plane never runs
 software itself: the computer host does, like any other target.
 
+`compute start` is also a complete one-command development start. When no
+pool is supplied, it manages a credentialed local computer host and wires it
+into placement automatically. `compute serve` is an internal/fleet target
+command, not a second command required for local use. Production and an
+explicit `--pool-config` remain operator-configured and never gain an
+implicit target.
+
 After that, everything is in the UI: every screen of the journey from
 `compute` to rollback is in [product-surface](product-surface/README.md),
 captured by the acceptance test that walks it.

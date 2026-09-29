@@ -99,7 +99,7 @@ enum Commands {
     /// Show the full decision chain for a workload: requirements,
     /// capabilities, policy, admission, and placement. Never executes.
     Explain(policy_cmd::ExplainCommand),
-    /// Run the persistent Compute daemon (environments and services).
+    /// Run Compute. Development starts manage a local computer host automatically.
     Start(environment_cmd::StartCommand),
     /// Stop the Compute daemon. Desired state is kept.
     Stop(environment_cmd::StopCommand),

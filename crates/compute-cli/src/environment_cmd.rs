@@ -483,12 +483,6 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
     }
     config.reconcile_interval = Duration::from_millis(command.reconcile_interval_ms.max(100));
     config.policy = command.policy.as_deref().map(load_policy).transpose()?;
-    config.pool = command
-        .pool_config
-        .as_deref()
-        .map(compute_placement::PoolConfig::load)
-        .transpose()
-        .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
     let api = command.state.api()?;
     let production =
         command.production || (!command.insecure && api.mode.as_deref() == Some("production"));
@@ -515,6 +509,24 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
     };
     let (mode, reason) =
         security_mode(command.listen, command.insecure, production, tls.is_some())?;
+    let automatic_pool = if command.pool_config.is_none()
+        && mode == compute_environment::auth::SecurityMode::Development
+    {
+        let home = command.state_dir.join("local");
+        let target = crate::launch_cmd::managed_local_host_endpoint(&home)?;
+        let pool = crate::launch_cmd::ensure_local_host(&home, &target, false)?;
+        eprintln!("Local computer host ready (managed by Compute)");
+        Some(pool)
+    } else {
+        None
+    };
+    config.pool = command
+        .pool_config
+        .as_deref()
+        .or(automatic_pool.as_deref())
+        .map(compute_placement::PoolConfig::load)
+        .transpose()
+        .map_err(|error| ComputeError::InvalidWorkload(error.to_string()))?;
     config.security = compute_environment::auth::SecurityConfig {
         mode,
         reason,
@@ -807,6 +819,7 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
 
 pub async fn stop(command: StopCommand) -> compute_core::Result<()> {
     let client = command.daemon.client()?;
+    let status = client.get::<DaemonStatus>("/status").await.ok();
     let _: serde_json::Value = client
         .post(
             "/shutdown",
@@ -825,6 +838,11 @@ pub async fn stop(command: StopCommand) -> compute_core::Result<()> {
             return Err(ComputeError::Runtime("the daemon did not stop".into()));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !command.keep_workloads
+        && let Some(status) = &status
+    {
+        crate::launch_cmd::stop_local_host(&std::path::Path::new(&status.state_dir).join("local"));
     }
     if command.json {
         print_json(

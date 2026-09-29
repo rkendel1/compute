@@ -1,8 +1,64 @@
 {
   "version": "compute.state@1",
-  "next_version": 9,
+  "next_version": 31,
   "collections": {
     "Audit": {
+      "aud_007c2daab0c7c215": {
+        "version": 27,
+        "value": {
+          "at": "2026-09-28T20:37:23.909551000Z",
+          "detail": {},
+          "error_kind": "invalid",
+          "operation": "POST /environments",
+          "operator_id": "development",
+          "request_id": "req_007c2daab0c7c215",
+          "resource": "environment",
+          "result": "failed",
+          "status": 400
+        }
+      },
+      "aud_063ee6c9a5d6e33e": {
+        "version": 28,
+        "value": {
+          "at": "2026-09-28T20:37:50.053118000Z",
+          "detail": {},
+          "error_kind": "invalid",
+          "operation": "POST /environments",
+          "operator_id": "development",
+          "request_id": "req_063ee6c9a5d6e33e",
+          "resource": "environment",
+          "result": "failed",
+          "status": 400
+        }
+      },
+      "aud_08e0c782b22d4ef0": {
+        "version": 25,
+        "value": {
+          "at": "2026-09-28T20:37:06.168621000Z",
+          "detail": {},
+          "error_kind": "invalid",
+          "operation": "POST /environments",
+          "operator_id": "development",
+          "request_id": "req_08e0c782b22d4ef0",
+          "resource": "environment",
+          "result": "failed",
+          "status": 400
+        }
+      },
+      "aud_386e8dec5632f5af": {
+        "version": 24,
+        "value": {
+          "at": "2026-09-28T20:36:45.627919000Z",
+          "detail": {},
+          "error_kind": "invalid",
+          "operation": "POST /environments",
+          "operator_id": "development",
+          "request_id": "req_386e8dec5632f5af",
+          "resource": "environment",
+          "result": "failed",
+          "status": 400
+        }
+      },
       "aud_42a29c97c93fc5b6": {
         "version": 7,
         "value": {
@@ -12,6 +68,47 @@
           "operation": "POST /environments",
           "operator_id": "development",
           "request_id": "req_42a29c97c93fc5b6",
+          "resource": "environment",
+          "result": "failed",
+          "status": 400
+        }
+      },
+      "aud_5f0998d70558a810": {
+        "version": 29,
+        "value": {
+          "at": "2026-09-28T20:39:16.384272000Z",
+          "detail": {},
+          "error_kind": "invalid",
+          "operation": "POST /environments",
+          "operator_id": "development",
+          "request_id": "req_5f0998d70558a810",
+          "resource": "environment",
+          "result": "failed",
+          "status": 400
+        }
+      },
+      "aud_8f9a2b8ffcc7d2d4": {
+        "version": 30,
+        "value": {
+          "at": "2026-09-28T20:40:55.624134000Z",
+          "detail": {},
+          "operation": "POST /shutdown",
+          "operator_id": "development",
+          "request_id": "req_8f9a2b8ffcc7d2d4",
+          "resource": "shutdown",
+          "result": "accepted",
+          "status": 200
+        }
+      },
+      "aud_a7f42c01c023daf6": {
+        "version": 26,
+        "value": {
+          "at": "2026-09-28T20:37:20.479802000Z",
+          "detail": {},
+          "error_kind": "invalid",
+          "operation": "POST /environments",
+          "operator_id": "development",
+          "request_id": "req_a7f42c01c023daf6",
           "resource": "environment",
           "result": "failed",
           "status": 400
@@ -43,6 +140,19 @@
           "resource": "environment",
           "result": "failed",
           "status": 400
+        }
+      },
+      "aud_f4e363f80b98a38b": {
+        "version": 16,
+        "value": {
+          "at": "2026-09-28T19:58:39.457681000Z",
+          "detail": {},
+          "operation": "POST /shutdown",
+          "operator_id": "development",
+          "request_id": "req_f4e363f80b98a38b",
+          "resource": "shutdown",
+          "result": "accepted",
+          "status": 200
         }
       }
     },
@@ -127,7 +237,7 @@
                 "endpoints": 0.00025,
                 "network": 0.020958,
                 "observe": 0.064625,
-                "pending": 0.021667000000000002,
+                "pending": 0.021667,
                 "refresh": 0.003417,
                 "releases": 0.049332999999999995
               },
@@ -150,17 +260,245 @@
           "message": "Compute controller daemon_18e780f070f7e7688920ab98 is ready",
           "sequence": 5
         }
+      },
+      "evt_00000000000000000006": {
+        "version": 11,
+        "value": {
+          "at": "2026-09-28T19:56:13.351069Z",
+          "data": {
+            "artifacts": ".compute/daemon/artifacts",
+            "reaped": [],
+            "state": {
+              "durable": true,
+              "kind": "file",
+              "location": ".compute/daemon/control-state.json"
+            }
+          },
+          "kind": "daemon.started",
+          "message": "Compute daemon daemon_dc18d0563f6823aaba8a27f6 started",
+          "sequence": 6
+        }
+      },
+      "evt_00000000000000000007": {
+        "version": 12,
+        "value": {
+          "at": "2026-09-28T19:56:13.362366Z",
+          "data": {
+            "controller": {
+              "build_id": "sha256:3fbe94419e2a68265067c5aa26d8efbdd8787b67b2fd5a041e6a3e7890fa943d",
+              "build_profile": "release",
+              "executable": "/Users/randy/.cargo/bin/compute",
+              "git_commit": "f03f30fb9af71ac4efcae1955ee33f62149ae049-dirty",
+              "platform": "macos-aarch64",
+              "version": "0.1.0"
+            },
+            "data_plane": {
+              "build_id": "sha256:22ceb1b2d8aaa0f212c6bbf205c7412a39496adb4a2ddc5c634cb70852758ae2",
+              "kind": "supervisor",
+              "orphans_stopped": 0,
+              "pid": 67605,
+              "protocol": 1,
+              "routes": 0,
+              "started_at": "2026-09-28T15:38:43.832571Z",
+              "units": 0,
+              "version": "0.1.0"
+            },
+            "recovery": {
+              "collected": [],
+              "orphaned": [],
+              "reattached": []
+            }
+          },
+          "kind": "controller.started",
+          "message": "Compute controller daemon_dc18d0563f6823aaba8a27f6 started (supervisor data plane, pid 67605); reattached 0, collected 0, orphaned 0",
+          "sequence": 7
+        }
+      },
+      "evt_00000000000000000008": {
+        "version": 13,
+        "value": {
+          "at": "2026-09-28T19:56:13.371082Z",
+          "data": {
+            "started_at": "2026-09-28T19:56:13.370770Z"
+          },
+          "kind": "reconcile.started",
+          "message": "reconciliation started at 2026-09-28T19:56:13.370770+00:00",
+          "sequence": 8
+        }
+      },
+      "evt_00000000000000000009": {
+        "version": 14,
+        "value": {
+          "at": "2026-09-28T19:56:13.371124Z",
+          "data": {
+            "cycle": {
+              "duration_ms": 0.30079199999999995,
+              "errors": 0,
+              "phases_ms": {
+                "computers": 0.00675,
+                "converge": 0.023083,
+                "data_plane": 0.051583,
+                "endpoints": 0.000167,
+                "network": 0.01875,
+                "observe": 0.1035,
+                "pending": 0.023458,
+                "refresh": 0.002708,
+                "releases": 0.04675
+              },
+              "resources_changed": 0,
+              "resources_examined": 0,
+              "started_at": "2026-09-28T19:56:13.370770Z"
+            }
+          },
+          "kind": "reconcile.finished",
+          "message": "reconciliation finished in 0.3 ms: 0 resources examined, 0 changed, 0 errors",
+          "sequence": 9
+        }
+      },
+      "evt_00000000000000000010": {
+        "version": 15,
+        "value": {
+          "at": "2026-09-28T19:56:13.380749Z",
+          "data": {},
+          "kind": "controller.ready",
+          "message": "Compute controller daemon_dc18d0563f6823aaba8a27f6 is ready",
+          "sequence": 10
+        }
+      },
+      "evt_00000000000000000011": {
+        "version": 17,
+        "value": {
+          "at": "2026-09-28T19:58:39.470371Z",
+          "data": {},
+          "kind": "daemon.stopped",
+          "message": "Compute daemon daemon_dc18d0563f6823aaba8a27f6 stopped",
+          "sequence": 11
+        }
+      },
+      "evt_00000000000000000012": {
+        "version": 19,
+        "value": {
+          "at": "2026-09-28T20:01:44.393922Z",
+          "data": {
+            "artifacts": ".compute/daemon/artifacts",
+            "reaped": [],
+            "state": {
+              "durable": true,
+              "kind": "file",
+              "location": ".compute/daemon/control-state.json"
+            }
+          },
+          "kind": "daemon.started",
+          "message": "Compute daemon daemon_20e4a9db6ee95e52cf390ec0 started",
+          "sequence": 12
+        }
+      },
+      "evt_00000000000000000013": {
+        "version": 20,
+        "value": {
+          "at": "2026-09-28T20:01:44.404881Z",
+          "data": {
+            "controller": {
+              "build_id": "sha256:d3f4e580bc31ed45487ecd435d8513392c7252cd52c17bd55a6646857e6e9168",
+              "build_profile": "release",
+              "executable": "/Users/randy/.cargo/bin/compute",
+              "git_commit": "f03f30fb9af71ac4efcae1955ee33f62149ae049-dirty",
+              "platform": "macos-aarch64",
+              "version": "0.1.0"
+            },
+            "data_plane": {
+              "build_id": "sha256:d3f4e580bc31ed45487ecd435d8513392c7252cd52c17bd55a6646857e6e9168",
+              "kind": "supervisor",
+              "orphans_stopped": 0,
+              "pid": 28749,
+              "protocol": 1,
+              "routes": 0,
+              "started_at": "2026-09-28T20:01:43.767630Z",
+              "units": 0,
+              "version": "0.1.0"
+            },
+            "recovery": {
+              "collected": [],
+              "orphaned": [],
+              "reattached": []
+            }
+          },
+          "kind": "controller.started",
+          "message": "Compute controller daemon_20e4a9db6ee95e52cf390ec0 started (supervisor data plane, pid 28749); reattached 0, collected 0, orphaned 0",
+          "sequence": 13
+        }
+      },
+      "evt_00000000000000000014": {
+        "version": 21,
+        "value": {
+          "at": "2026-09-28T20:01:44.413901Z",
+          "data": {
+            "started_at": "2026-09-28T20:01:44.413609Z"
+          },
+          "kind": "reconcile.started",
+          "message": "reconciliation started at 2026-09-28T20:01:44.413609+00:00",
+          "sequence": 14
+        }
+      },
+      "evt_00000000000000000015": {
+        "version": 22,
+        "value": {
+          "at": "2026-09-28T20:01:44.413942Z",
+          "data": {
+            "cycle": {
+              "duration_ms": 0.27216700000000005,
+              "errors": 0,
+              "phases_ms": {
+                "computers": 0.007209,
+                "converge": 0.020667,
+                "data_plane": 0.060625000000000005,
+                "endpoints": 0.00020800000000000001,
+                "network": 0.018625,
+                "observe": 0.078708,
+                "pending": 0.026125000000000002,
+                "refresh": 0.003542,
+                "releases": 0.0435
+              },
+              "resources_changed": 0,
+              "resources_examined": 0,
+              "started_at": "2026-09-28T20:01:44.413609Z"
+            }
+          },
+          "kind": "reconcile.finished",
+          "message": "reconciliation finished in 0.3 ms: 0 resources examined, 0 changed, 0 errors",
+          "sequence": 15
+        }
+      },
+      "evt_00000000000000000016": {
+        "version": 23,
+        "value": {
+          "at": "2026-09-28T20:01:44.422535Z",
+          "data": {},
+          "kind": "controller.ready",
+          "message": "Compute controller daemon_20e4a9db6ee95e52cf390ec0 is ready",
+          "sequence": 16
+        }
+      },
+      "evt_00000000000000000017": {
+        "version": 31,
+        "value": {
+          "at": "2026-09-28T20:40:55.633478Z",
+          "data": {},
+          "kind": "daemon.stopped",
+          "message": "Compute daemon daemon_20e4a9db6ee95e52cf390ec0 stopped",
+          "sequence": 17
+        }
       }
     },
     "Provider": {
       "pvd_local": {
-        "version": 1,
+        "version": 18,
         "value": {
           "kind": "local",
-          "observed_at": "2026-09-28T15:38:44.205144Z",
+          "observed_at": "2026-09-28T20:01:44.381491Z",
           "priority": 0,
           "provider_id": "local",
-          "registered_by": "daemon_18e780f070f7e7688920ab98"
+          "registered_by": "daemon_20e4a9db6ee95e52cf390ec0"
         }
       }
     }

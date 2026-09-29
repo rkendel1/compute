@@ -444,7 +444,9 @@ async function environmentsView() {
   ];
 }
 
-function createEnvironment() {
+async function createEnvironment() {
+  const targets = await api('GET', '/targets').catch(() => []);
+  const hasComputerHost = targets.some((target) => target.hosts_computers);
   const name = h('input', { id: 'environment-name', placeholder: 'my-app', autocomplete: 'off' });
   // Modest defaults: a computer that fits on a laptop. Ask for more.
   const cpu = h('input', { id: 'environment-cpu', type: 'number', min: '1', value: '1' });
@@ -455,9 +457,11 @@ function createEnvironment() {
   const keep = h('input', { type: 'radio', name: 'environment-lifetime', value: 'persistent', checked: true });
   const temporary = h('input', { type: 'radio', name: 'environment-lifetime', value: 'ephemeral' });
   const target = h('input', { id: 'environment-target', placeholder: 'placement chooses', autocomplete: 'off' });
-  const node = h('input', { id: 'environment-node', type: 'checkbox' });
+  const node = h('input', { id: 'environment-node', type: 'checkbox', checked: !hasComputerHost, disabled: !hasComputerHost });
+  for (const input of [cpu, memory, storage, endpoint, features, keep, temporary, target]) input.disabled = !hasComputerHost;
   modal('New environment', h('div', {},
     h('label', { for: 'environment-name' }, 'Name'), name,
+    !hasComputerHost ? h('div', { class: 'panel note' }, 'No computer host is configured. This environment will run on the control-plane node; configure a target before creating a computer.') : null,
     h('p', {}, h('strong', {}, 'What kind of computer do you need?'), ' Compute places it on a target that can provide it.'),
     h('label', { for: 'environment-cpu' }, 'CPUs'), cpu,
     h('label', { for: 'environment-memory' }, 'Memory (GiB)'), memory,
@@ -755,13 +759,14 @@ async function destroyComputer(name) {
 // ---- Work ----------------------------------------------------------------------------
 
 async function workHomeView() {
-  const environments = await api('GET', '/environments');
+  const [environments, targets] = await Promise.all([api('GET', '/environments'), api('GET', '/targets').catch(() => [])]);
   const computers = environments.filter((environment) => environment.computer);
+  const hasComputerHost = targets.some((target) => target.hosts_computers);
   return [
     h('div', { class: 'title' }, h('h1', {}, 'Work'),
       h('div', { class: 'actions' },
-        h('button', { onclick: temporaryDialog }, 'Temporary environment'),
-        h('button', { class: 'primary', onclick: createEnvironment }, 'New environment'))),
+        h('button', { disabled: !hasComputerHost, onclick: temporaryDialog }, 'Temporary environment'),
+        h('button', { class: 'primary', disabled: !hasComputerHost, onclick: createEnvironment }, 'New environment'))),
     h('div', { class: 'subtitle' }, 'What do you want to work on?'),
     computers.length ? h('div', { class: 'cards' }, computers.map((environment) =>
       h('div', { class: 'panel card', role: 'link', tabindex: '0', 'data-environment': environment.name,
@@ -770,7 +775,9 @@ async function workHomeView() {
       h('div', { class: 'name' }, environment.name),
       h('div', { class: 'meta' }, environment.target ? `on ${environment.target}` : 'placing…'),
       state(observedSummary(environment)))))
-      : h('div', { class: 'panel empty' }, 'No environment has a computer yet. Create one, or start a temporary one.'),
+      : h('div', { class: 'panel empty' }, hasComputerHost
+        ? 'No environment has a computer yet. Create one, or start a temporary one.'
+        : 'No computer host is configured. Ask an administrator to add a target before starting work.'),
   ];
 }
 
@@ -1087,17 +1094,19 @@ const ACTIONS = [
 ];
 
 async function homeView() {
-  const [software, environments] = await Promise.all([
+  const [software, environments, targets] = await Promise.all([
     api('GET', '/software').catch(() => []),
     api('GET', '/environments').catch(() => []),
+    api('GET', '/targets').catch(() => []),
   ]);
   const computers = environments.filter((environment) => environment.computer);
+  const hasComputerHost = targets.some((target) => target.hosts_computers);
   const production = computers.find((environment) => /prod/.test(environment.name));
   return [
     h('div', { class: 'title' }, h('h1', {}, 'What do you want to do?')),
     h('div', { class: 'subtitle' }, 'Put software here. Make it run. Change it. Test it. Publish it. Deploy it. Promote it. Operate it.'),
     h('div', { class: 'actions-grid' }, ACTIONS.map(([key, title, text, href]) =>
-      h('button', { class: 'action-tile', 'data-action': key, onclick: () => {
+      h('button', { class: 'action-tile', 'data-action': key, disabled: !hasComputerHost && ['run', 'try', 'computer'].includes(key), onclick: () => {
         if (key === 'computer') return createEnvironment();
         location.hash = key === 'operate' && production ? `#/environments/${enc(production.name)}` : href;
       } }, h('strong', {}, title), h('span', {}, text)))),

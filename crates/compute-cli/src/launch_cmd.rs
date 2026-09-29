@@ -118,6 +118,94 @@ fn detached(
     Ok(command.spawn()?.id())
 }
 
+/// Ensure this control plane has a local computer host and return the pool
+/// that names it. This is shared by `compute` and a development
+/// `compute start`: both are one user-facing start operation, even though
+/// the computer host remains a separate authority internally.
+pub(crate) fn ensure_local_host(
+    home: &std::path::Path,
+    target_listen: &str,
+    containers: bool,
+) -> compute_core::Result<PathBuf> {
+    std::fs::create_dir_all(home)?;
+    let exe = std::env::current_exe()?;
+    let host = home.join("computers");
+    std::fs::create_dir_all(&host)?;
+    let control_plane = control_plane_identity(home)?;
+    let credentials = host.join("credentials.json");
+    let token_file = home
+        .join("control-plane")
+        .join("targets")
+        .join("this-machine.token");
+    ensure_target_credential(&credentials, &token_file, &control_plane)?;
+    if !answers(target_listen) {
+        let mut serve = std::process::Command::new(&exe);
+        serve
+            .args(["serve", "--listen", target_listen, "--public-url"])
+            .arg(format!("http://{target_listen}"))
+            .arg("--job-store")
+            .arg(host.join("jobs"))
+            .arg("--session-store")
+            .arg(host.join("sessions"))
+            .arg("--credentials")
+            .arg(&credentials);
+        if containers {
+            serve.args(["--session-provider", "container"]);
+        }
+        let log = host.join("host.log");
+        let pid = detached(&mut serve, &log)?;
+        std::fs::write(host.join("host.pid"), pid.to_string())?;
+        wait_for(target_listen, "this machine's computer host", &log)?;
+    }
+    let pool = home.join("pool.toml");
+    std::fs::write(
+        &pool,
+        format!(
+            "# Written by Compute: the local computer host and the credential\n\
+             # this control plane presents to it.\n\
+             [providers.this-machine]\nkind = \"remote\"\nendpoint = \"http://{target_listen}\"\ntoken_file = {:?}\n",
+            token_file.display().to_string()
+        ),
+    )?;
+    Ok(pool)
+}
+
+/// The private endpoint of a managed local host. Pick it once and persist it
+/// so controller restarts find the same target without imposing a public
+/// port convention or colliding with another local control plane.
+pub(crate) fn managed_local_host_endpoint(home: &std::path::Path) -> compute_core::Result<String> {
+    let host = home.join("computers");
+    std::fs::create_dir_all(&host)?;
+    let path = host.join("listen");
+    if let Ok(endpoint) = std::fs::read_to_string(&path) {
+        let endpoint = endpoint.trim();
+        if endpoint.parse::<std::net::SocketAddr>().is_ok() {
+            return Ok(endpoint.to_owned());
+        }
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let endpoint = listener.local_addr()?.to_string();
+    drop(listener);
+    std::fs::write(path, format!("{endpoint}\n"))?;
+    Ok(endpoint)
+}
+
+/// Stop a computer host previously created by [`ensure_local_host`]. Its
+/// durable session and workspace records stay under `home` for the next
+/// start.
+pub(crate) fn stop_local_host(home: &std::path::Path) {
+    let pid_file = home.join("computers").join("host.pid");
+    if let Ok(pid) = std::fs::read_to_string(&pid_file)
+        && let Ok(pid) = pid.trim().parse::<i32>()
+    {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        let _ = std::fs::remove_file(pid_file);
+    }
+}
+
 pub async fn up(command: UpCommand) -> compute_core::Result<()> {
     let listen = setting(command.listen.clone(), "COMPUTE_LISTEN", "127.0.0.1:8787");
     let target_listen = setting(
@@ -127,49 +215,9 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
     );
     let no_browser = command.no_browser || std::env::var_os("COMPUTE_NO_BROWSER").is_some();
     let home = home()?;
-    std::fs::create_dir_all(&home)?;
     let exe = std::env::current_exe()?;
-    // This machine's computer host: a target like any other, which trusts
-    // only this control plane.
-    let host = home.join("computers");
-    std::fs::create_dir_all(&host)?;
+    let pool = ensure_local_host(&home, &target_listen, command.containers)?;
     let control_plane = control_plane_identity(&home)?;
-    let credentials = host.join("credentials.json");
-    let token_file = home
-        .join("control-plane")
-        .join("targets")
-        .join("this-machine.token");
-    ensure_target_credential(&credentials, &token_file, &control_plane)?;
-    if !answers(&target_listen) {
-        let mut serve = std::process::Command::new(&exe);
-        serve
-            .args(["serve", "--listen", &target_listen, "--public-url"])
-            .arg(format!("http://{}", target_listen))
-            .arg("--job-store")
-            .arg(host.join("jobs"))
-            .arg("--session-store")
-            .arg(host.join("sessions"))
-            .arg("--credentials")
-            .arg(&credentials);
-        if command.containers {
-            serve.args(["--session-provider", "container"]);
-        }
-        let log = host.join("host.log");
-        let pid = detached(&mut serve, &log)?;
-        std::fs::write(host.join("host.pid"), pid.to_string())?;
-        wait_for(&target_listen, "this machine's computer host", &log)?;
-    }
-    let pool = home.join("pool.toml");
-    std::fs::write(
-        &pool,
-        format!(
-            "# Written by `compute`: the targets computers are placed on, and the\n\
-             # credential this control plane presents to each.\n\
-             [providers.this-machine]\nkind = \"remote\"\nendpoint = \"http://{}\"\ntoken_file = {:?}\n",
-            target_listen,
-            token_file.display().to_string()
-        ),
-    )?;
     let url = format!("http://{}", listen);
     if !answers(&listen) {
         let state = home.join("control-plane");
@@ -289,16 +337,7 @@ pub async fn down(command: DownCommand) -> compute_core::Result<()> {
             .env("COMPUTE_DAEMON", format!("http://{}", listen))
             .status();
     }
-    let pid_file = home.join("computers").join("host.pid");
-    if let Ok(pid) = std::fs::read_to_string(&pid_file)
-        && let Ok(pid) = pid.trim().parse::<i32>()
-    {
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(pid, libc::SIGTERM);
-        }
-        let _ = std::fs::remove_file(&pid_file);
-    }
+    stop_local_host(&home);
     println!(
         "Compute is stopped. Its state is kept in {}.",
         home.display()

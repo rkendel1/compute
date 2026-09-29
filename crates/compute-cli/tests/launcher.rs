@@ -170,3 +170,37 @@ async fn the_launcher_makes_a_host_that_trusts_only_its_control_plane() {
         1
     );
 }
+
+#[test]
+fn a_development_start_is_one_operation_and_can_open_a_temporary_session() {
+    let temporary = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let launched = Launched {
+        home: temporary.path().join("home"),
+        listen: format!("127.0.0.1:{port}"),
+        target: format!("127.0.0.1:{}", free_port()),
+    };
+    let state = temporary.path().join("state");
+    let output = launched
+        .command(&["start", "--detach", "--listen", &launched.listen])
+        .args(["--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let targets = launched.json(&["target", "list", "--json"]);
+    let local = targets
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|target| target["target_id"] == "this-machine")
+        .unwrap_or_else(|| panic!("{targets}"));
+    assert_eq!(local["hosts_computers"], true);
+
+    let session = launched.json(&[
+        "session", "open", "--cpu", "1", "--memory", "64Mi", "--json",
+    ]);
+    assert_eq!(session["kind"], "ephemeral");
+    assert_eq!(session["status"], "open");
+}
