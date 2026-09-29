@@ -172,6 +172,56 @@ pub enum WorkspaceCommands {
     },
 }
 
+#[derive(Args, Debug)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: Option<ConfigCommands>,
+    pub environment: Option<String>,
+    /// Set KEY=VALUE (repeatable).
+    #[arg(long = "set", value_parser = parse_pair)]
+    pub set: Vec<(String, String)>,
+    /// Remove KEY (repeatable).
+    #[arg(long)]
+    pub unset: Vec<String>,
+    /// A variable being set whose value may be shown (repeatable).
+    #[arg(long)]
+    pub public: Vec<String>,
+    /// A variable being set that is sensitive whatever its name says.
+    #[arg(long)]
+    pub secret: Vec<String>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommands {
+    /// Import `.env` files as configuration: parsed and validated whole, then
+    /// applied as one new generation. The files are not copied into the
+    /// workspace, and no value is printed.
+    Import {
+        environment: String,
+        /// `.env` files, applied in the order given (a later file overrides).
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// A variable whose value may be shown (repeatable).
+        #[arg(long)]
+        public: Vec<String>,
+        /// A variable that is sensitive whatever its name says (repeatable).
+        #[arg(long)]
+        secret: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the variables the workspace's `.env` files ask for or provide
+    /// (names only; nothing is imported).
+    Discover {
+        environment: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 pub enum ComputerCommands {
     /// Show an environment's computer: desired against observed contents.
@@ -310,19 +360,12 @@ pub enum ComputerCommands {
     /// Release a revision of a project: the computer checks it out, builds
     /// it, and restarts what runs from it, in place. No redeployment.
     Release(ReleaseArgs),
-    /// Show or change the configuration every process, build, and command
-    /// sees. What depends on it restarts in place.
-    Config {
-        environment: String,
-        /// Set KEY=VALUE (repeatable).
-        #[arg(long = "set", value_parser = parse_pair)]
-        set: Vec<(String, String)>,
-        /// Remove KEY (repeatable).
-        #[arg(long)]
-        unset: Vec<String>,
-        #[arg(long)]
-        json: bool,
-    },
+    /// The environment's configuration: the runtime inputs its processes,
+    /// builds, and commands are given. Shows what is configured (never a
+    /// sensitive value); `--set`/`--unset` change it; `import` reads `.env`
+    /// files; `discover` lists what the workspace's `.env` files ask for. What
+    /// depends on a change restarts in place.
+    Config(ConfigArgs),
     /// Inspect a project's source in the computer and propose how to run
     /// it: runtime, dependencies, build, tests, start command, ports,
     /// services, configuration. Nothing changes.
@@ -949,6 +992,17 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                         report.omitted_config.join(", ")
                     );
                 }
+                if !report.configuration_required.is_empty() {
+                    println!(
+                        "Configure:   {} (no values are restored: compute environment config)",
+                        report
+                            .configuration_required
+                            .iter()
+                            .map(|variable| variable.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
                 println!("Operation:   {} durable jobs succeeded", report.jobs.len());
                 print_computer(&report.computer, false);
             }
@@ -1205,40 +1259,7 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
             wait_job(client, &environment, &submitted, json).await?;
         }
         ComputerCommands::Release(args) => release(client, &args).await?,
-        ComputerCommands::Config {
-            environment,
-            set,
-            unset,
-            json,
-        } => {
-            let view: ComputerView = client
-                .get(&format!("/environments/{environment}/computer"))
-                .await
-                .map_err(error)?;
-            if set.is_empty() && unset.is_empty() {
-                if json {
-                    print_json(&view.config.keys().collect::<Vec<_>>());
-                } else {
-                    for key in view.config.keys() {
-                        println!("{key}");
-                    }
-                }
-                return Ok(());
-            }
-            let mut config = view.config.clone();
-            for key in &unset {
-                config.remove(key);
-            }
-            config.extend(set);
-            let view: ComputerView = client
-                .post(
-                    &format!("/environments/{environment}/config"),
-                    Some(&config),
-                )
-                .await
-                .map_err(error)?;
-            print_computer(&view, json);
-        }
+        ComputerCommands::Config(args) => configuration(client, args).await?,
         ComputerCommands::Propose {
             environment,
             url,
@@ -1976,6 +1997,184 @@ pub async fn target(command: TargetCommand) -> compute_core::Result<()> {
                         (None, false) => "-".to_owned(),
                     }
                 );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn configuration(client: &DaemonClient, args: ConfigArgs) -> compute_core::Result<()> {
+    use compute_environment::*;
+    match args.command {
+        Some(ConfigCommands::Import {
+            environment,
+            files,
+            public,
+            secret,
+            json,
+        }) => {
+            let mut sent = vec![];
+            for path in files {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        compute_core::ComputeError::Runtime(format!(
+                            "{} is not a file",
+                            path.display()
+                        ))
+                    })?
+                    .to_owned();
+                let content = std::fs::read_to_string(&path)?;
+                sent.push(ConfigFile { name, content });
+            }
+            let report: ConfigImportReport = client
+                .post(
+                    &format!("/environments/{environment}/config/import"),
+                    Some(&ConfigImportRequest {
+                        files: sent,
+                        public,
+                        secret,
+                    }),
+                )
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&report);
+            } else {
+                if report.unchanged {
+                    println!(
+                        "Nothing changed: {} already holds these variables (configuration generation {}).",
+                        report.environment, report.generation
+                    );
+                } else {
+                    println!(
+                        "Imported {} variables into {} from {} (configuration generation {}).",
+                        report.imported.len(),
+                        report.environment,
+                        report.files.join(", "),
+                        report.generation
+                    );
+                }
+                for variable in &report.imported {
+                    println!(
+                        "  {:<28} {:<10} {:<10} {}",
+                        variable.name,
+                        if variable.changed {
+                            "imported"
+                        } else {
+                            "unchanged"
+                        },
+                        if variable.sensitive {
+                            "secret"
+                        } else {
+                            "non-secret"
+                        },
+                        variable.source
+                    );
+                }
+                for skipped in &report.skipped {
+                    println!("  {:<28} skipped: {}", skipped.name, skipped.reason);
+                }
+                if !report.overridden.is_empty() {
+                    println!(
+                        "  defined in more than one file (the later won): {}",
+                        report.overridden.join(", ")
+                    );
+                }
+            }
+        }
+        Some(ConfigCommands::Discover { environment, json }) => {
+            let found: ConfigurationDiscovery = client
+                .post::<(), _>(
+                    &format!("/environments/{environment}/config/discover"),
+                    None,
+                )
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&found);
+            } else if found.files.is_empty() {
+                println!("No .env files in {}'s workspace.", found.environment);
+            } else {
+                println!("Environment: {}", found.environment);
+                for file in &found.files {
+                    println!("  {} ({})", file.path, file.kind);
+                }
+                println!("Variables:");
+                for variable in &found.variables {
+                    println!(
+                        "  {:<28} {:<10} {:<10} {}",
+                        variable.name,
+                        variable.status,
+                        if variable.sensitive {
+                            "secret"
+                        } else {
+                            "non-secret"
+                        },
+                        variable.files.join(", ")
+                    );
+                }
+            }
+        }
+        None => {
+            let environment = args.environment.ok_or_else(|| {
+                compute_core::ComputeError::Runtime(
+                    "name the environment: compute environment config NAME".into(),
+                )
+            })?;
+            let view: ConfigurationView = if args.set.is_empty() && args.unset.is_empty() {
+                client
+                    .get(&format!("/environments/{environment}/config"))
+                    .await
+                    .map_err(error)?
+            } else {
+                client
+                    .post(
+                        &format!("/environments/{environment}/config/change"),
+                        Some(&ConfigChange {
+                            set: args.set.into_iter().collect(),
+                            unset: args.unset,
+                            public: args.public,
+                            secret: args.secret,
+                            source: Some("cli".into()),
+                        }),
+                    )
+                    .await
+                    .map_err(error)?
+            };
+            if args.json {
+                print_json(&view);
+            } else {
+                println!(
+                    "Environment: {}  (configuration generation {})",
+                    view.environment, view.generation
+                );
+                if view.variables.is_empty() {
+                    println!("  No configuration.");
+                }
+                for variable in &view.variables {
+                    println!(
+                        "  {:<28} {:<10} {:<10} {}{}",
+                        variable.name,
+                        if variable.configured {
+                            "configured"
+                        } else {
+                            "missing"
+                        },
+                        if variable.sensitive {
+                            "secret"
+                        } else {
+                            "non-secret"
+                        },
+                        variable.source,
+                        variable
+                            .value
+                            .as_ref()
+                            .map(|value| format!("  = {value}"))
+                            .unwrap_or_default()
+                    );
+                }
             }
         }
     }

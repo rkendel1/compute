@@ -114,6 +114,21 @@ Capturing state that has already been captured returns the existing record
 rewritten. Two captures of one environment differ only when the state or the
 provenance does.
 
+## Configuration is not captured
+
+A checkpoint captures the workspace. Configuration ([configuration.md](configuration.md))
+is not workspace state: its values are never written into a workspace by Compute
+and are not in the artifact. The manifest records the environment's
+configuration *by name*: each variable, whether it was sensitive, its source,
+and the configuration generation, so a reader knows what the state ran with and
+a restore knows what to supply. It records no value (tested).
+
+A `.env` file that a workload or a person wrote *into the workspace* is
+ordinary workspace data and is captured with it. The configuration import path
+does not create such a file; Compute cannot recognise secrets in arbitrary
+workspace files, and does not claim to. Explicit workspace exclusion rules would
+be a separate feature.
+
 ## Credentials
 
 Compute writes no credential, token, session, connection, or endpoint material

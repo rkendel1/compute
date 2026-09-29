@@ -493,6 +493,7 @@ fn claim_start(
             && matches!(seen.state, ProcessState::Exited | ProcessState::Failed)
     });
     let mut claim = current.cloned().unwrap_or(ObservedProcess {
+        config_generation: 0,
         state: ProcessState::Starting,
         fingerprint: wanted.to_owned(),
         pid: None,
@@ -1050,7 +1051,8 @@ impl Daemon {
         };
         let mut contents = definition.contents.clone();
         contents.generation = 1;
-        let record = EnvironmentRecord {
+        let mut record = EnvironmentRecord {
+            configuration: None,
             name: definition.name.clone(),
             desired_state: definition.desired_state,
             config: definition.env.clone(),
@@ -1065,6 +1067,7 @@ impl Daemon {
             computer: Some(spec.clone()),
             contents: Some(contents),
         };
+        super::settle_configuration(None, &mut record, 1);
         // Refused here, with every target's reasons, when nothing can host it.
         let report = self.place_computer(&record, &spec).await?;
         let id = format!(
@@ -1234,7 +1237,8 @@ impl Daemon {
             lifecycle: value.lifecycle,
             requested_lifecycle: spec.lifecycle,
             machine,
-            config: record.value.config.clone(),
+            config: super::visible_config(&record.value),
+            configuration: super::configuration_view(&record.value.name, &record.value),
             endpoints,
             status: value.status,
             requirements: spec.requirements,
@@ -1356,6 +1360,7 @@ impl Daemon {
                     max_restarts: spec.max_restarts,
                     next_restart_at: seen.and_then(|seen| seen.retry_at),
                     last_failure: seen.and_then(|seen| seen.last_failure.clone()),
+                    config_generation: seen.map_or(0, |seen| seen.config_generation),
                 };
                 (spec.name.clone(), reality)
             })
@@ -1521,6 +1526,7 @@ impl Daemon {
             contents.validate()?;
             validate_env("environment", &value.config)?;
             value.contents = Some(contents.clone());
+            super::settle_configuration(Some(&record.value), &mut value, contents.generation);
             let lifecycle = value
                 .computer
                 .as_ref()
@@ -1606,7 +1612,8 @@ impl Daemon {
                 }
                 value.contents = Some(update.contents.clone());
                 if let Some(config) = &update.config {
-                    value.config = config.clone();
+                    let before = value.clone();
+                    value.config = super::replace_visible_config(&before, config);
                 }
                 if let Some(lifecycle) = &update.lifecycle {
                     let spec = value
@@ -3750,6 +3757,11 @@ impl Daemon {
                 seen.evidence = evidence.clone();
                 if evidence.outcome == "succeeded" {
                     seen.state = ProcessState::Running;
+                    seen.config_generation = record
+                        .value
+                        .configuration
+                        .as_ref()
+                        .map_or(0, |state| state.generation);
                     seen.pid = output
                         .lines()
                         .last()
@@ -4655,6 +4667,7 @@ mod tests {
         observed.processes.insert(
             process.name.clone(),
             ObservedProcess {
+                config_generation: 0,
                 state: ProcessState::Running,
                 fingerprint: started.clone(),
                 pid: Some(1),
@@ -4706,6 +4719,7 @@ mod tests {
         observed.processes.insert(
             "api".into(),
             ObservedProcess {
+                config_generation: 0,
                 state: ProcessState::Failed,
                 fingerprint,
                 pid: None,
@@ -4801,6 +4815,7 @@ mod tests {
         observed.processes.insert(
             "api".into(),
             ObservedProcess {
+                config_generation: 0,
                 state: ProcessState::Running,
                 fingerprint: started,
                 pid: Some(1),

@@ -2724,6 +2724,26 @@
    "tests": []
   },
   {
+   "command": "compute environment config import",
+   "about": "Import .env files as configuration: parsed whole, applied as one generation, never printed or copied into the workspace",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": null,
+   "tests": []
+  },
+  {
+   "command": "compute environment config discover",
+   "about": "List the variables the workspace's .env files ask for or provide (names only)",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": null,
+   "tests": []
+  },
+  {
    "command": "compute environment checkpoint",
    "about": "Capture a checkpoint: immutable, verified, portable workspace state held as a durable artifact",
    "help_defect": null,
@@ -4137,6 +4157,42 @@
    "method": "POST",
    "path": "/environments/{environment}/fork",
    "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/environments/{environment}/config",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/config/change",
+   "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/config/import",
+   "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/config/discover",
+   "scope": "Execute",
    "ui": false,
    "cli": true,
    "appport": false,

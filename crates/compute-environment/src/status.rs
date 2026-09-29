@@ -484,9 +484,14 @@ pub struct ComputerView {
     /// Ordinary changes never replace it; `replace` does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<MachineView>,
-    /// What every process, build, and command sees.
+    /// The public configuration values every process, build, and command sees.
+    /// A sensitive value is never returned: see `configuration`.
     #[serde(default)]
     pub config: BTreeMap<String, String>,
+    /// Every configured variable, how it is treated and where it came from,
+    /// and the generation: without the values a caller may not see.
+    #[serde(default)]
+    pub configuration: crate::configuration::ConfigurationView,
     pub desired: compute_core::EnvironmentContents,
     pub observed: compute_core::ObservedContents,
     /// Where the environment's processes listen.
@@ -568,6 +573,13 @@ pub struct ProcessReality {
     pub next_restart_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<compute_core::ProcessFailure>,
+    /// The configuration generation the running process started with.
+    #[serde(default, skip_serializing_if = "is_zero_generation")]
+    pub config_generation: u64,
+}
+
+fn is_zero_generation(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Summary row for `compute environment list` and the UI's first screen.

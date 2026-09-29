@@ -45,6 +45,9 @@ app compute {
     owner: text?
     computer: json?
     contents: json?
+    // Generation 11: what is known about config (sensitivity, sources,
+    // generation), never its values.
+    configuration: json?
     index name using hash(name)
     record_id: text?
     index record_id using hash(record_id)

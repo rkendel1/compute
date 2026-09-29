@@ -67,8 +67,31 @@ pub struct Manifest {
     /// The checkpoint this one was derived from: lineage, not authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// The configuration the environment had: which variables, how each was
+    /// treated, and where each came from. **Names only, never a value.** A
+    /// restore needs these supplied; nothing here carries them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<ManifestConfiguration>,
     /// Empty directories, sorted, then files, sorted.
     pub entries: Vec<Entry>,
+}
+
+/// The configuration an environment had at capture, by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestConfiguration {
+    /// The environment's configuration generation at capture.
+    pub generation: u64,
+    /// Sorted by name.
+    pub variables: Vec<ManifestVariable>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestVariable {
+    pub name: String,
+    pub sensitive: bool,
+    pub source: String,
 }
 
 /// Where the state came from. Provenance only: nothing here grants anything.
@@ -112,6 +135,7 @@ pub struct Provenance {
     pub contents_generation: u64,
     pub platform: String,
     pub parent: Option<String>,
+    pub configuration: Option<ManifestConfiguration>,
 }
 
 /// A checkpoint artifact that validated.
@@ -175,6 +199,7 @@ pub(crate) fn build(
             note: EXCLUSION_NOTE.into(),
         },
         parent: provenance.parent.clone(),
+        configuration: provenance.configuration.clone(),
         entries,
     };
     render(&manifest, workspace)
@@ -419,6 +444,7 @@ mod tests {
             contents_generation: 2,
             platform: "Linux-x86_64".into(),
             parent: None,
+            configuration: None,
         }
     }
 

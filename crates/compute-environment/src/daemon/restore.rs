@@ -155,6 +155,16 @@ impl Daemon {
             applied_contents_generation: current_generation,
             declared_state: declared.into(),
             omitted_config: source.value.config.keys().cloned().collect(),
+            configuration_required: valid
+                .manifest
+                .configuration
+                .iter()
+                .flat_map(|configuration| &configuration.variables)
+                .map(|variable| crate::configuration::ConfigurationRequirement {
+                    name: variable.name.clone(),
+                    sensitive: variable.sensitive,
+                })
+                .collect(),
             jobs,
             computer,
         })

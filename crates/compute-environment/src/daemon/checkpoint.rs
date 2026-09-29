@@ -85,6 +85,24 @@ impl Daemon {
             contents_generation,
             platform: String::new(),
             parent: request.parent.clone(),
+            // Names and treatment only: a checkpoint never holds a value.
+            configuration: record
+                .value
+                .configuration
+                .as_ref()
+                .filter(|state| !state.variables.is_empty())
+                .map(|state| checkpoint::ManifestConfiguration {
+                    generation: state.generation,
+                    variables: state
+                        .variables
+                        .iter()
+                        .map(|(name, variable)| checkpoint::ManifestVariable {
+                            name: name.clone(),
+                            sensitive: variable.sensitive,
+                            source: variable.source.clone(),
+                        })
+                        .collect(),
+                }),
         };
 
         let captured = self

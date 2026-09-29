@@ -50,8 +50,27 @@ fn subcommands(path: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Whether `compute <path>` runs on its own although it also has
+/// subcommands: some line of its usage does not need one.
+fn runs_without_a_subcommand(path: &[String]) -> bool {
+    let output = Command::new(env!("CARGO_BIN_EXE_compute"))
+        .args(path)
+        .arg("--help")
+        .output()
+        .expect("run compute --help");
+    let help = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut usage = help
+        .lines()
+        .skip_while(|line| !line.starts_with("Usage:"))
+        .take_while(|line| !line.trim().is_empty());
+    usage.any(|line| !line.contains("<COMMAND>"))
+}
+
 fn leaves(path: Vec<String>, out: &mut BTreeSet<String>) {
     let children = subcommands(&path);
+    if !children.is_empty() && !path.is_empty() && runs_without_a_subcommand(&path) {
+        out.insert(format!("compute {}", path.join(" ")));
+    }
     if children.is_empty() {
         out.insert(format!("compute {}", path.join(" ")));
         return;

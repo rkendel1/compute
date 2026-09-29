@@ -137,6 +137,7 @@ async fn an_older_compute_model_is_upgraded_in_place() {
     assert!(FeltDbState::connect(config.clone()).await.is_err());
     let state = ControlState::new(Arc::new(FeltDbState::new(config.clone()).unwrap()));
     let environment = EnvironmentRecord {
+        configuration: None,
         name: "production".into(),
         desired_state: compute_state::DesiredState::Running,
         config: Default::default(),
@@ -387,6 +388,7 @@ async fn compute_speaks_to_feltdb_over_verified_https() {
         FeltDbState::connect(config.clone()).await.unwrap(),
     ));
     let environment = EnvironmentRecord {
+        configuration: None,
         name: "production".into(),
         desired_state: compute_state::DesiredState::Running,
         config: Default::default(),

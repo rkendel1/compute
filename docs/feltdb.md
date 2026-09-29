@@ -117,6 +117,9 @@ not index `_id`, `In`, ranges, or orderings. So:
   first, limited by FeltDB), and `status` on both, so a restarted
   controller resumes the operations in flight with one indexed equality
   each.
+- **Configuration** (generation 11). `Environment.configuration` is JSON
+  beside `config`: each variable's sensitivity and source, and the generation
+  the configuration last changed at. Never values.
 - **Checkpoints** (generation 10). `Checkpoint.environment_id` is indexed:
   an environment's checkpoints are one indexed equality, newest first and
   limited by FeltDB; a checkpoint is read by identity (`ckp_` + its artifact

@@ -556,6 +556,33 @@ impl ProjectSpec {
     }
 }
 
+/// What is known *about* an environment's configuration, never its values
+/// (those are `EnvironmentRecord.config`): which variables it has, how each is
+/// treated, where each came from, and the generation the configuration last
+/// changed at. Configuration is runtime input for the environment's processes;
+/// it is not workspace state and never part of a checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationState {
+    /// The environment's contents generation at the last change to any
+    /// variable or its treatment. A process records the generation it started
+    /// with, so evidence can say which configuration it used without holding it.
+    pub generation: u64,
+    pub variables: std::collections::BTreeMap<String, ConfigurationVariable>,
+}
+
+/// How one variable is treated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationVariable {
+    /// A sensitive value is never returned by any surface: only that it is
+    /// configured. Everything not known to be public is sensitive.
+    pub sensitive: bool,
+    /// Where it came from: `.env`, `.env.local`, `cli`, `api`, or `declared`
+    /// (set with the environment, or before sources were recorded).
+    pub source: String,
+}
+
 /// What an environment says belongs in its computer: desired state. Every
 /// change is an ordinary authorized operation; the reconciler makes the
 /// running computer match it, in place.
@@ -889,6 +916,10 @@ pub struct ObservedProcess {
     pub retry_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<ProcessFailure>,
+    /// The environment's configuration generation this process started with:
+    /// which configuration it ran under, without holding any of it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub config_generation: u64,
 }
 
 fn is_zero_u32(value: &u32) -> bool {

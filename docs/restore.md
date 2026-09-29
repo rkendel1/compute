@@ -54,7 +54,7 @@ retried. This is the fork/replace recovery, not a new one.
 | --- | --- |
 | the workspace files, empty directories, and executable bits, digest-verified | machine, session, provider, target, or connection identity |
 | the source's *declared* contents, policy, requirements, lifecycle kind, applied through the ordinary declaration path and reconciled | processes: pids, memory, sockets, terminals. A declared process runs because the new environment reconciled it, under a new pid |
-| provenance: a `restore` event on the new environment | configuration values (names are reported), credentials, tokens |
+| provenance: a `restore` event on the new environment | configuration values, credentials, tokens. The names and treatment the checkpoint recorded are reported as `configuration_required`; they are for the caller to supply with `compute environment config` |
 | | endpoints, domains, receipts, the source's events |
 
 **Declared state is the environment's, not the checkpoint's.** A checkpoint

@@ -66,6 +66,7 @@ impl Daemon {
             ])
         );
         let record = EnvironmentRecord {
+            configuration: None,
             name: definition.name.clone(),
             desired_state: definition.desired_state,
             config: definition.env,

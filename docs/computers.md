@@ -401,6 +401,10 @@ with `resume_unsupported`, rather than replacing it silently).
 | `POST` | `/environments/{environment}/release` | Release a revision of a project (`{ project, revision }`), in place |
 | `POST` | `/environments/{environment}/run` | Run a project's `build`, `test`, or named command as a durable job |
 | `POST` | `/environments/{environment}/config` | Replace the configuration every process sees |
+| `GET` | `/environments/{environment}/config` | The configuration: every variable, its treatment and source, and the generation; public values only ([configuration.md](configuration.md)) |
+| `POST` | `/environments/{environment}/config/change` | Set and remove variables, with their treatment |
+| `POST` | `/environments/{environment}/config/import` | Import `.env` files, atomically |
+| `POST` | `/environments/{environment}/config/discover` | The variables the workspace's `.env` files ask for or provide (names only) |
 | `POST` | `/environments/{environment}/lifecycle` | Keep it, or make it temporary (`{ lifecycle, ttl_seconds }`), in place |
 | `POST` | `/environments/{environment}/processes/{process}/start` \| `stop` | Set one process's desired state |
 | `POST` | `/environments/{environment}/reconcile` | Retry failed items and probe now |

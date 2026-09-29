@@ -1722,9 +1722,22 @@ async fn deployment_is_reconciliation_of_the_same_computer() {
         Some(resource.as_str())
     );
     assert_eq!(restarted.desired.repositories[0].revision, "v2");
+    // Configuration survives the restart: the process environment holds it,
+    // and the view reports it without the value (not a known-public name).
+    assert!(!restarted.config.contains_key("GREETING"));
+    let greeting = restarted
+        .configuration
+        .variables
+        .iter()
+        .find(|variable| variable.name == "GREETING")
+        .expect("the variable is configured");
+    assert!(greeting.configured && greeting.sensitive && greeting.value.is_none());
     assert_eq!(
-        restarted.config.get("GREETING").map(String::as_str),
-        Some("hi")
+        run(&daemon, "myapp", "alice", &["printenv", "GREETING"])
+            .await
+            .0
+            .trim(),
+        "hi"
     );
     let released = daemon
         .release_project(
@@ -3297,7 +3310,7 @@ async fn a_workspace_that_changes_while_it_is_captured_is_refused() {
     .await;
     let refused = daemon.export_workspace("busy", "alice").await;
     assert!(
-        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("changed while it was captured")),
+        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if changed_while_captured(reason)),
         "{refused:?}"
     );
     // A fork captures through the same path, so it is refused too, and
@@ -3314,7 +3327,7 @@ async fn a_workspace_that_changes_while_it_is_captured_is_refused() {
         )
         .await;
     assert!(
-        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("changed while it was captured")),
+        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if changed_while_captured(reason)),
         "{refused:?}"
     );
     assert!(daemon.computer("busy-copy").await.is_err());
@@ -3663,6 +3676,13 @@ async fn a_replacement_that_fails_before_the_handoff_leaves_the_old_computer_cur
             .unwrap()
             .verified
     );
+}
+
+/// A workspace written to during capture is refused, and either of two
+/// checks may notice first: the archiver's own, or the before/after digest.
+fn changed_while_captured(reason: &str) -> bool {
+    reason.contains("changed while it was captured")
+        || reason.contains("file changed as we read it")
 }
 
 fn fork_of(name: &str) -> ForkRequest {
@@ -4494,7 +4514,7 @@ async fn only_the_owner_checkpoints_and_a_changing_workspace_is_refused() {
         .checkpoint_environment("busy", "alice", no_parent())
         .await;
     assert!(
-        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("changed while it was captured")),
+        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if changed_while_captured(reason)),
         "{refused:?}"
     );
     assert!(
@@ -5337,6 +5357,916 @@ async fn checkpoint_and_restore_work_over_http_and_ownership_holds() {
     assert!(
         matches!(missing, Err(EnvironmentError::NotFound(_))),
         "{missing:?}"
+    );
+    server.abort();
+}
+
+// ---- configuration -------------------------------------------------------------
+
+const DATABASE_URL: &str = "postgres://app:S3cr3tPassw0rd@db.internal/app";
+
+fn env_file(text: &str) -> ConfigFile {
+    ConfigFile {
+        name: ".env".into(),
+        content: text.into(),
+    }
+}
+
+fn import_of(files: Vec<ConfigFile>) -> ConfigImportRequest {
+    ConfigImportRequest {
+        files,
+        public: vec![],
+        secret: vec![],
+    }
+}
+
+/// A process that only stays alive: its environment is read from `/proc`, so a
+/// test never has to write a value into the workspace to see it.
+fn sleeper() -> EnvironmentContents {
+    let mut contents = EnvironmentContents::default();
+    contents.processes.push(ProcessSpec {
+        name: "app".into(),
+        kind: ProcessKind::Process,
+        runtime: None,
+        command: vec!["sh".into(), "-c".into(), "sleep 3600".into()],
+        repository: None,
+        env: BTreeMap::new(),
+        desired: ProcessDesired::Running,
+        port: Some(41999),
+        restart: 0,
+        readiness: None,
+        restart_policy: Default::default(),
+        max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
+    });
+    contents
+}
+
+/// The SHA-256 of a variable's value in the environment the process was
+/// actually started with, or `None` when it has none. Computed inside the
+/// computer, so neither the value nor a command holding it is ever sent.
+async fn process_variable(daemon: &Arc<Daemon>, name: &str, variable: &str) -> Option<String> {
+    let pid = daemon.computer(name).await.unwrap().observed.processes["app"]
+        .pid
+        .expect("the process runs");
+    let out = sh(
+        daemon,
+        name,
+        &format!(
+            "if tr '\\0' '\\n' < /proc/{pid}/environ | grep -q '^{variable}='; then \
+             tr '\\0' '\\n' < /proc/{pid}/environ | sed -n 's/^{variable}=//p' | tr -d '\\n' | sha256sum | cut -d' ' -f1; \
+             else echo none; fi"
+        ),
+    )
+    .await;
+    let out = out.trim().to_owned();
+    (out != "none").then(|| format!("sha256:{out}"))
+}
+
+fn digest_of_value(value: &str) -> Option<String> {
+    Some(compute_core::sha256_identity(value.as_bytes()))
+}
+
+fn variable(view: &ConfigurationView, name: &str) -> ConfigurationInput {
+    view.variables
+        .iter()
+        .find(|variable| variable.name == name)
+        .unwrap_or_else(|| panic!("{name} is not configured: {view:?}"))
+        .clone()
+}
+
+/// Every file under `dir` that contains `needle`.
+fn files_containing(dir: &Path, needle: &str) -> Vec<PathBuf> {
+    let mut found = vec![];
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if std::fs::read(&path)
+                .is_ok_and(|bytes| bytes.windows(needle.len()).any(|w| w == needle.as_bytes()))
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Everything an operator can observe about an environment, as one string.
+async fn observable(daemon: &Arc<Daemon>, name: &str) -> String {
+    let mut all = serde_json::to_string(&daemon.computer(name).await.unwrap()).unwrap();
+    all += &serde_json::to_string(&daemon.environment(name).await.unwrap()).unwrap();
+    all += &serde_json::to_string(&daemon.configuration(name, "alice").await.unwrap()).unwrap();
+    all += &serde_json::to_string(&events(daemon, name).await).unwrap();
+    all
+}
+
+async fn created(daemon: &Arc<Daemon>, name: &str, source: &Path) -> ComputerView {
+    let mut contents = contents(source, "v1");
+    contents.processes = sleeper().processes;
+    daemon
+        .create_computer_environment(
+            definition(
+                name,
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents,
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    computer_where(daemon, name, "the process to run", |view| {
+        view.converged && view.observed.processes["app"].pid.is_some()
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn env_files_are_imported_as_configuration_and_reach_processes_without_leaking() {
+    let (_repositories, source) = repository();
+    let (daemon, _artifacts, _state, target, _workspaces, _node, _steered) =
+        checkpoint_world(&source).await;
+    let started = created(&daemon, "app", &source).await;
+    let before = started.observed.processes["app"].pid;
+    assert_eq!(process_variable(&daemon, "app", "DATABASE_URL").await, None);
+
+    // The workspace asks for variables; discovery lists names only.
+    sh(
+        &daemon,
+        "app",
+        "printf 'DATABASE_URL=\\nSTRIPE_SECRET_KEY=\\nPORT=3000\\nREDIS_URL=\\n' > .env.example && \
+         printf 'DATABASE_URL=from-the-workspace-file\\nAPP_MODE=test\\nPORT=3000\\n' > .env",
+    )
+    .await;
+    let found = daemon.discover_configuration("app", "alice").await.unwrap();
+    assert_eq!(
+        found
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.kind.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(".env", "values"), (".env.example", "requirements")]
+    );
+    let status = |name: &str| {
+        let v = found.variables.iter().find(|v| v.name == name).unwrap();
+        (v.status.clone(), v.sensitive)
+    };
+    assert_eq!(status("DATABASE_URL"), ("available".into(), true));
+    assert_eq!(status("APP_MODE"), ("available".into(), false));
+    assert_eq!(status("STRIPE_SECRET_KEY"), ("missing".into(), true));
+    assert_eq!(status("REDIS_URL"), ("missing".into(), true));
+    assert!(
+        !serde_json::to_string(&found)
+            .unwrap()
+            .contains("S3cr3tPassw0rd")
+    );
+
+    // Import: parsed, classified, one generation, the file not copied anywhere.
+    let report = daemon
+        .import_configuration(
+            "app",
+            "alice",
+            import_of(vec![env_file(&format!(
+                "DATABASE_URL={DATABASE_URL}\nAPP_MODE=test\nPORT=3000\n"
+            ))]),
+        )
+        .await
+        .unwrap();
+    assert!(!report.unchanged && report.generation > 0);
+    assert_eq!(
+        report
+            .imported
+            .iter()
+            .map(|v| (v.name.as_str(), v.sensitive))
+            .collect::<Vec<_>>(),
+        vec![("APP_MODE", false), ("DATABASE_URL", true)]
+    );
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(
+        report.skipped[0].name, "PORT",
+        "reserved: Compute gives a process its port"
+    );
+    let view = daemon.configuration("app", "alice").await.unwrap();
+    assert_eq!(view.generation, report.generation);
+    assert_eq!(variable(&view, "DATABASE_URL").source, ".env");
+    assert!(variable(&view, "DATABASE_URL").value.is_none());
+    assert_eq!(variable(&view, "APP_MODE").value.as_deref(), Some("test"));
+    assert!(
+        !sh(
+            &daemon,
+            "app",
+            "test -e imported.env && echo copied || echo no"
+        )
+        .await
+        .contains("copied")
+    );
+
+    // The reconciler restarts the process with the configuration: a new
+    // process, started under this generation.
+    let restarted = computer_where(&daemon, "app", "the process to restart", |view| {
+        view.converged
+            && view.observed.processes["app"].pid.is_some()
+            && view.observed.processes["app"].pid != before
+            && view.observed.processes["app"].config_generation == report.generation
+    })
+    .await;
+    assert_eq!(
+        restarted.reality.processes["app"].config_generation,
+        report.generation
+    );
+    assert_eq!(
+        process_variable(&daemon, "app", "DATABASE_URL").await,
+        digest_of_value(DATABASE_URL)
+    );
+    assert_eq!(
+        process_variable(&daemon, "app", "APP_MODE").await,
+        digest_of_value("test")
+    );
+    assert_eq!(
+        process_variable(&daemon, "app", "PORT").await,
+        digest_of_value("41999"),
+        "the declared port, not the file's"
+    );
+
+    // No surface returns the secret: views, configuration, events, the report,
+    // and the target's job records and receipts.
+    let everything = observable(&daemon, "app").await + &serde_json::to_string(&report).unwrap();
+    assert!(
+        !everything.contains("S3cr3tPassw0rd"),
+        "an API view or event leaked the value"
+    );
+    assert!(everything.contains("APP_MODE"), "names are shown");
+    assert_eq!(
+        files_containing(target.stores.path(), "S3cr3tPassw0rd"),
+        Vec::<PathBuf>::new(),
+        "a job record or receipt holds the value"
+    );
+
+    // Importing the same thing again changes nothing, and no generation moves.
+    let again = daemon
+        .import_configuration(
+            "app",
+            "alice",
+            import_of(vec![env_file(&format!(
+                "DATABASE_URL={DATABASE_URL}\nAPP_MODE=test\n"
+            ))]),
+        )
+        .await
+        .unwrap();
+    assert!(again.unchanged);
+    assert_eq!(again.generation, report.generation);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configuration_belongs_to_the_environment_not_the_controller() {
+    let (_repositories, source) = repository();
+    let (daemon, _artifacts, _state, _target, _workspaces, _node, _steered) =
+        checkpoint_world(&source).await;
+    created(&daemon, "alpha", &source).await;
+    created(&daemon, "beta", &source).await;
+    for (name, value) in [("alpha", "A"), ("beta", "B")] {
+        daemon
+            .import_configuration(
+                name,
+                "alice",
+                import_of(vec![env_file(&format!("DATABASE_URL={value}\n"))]),
+            )
+            .await
+            .unwrap();
+    }
+    for name in ["alpha", "beta"] {
+        computer_where(&daemon, name, "configured", |view| {
+            view.converged && view.observed.processes["app"].config_generation > 0
+        })
+        .await;
+    }
+    assert_eq!(
+        process_variable(&daemon, "alpha", "DATABASE_URL").await,
+        digest_of_value("A")
+    );
+    assert_eq!(
+        process_variable(&daemon, "beta", "DATABASE_URL").await,
+        digest_of_value("B")
+    );
+    let beta = daemon.computer("beta").await.unwrap();
+    let beta_generation = beta.configuration.generation;
+    let beta_pid = beta.observed.processes["app"].pid;
+
+    // Change one: the other does not move.
+    let alpha_pid = daemon.computer("alpha").await.unwrap().observed.processes["app"].pid;
+    daemon
+        .change_configuration(
+            "alpha",
+            "alice",
+            ConfigChange {
+                set: BTreeMap::from([("DATABASE_URL".into(), "A2".into())]),
+                source: Some("api".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    computer_where(&daemon, "alpha", "the restart", |view| {
+        view.converged
+            && view.observed.processes["app"].pid != alpha_pid
+            && view.observed.processes["app"].pid.is_some()
+    })
+    .await;
+    assert_eq!(
+        process_variable(&daemon, "alpha", "DATABASE_URL").await,
+        digest_of_value("A2")
+    );
+    assert_eq!(
+        process_variable(&daemon, "beta", "DATABASE_URL").await,
+        digest_of_value("B")
+    );
+    let beta = daemon.computer("beta").await.unwrap();
+    assert_eq!(beta.configuration.generation, beta_generation);
+    assert_eq!(
+        beta.observed.processes["app"].pid, beta_pid,
+        "beta's process was not restarted"
+    );
+    let alpha = daemon.configuration("alpha", "alice").await.unwrap();
+    assert_eq!(variable(&alpha, "DATABASE_URL").source, "api");
+    assert!(alpha.generation > beta_generation || alpha.generation != beta_generation);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_import_is_atomic_authorized_and_deterministic() {
+    let (_repositories, source) = repository();
+    let (daemon, _artifacts, _state, _target, _workspaces, _node, _steered) =
+        checkpoint_world(&source).await;
+    let before = daemon.configuration("origin", "alice").await.unwrap();
+    let watch = async |what: &str, result: Result<ConfigImportReport, EnvironmentError>| {
+        assert!(result.is_err(), "{what}: {result:?}");
+        assert_eq!(
+            daemon.configuration("origin", "alice").await.unwrap(),
+            before,
+            "{what}: nothing was applied"
+        );
+    };
+
+    // Good lines before a bad one apply nothing.
+    let error = daemon
+        .import_configuration(
+            "origin",
+            "alice",
+            import_of(vec![env_file(
+                "ONE=1\nTWO=2\nTHREE=3\nnot a line sk_live_TOPSECRET\n",
+            )]),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(".env, line 4") && !error.contains("sk_live_TOPSECRET"),
+        "{error}"
+    );
+    watch(
+        "a later malformed line",
+        daemon
+            .import_configuration(
+                "origin",
+                "alice",
+                import_of(vec![env_file("ONE=1\nTWO=2\nbad\n")]),
+            )
+            .await,
+    )
+    .await;
+    watch(
+        "a name twice in a file",
+        daemon
+            .import_configuration("origin", "alice", import_of(vec![env_file("A=1\nA=2\n")]))
+            .await,
+    )
+    .await;
+    watch(
+        "a bad second file",
+        daemon
+            .import_configuration(
+                "origin",
+                "alice",
+                import_of(vec![
+                    env_file("GOOD=1\n"),
+                    ConfigFile {
+                        name: ".env.local".into(),
+                        content: "\"unclosed\n".into(),
+                    },
+                ]),
+            )
+            .await,
+    )
+    .await;
+    watch(
+        "a treatment for a variable the files do not define",
+        daemon
+            .import_configuration(
+                "origin",
+                "alice",
+                ConfigImportRequest {
+                    files: vec![env_file("A=1\n")],
+                    public: vec!["OTHER".into()],
+                    secret: vec![],
+                },
+            )
+            .await,
+    )
+    .await;
+    watch(
+        "no files",
+        daemon
+            .import_configuration("origin", "alice", import_of(vec![]))
+            .await,
+    )
+    .await;
+
+    // Another operator cannot change or read configuration.
+    let stranger = daemon
+        .import_configuration("origin", "mallory", import_of(vec![env_file("X=1\n")]))
+        .await;
+    assert!(stranger.is_err());
+    assert!(daemon.configuration("origin", "mallory").await.is_err());
+    assert!(
+        daemon
+            .discover_configuration("origin", "mallory")
+            .await
+            .is_err()
+    );
+    assert!(
+        daemon
+            .change_configuration(
+                "origin",
+                "mallory",
+                ConfigChange {
+                    set: BTreeMap::from([("X".into(), "1".into())]),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        daemon.configuration("origin", "alice").await.unwrap(),
+        before
+    );
+    assert!(matches!(
+        daemon
+            .import_configuration("nowhere", "alice", import_of(vec![env_file("X=1\n")]))
+            .await,
+        Err(EnvironmentError::NotFound(_))
+    ));
+
+    // Files apply in the order given, deterministically; treatment is honoured.
+    let report = daemon
+        .import_configuration(
+            "origin",
+            "alice",
+            ConfigImportRequest {
+                files: vec![
+                    env_file("SHARED=base\nLABEL=\"héllo\"\nEMPTY=\nQUOTED='a=b #c'\r\n"),
+                    ConfigFile {
+                        name: ".env.local".into(),
+                        content: "SHARED=local\nCOMPUTE_INTERNAL=1\nMODE_FLAG=on\n".into(),
+                    },
+                ],
+                public: vec!["LABEL".into(), "MODE_FLAG".into()],
+                secret: vec!["QUOTED".into()],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.overridden, vec!["SHARED".to_string()]);
+    assert_eq!(
+        report
+            .skipped
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["COMPUTE_INTERNAL"]
+    );
+    let view = daemon.configuration("origin", "alice").await.unwrap();
+    assert_eq!(variable(&view, "SHARED").source, ".env.local");
+    assert_eq!(variable(&view, "LABEL").value.as_deref(), Some("héllo"));
+    assert_eq!(variable(&view, "MODE_FLAG").value.as_deref(), Some("on"));
+    assert!(variable(&view, "SHARED").sensitive && variable(&view, "SHARED").value.is_none());
+    assert!(variable(&view, "QUOTED").sensitive);
+    assert!(variable(&view, "EMPTY").configured);
+    assert_eq!(
+        sh(&daemon, "origin", "printenv QUOTED").await.trim(),
+        "a=b #c"
+    );
+    assert!(view.generation > before.generation);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_process_that_fails_reports_evidence_without_its_environment() {
+    let (_repositories, source) = repository();
+    let (daemon, _artifacts, _state, target, _workspaces, _node, _steered) =
+        checkpoint_world(&source).await;
+    daemon
+        .import_configuration(
+            "origin",
+            "alice",
+            import_of(vec![env_file(&format!("DATABASE_URL={DATABASE_URL}\n"))]),
+        )
+        .await
+        .unwrap();
+    let mut contents = daemon.computer("origin").await.unwrap().desired;
+    contents.processes = vec![ProcessSpec {
+        name: "app".into(),
+        kind: ProcessKind::Process,
+        runtime: None,
+        command: vec!["sh".into(), "-c".into(), "echo starting >&2; exit 3".into()],
+        repository: None,
+        env: BTreeMap::new(),
+        desired: ProcessDesired::Running,
+        port: None,
+        restart: 0,
+        readiness: None,
+        restart_policy: Default::default(),
+        max_restarts: 1,
+    }];
+    let contents_update = ContentsUpdate {
+        contents,
+        config: None,
+        lifecycle: None,
+        expected_generation: None,
+    };
+    daemon
+        .set_contents("origin", "alice", contents_update)
+        .await
+        .unwrap();
+    let failed = computer_where(&daemon, "origin", "the process to fail", |view| {
+        view.observed
+            .processes
+            .get("app")
+            .is_some_and(|seen| seen.last_failure.is_some())
+    })
+    .await;
+    assert!(failed.observed.processes["app"].last_failure.is_some());
+    assert!(
+        !observable(&daemon, "origin")
+            .await
+            .contains("S3cr3tPassw0rd")
+    );
+    assert!(files_containing(target.stores.path(), "S3cr3tPassw0rd").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_go_round_trip_of_the_masked_view_never_erases_what_it_could_not_see() {
+    let (_repositories, source) = repository();
+    let (daemon, _artifacts, _state, _target, _workspaces, _node, _steered) =
+        checkpoint_world(&source).await;
+    // The world's `API_TOKEN` is not a public name: its value is not in the view.
+    let view = daemon.computer("origin").await.unwrap();
+    assert!(!view.config.contains_key("API_TOKEN"));
+    assert!(
+        view.config.contains_key("APP_ENV"),
+        "a public value is shown"
+    );
+    assert!(variable(&view.configuration, "API_TOKEN").sensitive);
+    let generation = view.configuration.generation;
+
+    // GO writes back what it could see: the secret survives, nothing changes.
+    let update = ContentsUpdate {
+        contents: view.desired.clone(),
+        config: Some(view.config.clone()),
+        lifecycle: None,
+        expected_generation: None,
+    };
+    daemon
+        .set_contents("origin", "alice", update)
+        .await
+        .unwrap();
+    let after = daemon.computer("origin").await.unwrap();
+    assert_eq!(
+        after.configuration.generation, generation,
+        "no configuration change"
+    );
+    assert_eq!(
+        sh(&daemon, "origin", "printenv API_TOKEN").await.trim(),
+        "s3cret-token-value"
+    );
+
+    // Removal is by name, explicitly.
+    let view = daemon
+        .change_configuration(
+            "origin",
+            "alice",
+            ConfigChange {
+                unset: vec!["API_TOKEN".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(view.variables.iter().all(|v| v.name != "API_TOKEN"));
+    assert!(view.generation > generation);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fork_checkpoint_and_restore_carry_configuration_requirements_never_values() {
+    let (_repositories, source) = repository();
+    let (daemon, artifacts, _state, target, _workspaces, _node, _steered) =
+        checkpoint_world(&source).await;
+    let started = created(&daemon, "app", &source).await;
+    let before = started.observed.processes["app"].pid;
+    daemon
+        .import_configuration(
+            "app",
+            "alice",
+            import_of(vec![env_file(&format!(
+                "DATABASE_URL={DATABASE_URL}\nAPP_MODE=test\n"
+            ))]),
+        )
+        .await
+        .unwrap();
+    computer_where(&daemon, "app", "the configured process", |view| {
+        view.converged
+            && view.observed.processes["app"].pid != before
+            && view.observed.processes["app"].config_generation > 0
+    })
+    .await;
+    sh(
+        &daemon,
+        "app",
+        "mkdir data && printf notes > data/notes.txt",
+    )
+    .await;
+    assert_eq!(
+        process_variable(&daemon, "app", "DATABASE_URL").await,
+        digest_of_value(DATABASE_URL)
+    );
+
+    // Fork: the workspace and declarations, and no configuration values.
+    let forked = daemon
+        .fork_environment("app", "alice", fork_of("forked"))
+        .await
+        .unwrap();
+    assert!(forked.omitted_config.contains(&"DATABASE_URL".to_string()));
+    let forked_view = daemon.computer("forked").await.unwrap();
+    assert!(forked_view.config.is_empty());
+    assert!(forked_view.configuration.variables.is_empty());
+    assert_eq!(
+        process_variable(&daemon, "forked", "DATABASE_URL").await,
+        None
+    );
+    assert!(
+        !observable(&daemon, "forked")
+            .await
+            .contains("S3cr3tPassw0rd")
+    );
+
+    // Checkpoint: the manifest names the configuration, never a value.
+    let (checkpoint, digest) = {
+        let digest = digest_of(&daemon, "app").await;
+        (
+            daemon
+                .checkpoint_environment("app", "alice", no_parent())
+                .await
+                .unwrap(),
+            digest,
+        )
+    };
+    assert_eq!(checkpoint.workspace, digest);
+    let record = records(&daemon, "app").await.remove(0);
+    let bytes = artifact_bytes(&artifacts, &record.artifact_id).await;
+    let valid = compute_environment::checkpoint::validate(&bytes).unwrap();
+    let configuration = valid
+        .manifest
+        .configuration
+        .clone()
+        .expect("provenance is recorded");
+    let named = |name: &str| {
+        configuration
+            .variables
+            .iter()
+            .find(|variable| variable.name == name)
+            .unwrap_or_else(|| panic!("{name}: {configuration:?}"))
+            .clone()
+    };
+    assert!(named("DATABASE_URL").sensitive);
+    assert_eq!(named("DATABASE_URL").source, ".env");
+    assert!(!named("APP_MODE").sensitive);
+    assert!(!String::from_utf8_lossy(&bytes).contains("S3cr3tPassw0rd"));
+    assert!(
+        !String::from_utf8_lossy(&bytes).contains("\"value\""),
+        "the manifest holds no values"
+    );
+
+    // Restore: the workspace, and the names to supply; not the values.
+    let restored = daemon
+        .restore_checkpoint(&checkpoint.checkpoint_id, "alice", restore_of("revived"))
+        .await
+        .unwrap();
+    assert_eq!(restored.workspace, digest);
+    assert_eq!(digest_of(&daemon, "revived").await, digest);
+    assert!(
+        restored
+            .configuration_required
+            .iter()
+            .any(|required| required.name == "DATABASE_URL" && required.sensitive)
+    );
+    let revived = daemon.computer("revived").await.unwrap();
+    assert!(revived.config.is_empty() && revived.configuration.variables.is_empty());
+    assert_eq!(
+        process_variable(&daemon, "revived", "DATABASE_URL").await,
+        None
+    );
+    assert!(
+        !observable(&daemon, "revived")
+            .await
+            .contains("S3cr3tPassw0rd")
+    );
+
+    // Explicit configuration reaches the restored environment's process, and
+    // only that one.
+    let revived_pid = revived.observed.processes["app"].pid;
+    daemon
+        .import_configuration(
+            "revived",
+            "alice",
+            import_of(vec![env_file("DATABASE_URL=postgres://revived/db\n")]),
+        )
+        .await
+        .unwrap();
+    computer_where(&daemon, "revived", "the restart", |view| {
+        view.converged
+            && view.observed.processes["app"].pid != revived_pid
+            && view.observed.processes["app"].pid.is_some()
+    })
+    .await;
+    assert_eq!(
+        process_variable(&daemon, "revived", "DATABASE_URL").await,
+        digest_of_value("postgres://revived/db")
+    );
+    assert_eq!(
+        process_variable(&daemon, "app", "DATABASE_URL").await,
+        digest_of_value(DATABASE_URL),
+        "the source keeps its own"
+    );
+    assert_eq!(
+        process_variable(&daemon, "forked", "DATABASE_URL").await,
+        None
+    );
+
+    // Nothing of the secret reached any record the target keeps.
+    assert!(files_containing(target.stores.path(), "S3cr3tPassw0rd").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configuration_works_over_http_and_never_returns_a_secret_or_crosses_owners() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let artifacts = FaultyArtifacts::new(&store);
+    let (daemon, _node) =
+        start_daemon_tuned(store, artifacts, pool(&[("target-a", &target)]), |config| {
+            config.security.legacy_token = Some("operator".into())
+        })
+        .await;
+    for (name, owner) in [("mine", "legacy-token"), ("theirs", "alice")] {
+        let mut contents = contents(&source, "v1");
+        contents.processes = sleeper().processes;
+        daemon
+            .create_computer_environment(
+                definition(
+                    name,
+                    ComputerLifecycle::Persistent,
+                    requirements(),
+                    contents,
+                ),
+                owner,
+            )
+            .await
+            .unwrap();
+        computer_where(&daemon, name, "converge", |view| view.converged).await;
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(api::serve(listener, daemon.clone(), None));
+    let anonymous = client::DaemonClient::new(&endpoint).unwrap();
+    let operator = client::DaemonClient::new(&endpoint)
+        .unwrap()
+        .with_bearer_token("operator");
+    let request = import_of(vec![env_file(&format!(
+        "DATABASE_URL={DATABASE_URL}\nAPP_MODE=test\n"
+    ))]);
+
+    // Nothing without the token.
+    assert!(matches!(
+        anonymous
+            .get::<serde_json::Value>("/environments/mine/config")
+            .await,
+        Err(EnvironmentError::Unauthorized(_))
+    ));
+    assert!(matches!(
+        anonymous
+            .post::<_, serde_json::Value>("/environments/mine/config/import", Some(&request))
+            .await,
+        Err(EnvironmentError::Unauthorized(_))
+    ));
+
+    // Import, inspect, change, discover: every response is free of the value.
+    let imported: serde_json::Value = operator
+        .post("/environments/mine/config/import", Some(&request))
+        .await
+        .unwrap();
+    assert_eq!(imported["imported"].as_array().unwrap().len(), 2);
+    let shown: ConfigurationView = operator.get("/environments/mine/config").await.unwrap();
+    assert_eq!(variable(&shown, "DATABASE_URL").sensitive, true);
+    assert!(variable(&shown, "DATABASE_URL").value.is_none());
+    assert_eq!(variable(&shown, "APP_MODE").value.as_deref(), Some("test"));
+    let changed: ConfigurationView = operator
+        .post(
+            "/environments/mine/config/change",
+            Some(&ConfigChange {
+                set: BTreeMap::from([("EXTRA".into(), "x".into())]),
+                source: Some("api".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(changed.generation > shown.generation);
+    let discovered: serde_json::Value = operator
+        .post::<(), _>("/environments/mine/config/discover", None)
+        .await
+        .unwrap();
+    let computer: serde_json::Value = operator.get("/environments/mine/computer").await.unwrap();
+    let environment: serde_json::Value = operator.get("/environments/mine").await.unwrap();
+    for body in [&imported, &discovered, &computer, &environment] {
+        assert!(!body.to_string().contains("S3cr3tPassw0rd"), "{body}");
+    }
+    assert!(
+        !serde_json::to_string(&shown)
+            .unwrap()
+            .contains("S3cr3tPassw0rd")
+    );
+    assert!(
+        !serde_json::to_string(&changed)
+            .unwrap()
+            .contains("S3cr3tPassw0rd")
+    );
+
+    // Another operator's environment is neither visible nor changeable.
+    assert!(matches!(
+        operator
+            .get::<serde_json::Value>("/environments/theirs/config")
+            .await,
+        Err(EnvironmentError::Forbidden(_))
+    ));
+    assert!(
+        operator
+            .post::<_, serde_json::Value>("/environments/theirs/config/import", Some(&request))
+            .await
+            .is_err()
+    );
+    assert!(
+        operator
+            .post::<_, serde_json::Value>(
+                "/environments/theirs/config/change",
+                Some(&ConfigChange {
+                    set: BTreeMap::from([("X".into(), "1".into())]),
+                    ..Default::default()
+                })
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        daemon
+            .configuration("theirs", "alice")
+            .await
+            .unwrap()
+            .variables
+            .iter()
+            .all(|v| v.name != "X" && v.name != "DATABASE_URL")
+    );
+
+    // A malformed import over the wire applies nothing and echoes nothing.
+    let before = daemon.configuration("mine", "legacy-token").await.unwrap();
+    let error = operator
+        .post::<_, serde_json::Value>(
+            "/environments/mine/config/import",
+            Some(&import_of(vec![env_file("OK=1\nsk_live_TOPSECRET\n")])),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("line 2") && !error.contains("sk_live_TOPSECRET"),
+        "{error}"
+    );
+    assert_eq!(
+        daemon.configuration("mine", "legacy-token").await.unwrap(),
+        before
     );
     server.abort();
 }

@@ -112,13 +112,19 @@ desired contents, changed by **GO** (one generation-fenced change),
 **versions** published from one environment and **rolled out** to others,
 and **work sessions** recording who is working where. `compute init/deploy`
 applications are a compatibility name for exactly these records (below).
-### Three kinds of state
+### Kinds of state
 
 | Kind | Where it lives | Authority |
 | --- | --- | --- |
-| **Declared** | The Environment record in FeltDB: contents, configuration, policy, requirements | The environment |
+| **Declared** | The Environment record in FeltDB: contents, policy, requirements. What the environment says should exist | The environment |
+| **Configuration** | The Environment record: named runtime inputs (`config`) and what is known about them (`configuration`: sensitivity, source, generation). What its processes are given | The environment. Never workspace state, never in a checkpoint |
+| **Workspace** | The computer's portable filesystem state | Nothing durable until captured |
 | **Observed** | Reality and evidence: the Computer record, jobs, receipts, events | What the controller and targets proved |
-| **Captured** | A Checkpoint record in FeltDB plus its immutable artifact (`compute.checkpoint@1`) | None. It is evidence of a past state, never a source of truth |
+| **Captured** | A Checkpoint record plus its immutable artifact (`compute.checkpoint@1`) | None. Evidence of a past workspace, never a source of truth |
+
+`.env` is a configuration *source*, not a kind of state: it is parsed and
+imported ([configuration.md](configuration.md)). Workspace is filesystem state.
+A checkpoint is captured workspace state.
 
 **Checkpoint invariant.** A Checkpoint is immutable portable captured state
 derived from a verified Environment state. It is not an Environment, Computer,
