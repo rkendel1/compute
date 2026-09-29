@@ -65,27 +65,3 @@ jobs:
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Check out the Homebrew tap
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/checkout@v4
-        with:
-          repository: rkendel1/homebrew-compute
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-tap
-      - name: Publish the certified formula
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          checksum=$(cut -d ' ' -f 1 "${{ steps.package.outputs.asset }}.sha256")
-          distribution/render-homebrew-tap.sh homebrew-tap "$version" "$checksum"
-          grep -F "version \"$version\"" homebrew-tap/Formula/compute.rb
-          grep -F "sha256 \"$checksum\"" homebrew-tap/Formula/compute.rb
-          git -C homebrew-tap config user.name github-actions[bot]
-          git -C homebrew-tap config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git -C homebrew-tap add Formula/compute.rb README.md .github/workflows/tests.yml
-          if git -C homebrew-tap diff --cached --quiet; then
-            exit 0
-          fi
-          git -C homebrew-tap commit -m "compute $version"
-          git -C homebrew-tap push origin HEAD:main

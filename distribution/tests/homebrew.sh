@@ -20,6 +20,8 @@ grep -q 'depends_on arch: :x86_64' "$formula"
 grep -q 'libexec.install' "$formula"
 grep -q 'COMPUTE_HOME' "$formula"
 test -f "$work/tap/.github/workflows/tests.yml"
+test -f "$work/tap/.github/workflows/sync.yml"
+test -x "$work/tap/scripts/update-formula.sh"
 test -f "$work/tap/README.md"
 
 if "$repository/distribution/render-homebrew-tap.sh" "$work/bad" "$version" bad 2>/dev/null; then
