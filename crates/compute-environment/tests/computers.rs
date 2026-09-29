@@ -3348,7 +3348,7 @@ async fn replacing_a_computer_keeps_the_environment_and_its_workspace() {
     let reserved = daemon
         .create_computer_environment(
             definition(
-                "x--replacing",
+                "x--candidate",
                 ComputerLifecycle::Persistent,
                 requirements(),
                 empty_contents(),
@@ -3432,7 +3432,7 @@ async fn replacing_a_computer_keeps_the_environment_and_its_workspace() {
     })
     .await;
     // The candidate is gone; nothing of it outlives a successful replacement.
-    assert!(daemon.computer("app--replacing").await.is_err());
+    assert!(daemon.computer("app--candidate").await.is_err());
     assert_eq!(target.provider.provisions.load(Ordering::SeqCst), 2);
 
     // The evidence tells the truth about the handoff.
@@ -3540,7 +3540,7 @@ async fn a_replacement_that_fails_before_the_handoff_leaves_the_old_computer_cur
                 );
                 // The candidate is stopped, never presented as running or ready.
                 let candidate =
-                    computer_where(&daemon, "app--replacing", "the candidate to stop", |view| {
+                    computer_where(&daemon, "app--candidate", "the candidate to stop", |view| {
                         view.reality.observed == "stopped"
                     })
                     .await;
@@ -3617,7 +3617,7 @@ async fn a_replacement_that_fails_before_the_handoff_leaves_the_old_computer_cur
         view.converged
     })
     .await;
-    assert!(daemon.computer("app--replacing").await.is_err());
+    assert!(daemon.computer("app--candidate").await.is_err());
     assert!(
         daemon
             .verify_workspace(
