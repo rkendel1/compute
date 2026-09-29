@@ -196,15 +196,13 @@ pub struct CloneRequest {
 pub struct CloneReport {
     pub source: String,
     pub environment: String,
-    /// Digest of the archive that carried the workspace state.
+    /// The workspace digest (`compute.workspace@1`) carried and verified.
+    pub workspace: String,
     pub archive: String,
-    /// Digest of the seeded files, computed from the archive and recomputed
-    /// inside the new computer before anything started.
-    pub tree_digest: String,
     pub files: usize,
+    pub directories: usize,
     pub bytes: u64,
-    /// The seeded tree's digest inside the new computer matched.
-    pub seed_verified: bool,
+    pub workspace_verified: bool,
     /// The declared repositories: `(source commit, clone commit)`.
     pub repositories: BTreeMap<String, (Option<String>, Option<String>)>,
     /// Configuration names not copied.
@@ -213,6 +211,63 @@ pub struct CloneReport {
     pub jobs: Vec<String>,
     /// The clone's computer once its contents converged.
     pub computer: ComputerView,
+}
+
+/// A computer's workspace, exported: the archive and its identity
+/// (`compute.workspace@1`, see `docs/workspace.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceExport {
+    pub identity: String,
+    pub digest: String,
+    pub archive_digest: String,
+    pub files: usize,
+    /// Empty directories, the only ones the identity records.
+    pub directories: usize,
+    pub bytes: u64,
+    pub job_id: String,
+    #[serde(with = "compute_core::bytes_json")]
+    pub archive: Vec<u8>,
+}
+
+/// Seed an empty workspace from an archive. If `digest` is given the archive
+/// must hold exactly that workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceSeedRequest {
+    #[serde(with = "compute_core::bytes_json")]
+    pub archive: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSeed {
+    pub digest: String,
+    pub files: usize,
+    pub directories: usize,
+    /// The digest recomputed inside the computer matched.
+    pub verified: bool,
+    pub jobs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceVerifyRequest {
+    /// The digest the workspace should have. Absent: only measure it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+/// A workspace measured, and compared when a digest was expected. A mismatch
+/// is a result (`verified: false`), not an error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceVerification {
+    /// What the computer's workspace is.
+    pub digest: String,
+    pub expected: Option<String>,
+    /// An expected digest was given and equals `digest`.
+    pub verified: bool,
+    pub job_id: String,
 }
 
 /// Replace an environment's desired contents, optionally only if they are

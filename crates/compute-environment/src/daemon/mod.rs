@@ -30,10 +30,12 @@ pub use supervision::Recovery;
 mod software;
 mod views;
 mod work;
+mod workspace;
 
 pub use applications::application_environment;
 pub use computers::{ComputerExec, ComputerJob};
 pub use views::EventFilter;
+pub use workspace::{WORKSPACE_ARCHIVE_LIMIT, WORKSPACE_IDENTITY};
 
 /// A bundle's memory limit, wall-time limit, network policy, required CPUs,
 /// and required memory.

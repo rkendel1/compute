@@ -42,6 +42,8 @@ struct Steered {
     capabilities: SessionCapabilities,
     provisions: AtomicUsize,
     fail_provision: AtomicBool,
+    /// Refuse any command whose text contains this (a fault to inject).
+    fail_exec_containing: std::sync::Mutex<Option<String>>,
     gate: Option<Arc<Semaphore>>,
 }
 
@@ -56,6 +58,7 @@ impl Steered {
             capabilities,
             provisions: AtomicUsize::new(0),
             fail_provision: AtomicBool::new(false),
+            fail_exec_containing: std::sync::Mutex::new(None),
             gate,
         })
     }
@@ -102,6 +105,14 @@ impl SessionProvider for Steered {
         environment: &SessionEnvironment,
         command: &SessionCommand,
     ) -> Result<ProviderRequest, ProviderError> {
+        if let Some(marker) = self.fail_exec_containing.lock().unwrap().as_deref()
+            && command.command.iter().any(|part| part.contains(marker))
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProviderUnavailable,
+                "an injected fault",
+            ));
+        }
         self.inner.exec(environment, command).await
     }
     async fn destroy(&self, id: &str) -> Result<(), ProviderError> {
@@ -322,7 +333,14 @@ fn repository() -> (tempfile::TempDir, PathBuf) {
     std::fs::create_dir_all(&source).unwrap();
     let git = |arguments: &[&str]| {
         let status = std::process::Command::new("git")
-            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args(arguments)
             .current_dir(&source)
             .env_remove("GIT_DIR")
@@ -2893,8 +2911,8 @@ async fn cloning_an_environment_seeds_a_new_computer_with_the_same_workload_stat
         .unwrap();
 
     // The seed was proven inside the new computer, before anything started.
-    assert!(report.seed_verified);
-    assert!(report.tree_digest.starts_with("sha256:"));
+    assert!(report.workspace_verified);
+    assert!(report.workspace.starts_with("sha256:"));
     assert!(report.files >= 3, "{report:#?}");
     assert!(report.jobs.len() >= 4, "export, upload, extract, verify");
 
@@ -2947,7 +2965,7 @@ async fn cloning_an_environment_seeds_a_new_computer_with_the_same_workload_stat
         .find(|(_, data)| data["command"] == "clone")
         .expect("a clone event");
     assert_eq!(cloned.1["source"], "origin");
-    assert_eq!(cloned.1["tree_digest"], report.tree_digest.as_str());
+    assert_eq!(cloned.1["workspace"], report.workspace.as_str());
     let still = daemon.computer("origin").await.unwrap();
     assert_eq!(still.session_id, origin.session_id);
     assert!(still.converged);
@@ -3003,11 +3021,472 @@ async fn cloning_an_environment_seeds_a_new_computer_with_the_same_workload_stat
         )
         .await;
     assert!(
-        matches!(&refused, Err(EnvironmentError::Invalid(reason)) if reason.contains("other than files")),
+        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("unsupported entry")),
         "{refused:?}"
     );
     assert!(
         daemon.computer("linked").await.is_err(),
         "nothing was created"
     );
+}
+
+fn empty_contents() -> EnvironmentContents {
+    EnvironmentContents::default()
+}
+
+async fn running_computer(daemon: &Arc<Daemon>, name: &str) -> ComputerView {
+    computer_where(daemon, name, "the computer to run", |view| {
+        view.status == compute_core::ComputerStatus::Running
+    })
+    .await
+}
+
+async fn sh(daemon: &Arc<Daemon>, name: &str, script: &str) -> String {
+    run(daemon, name, "alice", &["sh", "-c", script]).await.0
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_state_is_exported_seeded_and_verified_without_clone() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    let create = |name: &'static str, contents: EnvironmentContents| {
+        let daemon = daemon.clone();
+        async move {
+            daemon
+                .create_computer_environment(
+                    definition(
+                        name,
+                        ComputerLifecycle::Persistent,
+                        requirements(),
+                        contents,
+                    ),
+                    "alice",
+                )
+                .await
+                .unwrap();
+            running_computer(&daemon, name).await
+        }
+    };
+
+    // A workspace with a repository (declared state), nested files, an empty
+    // directory, an executable, and files no declared content owns.
+    create("origin", contents(&source, "v1")).await;
+    computer_where(&daemon, "origin", "converge", |view| view.converged).await;
+    sh(
+        &daemon,
+        "origin",
+        "mkdir -p data/nested empty && printf hello > data/notes.txt && printf deep > data/nested/x.bin \\
+         && printf '#!/bin/sh\\necho hi\\n' > run.sh && chmod +x run.sh && printf mod >> repos/app/untracked.txt",
+    )
+    .await;
+
+    let export = daemon.export_workspace("origin", "alice").await.unwrap();
+    assert_eq!(export.identity, "compute.workspace@1");
+    assert!(export.digest.starts_with("sha256:"));
+    assert_eq!(
+        export.directories, 1,
+        "only the empty directory is recorded"
+    );
+    assert!(export.files >= 4, "{export:#?}");
+    assert!(!export.job_id.is_empty());
+
+    // Seed a second, empty workspace from it: no clone involved.
+    create("dest", empty_contents()).await;
+    let empty = daemon
+        .verify_workspace("dest", "alice", WorkspaceVerifyRequest { digest: None })
+        .await
+        .unwrap();
+    assert!(!empty.verified && empty.expected.is_none());
+    assert_ne!(empty.digest, export.digest);
+    let seed = daemon
+        .seed_workspace(
+            "dest",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: export.archive.clone(),
+                digest: Some(export.digest.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(seed.verified);
+    assert_eq!(seed.digest, export.digest);
+    assert_eq!(seed.files, export.files);
+
+    // Verified, and identical workspaces have identical digests.
+    let verify = |name: &'static str, digest: String| {
+        let daemon = daemon.clone();
+        async move {
+            daemon
+                .verify_workspace(
+                    name,
+                    "alice",
+                    WorkspaceVerifyRequest {
+                        digest: Some(digest),
+                    },
+                )
+                .await
+                .unwrap()
+        }
+    };
+    assert!(verify("dest", export.digest.clone()).await.verified);
+    assert!(verify("origin", export.digest.clone()).await.verified);
+
+    // The contents arrived; the repository (declared state) did not.
+    assert_eq!(
+        sh(&daemon, "dest", "cat data/notes.txt data/nested/x.bin").await,
+        "hellodeep"
+    );
+    assert_eq!(
+        sh(&daemon, "dest", "test -x run.sh && echo x || echo -")
+            .await
+            .trim(),
+        "x"
+    );
+    assert_eq!(
+        sh(&daemon, "dest", "test -d empty && echo yes")
+            .await
+            .trim(),
+        "yes"
+    );
+    assert_eq!(
+        sh(&daemon, "dest", "test -e repos && echo held || echo none")
+            .await
+            .trim(),
+        "none",
+        "declared repositories are not part of a workspace"
+    );
+
+    // Every part of the identity matters; nothing else does.
+    for (change, undo) in [
+        ("printf x > extra", "rm extra"),
+        (
+            "printf changed > data/notes.txt",
+            "printf hello > data/notes.txt",
+        ),
+        ("chmod -x run.sh", "chmod +x run.sh"),
+        ("rmdir empty", "mkdir empty"),
+        ("mkdir another", "rmdir another"),
+        (
+            "mv data/notes.txt data/moved.txt",
+            "mv data/moved.txt data/notes.txt",
+        ),
+    ] {
+        sh(&daemon, "dest", change).await;
+        let differs = verify("dest", export.digest.clone()).await;
+        assert!(!differs.verified, "{change}");
+        assert_ne!(differs.digest, export.digest, "{change}");
+        sh(&daemon, "dest", undo).await;
+        assert!(
+            verify("dest", export.digest.clone()).await.verified,
+            "{undo}"
+        );
+    }
+    // Permissions, timestamps and non-empty directories are not identity.
+    sh(
+        &daemon,
+        "dest",
+        "chmod 640 data/notes.txt && touch -t 200001010000 data/notes.txt",
+    )
+    .await;
+    assert!(verify("dest", export.digest.clone()).await.verified);
+    sh(&daemon, "dest", "chmod 644 data/notes.txt").await;
+
+    // A seed needs an empty workspace, and leaves what is there alone.
+    let again = daemon
+        .seed_workspace(
+            "dest",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: export.archive.clone(),
+                digest: None,
+            },
+        )
+        .await;
+    assert!(again.is_err(), "{again:?}");
+    assert!(
+        verify("dest", export.digest.clone()).await.verified,
+        "nothing was disturbed"
+    );
+
+    // A digest that is not the archive's is refused before anything is sent.
+    create("dest2", empty_contents()).await;
+    let untouched = daemon
+        .verify_workspace("dest2", "alice", WorkspaceVerifyRequest { digest: None })
+        .await
+        .unwrap()
+        .digest;
+    let wrong = format!("sha256:{}", "0".repeat(64));
+    let mismatch = daemon
+        .seed_workspace(
+            "dest2",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: export.archive.clone(),
+                digest: Some(wrong),
+            },
+        )
+        .await;
+    assert!(
+        matches!(mismatch, Err(EnvironmentError::Conflict(_))),
+        "{mismatch:?}"
+    );
+    // A corrupted archive is another workspace or unreadable; never seeded.
+    let mut corrupted = export.archive.clone();
+    let middle = corrupted.len() / 2;
+    corrupted[middle] ^= 0xff;
+    let refused = daemon
+        .seed_workspace(
+            "dest2",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: corrupted,
+                digest: Some(export.digest.clone()),
+            },
+        )
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    let truncated = daemon
+        .seed_workspace(
+            "dest2",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: export.archive[..export.archive.len() / 2].to_vec(),
+                digest: None,
+            },
+        )
+        .await;
+    assert!(truncated.is_err(), "{truncated:?}");
+    let oversized = daemon
+        .seed_workspace(
+            "dest2",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: vec![0; compute_environment::daemon::WORKSPACE_ARCHIVE_LIMIT + 1],
+                digest: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(oversized, Err(EnvironmentError::Invalid(_))),
+        "{oversized:?}"
+    );
+    assert_eq!(
+        daemon
+            .verify_workspace("dest2", "alice", WorkspaceVerifyRequest { digest: None })
+            .await
+            .unwrap()
+            .digest,
+        untouched,
+        "every refused seed left the workspace empty"
+    );
+
+    // Portable state: the same export seeds a third and a fourth computer,
+    // one of them ephemeral with different requirements. The primitive does
+    // not know or care what the destination is for.
+    let seeded = daemon
+        .seed_workspace(
+            "dest2",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: export.archive.clone(),
+                digest: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(seeded.digest, export.digest);
+    daemon
+        .create_computer_environment(
+            definition(
+                "dest3",
+                ComputerLifecycle::Ephemeral,
+                ComputerRequirements {
+                    memory_bytes: Some(128 << 20),
+                    ..requirements()
+                },
+                empty_contents(),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    running_computer(&daemon, "dest3").await;
+    let third = daemon
+        .seed_workspace(
+            "dest3",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: export.archive.clone(),
+                digest: Some(export.digest.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(third.verified);
+    for name in ["origin", "dest", "dest2", "dest3"] {
+        assert!(verify(name, export.digest.clone()).await.verified, "{name}");
+    }
+
+    // Only the owner exports, seeds, or verifies.
+    assert!(daemon.export_workspace("origin", "mallory").await.is_err());
+    assert!(
+        daemon
+            .seed_workspace(
+                "dest2",
+                "mallory",
+                WorkspaceSeedRequest {
+                    archive: export.archive.clone(),
+                    digest: None
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        daemon
+            .verify_workspace("origin", "mallory", WorkspaceVerifyRequest { digest: None })
+            .await
+            .is_err()
+    );
+
+    // Unsupported entries are refused, by export and by verify.
+    sh(&daemon, "origin", "ln -s /etc/passwd link").await;
+    let linked = daemon.export_workspace("origin", "alice").await;
+    assert!(
+        matches!(&linked, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("unsupported entry")),
+        "{linked:?}"
+    );
+    assert!(
+        daemon
+            .verify_workspace("origin", "alice", WorkspaceVerifyRequest { digest: None })
+            .await
+            .is_err()
+    );
+    sh(&daemon, "origin", "rm link").await;
+    assert!(daemon.export_workspace("origin", "alice").await.is_ok());
+
+    // Each operation is evidenced.
+    let recorded = events(&daemon, "dest").await;
+    for command in ["workspace.seed", "workspace.verify"] {
+        assert!(
+            recorded.iter().any(|(_, data)| data["command"] == command),
+            "{command}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_workspace_that_changes_while_it_is_captured_is_refused() {
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    let mut busy = EnvironmentContents::default();
+    busy.processes.push(ProcessSpec {
+        name: "writer".into(),
+        kind: ProcessKind::Process,
+        runtime: None,
+        command: vec![
+            "sh".into(),
+            "-c".into(),
+            "i=0; while [ $i -lt 3000 ]; do i=$((i+1)); : > \"tick$i\"; sleep 0.01; done".into(),
+        ],
+        repository: None,
+        env: BTreeMap::new(),
+        desired: ProcessDesired::Running,
+        port: None,
+        restart: 0,
+        readiness: None,
+        restart_policy: Default::default(),
+        max_restarts: compute_core::DEFAULT_MAX_RESTARTS,
+    });
+    daemon
+        .create_computer_environment(
+            definition("busy", ComputerLifecycle::Persistent, requirements(), busy),
+            "alice",
+        )
+        .await
+        .unwrap();
+    computer_where(&daemon, "busy", "the writer to run", |view| view.converged).await;
+    eventually("the writer to be writing", async || {
+        let count = sh(&daemon, "busy", "ls | grep -c '^tick' || true").await;
+        (count.trim().parse::<u32>().unwrap_or(0) > 5).then_some(())
+    })
+    .await;
+    let refused = daemon.export_workspace("busy", "alice").await;
+    assert!(
+        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("changed while it was captured")),
+        "{refused:?}"
+    );
+    // A workspace process outlives its test unless it is stopped.
+    daemon
+        .set_process("busy", "alice", "writer", ProcessDesired::Stopped)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_clone_never_leaves_an_unverified_environment_running() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let steered = Steered::new(workspaces.path(), full(), None);
+    let target = Target::start(steered.clone(), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    daemon
+        .create_computer_environment(
+            definition(
+                "origin",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    computer_where(&daemon, "origin", "converge", |view| view.converged).await;
+
+    // The seed's extraction fails on the new computer.
+    *steered.fail_exec_containing.lock().unwrap() = Some("tar -xf".into());
+    let failed = daemon
+        .clone_environment(
+            "origin",
+            "alice",
+            CloneRequest {
+                name: "copy".into(),
+                target: None,
+                copy_config: false,
+            },
+        )
+        .await;
+    let Err(EnvironmentError::Conflict(reason)) = &failed else {
+        panic!("{failed:?}")
+    };
+    assert!(
+        reason.contains("while seeding") && reason.contains("unverified"),
+        "{reason}"
+    );
+
+    // The environment exists, its workspace is unverified, and reality says
+    // it is not running: no contents ever ran.
+    let view = computer_where(&daemon, "copy", "the clone to stop", |view| {
+        view.reality.observed == "stopped"
+    })
+    .await;
+    assert_eq!(view.reality.desired, "stopped");
+    assert!(view.desired.processes.is_empty(), "nothing was applied");
+    let recorded = events(&daemon, "copy").await;
+    let failure = recorded
+        .iter()
+        .find(|(_, data)| data["command"] == "clone" && data["outcome"] == "failed")
+        .expect("the failure is recorded");
+    assert_eq!(failure.1["phase"], "seeding");
+    assert_eq!(failure.1["workspace_verified"], false);
+    // The source is untouched.
+    assert!(daemon.computer("origin").await.unwrap().converged);
 }

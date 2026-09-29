@@ -2724,6 +2724,36 @@
    "tests": []
   },
   {
+   "command": "compute environment workspace export",
+   "about": "Write the computer's workspace to a file and print its digest",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": null,
+   "tests": []
+  },
+  {
+   "command": "compute environment workspace seed",
+   "about": "Seed the computer's empty workspace from an archive, and prove it landed",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": null,
+   "tests": []
+  },
+  {
+   "command": "compute environment workspace verify",
+   "about": "Measure the computer's workspace, and compare it with a digest",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": null,
+   "tests": []
+  },
+  {
    "command": "compute environment repo add",
    "about": "Add a repository, checked out at a revision",
    "help_defect": null,
@@ -4077,6 +4107,33 @@
    "method": "POST",
    "path": "/environments/{environment}/clone",
    "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/workspace/export",
+   "scope": "Execute",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/workspace/seed",
+   "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/workspace/verify",
+   "scope": "Execute",
    "ui": false,
    "cli": true,
    "appport": false,

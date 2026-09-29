@@ -390,6 +390,7 @@ with `resume_unsupported`, rather than replacing it silently).
 | `POST` | `/environments/{environment}/reconcile` | Retry failed items and probe now |
 | `POST` | `/environments/{environment}/replace` | New requirements: a new machine |
 | `POST` | `/environments/{environment}/clone` | A new environment seeded with this one's workspace files and declared contents ([environment-clone.md](environment-clone.md)) |
+| `POST` | `/environments/{environment}/workspace/export` \| `seed` \| `verify` | Portable workspace state: export a computer's workspace, seed an empty one, verify one against a digest ([workspace.md](workspace.md)) |
 | `POST` | `/environments/{environment}/exec` | Run a command as a durable job |
 | `GET` | `/environments/{environment}/jobs/{job}` | That job and its result |
 | `GET` | `/environments/{environment}/logs` | The computer's logs, or one process's (`?process=api&limit=200`) |

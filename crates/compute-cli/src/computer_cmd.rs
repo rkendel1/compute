@@ -141,6 +141,38 @@ pub async fn create(
 }
 
 #[derive(Subcommand, Debug)]
+pub enum WorkspaceCommands {
+    /// Write the computer's workspace to a file and print its digest.
+    Export {
+        environment: String,
+        /// The archive to write.
+        #[arg(long, short)]
+        output: std::path::PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Seed the computer's empty workspace from an archive, and prove it landed.
+    Seed {
+        environment: String,
+        archive: std::path::PathBuf,
+        /// Refuse the archive unless it holds exactly this workspace.
+        #[arg(long)]
+        digest: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Measure the computer's workspace, and compare it with a digest.
+    Verify {
+        environment: String,
+        /// The digest it should have. Without one, only measure.
+        #[arg(long)]
+        digest: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ComputerCommands {
     /// Show an environment's computer: desired against observed contents.
     Computer {
@@ -196,6 +228,10 @@ pub enum ComputerCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Workspace state: export a computer's workspace, seed an empty one,
+    /// verify one against a digest. See docs/workspace.md.
+    #[command(subcommand)]
+    Workspace(WorkspaceCommands),
     /// Repositories checked out in the computer.
     #[command(subcommand)]
     Repo(RepoCommands),
@@ -575,6 +611,94 @@ pub enum ContentsCommands {
     },
 }
 
+async fn workspace(client: &DaemonClient, command: WorkspaceCommands) -> compute_core::Result<()> {
+    use compute_environment::*;
+    match command {
+        WorkspaceCommands::Export {
+            environment,
+            output,
+            json,
+        } => {
+            let export: WorkspaceExport = client
+                .post::<(), _>(
+                    &format!("/environments/{environment}/workspace/export"),
+                    None,
+                )
+                .await
+                .map_err(error)?;
+            std::fs::write(&output, &export.archive)?;
+            if json {
+                print_json(&serde_json::json!({
+                    "digest": export.digest, "archive_digest": export.archive_digest,
+                    "files": export.files, "directories": export.directories,
+                    "bytes": export.bytes, "job_id": export.job_id, "archive": output,
+                }));
+            } else {
+                println!("Workspace {}", export.digest);
+                println!(
+                    "Wrote {} ({} files, {} empty directories, {} bytes of content)",
+                    output.display(),
+                    export.files,
+                    export.directories,
+                    export.bytes
+                );
+            }
+        }
+        WorkspaceCommands::Seed {
+            environment,
+            archive,
+            digest,
+            json,
+        } => {
+            let seed: WorkspaceSeed = client
+                .post(
+                    &format!("/environments/{environment}/workspace/seed"),
+                    Some(&WorkspaceSeedRequest {
+                        archive: std::fs::read(&archive)?,
+                        digest,
+                    }),
+                )
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&seed);
+            } else {
+                println!(
+                    "Seeded {environment}: {} files, workspace {} (verified inside the computer)",
+                    seed.files, seed.digest
+                );
+            }
+        }
+        WorkspaceCommands::Verify {
+            environment,
+            digest,
+            json,
+        } => {
+            let result: WorkspaceVerification = client
+                .post(
+                    &format!("/environments/{environment}/workspace/verify"),
+                    Some(&WorkspaceVerifyRequest { digest }),
+                )
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&result);
+            } else {
+                println!("Workspace {}", result.digest);
+                match &result.expected {
+                    Some(expected) if result.verified => println!("Matches {expected}"),
+                    Some(expected) => println!("MISMATCH: expected {expected}"),
+                    None => {}
+                }
+            }
+            if result.expected.is_some() && !result.verified {
+                std::process::exit(1);
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_core::Result<()> {
     match command {
         ComputerCommands::Computer { environment, json } => {
@@ -681,8 +805,8 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
             } else {
                 println!("Cloned {} into {}", report.source, report.environment);
                 println!(
-                    "Seeded:   {} files, {} bytes, tree {} (verified inside the new computer)",
-                    report.files, report.bytes, report.tree_digest
+                    "Seeded:   {} files, {} bytes, workspace {} (verified inside the new computer)",
+                    report.files, report.bytes, report.workspace
                 );
                 for (name, (from, to)) in &report.repositories {
                     println!(
@@ -700,6 +824,7 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                 print_computer(&report.computer, false);
             }
         }
+        ComputerCommands::Workspace(command) => workspace(client, command).await?,
         ComputerCommands::Repo(command) => match command {
             RepoCommands::Add(args) | RepoCommands::Update(args) => {
                 let view: ComputerView = client
