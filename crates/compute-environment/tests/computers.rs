@@ -335,6 +335,15 @@ async fn start_daemon_with(
     artifacts: Arc<dyn compute_state::ArtifactStore>,
     pool: PoolConfig,
 ) -> (Arc<Daemon>, tempfile::TempDir) {
+    start_daemon_tuned(store, artifacts, pool, |_| {}).await
+}
+
+async fn start_daemon_tuned(
+    store: Arc<dyn StateStore>,
+    artifacts: Arc<dyn compute_state::ArtifactStore>,
+    pool: PoolConfig,
+    tune: impl FnOnce(&mut DaemonConfig),
+) -> (Arc<Daemon>, tempfile::TempDir) {
     let node = tempfile::tempdir().unwrap();
     let mut config = DaemonConfig::new(node.path(), store, artifacts);
     config.provider = Arc::new(common::provider());
@@ -344,6 +353,7 @@ async fn start_daemon_with(
     config.computer_liveness = Duration::from_millis(300);
     config.computer_liveness_timeout = Duration::from_secs(3);
     config.replacement_deadline = Duration::from_secs(20);
+    tune(&mut config);
     let seed = (std::process::id() % 400) as u16 * 20;
     config.port_range = (41000 + seed, 41000 + seed + 9);
     config.instance_port_range = (49000 + seed, 49000 + seed + 9);
@@ -4001,6 +4011,9 @@ struct FaultyArtifacts {
     corrupt_get: AtomicBool,
     hang_put: AtomicBool,
     put_started: AtomicBool,
+    truncate_get: AtomicBool,
+    /// Answers every read with these bytes instead: a store that lies.
+    substitute: std::sync::Mutex<Option<Vec<u8>>>,
 }
 
 impl FaultyArtifacts {
@@ -4013,6 +4026,8 @@ impl FaultyArtifacts {
             corrupt_get: AtomicBool::new(false),
             hang_put: AtomicBool::new(false),
             put_started: AtomicBool::new(false),
+            truncate_get: AtomicBool::new(false),
+            substitute: std::sync::Mutex::new(None),
         })
     }
 }
@@ -4039,6 +4054,16 @@ impl compute_state::ArtifactStore for FaultyArtifacts {
         {
             let middle = bytes.len() / 2;
             bytes[middle] ^= 0xff;
+        }
+        if self.truncate_get.load(Ordering::SeqCst)
+            && let Some(bytes) = bytes.as_mut()
+        {
+            bytes.truncate(bytes.len() / 2);
+        }
+        if bytes.is_some()
+            && let Some(lie) = self.substitute.lock().unwrap().clone()
+        {
+            return Ok(Some(lie));
         }
         Ok(bytes)
     }
@@ -4140,13 +4165,19 @@ type World = (
     Target,
     tempfile::TempDir,
     tempfile::TempDir,
+    Arc<Steered>,
 );
 
 /// A daemon over a memory state with a faulty artifact store and a state
 /// store that can refuse a checkpoint, and an environment holding state.
 async fn checkpoint_world(source: &Path) -> World {
+    checkpoint_world_gated(source, None).await
+}
+
+async fn checkpoint_world_gated(source: &Path, gate: Option<Arc<Semaphore>>) -> World {
     let workspaces = tempfile::tempdir().unwrap();
-    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let steered = Steered::new(workspaces.path(), full(), gate);
+    let target = Target::start(steered.clone(), &[]);
     let state = Arc::new(FailingState {
         inner: MemoryState::new(),
         fail_checkpoint: AtomicBool::new(false),
@@ -4178,13 +4209,14 @@ async fn checkpoint_world(source: &Path) -> World {
         "mkdir -p data/nested empty && printf hello > data/notes.txt && printf deep > data/nested/x.bin && printf '#!/bin/sh\\necho hi\\n' > run.sh && chmod +x run.sh",
     )
     .await;
-    (daemon, artifacts, state, target, workspaces, node)
+    (daemon, artifacts, state, target, workspaces, node, steered)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_checkpoint_is_immutable_captured_state_not_machine_state() {
     let (_repositories, source) = repository();
-    let (daemon, artifacts, _state, _target, _workspaces, _node) = checkpoint_world(&source).await;
+    let (daemon, artifacts, _state, _target, _workspaces, _node, _steered) =
+        checkpoint_world(&source).await;
     let origin = daemon.computer("origin").await.unwrap();
     let digest = digest_of(&daemon, "origin").await;
     let pid = origin.observed.processes["api"].pid;
@@ -4347,7 +4379,8 @@ async fn a_checkpoint_is_immutable_captured_state_not_machine_state() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_checkpoint_of_an_unsafe_workspace_is_refused_and_nothing_is_recorded() {
     let (_repositories, source) = repository();
-    let (daemon, _artifacts, _state, _target, _workspaces, _node) = checkpoint_world(&source).await;
+    let (daemon, _artifacts, _state, _target, _workspaces, _node, _steered) =
+        checkpoint_world(&source).await;
     for (what, make, remove) in [
         ("a symbolic link", "ln -s /etc/passwd link", "rm link"),
         ("a hard link", "ln data/notes.txt data/twin", "rm data/twin"),
@@ -4388,7 +4421,8 @@ async fn a_checkpoint_of_an_unsafe_workspace_is_refused_and_nothing_is_recorded(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn only_the_owner_checkpoints_and_a_changing_workspace_is_refused() {
     let (_repositories, source) = repository();
-    let (daemon, _artifacts, _state, _target, _workspaces, _node) = checkpoint_world(&source).await;
+    let (daemon, _artifacts, _state, _target, _workspaces, _node, _steered) =
+        checkpoint_world(&source).await;
     let refused = daemon
         .checkpoint_environment("origin", "mallory", no_parent())
         .await;
@@ -4479,7 +4513,8 @@ async fn only_the_owner_checkpoints_and_a_changing_workspace_is_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_capture_publishes_nothing_and_never_poisons_the_next() {
     let (_repositories, source) = repository();
-    let (daemon, artifacts, state, _target, _workspaces, _node) = checkpoint_world(&source).await;
+    let (daemon, artifacts, state, _target, _workspaces, _node, _steered) =
+        checkpoint_world(&source).await;
     let failed_at = async |phase: &str, failed: Result<CheckpointReport, EnvironmentError>| {
         assert!(failed.is_err(), "{phase}: {failed:?}");
         assert!(
@@ -4622,4 +4657,672 @@ async fn a_capture_interrupted_by_a_restart_publishes_nothing() {
     assert!(report.verified && !report.existing);
     assert_eq!(records(&second, "origin").await.len(), 1);
     second.shutdown().await;
+}
+
+// ---- restore -------------------------------------------------------------------
+
+fn restore_of(name: &str) -> RestoreRequest {
+    RestoreRequest {
+        name: name.into(),
+        target: None,
+    }
+}
+
+/// A checkpoint of the origin, and the digest it captured.
+async fn captured(daemon: &Arc<Daemon>) -> (CheckpointReport, String) {
+    let digest = digest_of(daemon, "origin").await;
+    let report = daemon
+        .checkpoint_environment("origin", "alice", no_parent())
+        .await
+        .unwrap();
+    assert_eq!(report.workspace, digest);
+    (report, digest)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restoring_a_checkpoint_creates_independent_environments_from_immutable_state() {
+    let (_repositories, source) = repository();
+    let (daemon, artifacts, _state, _target, _workspaces, _node, _steered) =
+        checkpoint_world(&source).await;
+    let origin = daemon.computer("origin").await.unwrap();
+    let pid = origin.observed.processes["api"].pid;
+    let (checkpoint, digest) = captured(&daemon).await;
+    let record = records(&daemon, "origin").await.remove(0);
+    let bytes = artifact_bytes(&artifacts, &record.artifact_id).await;
+
+    let report = daemon
+        .restore_checkpoint(&checkpoint.checkpoint_id, "alice", restore_of("branch"))
+        .await
+        .unwrap();
+
+    // A new environment, computer, and session: identity is fresh.
+    let branch = report.computer.clone();
+    assert_ne!(branch.environment_id, origin.environment_id);
+    assert_eq!(report.environment_id, branch.environment_id);
+    assert_ne!(
+        report.computer_id,
+        compute_state::ids::computer(&origin.environment_id)
+    );
+    assert_ne!(branch.session_id, origin.session_id);
+    assert_ne!(
+        branch
+            .machine
+            .as_ref()
+            .map(|machine| machine.resource.clone()),
+        origin
+            .machine
+            .as_ref()
+            .map(|machine| machine.resource.clone())
+    );
+    assert_eq!(branch.owner, "alice");
+    assert_eq!(report.checkpoint_id, checkpoint.checkpoint_id);
+    assert_eq!(report.source, "origin");
+    assert!(report.workspace_verified);
+    assert!(
+        report.jobs.len() >= 3,
+        "upload, extract, measure: {report:?}"
+    );
+
+    // The workspace: the digest, the contents, the empty directory, the
+    // executable bit.
+    assert_eq!(report.workspace, digest);
+    assert_eq!(digest_of(&daemon, "branch").await, digest);
+    assert_eq!(
+        sh(&daemon, "branch", "cat data/notes.txt data/nested/x.bin").await,
+        "hellodeep"
+    );
+    assert_eq!(
+        sh(&daemon, "branch", "test -d empty && echo yes")
+            .await
+            .trim(),
+        "yes"
+    );
+    assert_eq!(
+        sh(&daemon, "branch", "test -x run.sh && echo x")
+            .await
+            .trim(),
+        "x"
+    );
+
+    // The declared process runs in the new computer because it reconciled its
+    // declaration: not a restored process.
+    assert_eq!(branch.desired.processes, origin.desired.processes);
+    assert_eq!(branch.desired.repositories, origin.desired.repositories);
+    assert_eq!(
+        branch.observed.processes["api"].state,
+        ProcessState::Running
+    );
+    assert_ne!(branch.observed.processes["api"].pid, pid);
+    assert_eq!(report.declared_state, "matches the state at capture");
+    assert_eq!(
+        report.captured_contents_generation,
+        report.applied_contents_generation
+    );
+
+    // Nothing of the source's authority or configuration came along.
+    assert!(branch.config.is_empty());
+    assert_eq!(
+        report.omitted_config,
+        vec!["API_TOKEN".to_string(), "APP_ENV".to_string()]
+    );
+
+    // Provenance is evidence on the new environment, and nothing was written
+    // to the source's history.
+    let branch_events = events(&daemon, "branch").await;
+    let restored = branch_events
+        .iter()
+        .find(|(_, data)| data["command"] == "restore")
+        .expect("the provenance is recorded");
+    assert_eq!(
+        restored.1["checkpoint_id"],
+        checkpoint.checkpoint_id.as_str()
+    );
+    assert_eq!(restored.1["artifact"], record.artifact_id.as_str());
+    assert_eq!(restored.1["workspace"], digest.as_str());
+    assert_eq!(restored.1["declared_state"], "matches the state at capture");
+    assert!(
+        !events(&daemon, "origin")
+            .await
+            .iter()
+            .any(|(_, data)| data["command"] == "restore")
+    );
+    assert!(daemon.computer("branch--candidate").await.is_err());
+
+    // The source is untouched.
+    let still = daemon.computer("origin").await.unwrap();
+    assert_eq!(still.session_id, origin.session_id);
+    assert_eq!(still.observed.processes["api"].pid, pid);
+    assert!(still.converged);
+    assert_eq!(digest_of(&daemon, "origin").await, digest);
+
+    // Independence: a change to either side never reaches the other.
+    sh(
+        &daemon,
+        "origin",
+        "printf a-only > data/a.txt && printf changed > data/notes.txt",
+    )
+    .await;
+    assert_eq!(
+        digest_of(&daemon, "branch").await,
+        digest,
+        "B did not change"
+    );
+    let origin_changed = digest_of(&daemon, "origin").await;
+    sh(
+        &daemon,
+        "branch",
+        "printf b-only > data/b.txt && rm data/nested/x.bin",
+    )
+    .await;
+    assert_eq!(
+        digest_of(&daemon, "origin").await,
+        origin_changed,
+        "A did not change"
+    );
+
+    // The checkpoint is immutable through all of it.
+    assert_eq!(artifact_bytes(&artifacts, &record.artifact_id).await, bytes);
+    assert_eq!(records(&daemon, "origin").await, vec![record.clone()]);
+    let viewed = daemon
+        .checkpoint("origin", "alice", &record.checkpoint_id)
+        .await
+        .unwrap();
+    assert_eq!(viewed.valid, Some(true));
+    assert_eq!(viewed.checkpoint.workspace_digest, digest);
+
+    // Durable, reusable state: the same checkpoint again is another
+    // independent environment with the same initial workspace.
+    let again = daemon
+        .restore_checkpoint(&checkpoint.checkpoint_id, "alice", restore_of("branch-two"))
+        .await
+        .unwrap();
+    assert_ne!(again.environment_id, report.environment_id);
+    assert_ne!(again.computer_id, report.computer_id);
+    assert_ne!(again.computer.session_id, report.computer.session_id);
+    assert_eq!(again.workspace, report.workspace);
+    assert_eq!(digest_of(&daemon, "branch-two").await, digest);
+    assert_ne!(
+        digest_of(&daemon, "branch").await,
+        digest_of(&daemon, "branch-two").await,
+        "B1 changed; B2 did not"
+    );
+
+    // Declarations are the environment's, so a changed declaration is applied
+    // and said so, never silently: the checkpoint holds none.
+    daemon
+        .set_process("origin", "alice", "api", ProcessDesired::Stopped)
+        .await
+        .unwrap();
+    let later = daemon
+        .restore_checkpoint(
+            &checkpoint.checkpoint_id,
+            "alice",
+            restore_of("branch-three"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(later.declared_state, "changed since capture");
+    assert_ne!(
+        later.captured_contents_generation,
+        later.applied_contents_generation
+    );
+    assert_eq!(later.workspace, digest);
+    assert_eq!(artifact_bytes(&artifacts, &record.artifact_id).await, bytes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_checkpoint_that_cannot_be_trusted_never_becomes_an_environment() {
+    let (_repositories, source) = repository();
+    let (daemon, artifacts, state, _target, _workspaces, _node, _steered) =
+        checkpoint_world(&source).await;
+    let (checkpoint, _digest) = captured(&daemon).await;
+    let good = records(&daemon, "origin").await.remove(0);
+    let store: Arc<dyn StateStore> = state.clone();
+    let control = compute_state::ControlState::new(store);
+    let forge = async |id: &str, edit: &dyn Fn(&mut compute_state::CheckpointRecord)| {
+        let mut record = good.clone();
+        record.checkpoint_id = id.to_owned();
+        edit(&mut record);
+        control
+            .transaction(compute_state::Batch::new().create(id, &record))
+            .await
+            .unwrap();
+    };
+    let nothing_was_created =
+        async |what: &str, result: Result<RestoreReport, EnvironmentError>| {
+            assert!(result.is_err(), "{what}: {result:?}");
+            assert!(
+                daemon.computer("branch").await.is_err(),
+                "{what}: no environment"
+            );
+            assert!(
+                daemon.computer("branch--candidate").await.is_err(),
+                "{what}: no candidate, nothing was begun"
+            );
+            assert!(
+                !events(&daemon, "origin")
+                    .await
+                    .iter()
+                    .any(|(_, data)| data["command"] == "restore"),
+                "{what}"
+            );
+        };
+
+    nothing_was_created(
+        "a checkpoint that does not exist",
+        daemon
+            .restore_checkpoint("ckp_nope", "alice", restore_of("branch"))
+            .await,
+    )
+    .await;
+
+    // Corrupted, then truncated bytes.
+    artifacts.corrupt_get.store(true, Ordering::SeqCst);
+    nothing_was_created(
+        "a corrupted artifact",
+        daemon
+            .restore_checkpoint(&checkpoint.checkpoint_id, "alice", restore_of("branch"))
+            .await,
+    )
+    .await;
+    artifacts.corrupt_get.store(false, Ordering::SeqCst);
+    artifacts.truncate_get.store(true, Ordering::SeqCst);
+    nothing_was_created(
+        "a truncated artifact",
+        daemon
+            .restore_checkpoint(&checkpoint.checkpoint_id, "alice", restore_of("branch"))
+            .await,
+    )
+    .await;
+    artifacts.truncate_get.store(false, Ordering::SeqCst);
+
+    // An artifact the store does not have.
+    forge("ckp_lost", &|record| {
+        record.artifact_id = format!("sha256:{:0>64}", "1");
+    })
+    .await;
+    nothing_was_created(
+        "a missing artifact",
+        daemon
+            .restore_checkpoint("ckp_lost", "alice", restore_of("branch"))
+            .await,
+    )
+    .await;
+
+    // Valid bytes that are not the canonical encoding.
+    let bytes = artifact_bytes(&artifacts, &good.artifact_id).await;
+    let noncanonical = {
+        let mut archive = tar::Archive::new(&bytes[..]);
+        let mut builder = tar::Builder::new(Vec::new());
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let mut data = vec![];
+            std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+            if entry.path().unwrap().to_str() == Some("manifest.json") {
+                let manifest: serde_json::Value = serde_json::from_slice(&data).unwrap();
+                data = serde_json::to_vec(&manifest).unwrap();
+            }
+            let mut header = entry.header().clone();
+            header.set_size(data.len() as u64);
+            header.set_cksum();
+            builder.append(&header, &data[..]).unwrap();
+        }
+        builder.into_inner().unwrap()
+    };
+    let stored = compute_state::ArtifactStore::put(artifacts.as_ref(), "checkpoint", &noncanonical)
+        .await
+        .unwrap();
+    forge("ckp_loose", &|record| record.artifact_id = stored.clone()).await;
+    nothing_was_created(
+        "a non-canonical encoding",
+        daemon
+            .restore_checkpoint("ckp_loose", "alice", restore_of("branch"))
+            .await,
+    )
+    .await;
+
+    // A store that answers with a different, valid artifact.
+    forge("ckp_swapped", &|record| {
+        record.artifact_id = format!("sha256:{:0>64}", "2");
+    })
+    .await;
+    *artifacts.substitute.lock().unwrap() = Some(bytes.clone());
+    nothing_was_created(
+        "an artifact digest mismatch",
+        daemon
+            .restore_checkpoint("ckp_swapped", "alice", restore_of("branch"))
+            .await,
+    )
+    .await;
+    *artifacts.substitute.lock().unwrap() = None;
+
+    // Records that disagree with their own artifact.
+    forge("ckp_forged", &|_| {}).await;
+    nothing_was_created(
+        "a checkpoint id mismatch",
+        daemon
+            .restore_checkpoint("ckp_forged", "alice", restore_of("branch"))
+            .await,
+    )
+    .await;
+    forge("ckp_treed", &|record| {
+        record.checkpoint_id = good.checkpoint_id.clone();
+        record.workspace_digest = "sha256:wrong".into();
+    })
+    .await;
+    nothing_was_created(
+        "a workspace digest mismatch",
+        daemon
+            .restore_checkpoint("ckp_treed", "alice", restore_of("branch"))
+            .await,
+    )
+    .await;
+
+    // Names and operators.
+    assert!(matches!(
+        daemon
+            .restore_checkpoint(&checkpoint.checkpoint_id, "alice", restore_of("origin"))
+            .await,
+        Err(EnvironmentError::Conflict(_))
+    ));
+    assert!(matches!(
+        daemon
+            .restore_checkpoint(
+                &checkpoint.checkpoint_id,
+                "alice",
+                restore_of("x--candidate")
+            )
+            .await,
+        Err(EnvironmentError::Invalid(_))
+    ));
+    let stranger = daemon
+        .restore_checkpoint(&checkpoint.checkpoint_id, "mallory", restore_of("theirs"))
+        .await;
+    assert!(
+        matches!(stranger, Err(EnvironmentError::NotFound(_))),
+        "{stranger:?}"
+    );
+    assert!(daemon.computer("theirs").await.is_err());
+
+    // The good checkpoint was never harmed by any of it, and still restores.
+    assert!(
+        records(&daemon, "origin").await.contains(&good),
+        "the original record is unchanged"
+    );
+    assert_eq!(
+        daemon
+            .checkpoint("origin", "alice", &good.checkpoint_id)
+            .await
+            .unwrap()
+            .valid,
+        Some(true)
+    );
+    assert!(daemon.computer("origin").await.unwrap().converged);
+    let report = daemon
+        .restore_checkpoint(&checkpoint.checkpoint_id, "alice", restore_of("branch"))
+        .await
+        .unwrap();
+    assert!(report.workspace_verified);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_restore_publishes_nothing_and_a_retry_succeeds() {
+    let (_repositories, source) = repository();
+    let (daemon, artifacts, _state, _target, _workspaces, _node, steered) =
+        checkpoint_world(&source).await;
+    let origin = daemon.computer("origin").await.unwrap();
+    let (checkpoint, digest) = captured(&daemon).await;
+    let record = records(&daemon, "origin").await.remove(0);
+    let bytes = artifact_bytes(&artifacts, &record.artifact_id).await;
+
+    let failed_at = async |phase: &str, failed: Result<RestoreReport, EnvironmentError>| {
+        let Err(EnvironmentError::Conflict(reason)) = &failed else {
+            panic!("{phase}: {failed:?}")
+        };
+        assert!(reason.contains(&format!("while {phase}")), "{reason}");
+        assert!(reason.contains("unverified"), "{reason}");
+        // The checkpoint and the source are as they were.
+        assert_eq!(artifact_bytes(&artifacts, &record.artifact_id).await, bytes);
+        assert_eq!(records(&daemon, "origin").await, vec![record.clone()]);
+        let still = daemon.computer("origin").await.unwrap();
+        assert_eq!(still.session_id, origin.session_id);
+        assert!(still.converged);
+        assert_eq!(digest_of(&daemon, "origin").await, digest);
+        assert!(
+            !events(&daemon, "origin")
+                .await
+                .iter()
+                .any(|(_, data)| data["command"] == "restore"),
+            "{phase}: the source's history is not written to"
+        );
+        // Nothing usable exists, the name is free, and the candidate is inert.
+        assert!(
+            daemon.computer("branch").await.is_err(),
+            "{phase}: the name is free"
+        );
+        let candidate = computer_where(
+            &daemon,
+            "branch--candidate",
+            "the candidate to stop",
+            |view| view.reality.observed == "stopped",
+        )
+        .await;
+        assert_eq!(candidate.reality.desired, "stopped");
+        let recorded = events(&daemon, "branch--candidate").await;
+        let failure = recorded
+            .iter()
+            .rev()
+            .find(|(_, data)| data["command"] == "restore" && data["outcome"] == "failed")
+            .unwrap_or_else(|| panic!("{phase}: the failure is evidenced"));
+        assert_eq!(failure.1["phase"], phase);
+        assert_eq!(failure.1["workspace_verified"], false);
+    };
+    let attempt =
+        || daemon.restore_checkpoint(&checkpoint.checkpoint_id, "alice", restore_of("branch"));
+
+    // Seeding fails.
+    *steered.fail_exec_containing.lock().unwrap() = Some("tar -xf".into());
+    failed_at("seeding", attempt().await).await;
+    *steered.fail_exec_containing.lock().unwrap() = None;
+
+    // The seeded workspace is not the checkpoint's: verification refuses it.
+    *steered.tamper.lock().unwrap() = Some((
+        "workspace_check\ndigest".into(),
+        Box::new(|workspace: &Path| std::fs::write(workspace.join("stray"), "x").unwrap()),
+    ));
+    failed_at("seeding", attempt().await).await;
+
+    // The declared contents cannot be brought up.
+    *steered.fail_exec_containing.lock().unwrap() = Some("git fetch".into());
+    failed_at("reconciling", attempt().await).await;
+    *steered.fail_exec_containing.lock().unwrap() = None;
+
+    // A retry: the leftover candidate is cleared, the name was never poisoned.
+    let report = attempt().await.unwrap();
+    assert!(report.workspace_verified);
+    assert_eq!(digest_of(&daemon, "branch").await, digest);
+    assert!(daemon.computer("branch--candidate").await.is_err());
+    assert_eq!(artifact_bytes(&artifacts, &record.artifact_id).await, bytes);
+    assert_eq!(records(&daemon, "origin").await, vec![record]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restore_interrupted_by_a_restart_publishes_nothing_and_retries() {
+    let (_repositories, source) = repository();
+    // One permit: the origin provisions; the restore's machine waits.
+    let gate = Arc::new(Semaphore::new(1));
+    let (first, artifacts, state, target, _workspaces, _node, _steered) =
+        checkpoint_world_gated(&source, Some(gate.clone())).await;
+    let (checkpoint, digest) = captured(&first).await;
+    let record = records(&first, "origin").await.remove(0);
+
+    let restoring = {
+        let first = first.clone();
+        let id = checkpoint.checkpoint_id.clone();
+        tokio::spawn(async move {
+            first
+                .restore_checkpoint(&id, "alice", restore_of("branch"))
+                .await
+        })
+    };
+    eventually("the candidate to be created", async || {
+        first.computer("branch--candidate").await.ok()
+    })
+    .await;
+    first.shutdown().await;
+    restoring.abort();
+    drop(first);
+
+    // A new controller: nothing is authoritative under the name, the
+    // checkpoint is intact, and the restore can be retried.
+    gate.add_permits(64);
+    let store: Arc<dyn StateStore> = state.clone();
+    let (second, _node2) =
+        start_daemon_with(store, artifacts.clone(), pool(&[("target-a", &target)])).await;
+    computer_where(&second, "origin", "the origin to converge", |view| {
+        view.converged
+    })
+    .await;
+    assert!(second.computer("branch").await.is_err());
+    assert_eq!(records(&second, "origin").await, vec![record.clone()]);
+    assert_eq!(
+        second
+            .checkpoint("origin", "alice", &record.checkpoint_id)
+            .await
+            .unwrap()
+            .valid,
+        Some(true)
+    );
+    let report = second
+        .restore_checkpoint(&checkpoint.checkpoint_id, "alice", restore_of("branch"))
+        .await
+        .unwrap();
+    assert!(report.workspace_verified);
+    assert_eq!(digest_of(&second, "branch").await, digest);
+    assert!(second.computer("branch--candidate").await.is_err());
+    second.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn checkpoint_and_restore_work_over_http_and_ownership_holds() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let artifacts = FaultyArtifacts::new(&store);
+    let (daemon, _node) =
+        start_daemon_tuned(store, artifacts, pool(&[("target-a", &target)]), |config| {
+            config.security.legacy_token = Some("operator".into())
+        })
+        .await;
+    // The token's principal owns `origin`; alice owns `theirs`.
+    for (name, owner) in [("origin", "legacy-token"), ("theirs", "alice")] {
+        daemon
+            .create_computer_environment(
+                definition(
+                    name,
+                    ComputerLifecycle::Persistent,
+                    requirements(),
+                    contents(&source, "v1"),
+                ),
+                owner,
+            )
+            .await
+            .unwrap();
+        computer_where(&daemon, name, "converge", |view| view.converged).await;
+    }
+    let their_checkpoint = daemon
+        .checkpoint_environment("theirs", "alice", no_parent())
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(api::serve(listener, daemon.clone(), None));
+    let anonymous = client::DaemonClient::new(&endpoint).unwrap();
+    let operator = client::DaemonClient::new(&endpoint)
+        .unwrap()
+        .with_bearer_token("operator");
+
+    // Nothing without the token.
+    assert!(matches!(
+        anonymous
+            .post::<_, CheckpointReport>("/environments/origin/checkpoint", Some(&no_parent()))
+            .await,
+        Err(EnvironmentError::Unauthorized(_))
+    ));
+    assert!(matches!(
+        anonymous
+            .post::<_, RestoreReport>(
+                &format!("/checkpoints/{}/restore", their_checkpoint.checkpoint_id),
+                Some(&restore_of("stolen"))
+            )
+            .await,
+        Err(EnvironmentError::Unauthorized(_))
+    ));
+
+    // Capture, list, inspect and restore, all over the wire.
+    let captured: CheckpointReport = operator
+        .post("/environments/origin/checkpoint", Some(&no_parent()))
+        .await
+        .unwrap();
+    assert!(captured.verified);
+    let listed: Vec<CheckpointView> = operator
+        .get("/environments/origin/checkpoints")
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].checkpoint.checkpoint_id, captured.checkpoint_id);
+    let shown: CheckpointView = operator
+        .get(&format!(
+            "/environments/origin/checkpoints/{}",
+            captured.checkpoint_id
+        ))
+        .await
+        .unwrap();
+    assert_eq!(shown.valid, Some(true));
+    let restored: RestoreReport = operator
+        .post(
+            &format!("/checkpoints/{}/restore", captured.checkpoint_id),
+            Some(&restore_of("branch")),
+        )
+        .await
+        .unwrap();
+    assert!(restored.workspace_verified);
+    assert_eq!(restored.workspace, captured.workspace);
+    assert_eq!(restored.environment, "branch");
+    assert!(daemon.computer("branch").await.unwrap().converged);
+
+    // Ownership holds over HTTP: another operator's checkpoint is not
+    // visible, restorable, or capturable.
+    let refused = operator
+        .post::<_, RestoreReport>(
+            &format!("/checkpoints/{}/restore", their_checkpoint.checkpoint_id),
+            Some(&restore_of("stolen")),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(EnvironmentError::NotFound(_))),
+        "{refused:?}"
+    );
+    assert!(daemon.computer("stolen").await.is_err());
+    assert!(
+        operator
+            .get::<Vec<CheckpointView>>("/environments/theirs/checkpoints")
+            .await
+            .is_err()
+    );
+    assert!(
+        operator
+            .post::<_, CheckpointReport>("/environments/theirs/checkpoint", Some(&no_parent()))
+            .await
+            .is_err()
+    );
+    let missing = operator
+        .post::<_, RestoreReport>("/checkpoints/ckp_nope/restore", Some(&restore_of("ghost")))
+        .await;
+    assert!(
+        matches!(missing, Err(EnvironmentError::NotFound(_))),
+        "{missing:?}"
+    );
+    server.abort();
 }

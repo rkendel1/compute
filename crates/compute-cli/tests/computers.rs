@@ -938,4 +938,38 @@ fn a_checkpoint_and_a_fork_carry_the_same_verified_workspace_from_the_cli() {
         cli.ok(&["environment", "exec", "copy", "--", "cat", "data/notes.txt"]),
         "hello"
     );
+
+    // A restore carries the checkpoint's state into another new environment,
+    // independent of the fork.
+    let text = cli.ok(&["environment", "restore", &id, "revived"]);
+    assert!(
+        text.contains(&format!("Restored checkpoint {id} into revived")),
+        "{text}"
+    );
+    assert!(text.contains(&digest), "{text}");
+    assert!(
+        text.contains("verified inside the new computer: true"),
+        "{text}"
+    );
+    let restored = cli.json(&["environment", "restore", &id, "revived-two", "--json"]);
+    assert_eq!(restored["checkpoint_id"], id.as_str());
+    assert_eq!(restored["workspace"], digest.as_str());
+    assert_eq!(restored["workspace_verified"], true);
+    assert_ne!(restored["environment_id"], origin["environment_id"]);
+    assert_ne!(restored["computer"]["session_id"], origin["session_id"]);
+    assert_eq!(
+        cli.ok(&[
+            "environment",
+            "exec",
+            "revived-two",
+            "--",
+            "cat",
+            "data/notes.txt"
+        ]),
+        "hello"
+    );
+    let refused = cli.run(&["environment", "restore", &id, "revived"]);
+    assert!(!refused.status.success(), "a name in use is refused");
+    let refused = cli.run(&["environment", "restore", "ckp_missing", "ghost"]);
+    assert!(!refused.status.success());
 }

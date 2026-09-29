@@ -4,8 +4,8 @@
 [checkpoint.md](checkpoint.md), on a different foundation from the one below:
 the canonical artifact is built in Rust from the validated workspace archive
 ([workspace.md](workspace.md)) and stored in the existing artifact store, with
-no archiver job and no new provider method. Restore, retention, quiesce and
-provider capabilities remain design. [fork.md](fork.md) is implemented over
+no archiver job and no new provider method. Restore is implemented as [restore.md](restore.md), into a new environment. Retention,
+quiesce, restore into an existing environment, and provider capabilities remain design. [fork.md](fork.md) is implemented over
 export/seed/verify, not over checkpoints. Read
 [opencomputer-evaluation.md](opencomputer-evaluation.md) for the context and
 [persistent-environments.md](persistent-environments.md) for what survives

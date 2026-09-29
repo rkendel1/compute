@@ -3,10 +3,10 @@
 **Status:** capture implemented. `compute environment checkpoint NAME [--parent ID]`,
 `compute environment checkpoints NAME [ID]`;
 `POST /environments/{environment}/checkpoint`,
-`GET /environments/{environment}/checkpoints[/{checkpoint}]`. Code:
+`GET /environments/{environment}/checkpoints[/{checkpoint}]`; restore is
+[restore.md](restore.md). Code:
 `crates/compute-environment/src/checkpoint.rs` (the format),
-`daemon/checkpoint.rs` (the operation). **Restore is the next consumer and is
-not built here.**
+`daemon/checkpoint.rs` (the operation). **[Restore](restore.md) consumes it.**
 
 > A Checkpoint is immutable portable captured state derived from a verified
 > Environment state. It is not an Environment, Computer, Session, or authority
@@ -142,16 +142,9 @@ quiescing, VM or provider snapshots, streaming (the 8 MiB workspace bound
 applies to what can be captured), secret scanning, and any change to
 [fork](fork.md), which keeps its direct export/seed path.
 
-## Restore (next)
+## Restore
 
-```text
-Checkpoint ─▶ new Computer ─▶ seed (verified) ─▶ apply declared state ─▶ reconcile ─▶ verify
-```
-
-Not an in-place overwrite; a failed restore leaves the existing environment and
-computer authoritative. For an existing environment it is
-[replace](replace.md) seeded from the checkpoint (same environment, new
-computer); for a new environment it is [fork](fork.md) seeded from it (new
-environment, new computer). Both already exist over an archive; restore adds
-reading the artifact back, which `Checkpoint::read_files` and the shared reader
-already do.
+[Restore](restore.md) turns a checkpoint back into a new environment on a new
+computer: validated, seeded, verified, reconciled, and published in one fenced
+handoff. Into an existing environment it is not built: it composes with
+[replace](replace.md).

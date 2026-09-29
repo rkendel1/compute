@@ -132,10 +132,14 @@ Session, or authority boundary. See [checkpoint.md](checkpoint.md).
 | [**Replace**](replace.md) | Environment → new Computer | same environment, new computer |
 | [**Fork**](fork.md) | Environment → independent Environment | new environment, new computer |
 | [**Checkpoint**](checkpoint.md) | Environment → durable portable captured state | none: creates no environment or computer |
-| **Restore** (next) | durable captured state → Environment / Computer | same environment (replacement) or new environment (fork) |
+| [**Restore**](restore.md) | durable captured state → new Environment and Computer | new environment, new computer. Into an existing environment: not built (checkpoint + replace) |
 
 Export/seed/verify ([workspace.md](workspace.md)) is the transient transfer
 every row above is built on; a checkpoint is what makes that state durable.
+
+> Restore creates fresh execution identity from immutable captured state. It
+> does not restore machine identity, process identity, session identity,
+> credentials, provider identity, or authority.
 
 Node environments and bundle projects are an earlier deployment model that
 still runs on the daemon host (gap G-ARCH-5, blocked on named Computer

@@ -3,8 +3,8 @@
 **Status:** implemented. `compute environment fork SOURCE NAME [--target T] [--copy-config]`
 (`POST /environments/{environment}/fork`); code in
 `crates/compute-environment/src/daemon/fork.rs`. It composes the
-[workspace primitives](workspace.md) and the [candidate](#the-candidate); it adds
-no copy mechanism. It replaces the earlier `clone`, which was the same
+[workspace primitives](workspace.md) and the [candidate](#the-candidate) (shared
+with [restore](restore.md) as `Derivation`); it adds no copy mechanism. It replaces the earlier `clone`, which was the same
 operation with weaker failure semantics; there is one operation, not two.
 
 ## The identity invariant
@@ -79,7 +79,7 @@ are refused at the export, before anything is created. There is no rollback.
 
 ## Not built
 
-Restore, and streaming artifacts. [Checkpoint](checkpoint.md) makes the same
+Streaming artifacts. [Checkpoint](checkpoint.md) and [restore](restore.md) makes the same
 portable state durable; fork keeps the direct export/seed path, which stays
 the fast path for a transient transfer. The 8 MiB `WORKSPACE_ARCHIVE_LIMIT` bounds the workspace
 that can be forked; a larger one is refused at the export. That is a

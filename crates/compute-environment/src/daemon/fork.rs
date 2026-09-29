@@ -36,14 +36,35 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use compute_state::{ComputerRecord, EnvironmentRecord, events, ids};
+use compute_state::{ComputerRecord, EnvironmentRecord, Stored, events, ids};
 use serde_json::json;
 
-use super::candidate::{candidate_name, is_candidate};
+use super::candidate::{Claim, candidate_name, is_candidate};
 use super::{Change, Daemon, Scope};
 use crate::EnvironmentError;
 use crate::model::*;
 use crate::status::ComputerView;
+
+/// What a new environment is derived from and how: the shared composition of
+/// fork (from another environment's exported workspace) and restore (from a
+/// checkpoint's). The declared state is the source environment's; the
+/// workspace archive is whatever the caller resolved.
+pub(crate) struct Derivation<'a> {
+    /// `fork` or `restore`, in evidence and messages.
+    pub composition: &'a str,
+    /// What it derives from, for messages and the failure record: an
+    /// environment name (a failure is recorded on it too) or a checkpoint id.
+    pub label: &'a str,
+    /// The environment whose declared contents, policy, requirements, and
+    /// lifecycle the new one inherits.
+    pub source: &'a Stored<EnvironmentRecord>,
+    pub name: &'a str,
+    pub operator: &'a str,
+    pub target: Option<String>,
+    pub copy_config: bool,
+    /// Extra fields for the creation event: how this environment came to be.
+    pub provenance: serde_json::Value,
+}
 
 impl Daemon {
     /// Fork an environment; see the module documentation.
@@ -68,93 +89,24 @@ impl Daemon {
                 "{source} is a candidate, not an environment to fork"
             )));
         }
-        // A duplicate is refused before anything is exported or created.
-        self.refresh().await?;
-        if self
-            .inner
-            .lock()
-            .await
-            .desired
-            .environments
-            .contains_key(&name)
-        {
-            return Err(EnvironmentError::Conflict(format!(
-                "environment {name} already exists"
-            )));
-        }
-        let candidate = candidate_name(&name)?;
-        let _claim = self.claim(&format!("fork:{name}"), &format!("a fork into {name}"))?;
-        let spec = record
-            .value
-            .computer
-            .clone()
-            .ok_or_else(|| EnvironmentError::Invalid(format!("{source} has no computer")))?;
-        let contents = record.value.contents.clone().unwrap_or_default();
-        let policy = record
-            .value
-            .policy
-            .clone()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|error| EnvironmentError::Invalid(format!("{source}'s policy: {error}")))?;
-        let config = if request.copy_config {
-            record.value.config.clone()
-        } else {
-            Default::default()
+        let derivation = Derivation {
+            composition: "fork",
+            label: source,
+            source: &record,
+            name: &name,
+            operator,
+            target: request.target.clone(),
+            copy_config: request.copy_config,
+            provenance: json!({ "source": source }),
         };
-        self.discard_candidate(&candidate, operator).await?;
-
+        // A duplicate is refused before anything is exported or created.
+        let claim = self.begin_derivation(&derivation).await?;
         // Nothing exists until the source has been captured.
         let export = self.export_workspace(source, operator).await?;
-        self.create_computer_environment_inner(
-            ComputerEnvironmentDefinition {
-                name: candidate.clone(),
-                desired_state: DesiredState::Running,
-                env: config,
-                policy,
-                computer: ComputerRequest {
-                    lifecycle: spec.lifecycle,
-                    requirements: spec.requirements,
-                    target: request.target,
-                    ttl_seconds: None,
-                },
-                contents: Default::default(),
-            },
-            operator,
-        )
-        .await?;
-        let composed = self
-            .prepare_candidate(&candidate, operator, &export, &contents, None)
-            .await;
-        let seed = match composed {
-            Ok(seed) => seed,
-            Err((phase, error)) => {
-                return Err(self
-                    .abandon_composition("fork", source, &candidate, operator, phase, &error)
-                    .await);
-            }
-        };
-        let mut jobs = vec![export.job_id.clone()];
-        jobs.extend(seed.jobs);
-        let computer = match self
-            .adopt_candidate(source, &name, &candidate, operator, &export.digest, &jobs)
-            .await
-        {
-            Ok(computer) => computer,
-            Err(error) => {
-                return Err(self
-                    .abandon_composition(
-                        "fork",
-                        source,
-                        &candidate,
-                        operator,
-                        "handing off",
-                        &error,
-                    )
-                    .await);
-            }
-        };
-
+        let (seed, computer, jobs) = self
+            .derive_environment(&claim, &derivation, &export, vec![export.job_id.clone()])
+            .await?;
+        let contents = record.value.contents.clone().unwrap_or_default();
         let original = self.computer(source).await?;
         let repositories = contents
             .repositories
@@ -192,19 +144,141 @@ impl Daemon {
         })
     }
 
+    /// Refuse a name in use, mark the derivation in progress, and clear the
+    /// candidate an earlier failed attempt left. Nothing is created.
+    pub(crate) async fn begin_derivation(
+        self: &Arc<Self>,
+        derivation: &Derivation<'_>,
+    ) -> Result<Claim<'_>, EnvironmentError> {
+        let name = derivation.name;
+        self.refresh().await?;
+        if self
+            .inner
+            .lock()
+            .await
+            .desired
+            .environments
+            .contains_key(name)
+        {
+            return Err(EnvironmentError::Conflict(format!(
+                "environment {name} already exists"
+            )));
+        }
+        let candidate = candidate_name(name)?;
+        let claim = self.claim(
+            &format!("derive:{name}"),
+            &format!("a {} into {name}", derivation.composition),
+        )?;
+        self.discard_candidate(&candidate, derivation.operator)
+            .await?;
+        Ok(claim)
+    }
+
+    /// Prepare a candidate from `export` and the source's declared state, and
+    /// hand it over as NAME. Returns the seed, the new computer, and every job
+    /// that did the work. On any failure the candidate is stopped and the
+    /// failure recorded; NAME is never created.
+    pub(crate) async fn derive_environment(
+        self: &Arc<Self>,
+        _claim: &Claim<'_>,
+        derivation: &Derivation<'_>,
+        export: &WorkspaceExport,
+        prior_jobs: Vec<String>,
+    ) -> Result<(WorkspaceSeed, ComputerView, Vec<String>), EnvironmentError> {
+        let Derivation {
+            composition,
+            label,
+            source,
+            name,
+            operator,
+            ..
+        } = derivation;
+        let candidate = candidate_name(name)?;
+        let spec = source.value.computer.clone().ok_or_else(|| {
+            EnvironmentError::Invalid(format!("{label} has no computer to derive from"))
+        })?;
+        let contents = source.value.contents.clone().unwrap_or_default();
+        let policy = source
+            .value
+            .policy
+            .clone()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| EnvironmentError::Invalid(format!("{label}'s policy: {error}")))?;
+        let config = if derivation.copy_config {
+            source.value.config.clone()
+        } else {
+            Default::default()
+        };
+        self.create_computer_environment_inner(
+            ComputerEnvironmentDefinition {
+                name: candidate.clone(),
+                desired_state: DesiredState::Running,
+                env: config,
+                policy,
+                computer: ComputerRequest {
+                    lifecycle: spec.lifecycle,
+                    requirements: spec.requirements,
+                    target: derivation.target.clone(),
+                    ttl_seconds: None,
+                },
+                contents: Default::default(),
+            },
+            operator,
+        )
+        .await?;
+        let composed = self
+            .prepare_candidate(&candidate, operator, export, &contents, None)
+            .await;
+        let seed = match composed {
+            Ok(seed) => seed,
+            Err((phase, error)) => {
+                return Err(self
+                    .abandon_composition(composition, label, &candidate, operator, phase, &error)
+                    .await);
+            }
+        };
+        let mut jobs = prior_jobs;
+        jobs.extend(seed.jobs.iter().cloned());
+        let computer = match self
+            .adopt_candidate(derivation, &candidate, &export.digest, &jobs)
+            .await
+        {
+            Ok(computer) => computer,
+            Err(error) => {
+                return Err(self
+                    .abandon_composition(
+                        composition,
+                        label,
+                        &candidate,
+                        operator,
+                        "handing off",
+                        &error,
+                    )
+                    .await);
+            }
+        };
+        Ok((seed, computer, jobs))
+    }
+
     /// The handoff: one fenced transaction. NAME's environment and computer
     /// records are created from the candidate's, machine and all, and the
     /// candidate's are deleted. Refused, with nothing changed, if NAME has
     /// appeared or the candidate is no longer the verified, running machine.
     async fn adopt_candidate(
         self: &Arc<Self>,
-        source: &str,
-        name: &str,
+        derivation: &Derivation<'_>,
         candidate: &str,
-        operator: &str,
         workspace: &str,
         jobs: &[String],
     ) -> Result<ComputerView, EnvironmentError> {
+        let Derivation {
+            composition,
+            label,
+            name,
+            operator,
+            ..
+        } = derivation;
         let cand_env = self.owned_environment(candidate, operator).await?;
         let _ = self.refresh_targeted().await;
         let cand = self
@@ -230,23 +304,27 @@ impl Daemon {
             ])
         );
         let environment = EnvironmentRecord {
-            name: name.to_owned(),
+            name: (*name).to_owned(),
             created_at,
             ..cand_env.value.clone()
         };
         let computer = ComputerRecord {
             environment_id: id.clone(),
-            environment: name.to_owned(),
+            environment: (*name).to_owned(),
             generation: 1,
             created_at,
             updated_at: Utc::now(),
             ..cand.value.clone()
         };
-        let data = json!({
-            "environment_id": id, "command": "fork", "source": source,
+        let mut data = json!({
+            "environment_id": id, "command": composition, "source": label,
             "candidate": candidate, "workspace": workspace, "workspace_verified": true,
             "session": computer.session_id, "jobs": jobs,
         });
+        if let (Some(data), Some(extra)) = (data.as_object_mut(), derivation.provenance.as_object())
+        {
+            data.extend(extra.clone());
+        }
         let scope = Scope::environment(name);
         let mut change = Change::new().with(|batch| {
             batch
@@ -266,7 +344,7 @@ impl Daemon {
             change,
             events::ENVIRONMENT_COMMAND,
             scope,
-            format!("{operator} forked {source} into {name}"),
+            format!("{operator}: {composition} {label} into {name}"),
             data,
         );
         self.apply(change).await?;

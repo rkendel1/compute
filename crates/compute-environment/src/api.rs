@@ -127,6 +127,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/environments/{environment}/replace"),
     ("POST", "/environments/{environment}/fork"),
     ("POST", "/environments/{environment}/checkpoint"),
+    ("POST", "/checkpoints/{checkpoint}/restore"),
     ("GET", "/environments/{environment}/checkpoints"),
     (
         "GET",
@@ -1066,6 +1067,9 @@ async fn route(
         )?),
         ("POST", ["environments", id, "fork"]) => created(to_value(
             Box::pin(daemon.fork_environment(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["checkpoints", id, "restore"]) => created(to_value(
+            Box::pin(daemon.restore_checkpoint(id, &principal.operator_id, parse(body)?)).await?,
         )?),
         ("POST", ["environments", id, "checkpoint"]) => created(to_value(
             Box::pin(daemon.checkpoint_environment(id, &principal.operator_id, parse(body)?))

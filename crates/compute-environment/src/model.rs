@@ -661,3 +661,46 @@ pub struct CheckpointView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invalid_reason: Option<String>,
 }
+
+/// Restore a checkpoint into a new environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreRequest {
+    /// The new environment's name.
+    pub name: String,
+    /// Constrain placement of the new computer; placement chooses when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+/// What a restore consumed, created, and verified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoreReport {
+    /// The checkpoint consumed: input state, never an authority.
+    pub checkpoint_id: String,
+    pub artifact: String,
+    /// The environment the checkpoint was captured from, and whose declared
+    /// state the new environment inherited.
+    pub source: String,
+    pub environment: String,
+    pub environment_id: String,
+    pub computer_id: String,
+    /// The workspace digest (`compute.workspace@1`) restored and verified.
+    pub workspace: String,
+    pub files: usize,
+    pub directories: usize,
+    pub bytes: u64,
+    /// The seeded workspace was measured inside the new computer and matches.
+    pub workspace_verified: bool,
+    /// The declared contents generation at capture, and the one applied.
+    pub captured_contents_generation: u64,
+    pub applied_contents_generation: u64,
+    /// `matches the state at capture` or `changed since capture`.
+    pub declared_state: String,
+    /// Configuration names not restored: values are never restored.
+    pub omitted_config: Vec<String>,
+    /// The durable jobs that did the work, in order.
+    pub jobs: Vec<String>,
+    /// The new computer once its declared contents converged.
+    pub computer: ComputerView,
+}

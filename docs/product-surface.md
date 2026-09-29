@@ -496,6 +496,7 @@ route declares a scope; unknown routes need `admin`.
 | POST | `/environments/{environment}/replace` | Operate | yes | yes | yes | no |
 | POST | `/environments/{environment}/fork` | Operate | no | yes | no | no |
 | POST | `/environments/{environment}/checkpoint` | Operate | no | yes | no | no |
+| POST | `/checkpoints/{checkpoint}/restore` | Operate | no | yes | no | no |
 | GET | `/environments/{environment}/checkpoints` | Read | no | yes | no | no |
 | GET | `/environments/{environment}/checkpoints/{checkpoint}` | Read | no | yes | no | no |
 | POST | `/environments/{environment}/workspace/export` | Execute | no | yes | no | no |

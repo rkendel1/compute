@@ -26,6 +26,7 @@ mod processes;
 mod reconcile;
 mod release;
 mod replace;
+mod restore;
 mod supervision;
 mod upgrades;
 

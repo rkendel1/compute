@@ -131,7 +131,7 @@ pub struct Checkpoint {
 impl Checkpoint {
     /// The file contents by path, from a validated artifact's bytes.
     pub fn read_files(bytes: &[u8]) -> Result<BTreeMap<String, (bool, Vec<u8>)>, EnvironmentError> {
-        let (_, workspace) = parse(bytes)?;
+        let (_, workspace, _) = parse(bytes)?;
         Ok(workspace
             .files
             .into_iter()
@@ -209,7 +209,7 @@ fn render(manifest: &Manifest, workspace: &ArchivedWorkspace) -> Result<Vec<u8>,
 
 /// Parse an artifact into its manifest and the workspace it holds. Does not
 /// establish that it is canonical; [`validate`] does.
-fn parse(bytes: &[u8]) -> Result<(Manifest, ArchivedWorkspace), EnvironmentError> {
+fn parse(bytes: &[u8]) -> Result<(Manifest, ArchivedWorkspace, Vec<u8>), EnvironmentError> {
     if bytes.len() > CHECKPOINT_ARTIFACT_LIMIT {
         return Err(invalid(format!(
             "is {} bytes; the limit is {CHECKPOINT_ARTIFACT_LIMIT}",
@@ -344,13 +344,13 @@ fn parse(bytes: &[u8]) -> Result<(Manifest, ArchivedWorkspace), EnvironmentError
             manifest.tree_digest
         )));
     }
-    Ok((manifest, workspace))
+    Ok((manifest, workspace, plain))
 }
 
 /// Validate an artifact completely: parse it, reproduce the workspace digest
 /// from its files, and require the bytes to be exactly the canonical rendering.
 pub fn validate(bytes: &[u8]) -> Result<Checkpoint, EnvironmentError> {
-    let (manifest, workspace) = parse(bytes)?;
+    let (manifest, workspace, _) = parse(bytes)?;
     if render(&manifest, &workspace)? != bytes {
         return Err(invalid("is not in canonical form"));
     }
@@ -365,6 +365,16 @@ pub fn validate(bytes: &[u8]) -> Result<Checkpoint, EnvironmentError> {
         size: bytes.len() as u64,
         manifest,
     })
+}
+
+/// A validated checkpoint and the workspace archive it holds, ready to seed:
+/// what restore consumes. Everything [`validate`] establishes, then the files
+/// and empty directories as a plain workspace archive the workspace reader has
+/// already accepted, so seeding it re-checks the same rules and digest.
+pub fn restorable(bytes: &[u8]) -> Result<(Checkpoint, Vec<u8>), EnvironmentError> {
+    let checkpoint = validate(bytes)?;
+    let (_, _, archive) = parse(bytes)?;
+    Ok((checkpoint, archive))
 }
 
 #[cfg(test)]

@@ -123,6 +123,7 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
             ],
         )
         | ("POST", ["environments", _, "workspace", "seed"])
+        | ("POST", ["checkpoints", _, "restore"])
         // Work sessions: a way into an environment, or a temporary one.
         | ("POST", ["sessions"])
         | ("DELETE", ["sessions", _])

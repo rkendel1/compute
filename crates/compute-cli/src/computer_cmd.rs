@@ -240,6 +240,19 @@ pub enum ComputerCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Restore a checkpoint into a new environment on a new computer: its
+    /// workspace, verified, with the declared state of the environment it came
+    /// from. Restores no process, session, credential, or machine.
+    Restore {
+        checkpoint: String,
+        /// The new environment's name.
+        name: String,
+        /// Constrain placement of the new computer to one target.
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// List an environment's checkpoints, or show one and validate its
     /// artifact.
     Checkpoints {
@@ -896,6 +909,48 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                         ""
                     }
                 );
+            }
+        }
+        ComputerCommands::Restore {
+            checkpoint,
+            name,
+            target,
+            json,
+        } => {
+            let report: compute_environment::RestoreReport = client
+                .post(
+                    &format!("/checkpoints/{checkpoint}/restore"),
+                    Some(&compute_environment::RestoreRequest { name, target }),
+                )
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&report);
+            } else {
+                println!(
+                    "Restored checkpoint {} into {}",
+                    report.checkpoint_id, report.environment
+                );
+                println!(
+                    "From:        {} (declared state {})",
+                    report.source, report.declared_state
+                );
+                println!(
+                    "Environment: {}  Computer: {}",
+                    report.environment_id, report.computer_id
+                );
+                println!(
+                    "Workspace:   {} ({} files, {} bytes), verified inside the new computer: {}",
+                    report.workspace, report.files, report.bytes, report.workspace_verified
+                );
+                if !report.omitted_config.is_empty() {
+                    println!(
+                        "Config:      {} not restored",
+                        report.omitted_config.join(", ")
+                    );
+                }
+                println!("Operation:   {} durable jobs succeeded", report.jobs.len());
+                print_computer(&report.computer, false);
             }
         }
         ComputerCommands::Checkpoints {

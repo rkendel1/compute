@@ -138,8 +138,9 @@ the next attempt clears it. Nothing is rolled back.
 
 [`fork`](fork.md) (a new environment from portable state) and
 [`replace`](replace.md) (a computer replaced while the environment and its
-workspace survive) and [`checkpoint`](checkpoint.md) (the same state, made
-durable) exist.  `restore`, backup,
+workspace survive), [`checkpoint`](checkpoint.md) (the same state, made
+durable) and [`restore`](restore.md) (that state, back into a new
+environment) exist.  `restore`, backup,
 migration, and checkpoint (workspace + declared-state generation + provenance +
 lineage + receipt) are each a composition of these three operations; none needs
 new mechanism.
