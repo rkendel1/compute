@@ -15,7 +15,11 @@ case "$checksum" in *[!0-9A-Fa-f]*|'') echo "invalid SHA-256: $checksum" >&2; ex
 
 source_dir=$(CDPATH='' cd -- "$(dirname "$0")/homebrew" && pwd)
 mkdir -p "$tap/Formula" "$tap/.github/workflows"
-sed -e "s/@VERSION@/$version/g" -e "s/@SHA256@/$checksum/g" \
-  "$source_dir/Formula/compute.rb.in" > "$tap/Formula/compute.rb"
+mkdir -p "$tap/scripts"
+cp "$source_dir/Formula/compute.rb.in" "$tap/Formula/compute.rb.in"
+cp "$source_dir/scripts/update-formula.sh" "$tap/scripts/update-formula.sh"
+chmod +x "$tap/scripts/update-formula.sh"
+"$tap/scripts/update-formula.sh" "$version" "$checksum"
 cp "$source_dir/README.md" "$tap/README.md"
 cp "$source_dir/.github/workflows/tests.yml" "$tap/.github/workflows/tests.yml"
+cp "$source_dir/.github/workflows/sync.yml" "$tap/.github/workflows/sync.yml"

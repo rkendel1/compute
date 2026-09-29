@@ -75,12 +75,9 @@ all pinned payloads, and is the only environment accepted by `compute certify`.
 
 ## Homebrew channel
 
-Certified `v*` releases also render and publish the Linux x86_64 formula to
-`rkendel1/homebrew-compute`. The renderer in `distribution/homebrew` copies the
-release version and the adjacent release asset's SHA-256 into the formula; the
-formula never builds Compute or downloads runtimes independently.
-
-The GitHub repository must exist before the first release, and this repository
-must define a `HOMEBREW_TAP_TOKEN` Actions secret with contents permission for
-that tap (and workflow permission because the tap CI definition is synced).
-Failure to update the tap fails the tagged distribution workflow.
+The `rkendel1/homebrew-compute` tap synchronizes the latest stable certified
+release using its repository-scoped GitHub Actions token. The renderer in
+`distribution/homebrew` copies the release version and the adjacent release
+asset's SHA-256 into the formula; the formula never builds Compute or downloads
+runtimes independently. No cross-repository write credential is stored in this
+repository.
