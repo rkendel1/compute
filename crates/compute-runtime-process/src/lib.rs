@@ -211,6 +211,10 @@ struct DistributionManifest {
     _os: String,
     #[serde(rename = "architecture")]
     _architecture: String,
+    #[serde(default, rename = "distribution_profile")]
+    _distribution_profile: String,
+    #[serde(default, rename = "release_status")]
+    _release_status: String,
     #[serde(rename = "runtime_lock_sha256")]
     _runtime_lock_sha256: String,
     #[serde(rename = "certification_status")]
@@ -229,6 +233,9 @@ struct DistributionRuntime {
     #[serde(rename = "artifacts")]
     _artifacts: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
+    #[serde(rename = "unsupported_platforms")]
+    _unsupported_platforms: BTreeMap<String, String>,
+    #[serde(default)]
     #[serde(rename = "artifact_sha256")]
     _artifact_sha256: String,
     #[serde(default)]
@@ -237,6 +244,13 @@ struct DistributionRuntime {
     #[serde(default)]
     #[serde(rename = "reported_version")]
     _reported_version: String,
+    #[serde(default)]
+    availability: String,
+    #[serde(default)]
+    #[serde(rename = "support_status")]
+    _support_status: String,
+    #[serde(default)]
+    unavailable_reason: Option<String>,
     #[serde(default)]
     #[serde(rename = "distribution_id")]
     _distribution_id: Option<String>,
@@ -299,6 +313,17 @@ fn discover_distribution_runtime(root: &Path, definition: &RuntimeDefinition) ->
             format!("runtime is not prepared: {}", definition.kind),
         );
     };
+    if runtime.availability == "unavailable" {
+        return DiscoveredRuntime::unavailable(
+            RuntimeSource::Unavailable,
+            runtime.unavailable_reason.clone().unwrap_or_else(|| {
+                format!(
+                    "runtime is unavailable on {}: {}",
+                    manifest.platform, definition.kind
+                )
+            }),
+        );
+    }
     if runtime.version != definition.version || runtime.executable != definition.executable {
         return DiscoveredRuntime::unavailable(
             RuntimeSource::Distribution,

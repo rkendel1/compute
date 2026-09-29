@@ -1,4 +1,4 @@
-name: sync-certified-release
+name: sync-compute-release
 
 on:
   schedule:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Resolve latest certified release
+      - name: Resolve latest complete platform release
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -28,27 +28,45 @@ jobs:
           version="${tag#v}"
           asset="compute-$version-linux-x86_64.tar.gz"
           configured_asset="compute-configured-$version-linux-x86_64.tar.gz"
+          macos_asset="compute-$version-macos-aarch64.tar.gz"
+          macos_configured_asset="compute-configured-$version-macos-aarch64.tar.gz"
           archive_url=$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
           checksum_url=$(jq -r --arg name "$asset.sha256" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
           configured_url=$(jq -r --arg name "$configured_asset" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
           configured_checksum_url=$(jq -r --arg name "$configured_asset.sha256" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
+          macos_url=$(jq -r --arg name "$macos_asset" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
+          macos_checksum_url=$(jq -r --arg name "$macos_asset.sha256" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
+          macos_configured_url=$(jq -r --arg name "$macos_configured_asset" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
+          macos_configured_checksum_url=$(jq -r --arg name "$macos_configured_asset.sha256" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
           test -n "$archive_url"
           test -n "$checksum_url"
           test -n "$configured_url"
           test -n "$configured_checksum_url"
+          test -n "$macos_url"
+          test -n "$macos_checksum_url"
+          test -n "$macos_configured_url"
+          test -n "$macos_configured_checksum_url"
           checksum=$(curl -fsSL --proto '=https' --proto-redir '=https' "$checksum_url" | cut -d ' ' -f 1)
           configured_checksum=$(curl -fsSL --proto '=https' --proto-redir '=https' "$configured_checksum_url" | cut -d ' ' -f 1)
+          macos_checksum=$(curl -fsSL --proto '=https' --proto-redir '=https' "$macos_checksum_url" | cut -d ' ' -f 1)
+          macos_configured_checksum=$(curl -fsSL --proto '=https' --proto-redir '=https' "$macos_configured_checksum_url" | cut -d ' ' -f 1)
           [[ "$checksum" =~ ^[0-9a-fA-F]{64}$ ]]
           [[ "$configured_checksum" =~ ^[0-9a-fA-F]{64}$ ]]
+          [[ "$macos_checksum" =~ ^[0-9a-fA-F]{64}$ ]]
+          [[ "$macos_configured_checksum" =~ ^[0-9a-fA-F]{64}$ ]]
           echo "available=true" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
           echo "configured_checksum=$configured_checksum" >> "$GITHUB_OUTPUT"
+          echo "macos_checksum=$macos_checksum" >> "$GITHUB_OUTPUT"
+          echo "macos_configured_checksum=$macos_configured_checksum" >> "$GITHUB_OUTPUT"
           echo "archive_url=$archive_url" >> "$GITHUB_OUTPUT"
           echo "configured_url=$configured_url" >> "$GITHUB_OUTPUT"
+          echo "macos_url=$macos_url" >> "$GITHUB_OUTPUT"
+          echo "macos_configured_url=$macos_configured_url" >> "$GITHUB_OUTPUT"
       - name: Render formula from release checksum
         if: steps.release.outputs.available == 'true'
-        run: scripts/update-formula.sh '${{ steps.release.outputs.version }}' '${{ steps.release.outputs.checksum }}' '${{ steps.release.outputs.configured_checksum }}'
+        run: scripts/update-formula.sh '${{ steps.release.outputs.version }}' '${{ steps.release.outputs.checksum }}' '${{ steps.release.outputs.configured_checksum }}' '${{ steps.release.outputs.macos_checksum }}' '${{ steps.release.outputs.macos_configured_checksum }}'
       - name: Verify formula contract
         if: steps.release.outputs.available == 'true'
         shell: bash
@@ -57,6 +75,10 @@ jobs:
           grep -F 'sha256 "${{ steps.release.outputs.checksum }}"' Formula/compute.rb
           grep -F 'url "${{ steps.release.outputs.configured_url }}"' Formula/compute-configured.rb
           grep -F 'sha256 "${{ steps.release.outputs.configured_checksum }}"' Formula/compute-configured.rb
+          grep -F 'url "${{ steps.release.outputs.macos_url }}"' Formula/compute.rb
+          grep -F 'sha256 "${{ steps.release.outputs.macos_checksum }}"' Formula/compute.rb
+          grep -F 'url "${{ steps.release.outputs.macos_configured_url }}"' Formula/compute-configured.rb
+          grep -F 'sha256 "${{ steps.release.outputs.macos_configured_checksum }}"' Formula/compute-configured.rb
           ruby -c Formula/compute.rb
           ruby -c Formula/compute-configured.rb
       - name: Publish formula

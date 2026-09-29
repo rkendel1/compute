@@ -1,16 +1,17 @@
 # Homebrew Compute
 
-This is the official Homebrew tap for the certified
+This is the official Homebrew tap for
 [Compute](https://github.com/rkendel1/compute) distribution.
 
 ```sh
 brew tap rkendel1/compute
+brew trust rkendel1/compute
 brew install compute
 compute --version
 compute
 ```
 
-Base Compute is the standalone execution substrate. The separately certified
+Base Compute is the standalone execution substrate. The separately verified
 configured product uses the same Compute binary plus the exact published
 ecosystem set in its compatibility manifest:
 
@@ -21,9 +22,21 @@ compute-configured-verify
 compute-configured-setup
 ```
 
-The formula is currently available only on Linux x86_64, the platform for
-which Compute publishes a certified distribution. It installs that GitHub
-Release archive without rebuilding Compute or downloading runtimes separately.
+The formula selects a platform release artifact:
+
+- Linux x86_64 is Certified and contains the complete certified runtime set.
+- macOS ARM64 is Preview and contains the supported native runtime subset.
+  Linux-only runtimes are recorded as Unavailable with an explicit reason;
+  they are not silently discovered from the host or described as certified.
+
+Inspect the installed platform, status, and runtime availability with:
+
+```sh
+compute distribution inspect "$(brew --prefix compute)/libexec"
+```
+
+Both variants install a GitHub Release archive without rebuilding Compute or
+downloading runtimes separately.
 
 Homebrew owns the immutable Compute executable and pinned runtime bundle.
 Mutable state remains in `$COMPUTE_HOME` (default `~/.compute`) and survives

@@ -29,13 +29,13 @@ jobs:
           path: ~/.cache/compute/runtimes
           key: compute-runtimes-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('distribution/runtime-lock.json', 'packages/compute-appport/package-lock.json') }}
       - run: cargo build --release --locked
-      - run: target/release/compute distribution build --output compute-distribution --verify
+      - run: target/release/compute distribution build --output compute-distribution --status certified --verify
       - run: target/release/compute distribution verify compute-distribution --json
       - run: distribution/certify-distribution.sh compute-distribution
       - run: |
           mv compute-distribution compute-distribution-first
           mv compute-distribution.tar compute-distribution-first.tar
-          target/release/compute distribution build --output compute-distribution --offline --verify
+          target/release/compute distribution build --output compute-distribution --status certified --offline --verify
           diff -u compute-distribution-first/runtime-manifest.json compute-distribution/runtime-manifest.json
           diff -u compute-distribution-first/runtime-inventory.json compute-distribution/runtime-inventory.json
           cmp compute-distribution-first.tar compute-distribution.tar
@@ -62,6 +62,8 @@ jobs:
           npm ci --ignore-scripts --prefix compatibility/published-stack
           SOURCE_DATE_EPOCH=0 COMPUTE_COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/configured-evidence.json" \
             npm run verify --prefix compatibility/published-stack
+          test "$(jq -r .status "$RUNNER_TEMP/configured-evidence.json")" = certified
+          test "$(jq -r .platform "$RUNNER_TEMP/configured-evidence.json")" = linux-x86_64
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "compute-cli") | .version')
           test "$(jq -r .compute compatibility/published-stack/stack.json)" = "$version"
           root=compute-configured
@@ -86,15 +88,109 @@ jobs:
             ${{ steps.configured.outputs.asset }}
             ${{ steps.configured.outputs.asset }}.sha256
           if-no-files-found: error
-      - name: Publish the certified release assets
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+  validate-macos-aarch64-preview:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
         with:
-          files: |
+          node-version: 24
+          cache: npm
+          cache-dependency-path: compatibility/published-stack/package-lock.json
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/compute/runtimes
+          key: compute-runtimes-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('distribution/runtime-lock.json', 'packages/compute-appport/package-lock.json') }}
+      - name: Confirm preview platform
+        run: test "$(uname -s)-$(uname -m)" = Darwin-arm64
+      - run: cargo build --release --locked
+      - run: target/release/compute distribution build --output compute-distribution --status preview
+      - run: target/release/compute distribution verify compute-distribution --json
+      - name: Verify preview evidence
+        run: |
+          test "$(jq -r .release_status compute-distribution/runtime-manifest.json)" = preview
+          test "$(jq -r .platform compute-distribution/runtime-manifest.json)" = macos-aarch64
+          test "$(jq -r .runtimes.node.availability compute-distribution/runtime-manifest.json)" = supported
+          test "$(jq -r .runtimes.native.availability compute-distribution/runtime-manifest.json)" = unavailable
+          test "$(jq -r .runtimes.php.availability compute-distribution/runtime-manifest.json)" = unavailable
+          test "$(jq -r .runtimes.shell.availability compute-distribution/runtime-manifest.json)" = unavailable
+      - name: Package the preview artifact
+        id: package
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "compute-cli") | .version')
+          fi
+          package_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "compute-cli") | .version')
+          test "$version" = "$package_version"
+          asset="compute-$version-macos-aarch64.tar.gz"
+          gzip -n -9 -c compute-distribution.tar > "$asset"
+          gzip -dc "$asset" | cmp - compute-distribution.tar
+          shasum -a 256 "$asset" > "$asset.sha256"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      - name: Assemble the configured preview from published packages
+        id: configured
+        shell: bash
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "compute-cli") | .version')
+          cp -R compatibility/published-stack configured-stack
+          jq --arg version "$version" \
+            '.compute=$version | .platform="macos-aarch64" | .distribution.identity=("compute-configured-"+$version+"-macos-aarch64") | .distribution.certification_status="preview" | .distribution.base_asset=("compute-"+$version+"-macos-aarch64.tar.gz") | .distribution.configured_asset=("compute-configured-"+$version+"-macos-aarch64.tar.gz") | .distribution.release=("https://github.com/rkendel1/compute/releases/tag/v"+$version)' \
+            configured-stack/stack.json > "$RUNNER_TEMP/stack.json"
+          mv "$RUNNER_TEMP/stack.json" configured-stack/stack.json
+          npm ci --ignore-scripts --prefix configured-stack
+          SOURCE_DATE_EPOCH=0 COMPUTE_COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/configured-evidence.json" \
+            npm run verify --prefix configured-stack
+          test "$(jq -r .status "$RUNNER_TEMP/configured-evidence.json")" = preview
+          test "$(jq -r .platform "$RUNNER_TEMP/configured-evidence.json")" = macos-aarch64
+          root=compute-configured
+          mkdir -p "$root/stacks/configured"
+          cp configured-stack/package.json "$root/package.json"
+          cp configured-stack/package-lock.json "$root/package-lock.json"
+          cp configured-stack/stack.json "$root/stack.json"
+          cp configured-stack/verify.mjs "$root/verify.mjs"
+          cp configured-stack/stack.toml "$root/stacks/configured/stack.toml"
+          cp "$RUNNER_TEMP/configured-evidence.json" "$root/evidence.json"
+          cp -a configured-stack/node_modules "$root/node_modules"
+          asset="compute-configured-$version-macos-aarch64.tar.gz"
+          brew install gnu-tar
+          gtar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - "$root" | gzip -n -9 > "$asset"
+          shasum -a 256 "$asset" > "$asset.sha256"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preview-compute-macos-aarch64
+          path: |
             ${{ steps.package.outputs.asset }}
             ${{ steps.package.outputs.asset }}.sha256
             ${{ steps.configured.outputs.asset }}
             ${{ steps.configured.outputs.asset }}.sha256
+          if-no-files-found: error
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [certify-linux-x86_64, validate-macos-aarch64-preview]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: "*-compute-*"
+          path: release-assets
+          merge-multiple: true
+      - name: Publish certified and preview release assets atomically
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/compute-*.tar.gz
+            release-assets/compute-*.tar.gz.sha256
           fail_on_unmatched_files: true
+          draft: true
+          make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the complete release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest

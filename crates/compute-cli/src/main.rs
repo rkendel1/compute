@@ -367,6 +367,11 @@ enum DistributionCommands {
         offline: bool,
         #[arg(long)]
         verify: bool,
+        /// Release status for this platform. Certified builds must pass the
+        /// complete certification suite; preview builds may expose an honest
+        /// subset of the locked runtimes.
+        #[arg(long, default_value = "preview", value_parser = ["certified", "preview"])]
+        status: String,
         #[arg(long)]
         cache: Option<PathBuf>,
         #[arg(long, hide = true)]
@@ -1465,6 +1470,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 output,
                 offline,
                 verify,
+                status,
                 cache,
                 platform,
                 lock,
@@ -1473,6 +1479,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 output,
                 offline,
                 verify,
+                release_status: status,
                 cache,
                 platform,
                 lock,
