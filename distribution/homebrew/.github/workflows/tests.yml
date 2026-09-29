@@ -106,6 +106,7 @@ jobs:
           printf 'base state\n' > "$COMPUTE_HOME/base-to-configured"
           brew install --build-from-source rkendel1/compute/compute-configured
           test "$(cat "$COMPUTE_HOME/base-to-configured")" = "base state"
+          compute distribution verify "$(brew --prefix compute)/libexec"
           compute-configured --version
           compute-configured-verify
           compute-configured-setup

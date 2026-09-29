@@ -5,6 +5,10 @@ class Compute < Formula
   sha256 "@SHA256@"
   license "MIT"
 
+  # The release manifest certifies every byte under libexec, including Python
+  # package metadata that Homebrew's generic cleaner would otherwise rewrite.
+  skip_clean "libexec"
+
   depends_on arch: :x86_64
   depends_on :linux
 

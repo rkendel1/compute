@@ -21,6 +21,7 @@ fi
 grep -q "sha256 \"$checksum\"" "$formula"
 grep -q 'depends_on :linux' "$formula"
 grep -q 'depends_on arch: :x86_64' "$formula"
+grep -q 'skip_clean "libexec"' "$formula"
 grep -q 'libexec.install' "$formula"
 grep -q 'COMPUTE_HOME' "$formula"
 configured_formula="$work/tap/Formula/compute-configured.rb"
