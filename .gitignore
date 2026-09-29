@@ -3,3 +3,5 @@
 /packages/compute-appport/dist
 /packages/compute-state-model/node_modules
 /packages/compute-ui-e2e/node_modules
+/compatibility/published-stack/node_modules
+/compatibility/published-stack/evidence.json

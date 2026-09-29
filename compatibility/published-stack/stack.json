@@ -1,0 +1,32 @@
+{
+  "format": "compute.stack-compatibility@1",
+  "name": "published-compute-ecosystem",
+  "packages": {
+    "@appport/core": "1.0.3",
+    "@appport/github": "1.0.2",
+    "@appport/runtime": "0.4.6",
+    "@appport/server": "1.0.2",
+    "@appport/services": "0.4.6",
+    "@appport/transport-http": "1.0.2",
+    "@appport/transport-inprocess": "1.0.2",
+    "@appport/transport-websocket": "1.0.2",
+    "@authboundry/core": "1.15.3",
+    "@feltdb/core": "0.11.9"
+  },
+  "contracts": {
+    "appport": "AppPort/1",
+    "github_ui": "AppPort/ui/1",
+    "feltdb_protocol": 1,
+    "git_source": 1
+  },
+  "allowed_version_skew": {
+    "@feltdb/core": {
+      "versions": ["0.11.1", "0.11.5", "0.11.9"],
+      "reason": "@authboundry/core 1.15.3 embeds 0.11.5 and its @appport/services 0.3.2 embeds 0.11.1; the stack verifies the published graph against FeltDB protocol 1"
+    },
+    "@appport/services": {
+      "versions": ["0.3.2", "0.4.6"],
+      "reason": "@authboundry/core 1.15.3 embeds 0.3.2; @appport/github 1.0.2 uses 0.4.6"
+    }
+  }
+}
