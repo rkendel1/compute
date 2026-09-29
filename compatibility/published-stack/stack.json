@@ -1,6 +1,7 @@
 {
   "format": "compute.stack-compatibility@1",
   "name": "published-compute-ecosystem",
+  "compute": "0.1.2",
   "packages": {
     "@appport/core": "1.0.3",
     "@appport/github": "1.0.2",

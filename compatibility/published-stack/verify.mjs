@@ -144,6 +144,7 @@ const evidence = {
   generated_at: new Date().toISOString(),
   platform: `${process.platform}-${process.arch}`,
   node: process.version,
+  compute: stack.compute,
   packages: Object.fromEntries(Object.entries(stack.packages).map(([name, version]) => [name, {
     version,
     source: lock.packages[`node_modules/${name}`].resolved,

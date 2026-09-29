@@ -15,6 +15,19 @@ an npm dependency of the Base Compute executable.
 released capability stack. The compatibility set is synchronized; package version
 numbers are not.
 
+Both are Homebrew products built around the same certified executable:
+
+```sh
+brew install compute             # Base Compute
+brew install compute-configured  # Base plus the pinned configured artifact
+```
+
+`compute-configured` depends on `compute`; it never builds or carries another Compute
+binary. Its release asset contains the exact registry packages, lockfile, configured
+stack, verifier, and evidence produced by distribution CI. The wrapper exposes the
+installed stack through `COMPUTE_STACKS`; `compute-configured-verify` reruns the shipped
+contract without resolving packages or consulting `latest`.
+
 ## Three different results
 
 1. Package compatibility means the registry can resolve and install the declared graph.

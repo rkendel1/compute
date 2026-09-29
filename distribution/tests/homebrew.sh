@@ -8,7 +8,8 @@ trap cleanup EXIT HUP INT TERM
 
 version=1.2.3
 checksum=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-"$repository/distribution/render-homebrew-tap.sh" "$work/tap" "$version" "$checksum"
+configured_checksum=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+"$repository/distribution/render-homebrew-tap.sh" "$work/tap" "$version" "$checksum" "$configured_checksum"
 
 formula="$work/tap/Formula/compute.rb"
 ruby -c "$formula" | grep -q 'Syntax OK'
@@ -19,12 +20,18 @@ grep -q 'depends_on :linux' "$formula"
 grep -q 'depends_on arch: :x86_64' "$formula"
 grep -q 'libexec.install' "$formula"
 grep -q 'COMPUTE_HOME' "$formula"
+configured_formula="$work/tap/Formula/compute-configured.rb"
+ruby -c "$configured_formula" | grep -q 'Syntax OK'
+grep -q "compute-configured-$version-linux-x86_64.tar.gz" "$configured_formula"
+grep -q "sha256 \"$configured_checksum\"" "$configured_formula"
+grep -q 'depends_on "rkendel1/compute/compute"' "$configured_formula"
+grep -q 'compute-configured-verify' "$configured_formula"
 test -f "$work/tap/.github/workflows/tests.yml"
 test -f "$work/tap/.github/workflows/sync.yml"
 test -x "$work/tap/scripts/update-formula.sh"
 test -f "$work/tap/README.md"
 
-if "$repository/distribution/render-homebrew-tap.sh" "$work/bad" "$version" bad 2>/dev/null; then
+if "$repository/distribution/render-homebrew-tap.sh" "$work/bad" "$version" bad "$configured_checksum" 2>/dev/null; then
   echo "invalid checksum was accepted" >&2
   exit 1
 fi

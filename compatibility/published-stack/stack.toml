@@ -1,0 +1,40 @@
+schema = "compute.stack@1"
+
+[stack]
+name = "configured"
+version = "1.0.0"
+description = "The exact published capability set certified with this Compute release."
+
+[requirements]
+runtime = "node"
+version = ">=22"
+
+[[component]]
+name = "feltdb"
+kind = "package"
+source = "npm:@feltdb/core"
+version = "0.11.9"
+
+[[component]]
+name = "appport-core"
+kind = "package"
+source = "npm:@appport/core"
+version = "1.0.3"
+
+[[component]]
+name = "appport-services"
+kind = "package"
+source = "npm:@appport/services"
+version = "0.4.6"
+
+[[component]]
+name = "appport-github"
+kind = "package"
+source = "npm:@appport/github"
+version = "1.0.2"
+
+[[component]]
+name = "authboundry"
+kind = "package"
+source = "npm:@authboundry/core"
+version = "1.15.3"
