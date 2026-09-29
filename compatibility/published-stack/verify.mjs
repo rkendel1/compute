@@ -23,7 +23,7 @@ const pass = (name, detail) => checks.push({ name, result: 'pass', detail });
 assert.equal(stack.format, 'compute.distribution-profile@1');
 assert.equal(stack.profile, 'configured');
 assert.equal(stack.distribution.identity, `compute-configured-${stack.compute}-${stack.platform}`);
-assert.equal(stack.distribution.certification_status, 'certified');
+assert.ok(['certified', 'preview'].includes(stack.distribution.certification_status));
 assert.equal(stack.runtime.implementation, 'base-compute');
 assert.equal(stack.runtime.shared_binary, true);
 assert.equal(stack.runtime.shared_cli, true);
@@ -38,7 +38,7 @@ assert.deepEqual(stack.migrations, []);
 if (process.env.COMPUTE_INSTALLED_VERSION) {
   assert.equal(process.env.COMPUTE_INSTALLED_VERSION, stack.compute, 'Base Compute version drift');
 }
-pass('distribution_profile', 'configured is an additive certified profile over the same Compute binary, UI, CLI, and FeltDB-backed state model');
+pass('distribution_profile', `configured is an additive ${stack.distribution.certification_status} profile over the same Compute binary, UI, CLI, and FeltDB-backed state model`);
 for (const [name, version] of Object.entries(stack.packages)) {
   assert.equal(lock.packages[`node_modules/${name}`]?.version, version, `${name} version drift`);
 }
@@ -170,10 +170,11 @@ const certificationId = `sha256:${createHash('sha256').update(certificationMater
 const evidence = {
   format: 'compute.stack-compatibility-evidence@1',
   result: 'pass',
-  status: 'certified',
+  status: stack.distribution.certification_status,
   certification_id: certificationId,
   certified_at: new Date(Number(process.env.SOURCE_DATE_EPOCH ?? 0) * 1000).toISOString(),
-  platform: `${process.platform}-${process.arch}`,
+  platform: stack.platform,
+  host_platform: `${process.platform}-${process.arch}`,
   node: process.version,
   compute: stack.compute,
   distribution: stack.distribution,

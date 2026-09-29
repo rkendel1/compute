@@ -271,7 +271,7 @@ fn installed_distribution_is_discovered_from_any_working_directory() {
 }
 
 #[test]
-fn distribution_offline_cache_miss_and_wrong_platform_fail_explicitly() {
+fn distribution_cache_platform_and_preview_status_are_explicit() {
     let temporary = tempfile::tempdir().unwrap();
     let artifact = b"#!/bin/sh\necho fixture 1.2.3\n";
     let artifact_path = temporary.path().join("fixture");
@@ -315,7 +315,80 @@ fn distribution_offline_cache_miss_and_wrong_platform_fail_explicitly() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unsupported platform"));
+        .stderr(predicate::str::contains("platform"));
+
+    let preview_lock = temporary.path().join("preview-lock.json");
+    let mut preview = fixture_distribution_lock(artifact, &platform, &artifact_path);
+    preview["runtimes"]["fixture"]["artifacts"] = serde_json::json!({});
+    preview["runtimes"]["fixture"]["unsupported_platforms"] = serde_json::json!({
+        (platform.clone()): "fixture is intentionally unavailable in preview"
+    });
+    write_json(&preview_lock, preview);
+    let preview_output = temporary.path().join("preview");
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "distribution",
+            "build",
+            "--offline",
+            "--status",
+            "preview",
+            "--output",
+            preview_output.to_str().unwrap(),
+            "--lock",
+            preview_lock.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let mut preview_manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(preview_output.join("runtime-manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(preview_manifest["release_status"], "preview");
+    assert_eq!(
+        preview_manifest["runtimes"]["fixture"]["availability"],
+        "unavailable"
+    );
+    assert_eq!(
+        preview_manifest["runtimes"]["wasm"]["availability"],
+        "supported"
+    );
+    preview_manifest["release_status"] = "certified".into();
+    write_json(
+        &preview_output.join("runtime-manifest.json"),
+        preview_manifest,
+    );
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "distribution",
+            "verify",
+            preview_output.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("distribution_status"));
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args([
+            "distribution",
+            "build",
+            "--status",
+            "certified",
+            "--verify",
+            "--output",
+            temporary
+                .path()
+                .join("false-certification")
+                .to_str()
+                .unwrap(),
+            "--lock",
+            preview_lock.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("certified platform"));
 
     let wrong_runtime = b"#!/bin/sh\necho fixture 9.9.9\n";
     let wrong_digest = sha256(wrong_runtime);

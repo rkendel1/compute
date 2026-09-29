@@ -28,7 +28,9 @@ jobs:
       - name: Validate formula
         run: |
           brew audit --strict --online rkendel1/compute/compute
+          brew audit --strict --online rkendel1/compute/compute-configured
           brew style rkendel1/compute/compute
+          brew style rkendel1/compute/compute-configured
       - name: Install certified distribution
         run: brew install --build-from-source rkendel1/compute/compute
       - name: Test installed distribution
@@ -53,8 +55,8 @@ jobs:
         shell: bash
         run: |
           if git cat-file -e HEAD^:Formula/compute.rb 2>/dev/null; then
-            previous=$(git show HEAD^:Formula/compute.rb | sed -n 's#.*releases/download/v\([^/]*\)/.*#\1#p')
-            current=$(sed -n 's#.*releases/download/v\([^/]*\)/.*#\1#p' Formula/compute.rb)
+            previous=$(git show HEAD^:Formula/compute.rb | sed -n 's#.*releases/download/v\([^/]*\)/.*#\1#p' | head -n 1)
+            current=$(sed -n 's#.*releases/download/v\([^/]*\)/.*#\1#p' Formula/compute.rb | head -n 1)
             if [[ -n "$previous" && -n "$current" && "$previous" != "$current" ]]; then
               echo "exists=true" >> "$GITHUB_OUTPUT"
             else
@@ -69,7 +71,7 @@ jobs:
         with:
           core: true
           cask: false
-      - name: Install previous release and upgrade
+      - name: Install previous Configured release and upgrade in place
         if: steps.previous.outputs.exists == 'true'
         env:
           COMPUTE_HOME: ${{ runner.temp }}/compute-state
@@ -77,15 +79,18 @@ jobs:
         run: |
           tap=$(brew --repository rkendel1/compute)
           git -C "$tap" show HEAD^:Formula/compute.rb > "$tap/Formula/compute.rb"
-          brew install --build-from-source rkendel1/compute/compute
+          git -C "$tap" show HEAD^:Formula/compute-configured.rb > "$tap/Formula/compute-configured.rb"
+          brew install --build-from-source rkendel1/compute/compute-configured
           mkdir -p "$COMPUTE_HOME"
           printf 'durable state\n' > "$COMPUTE_HOME/homebrew-upgrade"
-          git -C "$tap" checkout HEAD -- Formula/compute.rb
-          brew upgrade --build-from-source rkendel1/compute/compute
+          git -C "$tap" checkout HEAD -- Formula/compute.rb Formula/compute-configured.rb
+          brew upgrade --build-from-source rkendel1/compute/compute rkendel1/compute/compute-configured
           test "$(cat "$COMPUTE_HOME/homebrew-upgrade")" = "durable state"
-          expected=$(sed -n 's#.*releases/download/v\([^/]*\)/.*#\1#p' "$tap/Formula/compute.rb")
+          expected=$(sed -n 's#.*releases/download/v\([^/]*\)/.*#\1#p' "$tap/Formula/compute.rb" | head -n 1)
           test "$(compute --version)" = "compute $expected"
           compute distribution verify "$(brew --prefix compute)/libexec"
+          compute-configured-verify
+          compute-configured-setup
 
   configured-linux-x86_64:
     runs-on: ubuntu-latest
@@ -118,3 +123,43 @@ jobs:
           brew uninstall compute-configured
           compute --version
           test "$(cat "$COMPUTE_HOME/base-to-configured")" = "base state"
+
+  install-macos-aarch64-preview:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@fd832223f9f99ebf0244dd20658680e5d4aca049
+        with:
+          core: true
+          cask: false
+      - name: Install Base Preview
+        env:
+          COMPUTE_HOME: ${{ runner.temp }}/compute-state
+        run: |
+          brew install --build-from-source rkendel1/compute/compute
+          compute --version
+          compute distribution verify "$(brew --prefix compute)/libexec"
+          test "$(jq -r .release_status "$(brew --prefix compute)/libexec/runtime-manifest.json")" = preview
+          test "$(jq -r .runtimes.node.availability "$(brew --prefix compute)/libexec/runtime-manifest.json")" = supported
+          test "$(jq -r .runtimes.native.availability "$(brew --prefix compute)/libexec/runtime-manifest.json")" = unavailable
+          brew test rkendel1/compute/compute
+      - name: Upgrade Base in place to Configured Preview
+        env:
+          COMPUTE_HOME: ${{ runner.temp }}/compute-state
+        run: |
+          mkdir -p "$COMPUTE_HOME"
+          printf 'preview state\n' > "$COMPUTE_HOME/base-to-configured"
+          brew install --build-from-source rkendel1/compute/compute-configured
+          test "$(cat "$COMPUTE_HOME/base-to-configured")" = "preview state"
+          compute-configured --version
+          compute-configured-verify | grep -F '"status": "preview"'
+          compute-configured-setup | grep -F 'preview and active'
+          brew test rkendel1/compute/compute-configured
+      - name: Remove Configured without deleting Base state
+        env:
+          COMPUTE_HOME: ${{ runner.temp }}/compute-state
+        run: |
+          brew uninstall compute-configured
+          compute --version
+          test "$(cat "$COMPUTE_HOME/base-to-configured")" = "preview state"

@@ -86,6 +86,8 @@ struct DistributionManifest {
     platform: String,
     os: String,
     architecture: String,
+    distribution_profile: String,
+    release_status: String,
     runtime_lock_sha256: String,
     certification_status: String,
     build: serde_json::Value,
@@ -99,6 +101,9 @@ struct LockedRuntime {
     executable: String,
     #[serde(default)]
     artifacts: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    #[serde(rename = "unsupported_platforms")]
+    _unsupported_platforms: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -109,6 +114,10 @@ struct ManifestRuntime {
     artifact_sha256: String,
     payload_sha256: String,
     reported_version: String,
+    availability: String,
+    support_status: String,
+    #[serde(default)]
+    unavailable_reason: Option<String>,
     #[serde(default)]
     capabilities: Option<compute_core::RuntimeCapabilities>,
 }
@@ -235,7 +244,14 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
         && manifest.distribution_id.starts_with("sha256:")
         && manifest.platform == format!("{}-{}", manifest.os, manifest.architecture)
         && manifest.runtime_lock_sha256.len() == 64
+        && manifest.distribution_profile == "base"
+        && manifest.release_status == "certified"
         && matches!(manifest.certification_status.as_str(), "not_run" | "pass")
+        && manifest.runtimes.values().all(|runtime| {
+            runtime.availability == "supported"
+                && runtime.support_status == "certified"
+                && runtime.unavailable_reason.is_none()
+        })
         && !manifest.build.is_null();
     if metadata_valid {
         pass_check(

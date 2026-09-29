@@ -17,7 +17,14 @@ executable.
 released capability stack. The compatibility set is synchronized; package version
 numbers are not.
 
-Both are Homebrew products built around the same certified executable:
+Both are Homebrew products built around the same Compute executable and UI.
+Certification is attached to a profile and platform, never inferred merely
+from successful installation:
+
+| Platform | Base | Configured |
+| --- | --- | --- |
+| Linux x86_64 | Certified | Certified |
+| macOS ARM64 | Preview | Preview |
 
 ```sh
 brew install compute             # Base Compute
@@ -49,9 +56,15 @@ assets. Installing or removing the configured formula neither recreates environm
 nor owns user state.
 
 The profile verifier compares the installed Base version with the configured manifest
-and validates every locked component. A passing report says `certified` and carries a
-content-derived certification identity. Version or manifest drift fails the verifier;
-the installation is then present but must not be described as a certified composition.
+and validates every locked component. On certified Linux, a passing report says
+`certified` and carries a content-derived certification identity. Version or manifest
+drift fails the verifier; the installation is then present but must not be described as
+a certified composition.
+For macOS Preview, a passing report says `preview`: the exact composition passed its
+compatibility checks, but the platform did not pass the complete Linux certification
+suite. The Base runtime manifest likewise records supported Preview runtimes and
+Unavailable Linux-only runtimes with reasons. A compatible remote Linux Computer may
+satisfy placement; the local macOS installation never pretends native support exists.
 The empty, explicit `migrations` list means the current profile has no state migration or
 rollback constraint. Future irreversible migrations must declare that limitation before
 release.

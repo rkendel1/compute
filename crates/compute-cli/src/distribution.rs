@@ -18,6 +18,7 @@ pub struct BuildOptions {
     pub output: PathBuf,
     pub offline: bool,
     pub verify: bool,
+    pub release_status: String,
     pub cache: Option<PathBuf>,
     pub platform: Option<String>,
     pub lock: Option<PathBuf>,
@@ -38,6 +39,8 @@ struct LockedRuntime {
     executable: String,
     #[serde(default)]
     artifacts: BTreeMap<String, LockedArtifact>,
+    #[serde(default)]
+    unsupported_platforms: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +79,10 @@ pub(crate) struct DistributionManifest {
     platform: String,
     os: String,
     architecture: String,
+    #[serde(default)]
+    distribution_profile: String,
+    #[serde(default)]
+    release_status: String,
     runtime_lock_sha256: String,
     certification_status: String,
     build: BuildMetadata,
@@ -97,6 +104,12 @@ struct ManifestRuntime {
     artifact_sha256: String,
     payload_sha256: String,
     reported_version: String,
+    #[serde(default = "supported_availability")]
+    availability: String,
+    #[serde(default)]
+    support_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unavailable_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     capabilities: Option<RuntimeCapabilities>,
 }
@@ -105,6 +118,9 @@ struct ManifestRuntime {
 pub(crate) struct VerificationReport {
     pub(crate) distribution_id: Option<String>,
     platform: Option<String>,
+    profile: Option<String>,
+    release_status: Option<String>,
+    certification_status: Option<String>,
     checks: Vec<VerificationCheck>,
     pub(crate) passed: bool,
 }
@@ -114,6 +130,10 @@ struct VerificationCheck {
     name: String,
     passed: bool,
     detail: String,
+}
+
+fn supported_availability() -> String {
+    "supported".into()
 }
 
 pub fn build(options: BuildOptions) -> Result<()> {
@@ -131,6 +151,12 @@ pub fn build(options: BuildOptions) -> Result<()> {
     }
     let platform = options.platform.unwrap_or_else(host_platform);
     let (os, architecture) = split_platform(&platform)?;
+    if options.release_status == "certified" && !options.verify {
+        return fail("a certified distribution must be built with --verify");
+    }
+    if options.release_status == "preview" && options.verify {
+        return fail("a preview distribution cannot be labeled as certified by --verify");
+    }
     if options.output.exists() {
         return fail(format!(
             "refusing to overwrite {}",
@@ -166,6 +192,36 @@ pub fn build(options: BuildOptions) -> Result<()> {
             .ok()
             .map(|kind| compute.capabilities(kind))
             .transpose()?;
+        let unavailable_reason = runtime
+            .unsupported_platforms
+            .get(&platform)
+            .cloned()
+            .or_else(|| {
+                (!runtime.artifacts.is_empty() && !runtime.artifacts.contains_key(&platform))
+                    .then(|| format!("runtime {name} has no native artifact for {platform}"))
+            });
+        if let Some(reason) = unavailable_reason {
+            if options.release_status == "certified" {
+                return fail(format!(
+                    "certified platform {platform} requires runtime {name}: {reason}"
+                ));
+            }
+            runtimes.insert(
+                name.clone(),
+                ManifestRuntime {
+                    version: runtime.version.clone(),
+                    executable: runtime.executable.clone(),
+                    artifact_sha256: String::new(),
+                    payload_sha256: String::new(),
+                    reported_version: String::new(),
+                    availability: "unavailable".into(),
+                    support_status: "unsupported".into(),
+                    unavailable_reason: Some(reason),
+                    capabilities,
+                },
+            );
+            continue;
+        }
         let artifact_hash = if runtime.artifacts.is_empty() {
             sha256_file(&root.join("bin/compute"))?
         } else {
@@ -204,6 +260,9 @@ pub fn build(options: BuildOptions) -> Result<()> {
                 artifact_sha256: artifact_hash,
                 payload_sha256: payload_hash,
                 reported_version,
+                availability: "supported".into(),
+                support_status: options.release_status.clone(),
+                unavailable_reason: None,
                 capabilities,
             },
         );
@@ -212,7 +271,14 @@ pub fn build(options: BuildOptions) -> Result<()> {
     fs::write(root.join("runtime-lock.json"), &lock_bytes).map_err(error)?;
     let lock_hash = sha256_bytes(&lock_bytes);
     let compute_version = env!("CARGO_PKG_VERSION").to_string();
-    let identity = distribution_identity(&compute_version, &platform, &lock_hash, &runtimes)?;
+    let identity = distribution_identity(
+        &compute_version,
+        &platform,
+        "base",
+        &options.release_status,
+        &lock_hash,
+        &runtimes,
+    )?;
     let mut manifest = DistributionManifest {
         schema_version: MANIFEST_SCHEMA,
         compute_version: compute_version.clone(),
@@ -221,8 +287,14 @@ pub fn build(options: BuildOptions) -> Result<()> {
         platform,
         os,
         architecture,
+        distribution_profile: "base".into(),
+        release_status: options.release_status.clone(),
         runtime_lock_sha256: lock_hash,
-        certification_status: "not_run".into(),
+        certification_status: if options.release_status == "preview" {
+            "preview".into()
+        } else {
+            "not_run".into()
+        },
         build: BuildMetadata {
             format: "compute-distribution-v2".into(),
             reproducible: true,
@@ -242,6 +314,8 @@ pub fn build(options: BuildOptions) -> Result<()> {
         manifest.distribution_id = distribution_identity(
             &manifest.compute_version,
             &manifest.platform,
+            &manifest.distribution_profile,
+            &manifest.release_status,
             &manifest.runtime_lock_sha256,
             &manifest.runtimes,
         )?;
@@ -275,12 +349,25 @@ pub fn inspect(path: &Path, json: bool) -> Result<()> {
     } else {
         println!("Distribution: {}", manifest.distribution_id);
         println!("Platform: {}", manifest.platform);
+        println!("Profile: {}", manifest.distribution_profile);
+        println!("Status: {}", manifest.release_status);
         println!("Certification: {}", manifest.certification_status);
         for (name, runtime) in manifest.runtimes {
-            println!(
-                "{name}: {} artifact sha256:{}",
-                runtime.version, runtime.artifact_sha256
-            );
+            if runtime.availability == "supported" {
+                println!(
+                    "{name}: {} {} artifact sha256:{}",
+                    runtime.version, runtime.support_status, runtime.artifact_sha256
+                );
+            } else {
+                println!(
+                    "{name}: {} unavailable — {}",
+                    runtime.version,
+                    runtime
+                        .unavailable_reason
+                        .as_deref()
+                        .unwrap_or("unsupported on this platform")
+                );
+            }
         }
     }
     Ok(())
@@ -291,6 +378,11 @@ pub fn verify(path: &Path, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&report).map_err(error)?);
     } else {
+        if let (Some(profile), Some(platform), Some(status)) =
+            (&report.profile, &report.platform, &report.release_status)
+        {
+            println!("Distribution: {profile} {platform} ({status})");
+        }
         for check in &report.checks {
             println!(
                 "{}: {} — {}",
@@ -320,6 +412,18 @@ pub fn doctor_provenance() -> BTreeMap<String, serde_json::Value> {
         .runtimes
         .into_iter()
         .map(|(name, runtime)| {
+            if runtime.availability != "supported" {
+                return (
+                    name,
+                    serde_json::json!({
+                        "source": "compute-distribution",
+                        "availability": runtime.availability,
+                        "support_status": runtime.support_status,
+                        "reason": runtime.unavailable_reason,
+                        "status": "unavailable",
+                    }),
+                );
+            }
             let actual = if runtime.executable.starts_with('<') {
                 Some(runtime.payload_sha256.clone())
             } else {
@@ -352,6 +456,9 @@ pub(crate) fn verify_root(root: &Path) -> VerificationReport {
     let mut report = VerificationReport {
         distribution_id: None,
         platform: None,
+        profile: None,
+        release_status: None,
+        certification_status: None,
         checks: Vec::new(),
         passed: false,
     };
@@ -364,11 +471,33 @@ pub(crate) fn verify_root(root: &Path) -> VerificationReport {
     };
     report.distribution_id = Some(manifest.distribution_id.clone());
     report.platform = Some(manifest.platform.clone());
+    report.profile = Some(manifest.distribution_profile.clone());
+    report.release_status = Some(manifest.release_status.clone());
+    report.certification_status = Some(manifest.certification_status.clone());
     push_check(
         &mut report,
         "manifest",
         manifest.schema_version == MANIFEST_SCHEMA,
         "manifest is readable and versioned",
+    );
+    let status_valid = manifest.distribution_profile == "base"
+        && matches!(manifest.release_status.as_str(), "certified" | "preview")
+        && match manifest.release_status.as_str() {
+            "certified" => manifest.certification_status == "pass",
+            "preview" => manifest.certification_status == "preview",
+            _ => false,
+        };
+    push_check(
+        &mut report,
+        "distribution_status",
+        status_valid,
+        format!(
+            "profile {} on {} is {} with certification {}",
+            manifest.distribution_profile,
+            manifest.platform,
+            manifest.release_status,
+            manifest.certification_status
+        ),
     );
     let lock_bytes = match fs::read(root.join("runtime-lock.json")) {
         Ok(bytes) => bytes,
@@ -450,7 +579,32 @@ pub(crate) fn verify_root(root: &Path) -> VerificationReport {
             .map(|artifact| artifact.sha256.as_str());
         let declared = installed.version == locked.version
             && installed.executable == locked.executable
+            && installed.availability == "supported"
+            && installed.support_status == manifest.release_status
+            && installed.unavailable_reason.is_none()
             && expected_artifact.is_none_or(|hash| hash == installed.artifact_sha256);
+        if installed.availability == "unavailable" {
+            let expected_unavailable = manifest.release_status == "preview"
+                && installed.support_status == "unsupported"
+                && installed.unavailable_reason.is_some()
+                && (locked
+                    .unsupported_platforms
+                    .contains_key(&manifest.platform)
+                    || (!locked.artifacts.is_empty()
+                        && !locked.artifacts.contains_key(&manifest.platform)));
+            push_check(
+                &mut report,
+                &format!("runtime:{name}"),
+                installed.version == locked.version
+                    && installed.executable == locked.executable
+                    && expected_unavailable,
+                installed
+                    .unavailable_reason
+                    .as_deref()
+                    .unwrap_or("runtime is unavailable without a reason"),
+            );
+            continue;
+        }
         if locked.executable.starts_with('<') {
             push_check(
                 &mut report,
@@ -498,6 +652,8 @@ pub(crate) fn verify_root(root: &Path) -> VerificationReport {
     let identity = distribution_identity(
         &manifest.compute_version,
         &manifest.platform,
+        &manifest.distribution_profile,
+        &manifest.release_status,
         &manifest.runtime_lock_sha256,
         &manifest.runtimes,
     );
@@ -740,10 +896,13 @@ fn probe(runtime: &str, executable: &Path, expected: &str) -> std::result::Resul
 fn distribution_identity(
     compute: &str,
     platform: &str,
+    profile: &str,
+    release_status: &str,
     lock: &str,
     runtimes: &BTreeMap<String, ManifestRuntime>,
 ) -> Result<String> {
-    let bytes = serde_json::to_vec(&(compute, platform, lock, runtimes)).map_err(error)?;
+    let bytes = serde_json::to_vec(&(compute, platform, profile, release_status, lock, runtimes))
+        .map_err(error)?;
     Ok(format!("sha256:{}", sha256_bytes(&bytes)))
 }
 

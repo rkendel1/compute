@@ -16,8 +16,22 @@ cargo build --release --locked
 rustup target add wasm32-wasip1
 target/release/compute distribution build \
   --output dist/compute-distribution \
+  --status certified \
   --verify
 ```
+
+Build the macOS ARM64 Preview on that host with:
+
+```sh
+target/release/compute distribution build \
+  --output dist/compute-distribution \
+  --status preview
+```
+
+Preview is an explicit distribution state. Runtimes with pinned native payloads are
+installed and labeled Preview; absent or Linux-only runtimes are retained in the
+inventory as Unavailable with a reason. `--status certified` requires `--verify` and
+fails if any locked runtime is unavailable.
 
 The builder downloads missing artifacts into
 `$XDG_CACHE_HOME/compute/runtimes/sha256/<digest>` (or

@@ -134,6 +134,8 @@ struct LockedRuntime {
     executable: String,
     #[serde(default)]
     artifacts: BTreeMap<String, LockedArtifact>,
+    #[serde(default)]
+    unsupported_platforms: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -286,7 +288,13 @@ impl RuntimeManager {
         }
         let platform_label = platform.label();
         let Some(artifact) = locked.artifacts.get(&platform_label) else {
-            return unsupported(format!("no artifact for {platform_label}"));
+            return unsupported(
+                locked
+                    .unsupported_platforms
+                    .get(&platform_label)
+                    .cloned()
+                    .unwrap_or_else(|| format!("no artifact for {platform_label}")),
+            );
         };
         let digest = format!("sha256:{}", artifact.sha256);
         let mut distribution = RuntimeDistribution {
@@ -1061,6 +1069,7 @@ mod tests {
                             }],
                         },
                     )]),
+                    unsupported_platforms: BTreeMap::new(),
                 },
             )]),
         };
@@ -1292,6 +1301,32 @@ mod tests {
                 assert!(artifact.url.starts_with("https://"));
                 assert!(!artifact.install.is_empty());
             }
+        }
+    }
+
+    #[test]
+    fn macos_preview_catalog_is_explicit() {
+        let lock: RuntimeLock =
+            serde_json::from_slice(include_bytes!("../../../distribution/runtime-lock.json"))
+                .unwrap();
+        for runtime in ["node", "python", "deno", "bun", "ruby", "jvm", "dotnet"] {
+            assert!(
+                lock.runtimes[runtime]
+                    .artifacts
+                    .contains_key("macos-aarch64")
+            );
+        }
+        assert!(
+            lock.runtimes["native"]
+                .unsupported_platforms
+                .contains_key("macos-aarch64")
+        );
+        for runtime in ["php", "shell"] {
+            assert!(
+                !lock.runtimes[runtime]
+                    .artifacts
+                    .contains_key("macos-aarch64")
+            );
         }
     }
 }

@@ -12,6 +12,10 @@
         "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz",
         "sha256": "01ce0ce9189feaead3298abf10d4efe998c55a489b3d5d38ca4f83dda7e7977e", "format": "tar_gz",
         "install": [{ "source": "python", "destination": "runtimes/python" }]
+      }, "macos-aarch64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-aarch64-apple-darwin-install_only_stripped.tar.gz",
+        "sha256": "d3904bd6a072246e07aa0bdadee9a14e80521e42a943c0848059feb16a2816dc", "format": "tar_gz",
+        "install": [{ "source": "python", "destination": "runtimes/python" }]
       }}
     },
     "node": {
@@ -24,6 +28,10 @@
         "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-arm64.tar.xz",
         "sha256": "58c9520501f6ae2b52d5b210444e24b9d0c029a58c5011b797bc1fe7105886f6", "format": "tar_xz",
         "install": [{ "source": "node-v24.18.0-linux-arm64", "destination": "runtimes/node" }]
+      }, "macos-aarch64": {
+        "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-darwin-arm64.tar.gz",
+        "sha256": "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1", "format": "tar_gz",
+        "install": [{ "source": "node-v24.18.0-darwin-arm64", "destination": "runtimes/node" }]
       }}
     },
     "bun": {
@@ -36,6 +44,10 @@
         "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-aarch64.zip",
         "sha256": "54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7", "format": "zip",
         "install": [{ "source": "bun-linux-aarch64/bun", "destination": "runtimes/bun/bin/bun" }]
+      }, "macos-aarch64": {
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-darwin-aarch64.zip",
+        "sha256": "90987a3a16d7db556d886ac3d551e7b6d3edf0a1cf43acaed622e8676be1d12f", "format": "zip",
+        "install": [{ "source": "bun-darwin-aarch64/bun", "destination": "runtimes/bun/bin/bun" }]
       }}
     },
     "deno": {
@@ -48,6 +60,10 @@
         "url": "https://github.com/denoland/deno/releases/download/v2.9.7/deno-aarch64-unknown-linux-gnu.zip",
         "sha256": "c832298b1ad4422481334855f6003e0f54145762c5a134f20a489511d2f65bbf", "format": "zip",
         "install": [{ "source": "deno", "destination": "runtimes/deno/bin/deno" }]
+      }, "macos-aarch64": {
+        "url": "https://github.com/denoland/deno/releases/download/v2.9.7/deno-aarch64-apple-darwin.zip",
+        "sha256": "5cd46d6268f6f78f5d88bdc7159d20bd44cdaa4b3303474839f87ec6fe7ae25c", "format": "zip",
+        "install": [{ "source": "deno", "destination": "runtimes/deno/bin/deno" }]
       }}
     },
     "ruby": {
@@ -55,6 +71,10 @@
       "artifacts": { "linux-x86_64": {
         "url": "https://github.com/bazel-contrib/portable-ruby/releases/download/3.4.11-1/ruby-3.4.11.x86_64_linux.tar.gz",
         "sha256": "f4a0ac310c7150586befb7fc885297be4a96bc4f7ad7b4dd362e427b87822055", "format": "tar_gz",
+        "install": [{ "source": "ruby-3.4.11", "destination": "runtimes/ruby" }]
+      }, "macos-aarch64": {
+        "url": "https://github.com/bazel-contrib/portable-ruby/releases/download/3.4.11-1/ruby-3.4.11.arm64_darwin.tar.gz",
+        "sha256": "a71d56e05c801eec9f5a330b8d0d096b10d6c527c0bf4485c2be22126460fa05", "format": "tar_gz",
         "install": [{ "source": "ruby-3.4.11", "destination": "runtimes/ruby" }]
       }}
     },
@@ -72,6 +92,10 @@
         "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz",
         "sha256": "ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94", "format": "tar_gz",
         "install": [{ "source": "jdk-21.0.12.1+1", "destination": "runtimes/jvm" }]
+      }, "macos-aarch64": {
+        "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.12.1_1.tar.gz",
+        "sha256": "3623232f33a9c3baadf304480b2535f9a3cba8a58d42ecbb438ba267315d9998", "format": "tar_gz",
+        "install": [{ "source": "jdk-21.0.12.1+1/Contents/Home", "destination": "runtimes/jvm" }]
       }}
     },
     "dotnet": {
@@ -80,9 +104,18 @@
         "url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.112/dotnet-sdk-10.0.112-linux-x64.tar.gz",
         "sha256": "93adf489110de46c6948ab2848a425d1dd99448f8374bc8a44a06d4ab892f3d2", "format": "tar_gz",
         "install": [{ "source": "", "destination": "runtimes/dotnet" }]
+      }, "macos-aarch64": {
+        "url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.112/dotnet-sdk-10.0.112-osx-arm64.tar.gz",
+        "sha256": "2883e5b032fb3c75d4159bf3f4c501697dd511bd7ada9920ae0eca005326458e", "format": "tar_gz",
+        "install": [{ "source": "", "destination": "runtimes/dotnet" }]
       }}
     },
-    "native": { "version": "linux-v1", "executable": "<workload-entrypoint>" },
+    "native": {
+      "version": "linux-v1", "executable": "<workload-entrypoint>",
+      "unsupported_platforms": {
+        "macos-aarch64": "native workloads require a Linux execution Computer; local macOS execution is not represented as native Linux support"
+      }
+    },
     "shell": {
       "version": "1.37.0", "executable": "runtimes/shell/bin/sh",
       "artifacts": { "linux-x86_64": {
