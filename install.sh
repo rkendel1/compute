@@ -1,5 +1,5 @@
 #!/bin/sh
-# Canonical Compute installer. This file is served by https://get.compute.dev.
+# Direct Compute installer. Homebrew is the primary product installation path.
 set -eu
 
 fail() {

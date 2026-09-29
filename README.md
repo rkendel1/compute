@@ -9,17 +9,18 @@ and running workloads across WASM and common process-backed runtimes.
 The supported product distribution is currently Linux x86_64:
 
 ```sh
-curl -fsSL https://get.compute.dev | sh
+brew tap rkendel1/compute
+brew install compute
 compute --version
 compute
 ```
 
-The installer verifies the certified GitHub Release archive and installs its
-pinned runtime bundle without root access. Run it again to upgrade; mutable
-state in `~/.compute` is preserved. See [Installing Compute](docs/installation.md)
-for locations, version pinning, verification, and the installation/state
-contract. `cargo install` is not equivalent because it does not install the
-certified runtime bundle.
+The formula verifies and installs the certified GitHub Release archive with its
+pinned runtime bundle. `brew upgrade compute` replaces only Homebrew's immutable
+installation; mutable state in `~/.compute` is preserved. See
+[Installing Compute](docs/installation.md) for the installation/state contract
+and direct-installer alternative. `cargo install` is not equivalent because it
+does not install the certified runtime bundle.
 
 Each execution returns a machine-readable result with a unique
 `execution_id`, lifecycle states, exit status, captured output, artifacts,

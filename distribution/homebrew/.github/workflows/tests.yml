@@ -1,0 +1,85 @@
+name: formula
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HOMEBREW_NO_ANALYTICS: "1"
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+
+jobs:
+  install-linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@fd832223f9f99ebf0244dd20658680e5d4aca049
+        with:
+          core: true
+          cask: false
+      - name: Tap this checkout
+        run: brew tap rkendel1/compute "$GITHUB_WORKSPACE"
+      - name: Validate formula
+        run: |
+          brew audit --strict --online rkendel1/compute/compute
+          brew style rkendel1/compute/compute
+      - name: Install certified distribution
+        run: brew install --build-from-source rkendel1/compute/compute
+      - name: Test installed distribution
+        env:
+          COMPUTE_HOME: ${{ runner.temp }}/compute-state
+        run: |
+          brew test rkendel1/compute/compute
+          compute --version
+          compute distribution verify "$(brew --prefix compute)/libexec"
+          test -d "$(brew --prefix compute)/libexec/runtimes"
+          COMPUTE_NO_BROWSER=1 compute
+          compute down
+
+  upgrade-preserves-state:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Check for a previous formula
+        id: previous
+        shell: bash
+        run: |
+          if git cat-file -e HEAD^:Formula/compute.rb 2>/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Set up Homebrew
+        if: steps.previous.outputs.exists == 'true'
+        uses: Homebrew/actions/setup-homebrew@fd832223f9f99ebf0244dd20658680e5d4aca049
+        with:
+          core: true
+          cask: false
+      - name: Install previous release and upgrade
+        if: steps.previous.outputs.exists == 'true'
+        env:
+          COMPUTE_HOME: ${{ runner.temp }}/compute-state
+        shell: bash
+        run: |
+          brew tap rkendel1/compute "$GITHUB_WORKSPACE"
+          tap=$(brew --repository rkendel1/compute)
+          git -C "$tap" show HEAD^:Formula/compute.rb > "$tap/Formula/compute.rb"
+          brew install --build-from-source rkendel1/compute/compute
+          mkdir -p "$COMPUTE_HOME"
+          printf 'durable state\n' > "$COMPUTE_HOME/homebrew-upgrade"
+          git -C "$tap" checkout HEAD -- Formula/compute.rb
+          brew upgrade --build-from-source rkendel1/compute/compute
+          test "$(cat "$COMPUTE_HOME/homebrew-upgrade")" = "durable state"
+          expected=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$tap/Formula/compute.rb")
+          test "$(compute --version)" = "compute $expected"
+          compute distribution verify "$(brew --prefix compute)/libexec"

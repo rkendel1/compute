@@ -1,0 +1,30 @@
+class Compute < Formula
+  desc "Runtime-neutral workload execution"
+  homepage "https://github.com/rkendel1/compute"
+  url "https://github.com/rkendel1/compute/releases/download/v@VERSION@/compute-@VERSION@-linux-x86_64.tar.gz"
+  version "@VERSION@"
+  sha256 "@SHA256@"
+  license "MIT"
+
+  depends_on :linux
+  depends_on arch: :x86_64
+
+  def install
+    distribution = Pathname.pwd
+    distribution /= "compute-distribution" unless (distribution/"bin/compute").exist?
+    libexec.install distribution.children
+    bin.install_symlink libexec/"bin/compute"
+  end
+
+  test do
+    ENV["COMPUTE_HOME"] = testpath/"state"
+    (testpath/"state").mkpath
+    (testpath/"state"/"homebrew-state").write("preserve me\n")
+
+    assert_equal "compute #{version}\n", shell_output("#{bin}/compute --version")
+    system bin/"compute", "distribution", "verify", libexec
+    assert_predicate libexec/"runtimes", :directory?
+    assert_predicate libexec/"runtime-manifest.json", :file?
+    assert_equal "preserve me\n", (testpath/"state"/"homebrew-state").read
+  end
+end

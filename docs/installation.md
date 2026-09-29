@@ -1,54 +1,60 @@
 # Installing Compute
 
-The supported product installation is:
+The supported product installation is Homebrew:
 
 ```sh
-curl -fsSL https://get.compute.dev | sh
+brew tap rkendel1/compute
+brew install compute
 compute --version
 compute
 ```
 
-The initial certified platform is Linux x86_64. The installer fails closed on
-every other operating system or architecture; it does not substitute a source
-build or host runtimes.
+The initial certified platform is Linux x86_64. The formula declares both
+constraints and does not advertise macOS or ARM merely because Homebrew runs
+there. Unsupported platforms fail rather than substituting a source build or
+host runtimes.
 
-The bootstrap resolves the latest stable `v*` GitHub Release, downloads
-`compute-<version>-linux-x86_64.tar.gz` and its adjacent `.sha256`, verifies the
-archive, validates the extracted distribution with Compute's existing
-distribution verifier, and only then atomically activates it. The archive is
-the artifact that passed release certification and contains the Compute
-executable, pinned runtime bundle, runtime lock, manifest, and inventory.
+The formula's version, URL, and SHA-256 are generated from the stable `v*`
+GitHub Release by the same workflow that certifies and publishes
+`compute-<version>-linux-x86_64.tar.gz`. Homebrew verifies that checksum and
+installs the archive unchanged. It contains the Compute executable, pinned
+runtime bundle, runtime lock, manifest, and inventory.
 
-By default, immutable installations live under:
+Homebrew owns the immutable installation under its Cellar:
 
 ```text
-~/.local/share/compute/
-  installations/<version>-<sha256>/
-  current -> installations/<version>-<sha256>
+$(brew --prefix compute)/
+  bin/compute -> ../libexec/bin/compute
+  libexec/
+    runtimes/
+    runtime-manifest.json
+    runtime-inventory.json
 ```
-
-`~/.local/bin/compute` points through `current` to the active distribution.
-Add `~/.local/bin` to `PATH` if it is not already present. `XDG_DATA_HOME`,
-`COMPUTE_INSTALL_ROOT`, and `COMPUTE_BIN_DIR` can relocate the installation.
 
 Mutable per-user state remains in `$COMPUTE_HOME`, defaulting to `~/.compute`.
 It is never stored in an installation directory. `COMPUTE_DISTRIBUTION_ROOT`
 is the explicit development/operations override for an immutable distribution
 root; normal installed execution discovers that root relative to the executable.
 
-Run the installation command again to upgrade. The new version is downloaded,
-verified, extracted, and validated before the active symlink changes. A failed
-download, checksum, extraction, or validation leaves the prior installation
-and all user state untouched. For reproducible installation of a specific
-release:
+Upgrade through Homebrew:
 
 ```sh
-curl -fsSL https://get.compute.dev | COMPUTE_VERSION=0.1.0 sh
+brew update
+brew upgrade compute
 ```
+
+The new keg replaces only immutable installation assets. Environments, FeltDB
+state, checkpoints, artifacts, configuration, and receipts under
+`COMPUTE_HOME` remain untouched.
 
 `compute --version` reports the installed Compute version. Runtime versions
 and payload identities remain inspectable in the installed
 `runtime-manifest.json` and `runtime-inventory.json`.
+
+For a direct user-local installation, download `install.sh` from a trusted
+Compute source checkout and run `sh install.sh`. The script remains supported,
+but no domain-backed curl command is documented until that domain is operated
+by the project.
 
 `cargo install` is not the product installation mechanism: a Cargo-built
 binary does not include the certified pinned runtime bundle.

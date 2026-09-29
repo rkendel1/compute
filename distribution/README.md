@@ -72,3 +72,15 @@ discovered relative to its `bin/compute` executable), carries provenance for
 all pinned payloads, and is the only environment accepted by `compute certify`.
 `COMPUTE_HOME` is separate: it contains mutable per-user state and defaults to
 `~/.compute`. Replacing either tree never replaces the other.
+
+## Homebrew channel
+
+Certified `v*` releases also render and publish the Linux x86_64 formula to
+`rkendel1/homebrew-compute`. The renderer in `distribution/homebrew` copies the
+release version and the adjacent release asset's SHA-256 into the formula; the
+formula never builds Compute or downloads runtimes independently.
+
+The GitHub repository must exist before the first release, and this repository
+must define a `HOMEBREW_TAP_TOKEN` Actions secret with contents permission for
+that tap (and workflow permission because the tap CI definition is synced).
+Failure to update the tap fails the tagged distribution workflow.
