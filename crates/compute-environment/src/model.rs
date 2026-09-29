@@ -699,6 +699,11 @@ pub struct RestoreReport {
     pub declared_state: String,
     /// Configuration names not restored: values are never restored.
     pub omitted_config: Vec<String>,
+    /// The variables the checkpointed environment had configured: names and
+    /// treatment from the checkpoint, never values. They are for the caller to
+    /// supply (`compute environment config`); restore does not.
+    #[serde(default)]
+    pub configuration_required: Vec<crate::configuration::ConfigurationRequirement>,
     /// The durable jobs that did the work, in order.
     pub jobs: Vec<String>,
     /// The new computer once its declared contents converged.

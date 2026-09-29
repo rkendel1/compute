@@ -122,7 +122,7 @@ impl Daemon {
             created_at: record.value.created_at,
             policy_id: EffectivePolicy::compose(&self.policy_sources(&record.value)?).policy_id,
             provider: record.value.provider.clone(),
-            config: record.value.config.clone(),
+            config: super::visible_config(&record.value),
             project_count: views.len(),
             workload_count: views.iter().map(|project| project.workload_count).sum(),
             service_count: views.iter().map(|project| project.service_count).sum(),

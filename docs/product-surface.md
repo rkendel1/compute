@@ -509,6 +509,10 @@ route declares a scope; unknown routes need `admin`.
 | POST | `/environments/{environment}/run` | Execute | yes | yes | yes | no |
 | POST | `/environments/{environment}/release` | Deploy | no | yes | yes | no |
 | POST | `/environments/{environment}/config` | Operate | no | yes | yes | yes |
+| GET | `/environments/{environment}/config` | Read | no | yes | no | no |
+| POST | `/environments/{environment}/config/change` | Operate | no | yes | no | no |
+| POST | `/environments/{environment}/config/import` | Operate | no | yes | no | no |
+| POST | `/environments/{environment}/config/discover` | Execute | no | yes | no | no |
 | POST | `/environments/{environment}/lifecycle` | Operate | no | yes | yes | no |
 | POST | `/environments/{environment}/propose` | Execute | yes | yes | yes | no |
 | POST | `/environments/{environment}/processes/{process}/restart` | Operate | yes | no | yes | no |

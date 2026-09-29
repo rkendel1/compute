@@ -76,6 +76,7 @@ async fn connect(config: &FeltDbConfig) -> Arc<FeltDbState> {
 
 fn environment(name: &str) -> EnvironmentRecord {
     EnvironmentRecord {
+        configuration: None,
         name: name.into(),
         desired_state: compute_state::DesiredState::Running,
         config: Default::default(),

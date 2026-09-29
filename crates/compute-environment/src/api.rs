@@ -143,6 +143,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/environments/{environment}/run"),
     ("POST", "/environments/{environment}/release"),
     ("POST", "/environments/{environment}/config"),
+    ("GET", "/environments/{environment}/config"),
+    ("POST", "/environments/{environment}/config/change"),
+    ("POST", "/environments/{environment}/config/import"),
+    ("POST", "/environments/{environment}/config/discover"),
     ("POST", "/environments/{environment}/lifecycle"),
     ("POST", "/environments/{environment}/propose"),
     (
@@ -1111,6 +1115,18 @@ async fn route(
         )?),
         ("POST", ["environments", id, "release"]) => ok(to_value(
             Box::pin(daemon.release_project(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("GET", ["environments", id, "config"]) => ok(to_value(
+            Box::pin(daemon.configuration(id, &principal.operator_id)).await?,
+        )?),
+        ("POST", ["environments", id, "config", "change"]) => ok(to_value(
+            Box::pin(daemon.change_configuration(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "config", "import"]) => ok(to_value(
+            Box::pin(daemon.import_configuration(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["environments", id, "config", "discover"]) => ok(to_value(
+            Box::pin(daemon.discover_configuration(id, &principal.operator_id)).await?,
         )?),
         ("POST", ["environments", id, "config"]) => ok(to_value(
             Box::pin(daemon.set_config(id, &principal.operator_id, parse(body)?)).await?,

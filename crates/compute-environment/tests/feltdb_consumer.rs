@@ -318,6 +318,7 @@ async fn the_controller_keeps_authority_in_feltdb_through_an_outage() {
         .transaction(Batch::new().create(
             "env_foreign",
             &compute_state::EnvironmentRecord {
+                configuration: None,
                 name: "foreign".into(),
                 desired_state: compute_state::DesiredState::Stopped,
                 config: BTreeMap::new(),

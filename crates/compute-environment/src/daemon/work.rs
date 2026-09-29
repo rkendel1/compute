@@ -197,7 +197,8 @@ impl Daemon {
             "configuration replaced".into(),
             None,
             move |value| {
-                value.config = config.clone();
+                let before = value.clone();
+                value.config = super::replace_visible_config(&before, &config);
                 Ok(())
             },
         )

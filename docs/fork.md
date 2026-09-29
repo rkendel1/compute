@@ -24,7 +24,7 @@ portable state produced by another environment**.
 | --- | --- |
 | workspace files, moved by export / seed / verify (`compute.workspace@1`) | environment id, computer id, machine, session, connection |
 | declared contents (repositories, packages, processes), which the **new** controller reconciles, so a process runs in B because B started it, not because one was copied | running processes and their pids, readiness and restart state |
-| policy (environment state in the model) | configuration values, where credentials live. `--copy-config` opts in, and the names left behind are reported |
+| policy (environment state in the model) | configuration values, where credentials live ([configuration.md](configuration.md)). `--copy-config` opts in, and the names left behind are reported |
 | requirements and lifecycle kind | provider / target choice: placement decides unless the caller names a target |
 | | `repos/` (re-derived from declared revisions), controller state, endpoints |
 | | the source's events and receipts: the fork is recorded on the new environment, the failure on both, and nothing is written to the source on success |

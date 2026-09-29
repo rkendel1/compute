@@ -973,3 +973,160 @@ fn a_checkpoint_and_a_fork_carry_the_same_verified_workspace_from_the_cli() {
     let refused = cli.run(&["environment", "restore", "ckp_missing", "ghost"]);
     assert!(!refused.status.success());
 }
+
+/// Configuration through the CLI: imported from files, shown without values,
+/// and never printed anywhere an operator looks.
+#[test]
+fn env_files_are_imported_through_the_cli_and_no_output_shows_a_secret() {
+    const SECRET: &str = "sk_live_51NotARealKeyJustATest";
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().to_path_buf();
+    let (_target, cli, _listen) = controller_with_target(&root);
+    cli.ok(&[
+        "environment",
+        "create",
+        "myapp",
+        "--cpu",
+        "1",
+        "--memory",
+        "64Mi",
+        "--persistent",
+    ]);
+    cli.computer_until("running", |view| view["reality"]["observed"] == "running");
+    std::fs::write(
+        root.join(".env"),
+        format!("DATABASE_URL=postgres://u:p@db/app\nSTRIPE_SECRET_KEY={SECRET}\nPORT=3000\nAPP_MODE=test\n"),
+    )
+    .unwrap();
+    std::fs::write(root.join(".env.local"), "APP_MODE=local\n").unwrap();
+
+    let text = cli.ok(&[
+        "environment",
+        "config",
+        "import",
+        "myapp",
+        ".env",
+        ".env.local",
+    ]);
+    assert!(text.contains("Imported 3 variables into myapp"), "{text}");
+    assert!(
+        text.contains("STRIPE_SECRET_KEY") && text.contains("secret"),
+        "{text}"
+    );
+    assert!(
+        text.contains("PORT") && text.contains("skipped: reserved"),
+        "{text}"
+    );
+    assert!(
+        text.contains("defined in more than one file") && text.contains("APP_MODE"),
+        "{text}"
+    );
+    assert!(
+        !text.contains(SECRET) && !text.contains("postgres://"),
+        "{text}"
+    );
+
+    let shown = cli.ok(&["environment", "config", "myapp"]);
+    assert!(shown.contains("configuration generation"), "{shown}");
+    assert!(
+        shown.contains("DATABASE_URL") && shown.contains("configured") && shown.contains("secret"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("APP_MODE") && shown.contains("= local"),
+        "a public value is shown: {shown}"
+    );
+    assert!(
+        !shown.contains(SECRET) && !shown.contains("postgres://"),
+        "{shown}"
+    );
+    let json = cli.json(&["environment", "config", "myapp", "--json"]);
+    assert_eq!(json["variables"].as_array().unwrap().len(), 3);
+    let stripe = json["variables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variable| variable["name"] == "STRIPE_SECRET_KEY")
+        .unwrap();
+    assert_eq!(
+        (
+            stripe["configured"].clone(),
+            stripe["sensitive"].clone(),
+            stripe["source"].clone()
+        ),
+        (true.into(), true.into(), ".env".into())
+    );
+    assert!(stripe.get("value").is_none());
+
+    // The same secret is in no other output an operator can ask for.
+    for arguments in [
+        vec!["environment", "computer", "myapp", "--json"],
+        vec!["environment", "status", "myapp"],
+        vec!["events", "--environment", "myapp"],
+        vec!["environment", "list", "--json"],
+    ] {
+        let output = cli.ok(&arguments);
+        assert!(
+            !output.contains(SECRET) && !output.contains("postgres://"),
+            "{arguments:?}:\n{output}"
+        );
+    }
+
+    // A malformed file is refused whole, without echoing it.
+    std::fs::write(root.join("bad.env"), format!("GOOD=1\n{SECRET}\n")).unwrap();
+    let refused = cli.run(&["environment", "config", "import", "myapp", "bad.env"]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("line 2") && !stderr.contains(SECRET),
+        "{stderr}"
+    );
+    assert!(!cli.ok(&["environment", "config", "myapp"]).contains("GOOD"));
+
+    // Set and remove, and name what may be shown.
+    cli.ok(&[
+        "environment",
+        "config",
+        "myapp",
+        "--set",
+        "REGION=eu",
+        "--set",
+        "SALT_LEVEL=7",
+        "--secret",
+        "SALT_LEVEL",
+        "--unset",
+        "APP_MODE",
+    ]);
+    let shown = cli.ok(&["environment", "config", "myapp"]);
+    assert!(
+        shown.contains("REGION") && shown.contains("= eu") && shown.contains("cli"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("SALT_LEVEL") && !shown.contains("= 7"),
+        "{shown}"
+    );
+    assert!(!shown.contains("APP_MODE"), "{shown}");
+
+    // Discovery reads names from the workspace, never values.
+    cli.ok(&[
+        "environment",
+        "exec",
+        "myapp",
+        "--",
+        "sh",
+        "-c",
+        "printf 'A_KEY=\\nB_MODE=1\\n' > .env.example",
+    ]);
+    let discovered = cli.ok(&["environment", "config", "discover", "myapp"]);
+    assert!(
+        discovered.contains(".env.example (requirements)"),
+        "{discovered}"
+    );
+    assert!(
+        discovered.contains("A_KEY") && discovered.contains("missing"),
+        "{discovered}"
+    );
+    let json = cli.json(&["environment", "config", "discover", "myapp", "--json"]);
+    assert_eq!(json["files"][0]["kind"], "requirements");
+}

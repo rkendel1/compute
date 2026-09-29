@@ -20,6 +20,7 @@ pub mod api;
 pub mod auth;
 pub mod checkpoint;
 pub mod client;
+pub mod configuration;
 pub mod daemon;
 pub mod dataplane;
 pub mod identity;
@@ -31,6 +32,7 @@ pub mod upgrade;
 
 pub use compute_network::acme::AcmeConfig;
 pub use compute_network::dns::DnsProviderConfig;
+pub use configuration::*;
 pub use daemon::{
     ComputerExec, ComputerJob, Daemon, DaemonConfig, EventFilter, NetworkConfig,
     application_environment, desired_snapshot, observed_snapshot,

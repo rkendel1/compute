@@ -39,6 +39,7 @@ fn event(nonce: &str, sequence: u64) -> EventRecord {
 
 fn environment(name: &str) -> EnvironmentRecord {
     EnvironmentRecord {
+        configuration: None,
         name: name.into(),
         desired_state: DesiredState::Running,
         config: BTreeMap::from([("LOG_LEVEL".into(), "info".into())]),
@@ -623,6 +624,7 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
                 processes: BTreeMap::from([(
                     "api".into(),
                     compute_core::ObservedProcess {
+                        config_generation: 0,
                         state: compute_core::ProcessState::Running,
                         fingerprint: "sha256:p".into(),
                         pid: Some(42),

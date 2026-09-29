@@ -612,8 +612,18 @@ impl Daemon {
         wanted: impl Fn(&ComputerView) -> bool,
     ) -> Result<ComputerView, EnvironmentError> {
         let deadline = tokio::time::Instant::now() + within;
+        // An environment created a moment ago may not be visible to this read
+        // yet: absent is tolerated briefly, then it is an error as before.
+        let grace = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            let view = self.computer(environment).await?;
+            let view = match self.computer(environment).await {
+                Ok(view) => view,
+                Err(EnvironmentError::NotFound(_)) if tokio::time::Instant::now() < grace => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if wanted(&view) {
                 return Ok(view);
             }

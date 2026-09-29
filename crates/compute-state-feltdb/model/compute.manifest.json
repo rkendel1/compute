@@ -130,6 +130,11 @@
           "required": false
         },
         {
+          "name": "configuration",
+          "type": "json",
+          "required": false
+        },
+        {
           "name": "record_id",
           "type": "text",
           "required": false

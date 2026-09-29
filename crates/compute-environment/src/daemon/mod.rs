@@ -16,6 +16,7 @@ mod applications;
 mod candidate;
 mod checkpoint;
 mod computers;
+mod configuration;
 mod deploy;
 mod execute;
 mod fork;
@@ -38,6 +39,9 @@ mod workspace;
 
 pub use applications::application_environment;
 pub use computers::{ComputerExec, ComputerJob};
+pub(crate) use configuration::{
+    configuration_view, replace_visible_config, settle_configuration, visible_config,
+};
 pub use views::EventFilter;
 pub(crate) use workspace::{ArchivedWorkspace, read_workspace};
 pub use workspace::{WORKSPACE_ARCHIVE_LIMIT, WORKSPACE_IDENTITY};

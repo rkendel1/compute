@@ -65,7 +65,12 @@ pub const STATE_VERSION: &str = "compute.state@1";
 ///   workspace state: the record of a `compute.checkpoint@1` artifact held in
 ///   the artifact store, with its provenance and lineage). Additive: no
 ///   existing collection or field changed.
-pub const MODEL_GENERATION: u32 = 10;
+/// - 11: configuration metadata: `Environment.configuration` (inside its JSON:
+///   each variable's sensitivity and source, and the generation the
+///   configuration last changed at; never values, which stay in
+///   `Environment.config`) and `Computer.observed` processes gain
+///   `config_generation`. Additive.
+pub const MODEL_GENERATION: u32 = 11;
 
 /// A typed document of one collection.
 pub trait Document: Serialize + DeserializeOwned + Clone + Send + Sync {
@@ -283,6 +288,11 @@ pub struct EnvironmentRecord {
     /// What belongs in the computer: desired state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contents: Option<compute_core::EnvironmentContents>,
+    /// What is known about `config` (its sensitivity, sources, and
+    /// generation), never its values. Absent on records that predate it: every
+    /// variable is then sensitive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<compute_core::ConfigurationState>,
 }
 document!(EnvironmentRecord, Environment);
 
