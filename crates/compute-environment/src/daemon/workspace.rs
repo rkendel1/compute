@@ -108,7 +108,7 @@ const EXPORT_TAIL: &str = r#"
 workspace_check
 before="$(digest)"
 tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
-tar -cf "$tmp" --exclude=./repos --exclude=./.compute/processes --exclude=./.compute/imports .
+COPYFILE_DISABLE=1 tar -cf "$tmp" --exclude=./repos --exclude=./.compute/processes --exclude=./.compute/imports .
 size="$(wc -c <"$tmp" | tr -d ' ')"
 if [ "$size" -gt "$1" ]; then echo "the workspace archive is $size bytes; the transport carries $1" >&2; exit 5; fi
 after="$(digest)"
@@ -375,10 +375,12 @@ impl Daemon {
             return Err(failed("the archive does not match its digest".into()));
         }
         let identity = identify(&archive)?;
-        if identity.digest != format!("sha256:{}", observed.trim()) {
-            return Err(failed(
-                "the archive does not describe the workspace the computer measured".into(),
-            ));
+        let observed = format!("sha256:{}", observed.trim());
+        if identity.digest != observed {
+            return Err(failed(format!(
+                "the archive describes {}, but the computer measured {observed}",
+                identity.digest
+            )));
         }
         let export = WorkspaceExport {
             identity: WORKSPACE_IDENTITY.into(),

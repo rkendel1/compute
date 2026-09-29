@@ -5384,11 +5384,25 @@ fn import_of(files: Vec<ConfigFile>) -> ConfigImportRequest {
 /// test never has to write a value into the workspace to see it.
 fn sleeper() -> EnvironmentContents {
     let mut contents = EnvironmentContents::default();
+    #[cfg(not(target_os = "macos"))]
+    let command = vec!["sh".into(), "-c".into(), "sleep 3600".into()];
+    #[cfg(target_os = "macos")]
+    let command = vec![
+        "sh".into(),
+        "-c".into(),
+        r#"mkdir -p .compute/processes/test-environment; \
+         for variable in DATABASE_URL APP_MODE PORT; do \
+           eval "value=\${$variable-}"; \
+           if [ -n "$value" ]; then printf %s "$value" | shasum -a 256 | cut -d' ' -f1 > .compute/processes/test-environment/$variable; \
+           else rm -f .compute/processes/test-environment/$variable; fi; \
+         done; exec sleep 3600"#
+            .into(),
+    ];
     contents.processes.push(ProcessSpec {
         name: "app".into(),
         kind: ProcessKind::Process,
         runtime: None,
-        command: vec!["sh".into(), "-c".into(), "sleep 3600".into()],
+        command,
         repository: None,
         env: BTreeMap::new(),
         desired: ProcessDesired::Running,
@@ -5408,16 +5422,18 @@ async fn process_variable(daemon: &Arc<Daemon>, name: &str, variable: &str) -> O
     let pid = daemon.computer(name).await.unwrap().observed.processes["app"]
         .pid
         .expect("the process runs");
-    let out = sh(
-        daemon,
-        name,
-        &format!(
-            "if tr '\\0' '\\n' < /proc/{pid}/environ | grep -q '^{variable}='; then \
-             tr '\\0' '\\n' < /proc/{pid}/environ | sed -n 's/^{variable}=//p' | tr -d '\\n' | sha256sum | cut -d' ' -f1; \
-             else echo none; fi"
-        ),
-    )
-    .await;
+    #[cfg(target_os = "macos")]
+    let _ = pid;
+    #[cfg(not(target_os = "macos"))]
+    let inspect = format!(
+        "if tr '\\0' '\\n' < /proc/{pid}/environ | grep -q '^{variable}='; then \
+         tr '\\0' '\\n' < /proc/{pid}/environ | sed -n 's/^{variable}=//p' | tr -d '\\n' | sha256sum | cut -d' ' -f1; \
+         else echo none; fi"
+    );
+    #[cfg(target_os = "macos")]
+    let inspect =
+        format!("cat .compute/processes/test-environment/{variable} 2>/dev/null || echo none");
+    let out = sh(daemon, name, &inspect).await;
     let out = out.trim().to_owned();
     (out != "none").then(|| format!("sha256:{out}"))
 }
