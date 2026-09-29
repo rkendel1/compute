@@ -181,6 +181,21 @@ pub enum ComputerCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Clone the environment: a new environment on a new computer, seeded
+    /// with this one's workspace files and given the same declared contents.
+    Clone {
+        environment: String,
+        /// The new environment's name.
+        name: String,
+        /// Constrain placement of the new computer to one target.
+        #[arg(long)]
+        target: Option<String>,
+        /// Also copy configuration values (they may be credentials).
+        #[arg(long)]
+        copy_config: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Repositories checked out in the computer.
     #[command(subcommand)]
     Repo(RepoCommands),
@@ -642,6 +657,48 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                 .await
                 .map_err(error)?;
             print_computer(&view, json);
+        }
+        ComputerCommands::Clone {
+            environment,
+            name,
+            target,
+            copy_config,
+            json,
+        } => {
+            let report: compute_environment::CloneReport = client
+                .post(
+                    &format!("/environments/{environment}/clone"),
+                    Some(&compute_environment::CloneRequest {
+                        name,
+                        target,
+                        copy_config,
+                    }),
+                )
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&report);
+            } else {
+                println!("Cloned {} into {}", report.source, report.environment);
+                println!(
+                    "Seeded:   {} files, {} bytes, tree {} (verified inside the new computer)",
+                    report.files, report.bytes, report.tree_digest
+                );
+                for (name, (from, to)) in &report.repositories {
+                    println!(
+                        "Repo:     {name} {} -> {}",
+                        from.as_deref().unwrap_or("-"),
+                        to.as_deref().unwrap_or("-")
+                    );
+                }
+                if !report.omitted_config.is_empty() {
+                    println!(
+                        "Config:   {} not copied (use --copy-config)",
+                        report.omitted_config.join(", ")
+                    );
+                }
+                print_computer(&report.computer, false);
+            }
         }
         ComputerCommands::Repo(command) => match command {
             RepoCommands::Add(args) | RepoCommands::Update(args) => {

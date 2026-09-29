@@ -2057,33 +2057,17 @@ impl Daemon {
         })
     }
 
-    /// Import a source tree (a tar archive) into the running computer as
-    /// the next revision of a repository in its workspace, through durable
-    /// jobs on its target, and return the commit. The repository is named
-    /// by [`imported_source`] as a repository URL: syncing, building,
-    /// publishing, and deploying it are the ordinary operations.
-    pub async fn import_source(
-        self: &Arc<Self>,
-        environment: &str,
-        operator: &str,
-        repository: &str,
+    /// Carry an archive into the computer as base64 chunks under a fresh
+    /// import directory, through durable jobs on its target. Returns the
+    /// import ID, the archive's digest, and the jobs that carried it.
+    pub(crate) async fn upload_archive(
+        &self,
+        client: &RemoteProvider,
+        session_id: &str,
         archive: &[u8],
-        message: &str,
-    ) -> Result<String, EnvironmentError> {
+        what: &str,
+    ) -> Result<(String, String, Vec<String>), EnvironmentError> {
         use base64::Engine as _;
-        let record = self.owned_environment(environment, operator).await?;
-        self.require_live(&record).await?;
-        compute_core::EnvironmentContents {
-            repositories: vec![RepositorySpec {
-                name: repository.to_owned(),
-                url: imported_source(repository),
-                revision: "main".into(),
-                sync: 0,
-            }],
-            ..Default::default()
-        }
-        .validate()?;
-        let (computer, client, session_id) = self.running(&record).await?;
         let import = crate::auth::hex(&crate::auth::random::<8>()?);
         let digest = compute_core::sha256_identity(archive);
         let encoded = base64::engine::general_purpose::STANDARD.encode(archive);
@@ -2101,17 +2085,54 @@ impl Daemon {
                     .insert(format!("COMPUTE_IMPORT_{index}"), value.clone());
             }
             let (evidence, _) = self
-                .run_in_computer_command(&client, &session_id, command, Duration::from_secs(300))
+                .run_in_computer_command(client, session_id, command, Duration::from_secs(300))
                 .await;
             if evidence.outcome != "succeeded" {
                 return Err(EnvironmentError::RuntimeUnavailable(format!(
-                    "importing {repository} into {environment} failed (job {}): {}",
+                    "{what} failed (job {}): {}",
                     evidence.job_id,
                     evidence.error.unwrap_or_default()
                 )));
             }
             jobs.push(evidence.job_id);
         }
+        Ok((import, digest, jobs))
+    }
+
+    /// Import a source tree (a tar archive) into the running computer as
+    /// the next revision of a repository in its workspace, through durable
+    /// jobs on its target, and return the commit. The repository is named
+    /// by [`imported_source`] as a repository URL: syncing, building,
+    /// publishing, and deploying it are the ordinary operations.
+    pub async fn import_source(
+        self: &Arc<Self>,
+        environment: &str,
+        operator: &str,
+        repository: &str,
+        archive: &[u8],
+        message: &str,
+    ) -> Result<String, EnvironmentError> {
+        let record = self.owned_environment(environment, operator).await?;
+        self.require_live(&record).await?;
+        compute_core::EnvironmentContents {
+            repositories: vec![RepositorySpec {
+                name: repository.to_owned(),
+                url: imported_source(repository),
+                revision: "main".into(),
+                sync: 0,
+            }],
+            ..Default::default()
+        }
+        .validate()?;
+        let (computer, client, session_id) = self.running(&record).await?;
+        let (import, digest, mut jobs) = self
+            .upload_archive(
+                &client,
+                &session_id,
+                archive,
+                &format!("importing {repository} into {environment}"),
+            )
+            .await?;
         let (evidence, output) = self
             .run_in_computer_command(
                 &client,

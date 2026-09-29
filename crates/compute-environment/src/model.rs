@@ -18,6 +18,7 @@ pub use compute_state::{
 };
 
 use crate::EnvironmentError;
+use crate::status::ComputerView;
 
 pub const ENVIRONMENT_VERSION: &str = "compute.environment@1";
 
@@ -171,6 +172,47 @@ pub struct ComputerEnvironmentDefinition {
     pub computer: ComputerRequest,
     #[serde(default)]
     pub contents: compute_core::EnvironmentContents,
+}
+
+/// Clone an environment: a new environment on a new computer, seeded with
+/// the source workspace's files and given the same declared contents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloneRequest {
+    /// The new environment's name.
+    pub name: String,
+    /// Constrain placement of the new computer; placement chooses when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Copy the source's configuration *values*. Off by default, because
+    /// configuration is where credentials live; the names left behind are
+    /// reported.
+    #[serde(default)]
+    pub copy_config: bool,
+}
+
+/// What a clone did and what it verified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloneReport {
+    pub source: String,
+    pub environment: String,
+    /// Digest of the archive that carried the workspace state.
+    pub archive: String,
+    /// Digest of the seeded files, computed from the archive and recomputed
+    /// inside the new computer before anything started.
+    pub tree_digest: String,
+    pub files: usize,
+    pub bytes: u64,
+    /// The seeded tree's digest inside the new computer matched.
+    pub seed_verified: bool,
+    /// The declared repositories: `(source commit, clone commit)`.
+    pub repositories: BTreeMap<String, (Option<String>, Option<String>)>,
+    /// Configuration names not copied.
+    pub omitted_config: Vec<String>,
+    /// The durable jobs that did the work, in order.
+    pub jobs: Vec<String>,
+    /// The clone's computer once its contents converged.
+    pub computer: ComputerView,
 }
 
 /// Replace an environment's desired contents, optionally only if they are

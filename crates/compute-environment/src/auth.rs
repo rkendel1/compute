@@ -118,7 +118,7 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
             [
                 "environments",
                 _,
-                "reconcile" | "replace" | "config" | "lifecycle",
+                "reconcile" | "replace" | "config" | "lifecycle" | "clone",
             ],
         )
         // Work sessions: a way into an environment, or a temporary one.

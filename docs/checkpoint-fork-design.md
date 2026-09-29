@@ -275,3 +275,7 @@ Environment.lineage  (set once, immutable)
   limit; deletion removes bytes and keeps the digest in lineage.
 - **AuthBoundry** is not involved unless an application chooses it as its
   authority boundary above Compute.
+
+## Implementation note: what exists
+
+`compute environment clone` ([environment-clone.md](environment-clone.md)) composes export, seed and a tree digest over existing primitives without a stored checkpoint. It shows the remaining work for checkpoint/restore/fork is storage, a record and lineage, not new transport or verification mechanism.

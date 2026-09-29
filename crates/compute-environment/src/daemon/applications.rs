@@ -594,7 +594,7 @@ impl Daemon {
     /// Wait until the application's computer is as `wanted`, failing as
     /// soon as it cannot get there: a computer that ended, is lost, or whose
     /// target is not answering says so.
-    async fn await_computer(
+    pub(crate) async fn await_computer(
         &self,
         environment: &str,
         what: &str,

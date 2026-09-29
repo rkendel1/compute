@@ -13,6 +13,7 @@
 //! running and should not.
 
 mod applications;
+mod clone;
 mod computers;
 mod deploy;
 mod execute;

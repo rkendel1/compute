@@ -2840,3 +2840,174 @@ async fn a_stale_answer_from_a_target_cannot_revive_a_lost_computer() {
     );
     daemon.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cloning_an_environment_seeds_a_new_computer_with_the_same_workload_state() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+
+    daemon
+        .create_computer_environment(
+            definition(
+                "origin",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    let origin = computer_where(&daemon, "origin", "the origin to converge", |view| {
+        view.converged
+    })
+    .await;
+
+    // State a workload wrote that no declared content owns.
+    run(
+        &daemon,
+        "origin",
+        "alice",
+        &[
+            "sh",
+            "-c",
+            "mkdir -p data/nested && printf hello > data/notes.txt && printf deep > data/nested/x.bin && mkdir empty",
+        ],
+    )
+    .await;
+
+    let report = daemon
+        .clone_environment(
+            "origin",
+            "alice",
+            CloneRequest {
+                name: "copy".into(),
+                target: None,
+                copy_config: false,
+            },
+        )
+        .await
+        .unwrap();
+
+    // The seed was proven inside the new computer, before anything started.
+    assert!(report.seed_verified);
+    assert!(report.tree_digest.starts_with("sha256:"));
+    assert!(report.files >= 3, "{report:#?}");
+    assert!(report.jobs.len() >= 4, "export, upload, extract, verify");
+
+    // Same workload state, in a different computer.
+    let copy = report.computer;
+    assert!(copy.converged);
+    assert_ne!(copy.session_id, origin.session_id, "a new machine");
+    assert_ne!(
+        copy.machine
+            .as_ref()
+            .map(|machine| machine.resource.clone()),
+        origin
+            .machine
+            .as_ref()
+            .map(|machine| machine.resource.clone())
+    );
+    let (notes, _) = run(&daemon, "copy", "alice", &["cat", "data/notes.txt"]).await;
+    assert_eq!(notes, "hello");
+    let (deep, _) = run(&daemon, "copy", "alice", &["cat", "data/nested/x.bin"]).await;
+    assert_eq!(deep, "deep");
+    let (empty, _) = run(
+        &daemon,
+        "copy",
+        "alice",
+        &["sh", "-c", "test -d empty && echo yes"],
+    )
+    .await;
+    assert_eq!(empty.trim(), "yes");
+
+    // Declared contents were re-derived, not copied: same commit, and the
+    // process runs in the clone under its own pid.
+    let (from, to) = &report.repositories["app"];
+    assert!(from.is_some() && from == to, "{:?}", report.repositories);
+    assert_eq!(copy.observed.processes["api"].state, ProcessState::Running);
+    assert_ne!(
+        copy.observed.processes["api"].pid,
+        origin.observed.processes["api"].pid
+    );
+    let (version, _) = run(&daemon, "copy", "alice", &["cat", "running-version"]).await;
+    assert_eq!(version, "v1");
+
+    // Configuration values stay behind unless asked for; their names are reported.
+    assert_eq!(report.omitted_config, vec!["APP_ENV".to_string()]);
+    assert!(copy.config.is_empty());
+
+    // The clone is evidenced, and the origin was not disturbed.
+    let recorded = events(&daemon, "copy").await;
+    let cloned = recorded
+        .iter()
+        .find(|(_, data)| data["command"] == "clone")
+        .expect("a clone event");
+    assert_eq!(cloned.1["source"], "origin");
+    assert_eq!(cloned.1["tree_digest"], report.tree_digest.as_str());
+    let still = daemon.computer("origin").await.unwrap();
+    assert_eq!(still.session_id, origin.session_id);
+    assert!(still.converged);
+
+    // Only the owner clones; a name is not reused.
+    assert!(
+        daemon
+            .clone_environment(
+                "origin",
+                "mallory",
+                CloneRequest {
+                    name: "theirs".into(),
+                    target: None,
+                    copy_config: false
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert!(daemon.computer("theirs").await.is_err());
+    assert!(matches!(
+        daemon
+            .clone_environment(
+                "origin",
+                "alice",
+                CloneRequest {
+                    name: "copy".into(),
+                    target: None,
+                    copy_config: false
+                }
+            )
+            .await,
+        Err(EnvironmentError::Conflict(_))
+    ));
+
+    // What cannot travel is refused before anything is created.
+    run(
+        &daemon,
+        "origin",
+        "alice",
+        &["ln", "-s", "/etc/passwd", "link"],
+    )
+    .await;
+    let refused = daemon
+        .clone_environment(
+            "origin",
+            "alice",
+            CloneRequest {
+                name: "linked".into(),
+                target: None,
+                copy_config: false,
+            },
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(EnvironmentError::Invalid(reason)) if reason.contains("other than files")),
+        "{refused:?}"
+    );
+    assert!(
+        daemon.computer("linked").await.is_err(),
+        "nothing was created"
+    );
+}
