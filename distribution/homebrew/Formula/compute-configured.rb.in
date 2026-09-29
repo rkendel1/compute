@@ -9,7 +9,6 @@ class ComputeConfigured < Formula
   license "MIT"
 
   depends_on "rkendel1/compute/compute"
-  depends_on "node@24"
   depends_on :linux
   depends_on arch: :x86_64
 
@@ -26,7 +25,7 @@ class ComputeConfigured < Formula
       #!/bin/sh
       version=$("#{Formula["compute"].opt_bin}/compute" --version) || exit
       version=${version#compute }
-      COMPUTE_INSTALLED_VERSION="$version" exec "#{Formula["node@24"].opt_bin}/node" "#{libexec}/verify.mjs"
+      COMPUTE_INSTALLED_VERSION="$version" exec "#{Formula["compute"].opt_libexec}/runtimes/node/bin/node" "#{libexec}/verify.mjs"
     SH
     (bin/"compute-configured-setup").write <<~SH
       #!/bin/sh

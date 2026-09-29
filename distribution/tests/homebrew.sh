@@ -25,6 +25,11 @@ ruby -c "$configured_formula" | grep -q 'Syntax OK'
 grep -q "compute-configured-$version-linux-x86_64.tar.gz" "$configured_formula"
 grep -q "sha256 \"$configured_checksum\"" "$configured_formula"
 grep -q 'depends_on "rkendel1/compute/compute"' "$configured_formula"
+if grep -q 'depends_on "node' "$configured_formula"; then
+  echo "configured formula must use Compute's certified bundled Node runtime" >&2
+  exit 1
+fi
+grep -q 'opt_libexec}/runtimes/node/bin/node' "$configured_formula"
 grep -q 'compute-configured-verify' "$configured_formula"
 grep -q 'compute-configured-setup' "$configured_formula"
 grep -q 'COMPUTE_INSTALLED_VERSION' "$configured_formula"
