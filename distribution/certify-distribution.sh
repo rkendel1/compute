@@ -65,7 +65,7 @@ COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" bundle cre
 mkdir "$temporary/jobs"
 start_job_server() {
   job_container=$(docker run --rm -d \
-    -p 127.0.0.1::8080 \
+    -p 127.0.0.1:0:8080/tcp \
     -v "$temporary/jobs:/jobs" \
     "$image" serve \
     --listen 0.0.0.0:8080 \
@@ -192,7 +192,7 @@ JSON
 "$distribution/bin/compute" policy validate "$temporary/policy/production.json" --json \
   > "$temporary/policy/validation.json"
 policy_container=$(docker run --rm -d \
-  -p 127.0.0.1::8080 \
+  -p 127.0.0.1:0:8080/tcp \
   -v "$temporary/policy:/policy:ro" \
   "$image" serve \
   --listen 0.0.0.0:8080 \
