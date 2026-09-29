@@ -278,4 +278,4 @@ Environment.lineage  (set once, immutable)
 
 ## Implementation note: what exists
 
-`compute environment clone` ([environment-clone.md](environment-clone.md)) composes export, seed and a tree digest over existing primitives without a stored checkpoint. It shows the remaining work for checkpoint/restore/fork is storage, a record and lineage, not new transport or verification mechanism.
+`compute environment fork` ([fork.md](fork.md)) composes export, seed and a tree digest over existing primitives without a stored checkpoint. It shows the remaining work for checkpoint/restore/fork is storage, a record and lineage, not new transport or verification mechanism.

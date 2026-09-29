@@ -174,11 +174,12 @@ pub struct ComputerEnvironmentDefinition {
     pub contents: compute_core::EnvironmentContents,
 }
 
-/// Clone an environment: a new environment on a new computer, seeded with
-/// the source workspace's files and given the same declared contents.
+/// Fork an environment: a new environment, on a new computer, from the
+/// source's portable state: its workspace files, declared contents, and
+/// policy. Never its configuration values, sessions, or machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CloneRequest {
+pub struct ForkRequest {
     /// The new environment's name.
     pub name: String,
     /// Constrain placement of the new computer; placement chooses when absent.
@@ -191,9 +192,9 @@ pub struct CloneRequest {
     pub copy_config: bool,
 }
 
-/// What a clone did and what it verified.
+/// What a fork did and what it verified.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CloneReport {
+pub struct ForkReport {
     pub source: String,
     pub environment: String,
     /// The workspace digest (`compute.workspace@1`) carried and verified.
@@ -203,13 +204,13 @@ pub struct CloneReport {
     pub directories: usize,
     pub bytes: u64,
     pub workspace_verified: bool,
-    /// The declared repositories: `(source commit, clone commit)`.
+    /// The declared repositories: `(source commit, fork commit)`.
     pub repositories: BTreeMap<String, (Option<String>, Option<String>)>,
     /// Configuration names not copied.
     pub omitted_config: Vec<String>,
     /// The durable jobs that did the work, in order.
     pub jobs: Vec<String>,
-    /// The clone's computer once its contents converged.
+    /// The fork's computer once its contents converged.
     pub computer: ComputerView,
 }
 

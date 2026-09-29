@@ -540,14 +540,16 @@ impl Daemon {
                 let _ = self.apply(change).await;
             }
         }
-        // A composition that replaces leaves its source current and untouched.
+        // Both compositions prepare a candidate; neither touches its source.
         let source_note = if composition == "replace" {
             format!("; {source} is unchanged and its computer remains current")
         } else {
-            String::new()
+            format!(
+                "; {source} is unchanged and no environment was created under the requested name"
+            )
         };
         EnvironmentError::Conflict(format!(
-            "{composition} of {source} into {name} failed while {phase}; {name} exists, is stopped, and its workspace is unverified{source_note}: {error}"
+            "{composition} of {source} into {name} failed while {phase}; the candidate {name} is stopped and its workspace is unverified{source_note}: {error}"
         ))
     }
 }

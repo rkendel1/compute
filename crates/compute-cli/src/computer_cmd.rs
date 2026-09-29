@@ -213,9 +213,10 @@ pub enum ComputerCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Clone the environment: a new environment on a new computer, seeded
-    /// with this one's workspace files and given the same declared contents.
-    Clone {
+    /// Fork the environment: a new environment on a new computer, from this
+    /// one's workspace files, declared contents, and policy (never its
+    /// configuration values, sessions, or machine).
+    Fork {
         environment: String,
         /// The new environment's name.
         name: String,
@@ -793,17 +794,17 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                 .map_err(error)?;
             print_computer(&view, json);
         }
-        ComputerCommands::Clone {
+        ComputerCommands::Fork {
             environment,
             name,
             target,
             copy_config,
             json,
         } => {
-            let report: compute_environment::CloneReport = client
+            let report: compute_environment::ForkReport = client
                 .post(
-                    &format!("/environments/{environment}/clone"),
-                    Some(&compute_environment::CloneRequest {
+                    &format!("/environments/{environment}/fork"),
+                    Some(&compute_environment::ForkRequest {
                         name,
                         target,
                         copy_config,
@@ -814,7 +815,7 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
             if json {
                 print_json(&report);
             } else {
-                println!("Cloned {} into {}", report.source, report.environment);
+                println!("Forked {} into {}", report.source, report.environment);
                 println!(
                     "Seeded:   {} files, {} bytes, workspace {} (verified inside the new computer)",
                     report.files, report.bytes, report.workspace

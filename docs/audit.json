@@ -2714,8 +2714,8 @@
    "tests": []
   },
   {
-   "command": "compute environment clone",
-   "about": "Clone the environment: a new environment on a new computer, seeded with this one's workspace files and given the same declared contents",
+   "command": "compute environment fork",
+   "about": "Fork the environment: a new environment on a new computer from its workspace, declared contents, and policy",
    "help_defect": null,
    "interface": "daemon API /environments",
    "state": "durable",
@@ -4105,7 +4105,7 @@
   },
   {
    "method": "POST",
-   "path": "/environments/{environment}/clone",
+   "path": "/environments/{environment}/fork",
    "scope": "Operate",
    "ui": false,
    "cli": true,

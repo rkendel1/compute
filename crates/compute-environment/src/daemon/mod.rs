@@ -13,10 +13,11 @@
 //! running and should not.
 
 mod applications;
-mod clone;
+mod candidate;
 mod computers;
 mod deploy;
 mod execute;
+mod fork;
 mod lifecycle;
 pub(crate) mod network;
 mod operators;
@@ -720,9 +721,9 @@ pub struct Daemon {
     computer_drivers: std::sync::Mutex<BTreeSet<String>>,
     /// Wakes computer drivers after a change to what they drive.
     computer_wake: Notify,
-    /// Environments with a replacement in progress on this daemon: a guard
+    /// Compositions in progress on this daemon (a replace or fork): a guard
     /// against two at once, never state (a candidate is recorded durably).
-    replacing: std::sync::Mutex<BTreeSet<String>>,
+    claims: std::sync::Mutex<BTreeSet<String>>,
     /// When each computer was last confirmed with its target, and at which
     /// record generation: live evidence, never durable. A confirmation of
     /// an older generation confirms nothing about the current one.
@@ -1011,7 +1012,7 @@ impl Daemon {
             lock: std::sync::Mutex::new(Some(lock)),
             computer_drivers: std::sync::Mutex::new(BTreeSet::new()),
             computer_wake: Notify::new(),
-            replacing: std::sync::Mutex::new(BTreeSet::new()),
+            claims: std::sync::Mutex::new(BTreeSet::new()),
             computer_confirmed: std::sync::Mutex::new(BTreeMap::new()),
             orphan_sweep: std::sync::Mutex::new(None),
             operation_drivers: std::sync::Mutex::new(BTreeSet::new()),

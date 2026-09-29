@@ -125,7 +125,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ),
     ("POST", "/environments/{environment}/reconcile"),
     ("POST", "/environments/{environment}/replace"),
-    ("POST", "/environments/{environment}/clone"),
+    ("POST", "/environments/{environment}/fork"),
     ("POST", "/environments/{environment}/workspace/export"),
     ("POST", "/environments/{environment}/workspace/seed"),
     ("POST", "/environments/{environment}/workspace/verify"),
@@ -1058,8 +1058,8 @@ async fn route(
         ("POST", ["environments", id, "replace"]) => ok(to_value(
             Box::pin(daemon.replace_computer(id, &principal.operator_id, parse(body)?)).await?,
         )?),
-        ("POST", ["environments", id, "clone"]) => created(to_value(
-            Box::pin(daemon.clone_environment(id, &principal.operator_id, parse(body)?)).await?,
+        ("POST", ["environments", id, "fork"]) => created(to_value(
+            Box::pin(daemon.fork_environment(id, &principal.operator_id, parse(body)?)).await?,
         )?),
         ("POST", ["environments", id, "workspace", "export"]) => ok(to_value(
             Box::pin(daemon.export_workspace(id, &principal.operator_id)).await?,

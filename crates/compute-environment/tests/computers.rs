@@ -2876,177 +2876,6 @@ async fn a_stale_answer_from_a_target_cannot_revive_a_lost_computer() {
     daemon.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cloning_an_environment_seeds_a_new_computer_with_the_same_workload_state() {
-    let (_repositories, source) = repository();
-    let workspaces = tempfile::tempdir().unwrap();
-    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
-    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
-    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
-
-    daemon
-        .create_computer_environment(
-            definition(
-                "origin",
-                ComputerLifecycle::Persistent,
-                requirements(),
-                contents(&source, "v1"),
-            ),
-            "alice",
-        )
-        .await
-        .unwrap();
-    let origin = computer_where(&daemon, "origin", "the origin to converge", |view| {
-        view.converged
-    })
-    .await;
-
-    // State a workload wrote that no declared content owns.
-    run(
-        &daemon,
-        "origin",
-        "alice",
-        &[
-            "sh",
-            "-c",
-            "mkdir -p data/nested && printf hello > data/notes.txt && printf deep > data/nested/x.bin && mkdir empty",
-        ],
-    )
-    .await;
-
-    let report = daemon
-        .clone_environment(
-            "origin",
-            "alice",
-            CloneRequest {
-                name: "copy".into(),
-                target: None,
-                copy_config: false,
-            },
-        )
-        .await
-        .unwrap();
-
-    // The seed was proven inside the new computer, before anything started.
-    assert!(report.workspace_verified);
-    assert!(report.workspace.starts_with("sha256:"));
-    assert!(report.files >= 3, "{report:#?}");
-    assert!(report.jobs.len() >= 4, "export, upload, extract, verify");
-
-    // Same workload state, in a different computer.
-    let copy = report.computer;
-    assert!(copy.converged);
-    assert_ne!(copy.session_id, origin.session_id, "a new machine");
-    assert_ne!(
-        copy.machine
-            .as_ref()
-            .map(|machine| machine.resource.clone()),
-        origin
-            .machine
-            .as_ref()
-            .map(|machine| machine.resource.clone())
-    );
-    let (notes, _) = run(&daemon, "copy", "alice", &["cat", "data/notes.txt"]).await;
-    assert_eq!(notes, "hello");
-    let (deep, _) = run(&daemon, "copy", "alice", &["cat", "data/nested/x.bin"]).await;
-    assert_eq!(deep, "deep");
-    let (empty, _) = run(
-        &daemon,
-        "copy",
-        "alice",
-        &["sh", "-c", "test -d empty && echo yes"],
-    )
-    .await;
-    assert_eq!(empty.trim(), "yes");
-
-    // Declared contents were re-derived, not copied: same commit, and the
-    // process runs in the clone under its own pid.
-    let (from, to) = &report.repositories["app"];
-    assert!(from.is_some() && from == to, "{:?}", report.repositories);
-    assert_eq!(copy.observed.processes["api"].state, ProcessState::Running);
-    assert_ne!(
-        copy.observed.processes["api"].pid,
-        origin.observed.processes["api"].pid
-    );
-    let (version, _) = run(&daemon, "copy", "alice", &["cat", "running-version"]).await;
-    assert_eq!(version, "v1");
-
-    // Configuration values stay behind unless asked for; their names are reported.
-    assert_eq!(report.omitted_config, vec!["APP_ENV".to_string()]);
-    assert!(copy.config.is_empty());
-
-    // The clone is evidenced, and the origin was not disturbed.
-    let recorded = events(&daemon, "copy").await;
-    let cloned = recorded
-        .iter()
-        .find(|(_, data)| data["command"] == "clone")
-        .expect("a clone event");
-    assert_eq!(cloned.1["source"], "origin");
-    assert_eq!(cloned.1["workspace"], report.workspace.as_str());
-    let still = daemon.computer("origin").await.unwrap();
-    assert_eq!(still.session_id, origin.session_id);
-    assert!(still.converged);
-
-    // Only the owner clones; a name is not reused.
-    assert!(
-        daemon
-            .clone_environment(
-                "origin",
-                "mallory",
-                CloneRequest {
-                    name: "theirs".into(),
-                    target: None,
-                    copy_config: false
-                }
-            )
-            .await
-            .is_err()
-    );
-    assert!(daemon.computer("theirs").await.is_err());
-    assert!(matches!(
-        daemon
-            .clone_environment(
-                "origin",
-                "alice",
-                CloneRequest {
-                    name: "copy".into(),
-                    target: None,
-                    copy_config: false
-                }
-            )
-            .await,
-        Err(EnvironmentError::Conflict(_))
-    ));
-
-    // What cannot travel is refused before anything is created.
-    run(
-        &daemon,
-        "origin",
-        "alice",
-        &["ln", "-s", "/etc/passwd", "link"],
-    )
-    .await;
-    let refused = daemon
-        .clone_environment(
-            "origin",
-            "alice",
-            CloneRequest {
-                name: "linked".into(),
-                target: None,
-                copy_config: false,
-            },
-        )
-        .await;
-    assert!(
-        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("unsupported entry")),
-        "{refused:?}"
-    );
-    assert!(
-        daemon.computer("linked").await.is_err(),
-        "nothing was created"
-    );
-}
-
 fn empty_contents() -> EnvironmentContents {
     EnvironmentContents::default()
 }
@@ -3063,7 +2892,7 @@ async fn sh(daemon: &Arc<Daemon>, name: &str, script: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn workspace_state_is_exported_seeded_and_verified_without_clone() {
+async fn workspace_state_is_exported_seeded_and_verified_without_fork() {
     let (_repositories, source) = repository();
     let workspaces = tempfile::tempdir().unwrap();
     let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
@@ -3439,73 +3268,30 @@ async fn a_workspace_that_changes_while_it_is_captured_is_refused() {
         matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("changed while it was captured")),
         "{refused:?}"
     );
-    // A workspace process outlives its test unless it is stopped.
-    daemon
-        .set_process("busy", "alice", "writer", ProcessDesired::Stopped)
-        .await
-        .unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_failed_clone_never_leaves_an_unverified_environment_running() {
-    let (_repositories, source) = repository();
-    let workspaces = tempfile::tempdir().unwrap();
-    let steered = Steered::new(workspaces.path(), full(), None);
-    let target = Target::start(steered.clone(), &[]);
-    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
-    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
-    daemon
-        .create_computer_environment(
-            definition(
-                "origin",
-                ComputerLifecycle::Persistent,
-                requirements(),
-                contents(&source, "v1"),
-            ),
+    // A fork captures through the same path, so it is refused too, and
+    // nothing is created under either name.
+    let refused = daemon
+        .fork_environment(
+            "busy",
             "alice",
-        )
-        .await
-        .unwrap();
-    computer_where(&daemon, "origin", "converge", |view| view.converged).await;
-
-    // The seed's extraction fails on the new computer.
-    *steered.fail_exec_containing.lock().unwrap() = Some("tar -xf".into());
-    let failed = daemon
-        .clone_environment(
-            "origin",
-            "alice",
-            CloneRequest {
-                name: "copy".into(),
+            ForkRequest {
+                name: "busy-copy".into(),
                 target: None,
                 copy_config: false,
             },
         )
         .await;
-    let Err(EnvironmentError::Conflict(reason)) = &failed else {
-        panic!("{failed:?}")
-    };
     assert!(
-        reason.contains("while seeding") && reason.contains("unverified"),
-        "{reason}"
+        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("changed while it was captured")),
+        "{refused:?}"
     );
-
-    // The environment exists, its workspace is unverified, and reality says
-    // it is not running: no contents ever ran.
-    let view = computer_where(&daemon, "copy", "the clone to stop", |view| {
-        view.reality.observed == "stopped"
-    })
-    .await;
-    assert_eq!(view.reality.desired, "stopped");
-    assert!(view.desired.processes.is_empty(), "nothing was applied");
-    let recorded = events(&daemon, "copy").await;
-    let failure = recorded
-        .iter()
-        .find(|(_, data)| data["command"] == "clone" && data["outcome"] == "failed")
-        .expect("the failure is recorded");
-    assert_eq!(failure.1["phase"], "seeding");
-    assert_eq!(failure.1["workspace_verified"], false);
-    // The source is untouched.
-    assert!(daemon.computer("origin").await.unwrap().converged);
+    assert!(daemon.computer("busy-copy").await.is_err());
+    assert!(daemon.computer("busy-copy--candidate").await.is_err());
+    // A workspace process outlives its test unless it is stopped.
+    daemon
+        .set_process("busy", "alice", "writer", ProcessDesired::Stopped)
+        .await
+        .unwrap();
 }
 
 /// The identity of a computer's machine, and of what it holds.
@@ -3844,5 +3630,356 @@ async fn a_replacement_that_fails_before_the_handoff_leaves_the_old_computer_cur
             .await
             .unwrap()
             .verified
+    );
+}
+
+fn fork_of(name: &str) -> ForkRequest {
+    ForkRequest {
+        name: name.into(),
+        target: None,
+        copy_config: false,
+    }
+}
+
+async fn digest_of(daemon: &Arc<Daemon>, name: &str) -> String {
+    daemon
+        .verify_workspace(name, "alice", WorkspaceVerifyRequest { digest: None })
+        .await
+        .unwrap()
+        .digest
+}
+
+fn a_policy() -> compute_policy::Policy {
+    let mut policy: compute_policy::Policy =
+        serde_json::from_value(serde_json::json!({ "version": 1, "name": "forked-policy" }))
+            .unwrap();
+    policy.defaults.network = Some(NetworkPolicy::Network);
+    policy
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fork_is_an_independent_environment_made_from_portable_state() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    let mut origin_definition = definition(
+        "origin",
+        ComputerLifecycle::Persistent,
+        requirements(),
+        contents(&source, "v1"),
+    );
+    origin_definition.policy = Some(a_policy());
+    daemon
+        .create_computer_environment(origin_definition, "alice")
+        .await
+        .unwrap();
+    let origin = computer_where(&daemon, "origin", "the origin to converge", |view| {
+        view.converged
+    })
+    .await;
+    sh(
+        &daemon,
+        "origin",
+        "mkdir -p data/nested empty && printf hello > data/notes.txt && printf deep > data/nested/x.bin",
+    )
+    .await;
+    let origin_digest = digest_of(&daemon, "origin").await;
+    let origin_pid = origin.observed.processes["api"].pid;
+    let origin_environment = daemon.environment("origin").await.unwrap();
+
+    let report = daemon
+        .fork_environment("origin", "alice", fork_of("branch"))
+        .await
+        .unwrap();
+
+    // A new environment and a new machine.
+    let branch = report.computer.clone();
+    assert_ne!(branch.environment_id, origin.environment_id);
+    assert_ne!(branch.session_id, origin.session_id);
+    assert_ne!(
+        branch
+            .machine
+            .as_ref()
+            .map(|machine| machine.resource.clone()),
+        origin
+            .machine
+            .as_ref()
+            .map(|machine| machine.resource.clone())
+    );
+    assert_eq!(
+        branch.owner, "alice",
+        "its own ownership, from the forking operator"
+    );
+    assert!(report.workspace_verified);
+    assert!(report.jobs.len() >= 4, "export, upload, extract, measure");
+
+    // Portable state moved: the same workspace, proved by the same digest.
+    assert_eq!(report.workspace, origin_digest);
+    assert_eq!(digest_of(&daemon, "branch").await, origin_digest);
+    assert_eq!(
+        sh(&daemon, "branch", "cat data/notes.txt data/nested/x.bin").await,
+        "hellodeep"
+    );
+    assert_eq!(
+        sh(&daemon, "branch", "test -d empty && echo yes")
+            .await
+            .trim(),
+        "yes"
+    );
+
+    // Declared state was inherited, and reconciled there: the process runs in
+    // B under its own pid because B started it, and A's was not touched.
+    assert_eq!(branch.desired.repositories, origin.desired.repositories);
+    assert_eq!(branch.desired.processes, origin.desired.processes);
+    assert_eq!(
+        branch.observed.processes["api"].state,
+        ProcessState::Running
+    );
+    assert_ne!(branch.observed.processes["api"].pid, origin_pid);
+    let (from, to) = &report.repositories["app"];
+    assert!(from.is_some() && from == to, "{:?}", report.repositories);
+    let still = daemon.computer("origin").await.unwrap();
+    assert_eq!(still.session_id, origin.session_id);
+    assert_eq!(still.observed.processes["api"].pid, origin_pid);
+    assert!(still.converged);
+    assert_eq!(digest_of(&daemon, "origin").await, origin_digest);
+
+    // Policy is environment state, so it is inherited; configuration values
+    // are where credentials live, so they are not.
+    let branch_environment = daemon.environment("branch").await.unwrap();
+    assert_eq!(branch_environment.policy_id, origin_environment.policy_id);
+    assert_eq!(report.omitted_config, vec!["APP_ENV".to_string()]);
+    assert!(branch.config.is_empty());
+    assert_eq!(
+        daemon.computer("origin").await.unwrap().config["APP_ENV"],
+        "origin"
+    );
+
+    // The source's evidence is its own: the fork is recorded on B only.
+    let branch_events = events(&daemon, "branch").await;
+    let forked = branch_events
+        .iter()
+        .find(|(_, data)| data["command"] == "fork")
+        .expect("a fork event");
+    assert_eq!(forked.1["source"], "origin");
+    assert_eq!(forked.1["workspace"], origin_digest.as_str());
+    assert!(
+        !events(&daemon, "origin")
+            .await
+            .iter()
+            .any(|(_, data)| data["command"] == "fork")
+    );
+    assert!(
+        daemon.computer("branch--candidate").await.is_err(),
+        "nothing of the candidate remains"
+    );
+
+    // A change to either side never reaches the other: a fork, not a second
+    // handle onto shared state.
+    sh(
+        &daemon,
+        "origin",
+        "printf a-only > data/a.txt && printf changed > data/notes.txt",
+    )
+    .await;
+    assert_eq!(
+        digest_of(&daemon, "branch").await,
+        origin_digest,
+        "B did not change"
+    );
+    assert_eq!(
+        sh(
+            &daemon,
+            "branch",
+            "cat data/notes.txt; test -e data/a.txt || echo none"
+        )
+        .await,
+        "hellonone\n"
+    );
+    let origin_changed = digest_of(&daemon, "origin").await;
+    assert_ne!(origin_changed, origin_digest);
+    sh(
+        &daemon,
+        "branch",
+        "printf b-only > data/b.txt && rm data/nested/x.bin",
+    )
+    .await;
+    assert_eq!(
+        digest_of(&daemon, "origin").await,
+        origin_changed,
+        "A did not change"
+    );
+    assert_eq!(
+        sh(
+            &daemon,
+            "origin",
+            "test -e data/b.txt || echo none; cat data/nested/x.bin"
+        )
+        .await
+        .trim(),
+        "none\ndeep"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_fork_creates_nothing_and_poisons_no_name() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let steered = Steered::new(workspaces.path(), full(), None);
+    let target = Target::start(steered.clone(), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    daemon
+        .create_computer_environment(
+            definition(
+                "origin",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    let origin = computer_where(&daemon, "origin", "converge", |view| view.converged).await;
+    sh(
+        &daemon,
+        "origin",
+        "mkdir data && printf hello > data/notes.txt",
+    )
+    .await;
+    let digest = digest_of(&daemon, "origin").await;
+    let pid = origin.observed.processes["api"].pid;
+
+    // After every failure: the source is exactly as it was, the requested
+    // name does not exist, and its candidate is stopped and never ready.
+    let assert_failed = async |phase: &str, failed: Result<ForkReport, EnvironmentError>| {
+        let Err(EnvironmentError::Conflict(reason)) = &failed else {
+            panic!("{phase}: {failed:?}")
+        };
+        assert!(reason.contains(&format!("while {phase}")), "{reason}");
+        assert!(
+            reason.contains("unverified") && reason.contains("no environment was created"),
+            "{reason}"
+        );
+        let still = daemon.computer("origin").await.unwrap();
+        assert_eq!(still.session_id, origin.session_id);
+        assert!(still.converged);
+        assert_eq!(still.observed.processes["api"].pid, pid);
+        assert_eq!(
+            digest_of(&daemon, "origin").await,
+            digest,
+            "{phase}: the source is untouched"
+        );
+        assert!(
+            daemon.computer("branch").await.is_err(),
+            "{phase}: the name is free"
+        );
+        let candidate = computer_where(
+            &daemon,
+            "branch--candidate",
+            "the candidate to stop",
+            |view| view.reality.observed == "stopped",
+        )
+        .await;
+        assert_eq!(candidate.reality.desired, "stopped");
+        let recorded = events(&daemon, "origin").await;
+        let failure = recorded
+            .iter()
+            .rev()
+            .find(|(_, data)| data["command"] == "fork" && data["outcome"] == "failed")
+            .expect("the failure is recorded on the source");
+        assert_eq!(failure.1["phase"], phase);
+        assert_eq!(failure.1["workspace_verified"], false);
+        assert!(
+            !recorded
+                .iter()
+                .any(|(_, data)| data["command"] == "fork" && data["outcome"] != "failed")
+        );
+    };
+
+    // Seed failure.
+    *steered.fail_exec_containing.lock().unwrap() = Some("tar -xf".into());
+    assert_failed(
+        "seeding",
+        daemon
+            .fork_environment("origin", "alice", fork_of("branch"))
+            .await,
+    )
+    .await;
+    *steered.fail_exec_containing.lock().unwrap() = None;
+
+    // Destination verification failure: what landed is not the archive.
+    *steered.tamper.lock().unwrap() = Some((
+        "workspace_check\ndigest".into(),
+        Box::new(|workspace: &Path| std::fs::write(workspace.join("stray"), "x").unwrap()),
+    ));
+    assert_failed(
+        "seeding",
+        daemon
+            .fork_environment("origin", "alice", fork_of("branch"))
+            .await,
+    )
+    .await;
+
+    // Reconcile failure: the declared contents cannot come up on the new machine.
+    *steered.fail_exec_containing.lock().unwrap() = Some("git fetch".into());
+    assert_failed(
+        "reconciling",
+        daemon
+            .fork_environment("origin", "alice", fork_of("branch"))
+            .await,
+    )
+    .await;
+    *steered.fail_exec_containing.lock().unwrap() = None;
+
+    // Refused before anything is created: a name in use, another operator,
+    // a reserved name, and a workspace that cannot travel.
+    assert!(matches!(
+        daemon
+            .fork_environment("origin", "alice", fork_of("origin"))
+            .await,
+        Err(EnvironmentError::Conflict(_))
+    ));
+    assert!(daemon.computer("origin--candidate").await.is_err());
+    assert!(
+        daemon
+            .fork_environment("origin", "mallory", fork_of("theirs"))
+            .await
+            .is_err()
+    );
+    assert!(daemon.computer("theirs").await.is_err());
+    assert!(daemon.computer("theirs--candidate").await.is_err());
+    assert!(matches!(
+        daemon
+            .fork_environment("origin", "alice", fork_of("x--candidate"))
+            .await,
+        Err(EnvironmentError::Invalid(_))
+    ));
+    sh(&daemon, "origin", "ln -s /etc/passwd link").await;
+    let refused = daemon
+        .fork_environment("origin", "alice", fork_of("linked"))
+        .await;
+    assert!(
+        matches!(&refused, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("unsupported entry")),
+        "{refused:?}"
+    );
+    assert!(daemon.computer("linked").await.is_err());
+    assert!(daemon.computer("linked--candidate").await.is_err());
+    sh(&daemon, "origin", "rm link").await;
+
+    // A fork after the failures: the name and the leftover candidate are not poisoned.
+    let report = daemon
+        .fork_environment("origin", "alice", fork_of("branch"))
+        .await
+        .unwrap();
+    assert!(report.workspace_verified);
+    assert_eq!(digest_of(&daemon, "branch").await, digest);
+    assert!(daemon.computer("branch--candidate").await.is_err());
+    assert_eq!(
+        daemon.computer("origin").await.unwrap().session_id,
+        origin.session_id
     );
 }

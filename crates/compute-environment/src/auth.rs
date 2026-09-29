@@ -119,7 +119,7 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
             [
                 "environments",
                 _,
-                "reconcile" | "replace" | "config" | "lifecycle" | "clone",
+                "reconcile" | "replace" | "config" | "lifecycle" | "fork",
             ],
         )
         | ("POST", ["environments", _, "workspace", "seed"])

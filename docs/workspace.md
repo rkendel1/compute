@@ -12,7 +12,7 @@ Computer A ── export ──▶ portable workspace state (archive + digest)
 ```
 
 Workspace state is a Compute capability, not a feature of any one workflow.
-[`clone`](environment-clone.md) is the first thing composed from it; it is not
+[`fork`](fork.md) and [`replace`](replace.md) are composed from it; neither is
 why it exists.
 
 ## Invariant: workspace state is context-independent
@@ -128,15 +128,17 @@ force a streamed artifact capability, not a bigger constant.
 ## Lifecycle rule for compositions
 
 A composition that fails after it has created something must never present an
-unverified environment as runnable. `abandon_composition` (used by `clone`)
-stops the new environment, so Reality says `stopped`, and records the failure
-with its phase and `workspace_verified: false`. The environment and its
-computer may exist; nothing is rolled back.
+unverified environment as runnable. `abandon_composition` (used by `fork` and `replace`)
+stops the candidate it was preparing, so Reality says `stopped`, and records
+the failure with its phase and `workspace_verified: false`. The requested name
+is never occupied by an unverified environment; the inert candidate stays until
+the next attempt clears it. Nothing is rolled back.
 
 ## Consumers (not built here)
 
-`clone` and [`replace`](replace.md) (a computer replaced while the
-environment and its workspace survive) exist. `fork`, `restore`, backup,
+[`fork`](fork.md) (a new environment from portable state) and
+[`replace`](replace.md) (a computer replaced while the environment and its
+workspace survive) exist.  `restore`, backup,
 migration, and checkpoint (workspace + declared-state generation + provenance +
 lineage + receipt) are each a composition of these three operations; none needs
 new mechanism.

@@ -26,7 +26,7 @@
 //! the controller reconciles the record's machine. To prepare a second machine
 //! for the same environment *without* touching the first, the second needs a
 //! record the controller will drive: an environment of its own. Its name ends
-//! in [`CANDIDATE_SUFFIX`], which no other environment may use. The handoff
+//! in [`CANDIDATE_SUFFIX`](super::candidate::CANDIDATE_SUFFIX), which no other environment may use. The handoff
 //! transaction writes E's environment and computer records and deletes the
 //! candidate's, so nothing about the candidate outlives a successful
 //! replacement. After a failed one it stays, stopped, as evidence, until the
@@ -47,43 +47,18 @@
 //! after it was captured the replacement is refused rather than losing that
 //! change.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::Utc;
-use compute_core::{
-    ComputerLifecycle, ComputerRequirements, ComputerStatus, EnvironmentContents, RetiredSession,
-};
+use compute_core::{ComputerLifecycle, ComputerRequirements, ComputerStatus, RetiredSession};
 use compute_state::events;
 use serde_json::json;
 
+use super::candidate::{candidate_name, is_candidate};
 use super::{Change, Daemon, Scope};
 use crate::EnvironmentError;
 use crate::model::*;
 use crate::status::ComputerView;
-
-/// Reserved: only a replacement creates an environment with this ending.
-pub(crate) const CANDIDATE_SUFFIX: &str = "--replacing";
-
-pub(crate) fn is_candidate(name: &str) -> bool {
-    name.ends_with(CANDIDATE_SUFFIX)
-}
-
-/// Releases the in-progress mark of an environment when a replacement ends.
-struct Claim<'a> {
-    replacing: &'a std::sync::Mutex<BTreeSet<String>>,
-    id: String,
-}
-
-impl Drop for Claim<'_> {
-    fn drop(&mut self) {
-        self.replacing
-            .lock()
-            .expect("replacements")
-            .remove(&self.id);
-    }
-}
 
 impl Daemon {
     /// Replace the environment's computer with one that meets `requirements`.
@@ -118,26 +93,8 @@ impl Daemon {
             .as_ref()
             .and_then(|old| old.value.session_id.clone())
             .unwrap_or_default();
-        let candidate = format!("{}{CANDIDATE_SUFFIX}", record.value.name);
-        if candidate.len() > 63 {
-            return Err(EnvironmentError::Invalid(format!(
-                "{environment}'s name is too long to be replaced (its candidate's would exceed 63 characters)"
-            )));
-        }
-        if !self
-            .replacing
-            .lock()
-            .expect("replacements")
-            .insert(record.id.clone())
-        {
-            return Err(EnvironmentError::Conflict(format!(
-                "a replacement of {environment} is already in progress"
-            )));
-        }
-        let _claim = Claim {
-            replacing: &self.replacing,
-            id: record.id.clone(),
-        };
+        let candidate = candidate_name(&record.value.name)?;
+        let _claim = self.claim(&record.id, &format!("a replacement of {environment}"))?;
         self.discard_candidate(&candidate, operator).await?;
 
         // Capture first: nothing is created until A's workspace is a
@@ -182,7 +139,7 @@ impl Daemon {
 
         let contents = record.value.contents.clone().unwrap_or_default();
         let prepared = self
-            .prepare_candidate(environment, &candidate, operator, &export, &contents)
+            .prepare_candidate(&candidate, operator, &export, &contents, Some(environment))
             .await;
         let seed = match prepared {
             Ok(seed) => seed,
@@ -225,65 +182,6 @@ impl Daemon {
                 )
                 .await),
         }
-    }
-
-    /// Everything before the handoff, each step tagged for the failure record.
-    async fn prepare_candidate(
-        self: &Arc<Self>,
-        environment: &str,
-        candidate: &str,
-        operator: &str,
-        export: &WorkspaceExport,
-        contents: &EnvironmentContents,
-    ) -> Result<WorkspaceSeed, (&'static str, EnvironmentError)> {
-        let within = self.config.replacement_deadline;
-        self.await_computer_within(candidate, "run", within, |view| {
-            view.status == ComputerStatus::Running
-        })
-        .await
-        .map_err(|error| ("provisioning", error))?;
-        let seed = self
-            .seed_workspace(
-                candidate,
-                operator,
-                WorkspaceSeedRequest {
-                    archive: export.archive.clone(),
-                    digest: Some(export.digest.clone()),
-                },
-            )
-            .await
-            .map_err(|error| ("seeding", error))?;
-        self.change_environment(candidate, operator, "replacing".into(), None, |value| {
-            value.contents = Some(contents.clone());
-            Ok(())
-        })
-        .await
-        .map_err(|error| ("applying contents", error))?;
-        self.await_computer_within(candidate, "converge", within, |view| view.converged)
-            .await
-            .map_err(|error| ("reconciling", error))?;
-        // What is moved is exactly what was captured: if the source changed
-        // since, the change would be lost by the handoff, so it is refused.
-        let source = self
-            .verify_workspace(
-                environment,
-                operator,
-                WorkspaceVerifyRequest {
-                    digest: Some(export.digest.clone()),
-                },
-            )
-            .await
-            .map_err(|error| ("verifying the source", error))?;
-        if !source.verified {
-            return Err((
-                "verifying the source",
-                EnvironmentError::Conflict(format!(
-                    "the workspace of {environment} is {}, no longer the {} that was captured; quiesce it and replace again",
-                    source.digest, export.digest
-                )),
-            ));
-        }
-        Ok(seed)
     }
 
     /// The handoff: one fenced transaction. E's computer takes the
@@ -421,45 +319,5 @@ impl Daemon {
         self.computer_wake.notify_waiters();
         self.changed().await;
         self.fresh_computer_view(&name).await
-    }
-
-    /// Clear a candidate an earlier, failed replacement left: destroy its
-    /// machine, wait until it is gone, and delete its records.
-    async fn discard_candidate(
-        self: &Arc<Self>,
-        candidate: &str,
-        operator: &str,
-    ) -> Result<(), EnvironmentError> {
-        let env = match self.owned_environment(candidate, operator).await {
-            Ok(env) => env,
-            Err(EnvironmentError::NotFound(_)) => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        self.destroy_computer(candidate, operator).await?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        loop {
-            self.refresh().await?;
-            let computer = self.stored_computer(&env.id).await;
-            match computer {
-                Some(computer)
-                    if computer.value.status.is_terminal() && computer.value.retired.is_empty() =>
-                {
-                    let env = self.owned_environment(candidate, operator).await?;
-                    let change = Change::new().with(|batch| batch.delete(&computer).delete(&env));
-                    return self.apply(change).await;
-                }
-                None => {
-                    let change = Change::new().with(|batch| batch.delete(&env));
-                    return self.apply(change).await;
-                }
-                Some(_) => {}
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(EnvironmentError::Conflict(format!(
-                    "an earlier replacement's candidate {candidate} could not be cleared yet"
-                )));
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
     }
 }
