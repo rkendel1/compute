@@ -58,17 +58,29 @@ pass('appport_contract', 'published GitHub DSL, capability manifest, services ex
 const work = await mkdtemp(join(tmpdir(), 'compute-stack-compatibility-'));
 try {
   const databasePath = join(work, 'feltdb');
-  let db = createFeltDB({ mode: 'local', path: databasePath, namespace: 'compatibility' });
-  await db.collection('CompatibilityEvidence').insert({ value: 'survives-restart' }, 'record');
-  await db.close();
-  db = createFeltDB({ mode: 'local', path: databasePath, namespace: 'compatibility' });
-  assert.equal((await db.collection('CompatibilityEvidence').get('record'))?.value, 'survives-restart');
-  await db.close();
-  pass('feltdb_persistence', 'published @feltdb/core wrote, restarted, and recovered durable state');
+  const feltClients = [
+    ['0.11.1', await import('./node_modules/@authboundry/core/node_modules/@appport/services/node_modules/@feltdb/core/dist/index.js')],
+    ['0.11.5', await import('./node_modules/@authboundry/core/node_modules/@feltdb/core/dist/index.js')],
+    ['0.11.9', { createFeltDB }],
+  ];
+  for (const [index, [version, client]] of feltClients.entries()) {
+    const db = client.createFeltDB({ mode: 'local', path: databasePath, namespace: 'compatibility' });
+    const records = db.collection('CompatibilityEvidence');
+    if (index === 0) {
+      await records.insert({ value: version }, 'record');
+    } else {
+      assert.equal((await records.get('record'))?.value, feltClients[index - 1][0]);
+      await records.update('record', { value: version });
+    }
+    await db.close();
+  }
+  pass('feltdb_persistence', 'published FeltDB 0.11.1 → 0.11.5 → 0.11.9 wrote, restarted, recovered, and updated the same durable state');
 
   const originalFetch = globalThis.fetch;
+  const requestedUrls = [];
   globalThis.fetch = async (request) => {
     const url = String(request);
+    requestedUrls.push(url);
     const data = url.includes('/commits/')
       ? { sha: 'a'.repeat(40), commit: { message: 'compatibility fixture' } }
       : {
@@ -111,6 +123,8 @@ try {
       source: 'git', url: 'https://github.com/rkendel1/compute.git', owner: 'rkendel1',
       repository: 'compute', ref: 'main', commit: 'a'.repeat(40),
     });
+    assert.ok(requestedUrls.some((url) => url.includes('/repos/rkendel1/compute')));
+    assert.ok(requestedUrls.some((url) => url.includes('/commits/main')));
     pass('github_git_source', 'published @appport/github produced a provider-neutral immutable Git source');
 
     const flow = await github.flow();

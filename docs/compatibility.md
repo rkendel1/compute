@@ -68,7 +68,8 @@ The configured fixture uses only npm registry URLs and integrity hashes. It reje
 - exact package versions and declared version skew;
 - `use github { repositories = true }` and `github.repository.read`;
 - AppPort and packaged FlowSpec contracts;
-- a durable FeltDB write, close, reopen, and read;
+- the actual nested FeltDB 0.11.1 → 0.11.5 → 0.11.9 clients writing,
+  closing, reopening, reading, and updating the same durable state;
 - the published GitHub package producing a provider-neutral immutable Git source.
 
 Run it with:
