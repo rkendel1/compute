@@ -43,6 +43,11 @@ if ! docker run --rm \
   exit 1
 fi
 
+# Keep the cross-boundary portion observable: most of its assertions write
+# machine-readable evidence to files, so a failing command is otherwise absent
+# from CI's log.
+set -x
+
 cat > "$temporary/main.py" <<'PY'
 import os
 data = open(os.path.join(os.environ["COMPUTE_WORK_DIR"], "input.txt"), encoding="utf-8").read()
