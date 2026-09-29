@@ -24,6 +24,12 @@ struct ReceiptManifestRuntime {
     artifact_sha256: String,
     payload_sha256: String,
     reported_version: String,
+    #[serde(default)]
+    availability: String,
+    #[serde(default)]
+    support_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unavailable_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     distribution_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1010,9 +1016,13 @@ fn receipt_environment(
                 "runtime_lock": prefixed_digest(&lock)?,
             }))?)
         } else {
+            let distribution_profile = string("distribution_profile")?;
+            let release_status = string("release_status")?;
             sha256_identity(&serde_json::to_vec(&(
                 compute_version,
                 declared_platform,
+                distribution_profile,
+                release_status,
                 lock.clone(),
                 &runtimes,
             ))?)
