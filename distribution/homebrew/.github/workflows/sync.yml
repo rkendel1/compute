@@ -54,10 +54,8 @@ jobs:
         shell: bash
         run: |
           grep -F 'url "${{ steps.release.outputs.archive_url }}"' Formula/compute.rb
-          grep -F 'version "${{ steps.release.outputs.version }}"' Formula/compute.rb
           grep -F 'sha256 "${{ steps.release.outputs.checksum }}"' Formula/compute.rb
           grep -F 'url "${{ steps.release.outputs.configured_url }}"' Formula/compute-configured.rb
-          grep -F 'version "${{ steps.release.outputs.version }}"' Formula/compute-configured.rb
           grep -F 'sha256 "${{ steps.release.outputs.configured_checksum }}"' Formula/compute-configured.rb
           ruby -c Formula/compute.rb
           ruby -c Formula/compute-configured.rb

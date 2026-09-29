@@ -43,6 +43,10 @@ if ! docker run --rm \
   exit 1
 fi
 
+# Commands below mostly write machine-readable evidence to files. Trace their
+# invocations so a failed assertion remains attributable in CI.
+set -x
+
 cat > "$temporary/main.py" <<'PY'
 import os
 data = open(os.path.join(os.environ["COMPUTE_WORK_DIR"], "input.txt"), encoding="utf-8").read()
@@ -296,10 +300,29 @@ for denied in "$temporary/slow.compute" "$temporary/policy/denied.compute"; do
     echo "policy server executed a disallowed workload: $denied" >&2
     exit 1
   fi
-  grep -q "AdmissionDenied" "$temporary/policy/denied-run.err"
-  if policy_remote submit --provider policy \
-    --bundle "$denied" --json > /dev/null 2>&1; then
-    echo "policy server accepted a job for a disallowed workload: $denied" >&2
+  if ! jq -e '
+    .error.code == "admission_denied"
+    and .error.provider_error == "admission_denied"
+    and .error.retried == false
+    and (.error.admission.reasons | length > 0)' \
+    "$temporary/policy/denied-run.json" >/dev/null; then
+    echo "policy rejection did not contain structured admission evidence: $denied" >&2
+    cat "$temporary/policy/denied-run.json" >&2
+    cat "$temporary/policy/denied-run.err" >&2
+    exit 1
+  fi
+  policy_remote submit --provider policy \
+    --bundle "$denied" --json > "$temporary/policy/denied-submission.json"
+  denied_job_id=$(jq -r .job_id "$temporary/policy/denied-submission.json")
+  policy_remote wait --provider policy "$denied_job_id" \
+    --timeout 30s --json > "$temporary/policy/denied-job.json"
+  if ! jq -e '
+    .status == "rejected"
+    and .admission.admission_status == "denied"
+    and (.failure | startswith("admission_denied:"))' \
+    "$temporary/policy/denied-job.json" >/dev/null; then
+    echo "policy did not durably reject the submitted job: $denied" >&2
+    cat "$temporary/policy/denied-job.json" >&2
     exit 1
   fi
 done
