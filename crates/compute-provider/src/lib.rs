@@ -1033,23 +1033,27 @@ impl LocalProvider {
             .await
             .ok()
             .and_then(|runtime| runtime.version);
-        let managed = self.runtimes.resolve(
-            ProviderRuntimeRequirement {
-                runtime: bundle.workload.runtime,
-                version: bundle.workload.runtime_version.clone(),
-                platform: Some(compute_core::PlatformIdentity {
-                    runtime_abi: None,
-                    ..compute_core::PlatformIdentity::current()
-                }),
-            },
-            self.compute
-                .capabilities(bundle.workload.runtime)
-                .unwrap_or_else(|_| compute_core::RuntimeCapabilities::process()),
-        );
-        let runtime_version = managed
-            .distribution
-            .map(|distribution| distribution.version)
-            .or(installed_version);
+        let runtime_version = if uses_installed_distribution() {
+            installed_version
+        } else {
+            self.runtimes
+                .resolve(
+                    ProviderRuntimeRequirement {
+                        runtime: bundle.workload.runtime,
+                        version: bundle.workload.runtime_version.clone(),
+                        platform: Some(compute_core::PlatformIdentity {
+                            runtime_abi: None,
+                            ..compute_core::PlatformIdentity::current()
+                        }),
+                    },
+                    self.compute
+                        .capabilities(bundle.workload.runtime)
+                        .unwrap_or_else(|_| compute_core::RuntimeCapabilities::process()),
+                )
+                .distribution
+                .map(|distribution| distribution.version)
+                .or(installed_version)
+        };
         ProviderFacts {
             identity: self.identity(),
             distribution_id: distribution.as_ref().map(|value| value.id.clone()),
@@ -1414,6 +1418,10 @@ impl ComputeProvider for LocalProvider {
             // runtime store. Its inventory must not be replaced by the
             // mutable provider catalog or advertised as needing preparation.
             if installed_distribution {
+                // Banner text is execution evidence, not placement or
+                // admission identity. The installed manifest's exact version
+                // is the stable fact shared by discovery and execution.
+                entry.detected_version = None;
                 continue;
             }
             let resolution = self.runtimes.resolve(
