@@ -16,6 +16,10 @@ policy_container=
 cleanup() {
   if [ -n "$job_container" ]; then docker rm -f "$job_container" >/dev/null 2>&1 || true; fi
   if [ -n "$policy_container" ]; then docker rm -f "$policy_container" >/dev/null 2>&1 || true; fi
+  if [ -n "${image:-}" ] && [ -d "$temporary/jobs" ]; then
+    docker run --rm --entrypoint /bin/chmod -v "$temporary:/cleanup" \
+      "$image" -R a+rwX /cleanup >/dev/null 2>&1 || true
+  fi
   rm -rf "$temporary"
 }
 trap cleanup EXIT HUP INT TERM
@@ -57,6 +61,12 @@ cat > "$temporary/workload.json" <<'JSON'
 }
 JSON
 
+free_host_port() {
+  PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+    "$distribution/runtimes/python/bin/python3" -c \
+    'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+
 COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" bundle create \
   --workload "$temporary/workload.json" \
   --output "$temporary/workload.compute" \
@@ -64,39 +74,56 @@ COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" bundle cre
 
 mkdir "$temporary/jobs"
 start_job_server() {
-  job_container=$(docker run --rm -d \
-    -p 127.0.0.1::8080 \
+  job_port=$(free_host_port)
+  job_container=$(docker run -d \
+    -p "127.0.0.1:$job_port:8080/tcp" \
     -v "$temporary/jobs:/jobs" \
-    "$image" serve \
+    "$image" serve --insecure-unauthenticated \
     --listen 0.0.0.0:8080 \
     --public-url http://compute-docker:8080 \
     --job-store /jobs \
     --max-concurrent-jobs 1)
-  job_port=$(docker port "$job_container" 8080/tcp | sed 's/.*://')
   job_provider="http://127.0.0.1:$job_port"
+  cat > "$temporary/job-pool.toml" <<TOML
+[providers.job]
+kind = "remote"
+endpoint = "$job_provider"
+TOML
   attempts=0
-  until "$distribution/bin/compute" remote health --provider "$job_provider" --json >/dev/null 2>&1; do
+  until job_remote health --provider job --json >/dev/null 2>"$temporary/job-health.err"; do
     attempts=$((attempts + 1))
-    if [ "$attempts" -ge 50 ]; then echo "Compute job server did not become healthy" >&2; exit 1; fi
+    if [ "$attempts" -ge 50 ]; then
+      echo "Compute job server did not become healthy" >&2
+      cat "$temporary/job-health.err" >&2
+      docker port "$job_container" >&2 || true
+      docker logs "$job_container" >&2 || true
+      exit 1
+    fi
     sleep 0.1
   done
 }
 
+job_remote() {
+  "$distribution/bin/compute" remote "$@" \
+    --pool-config "$temporary/job-pool.toml" \
+    --capability-cache "$temporary/job-capabilities.json"
+}
+
 start_job_server
-"$distribution/bin/compute" remote submit \
-  --provider "$job_provider" \
+job_remote submit \
+  --provider job \
   --bundle "$temporary/workload.compute" \
   --idempotency-key docker-certification \
   --json > "$temporary/job-submission.json"
 job_id=$(jq -r .job_id "$temporary/job-submission.json")
-"$distribution/bin/compute" remote wait \
-  --provider "$job_provider" "$job_id" \
+job_remote wait \
+  --provider job "$job_id" \
   --timeout 60s --json > "$temporary/job-result.json"
-"$distribution/bin/compute" remote receipt \
-  --provider "$job_provider" "$job_id" \
+job_remote receipt \
+  --provider job "$job_id" \
   --output "$temporary/job-receipt.json"
-"$distribution/bin/compute" remote artifacts \
-  --provider "$job_provider" "$job_id" --json > "$temporary/job-artifacts.json"
+job_remote artifacts \
+  --provider job "$job_id" --json > "$temporary/job-artifacts.json"
 
 # Provider pool: the local provider and the Docker provider built from the
 # same distribution participate in one caller-owned pool. Placement must pick
@@ -153,10 +180,10 @@ jq -e --slurpfile placement "$temporary/pool/placement.json" '
   .provider_id == "docker" and .placement_id == $placement[0].placement_id' \
   "$temporary/pool/submission.json" >/dev/null
 pool_job=$(jq -r .job_id "$temporary/pool/submission.json")
-"$distribution/bin/compute" remote wait --provider "$job_provider" "$pool_job" \
+job_remote wait --provider job "$pool_job" \
   --timeout 60s --json > "$temporary/pool/result.json"
 jq -e '.status == "completed" and .stdout.text == "pooled"' "$temporary/pool/result.json" >/dev/null
-"$distribution/bin/compute" remote receipt --provider "$job_provider" "$pool_job" \
+job_remote receipt --provider job "$pool_job" \
   --output "$temporary/pool/receipt.json"
 "$distribution/bin/compute" receipt verify "$temporary/pool/receipt.json" \
   --distribution "$distribution" --json >/dev/null
@@ -191,27 +218,44 @@ cat > "$temporary/policy/production.json" <<'JSON'
 JSON
 "$distribution/bin/compute" policy validate "$temporary/policy/production.json" --json \
   > "$temporary/policy/validation.json"
-policy_container=$(docker run --rm -d \
-  -p 127.0.0.1::8080 \
+policy_port=$(free_host_port)
+policy_container=$(docker run -d \
+  -p "127.0.0.1:$policy_port:8080/tcp" \
   -v "$temporary/policy:/policy:ro" \
-  "$image" serve \
+  "$image" serve --insecure-unauthenticated \
   --listen 0.0.0.0:8080 \
   --public-url http://compute-policy:8080 \
   --job-store /tmp/jobs \
   --policy /policy/production.json)
-policy_port=$(docker port "$policy_container" 8080/tcp | sed 's/.*://')
 policy_provider="http://127.0.0.1:$policy_port"
+cat > "$temporary/policy-pool.toml" <<TOML
+[providers.policy]
+kind = "remote"
+endpoint = "$policy_provider"
+TOML
+policy_remote() {
+  "$distribution/bin/compute" remote "$@" \
+    --pool-config "$temporary/policy-pool.toml" \
+    --capability-cache "$temporary/policy-capabilities.json"
+}
 attempts=0
-until "$distribution/bin/compute" remote health --provider "$policy_provider" --json >/dev/null 2>&1; do
+until policy_remote health --provider policy --json \
+  >/dev/null 2>"$temporary/policy-health.err"; do
   attempts=$((attempts + 1))
-  if [ "$attempts" -ge 50 ]; then echo "policy server did not become healthy" >&2; exit 1; fi
+  if [ "$attempts" -ge 50 ]; then
+    echo "policy server did not become healthy" >&2
+    cat "$temporary/policy-health.err" >&2
+    docker port "$policy_container" >&2 || true
+    docker logs "$policy_container" >&2 || true
+    exit 1
+  fi
   sleep 0.1
 done
-"$distribution/bin/compute" remote capabilities --provider "$policy_provider" --json \
+policy_remote capabilities --provider policy --json \
   > "$temporary/policy/capabilities.json"
 jq -e '.policy.name == "production-policy" and .policy.allowed_runtimes == ["python"]' \
   "$temporary/policy/capabilities.json" >/dev/null
-"$distribution/bin/compute" remote run --provider "$policy_provider" \
+policy_remote run --provider policy \
   --bundle "$temporary/workload.compute" \
   --receipt "$temporary/policy/receipt.json" --json > "$temporary/policy/allowed.json"
 jq -e '.status == "completed" and .admission.admission_status == "admitted"' \
@@ -228,6 +272,16 @@ started_before=$(curl -fsS -H 'X-Compute-Protocol: compute.remote@1' \
   "$policy_provider/compute/health" | jq -r .executions_started)
 # slow.compute declares no timeout (timeout_unbounded); the node bundle is a
 # runtime the policy does not allow (runtime_denied).
+cat > "$temporary/slow.py" <<'PY'
+import time
+time.sleep(10)
+PY
+cat > "$temporary/slow-workload.json" <<'JSON'
+{"version":"1","runtime":"python","entrypoint":"slow.py","network":"network"}
+JSON
+COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" bundle create \
+  --workload "$temporary/slow-workload.json" \
+  --output "$temporary/slow.compute" --json >/dev/null
 printf 'console.log("must not run")\n' > "$temporary/policy/denied.js"
 cat > "$temporary/policy/denied.json" <<'JSON'
 {"version":"1","runtime":"node","entrypoint":"denied.js","network":"network",
@@ -237,13 +291,13 @@ COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" bundle cre
   --workload "$temporary/policy/denied.json" \
   --output "$temporary/policy/denied.compute" --json >/dev/null
 for denied in "$temporary/slow.compute" "$temporary/policy/denied.compute"; do
-  if "$distribution/bin/compute" remote run --provider "$policy_provider" \
+  if policy_remote run --provider policy \
     --bundle "$denied" --json > "$temporary/policy/denied-run.json" 2> "$temporary/policy/denied-run.err"; then
     echo "policy server executed a disallowed workload: $denied" >&2
     exit 1
   fi
   grep -q "AdmissionDenied" "$temporary/policy/denied-run.err"
-  if "$distribution/bin/compute" remote submit --provider "$policy_provider" \
+  if policy_remote submit --provider policy \
     --bundle "$denied" --json > /dev/null 2>&1; then
     echo "policy server accepted a job for a disallowed workload: $denied" >&2
     exit 1
@@ -261,27 +315,17 @@ policy_container=
 docker rm -f "$job_container" >/dev/null
 job_container=
 start_job_server
-"$distribution/bin/compute" remote status \
-  --provider "$job_provider" "$job_id" --json > "$temporary/job-recovered.json"
+job_remote status \
+  --provider job "$job_id" --json > "$temporary/job-recovered.json"
 jq -e '.status == "succeeded"' "$temporary/job-recovered.json" >/dev/null
 
-cat > "$temporary/slow.py" <<'PY'
-import time
-time.sleep(10)
-PY
-cat > "$temporary/slow-workload.json" <<'JSON'
-{"version":"1","runtime":"python","entrypoint":"slow.py","network":"network"}
-JSON
-COMPUTE_DISTRIBUTION_ROOT="$distribution" "$distribution/bin/compute" bundle create \
-  --workload "$temporary/slow-workload.json" \
-  --output "$temporary/slow.compute" --json >/dev/null
-"$distribution/bin/compute" remote submit --provider "$job_provider" \
+job_remote submit --provider job \
   --bundle "$temporary/slow.compute" --json > "$temporary/blocking-job.json"
 sleep 0.2
-"$distribution/bin/compute" remote submit --provider "$job_provider" \
+job_remote submit --provider job \
   --bundle "$temporary/slow.compute" --json > "$temporary/queued-job.json"
 queued_job_id=$(jq -r .job_id "$temporary/queued-job.json")
-"$distribution/bin/compute" remote cancel --provider "$job_provider" \
+job_remote cancel --provider job \
   "$queued_job_id" --json > "$temporary/job-cancellation.json"
 jq -e '.cancellation.requested == true' "$temporary/job-cancellation.json" >/dev/null
 

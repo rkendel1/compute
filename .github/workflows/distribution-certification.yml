@@ -11,7 +11,9 @@ on:
 
 jobs:
   certify-linux-x86_64:
-    runs-on: ubuntu-latest
+    # This is the certified Linux ABI baseline. Do not let ubuntu-latest move
+    # the minimum glibc version of an already-defined distribution target.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
