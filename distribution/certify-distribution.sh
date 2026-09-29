@@ -73,7 +73,7 @@ start_job_server() {
   job_container=$(docker run --rm -d \
     -p "127.0.0.1:$job_port:8080/tcp" \
     -v "$temporary/jobs:/jobs" \
-    "$image" serve \
+    "$image" serve --insecure-unauthenticated \
     --listen 0.0.0.0:8080 \
     --public-url http://compute-docker:8080 \
     --job-store /jobs \
@@ -207,7 +207,7 @@ policy_port=$(free_host_port)
 policy_container=$(docker run --rm -d \
   -p "127.0.0.1:$policy_port:8080/tcp" \
   -v "$temporary/policy:/policy:ro" \
-  "$image" serve \
+  "$image" serve --insecure-unauthenticated \
   --listen 0.0.0.0:8080 \
   --public-url http://compute-policy:8080 \
   --job-store /tmp/jobs \
