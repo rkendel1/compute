@@ -744,6 +744,17 @@ pub struct LocalProvider {
     executions_started: AtomicU64,
 }
 
+fn provider_compute(runtimes: &RuntimeManager) -> Compute {
+    if compute_core::paths::installation_root().is_some() {
+        // A certified installation already owns an immutable, complete runtime
+        // bundle. Provider state must not shadow it with the mutable managed
+        // runtime store.
+        Compute::new()
+    } else {
+        Compute::with_distribution_root(runtimes.root().to_path_buf())
+    }
+}
+
 impl Default for LocalProvider {
     fn default() -> Self {
         Self::new()
@@ -780,7 +791,7 @@ impl LocalProvider {
     /// prepared by either are ready for both.
     pub fn sharing_runtimes(&self, identity: ProviderIdentity) -> Self {
         let runtimes = self.runtimes.sharing();
-        let compute = Compute::with_distribution_root(runtimes.root().to_path_buf());
+        let compute = provider_compute(&runtimes);
         Self {
             compute,
             runtimes,
@@ -795,7 +806,7 @@ impl LocalProvider {
     fn with_identity_and_catalog(identity: ProviderIdentity, catalog: RuntimeCatalog) -> Self {
         let provider_key = serde_json::to_string(&identity).expect("provider identity serializes");
         let runtimes = RuntimeManager::new(&provider_key, catalog);
-        let compute = Compute::with_distribution_root(runtimes.root().to_path_buf());
+        let compute = provider_compute(&runtimes);
         Self {
             compute,
             runtimes,
