@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::Utc;
 use compute_core::{
-    IsolationProfile, ProviderIdentity, RuntimeKind, SelectionMode, WorkloadBundle,
+    IsolationProfile, ProviderIdentity, ProviderRuntimeRequirement, RuntimeDistribution,
+    RuntimeKind, RuntimePreparation, RuntimeResolution, SelectionMode, WorkloadBundle,
 };
 use compute_placement::{
     AdmissionContext, CapabilityCache, DiscoveryMode, DiscoveryRecord, DiscoveryStatus,
@@ -50,6 +51,24 @@ impl ComputeProvider for CountingLocal {
     }
     async fn health(&self) -> Result<ProviderHealth, ProviderError> {
         self.inner.health().await
+    }
+    async fn resolve_runtime(
+        &self,
+        requirement: ProviderRuntimeRequirement,
+    ) -> Result<RuntimeResolution, ProviderError> {
+        self.inner.resolve_runtime(requirement).await
+    }
+    async fn prepare_runtime(
+        &self,
+        distribution: RuntimeDistribution,
+    ) -> Result<RuntimePreparation, ProviderError> {
+        self.inner.prepare_runtime(distribution).await
+    }
+    async fn runtime_status(
+        &self,
+        distribution: RuntimeDistribution,
+    ) -> Result<RuntimeResolution, ProviderError> {
+        self.inner.runtime_status(distribution).await
     }
     async fn admit(&self, request: ProviderRequest) -> Result<Admission, ProviderError> {
         self.inner.admit(request).await
@@ -260,7 +279,14 @@ impl PlacementHarness {
                 return Err("priority-100 incompatible provider was not excluded".into());
             }
         }
-        let again = self.place(&self.discover(None).await, &requirements, &admission, None);
+        // Determinism is defined over the same placement inputs. A fresh
+        // discovery is a different input because provider availability (for
+        // example free memory and disk) may legitimately change between
+        // observations. Reverse the discovered records to also prove that
+        // provider response order cannot affect the decision.
+        let mut reordered = records.clone();
+        reordered.reverse();
+        let again = self.place(&reordered, &requirements, &admission, None);
         if again.placement_id != report.placement_id
             || again.selected != report.selected
             || again.explanation != report.explanation
@@ -297,8 +323,13 @@ impl PlacementHarness {
         {
             return Err("receipt placement does not name the selected provider".into());
         }
-        if self.local_executions.load(Ordering::SeqCst) != before {
-            return Err("a remote placement executed locally".into());
+        let after = self.local_executions.load(Ordering::SeqCst);
+        let expected = before + usize::from(selected.provider_id == "local");
+        if after != expected {
+            return Err(format!(
+                "selected provider {} did not exclusively execute the workload",
+                selected.provider_id
+            ));
         }
 
         if kind != RuntimeKind::Wasm {

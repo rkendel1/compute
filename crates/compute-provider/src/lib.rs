@@ -744,6 +744,21 @@ pub struct LocalProvider {
     executions_started: AtomicU64,
 }
 
+fn provider_compute(runtimes: &RuntimeManager) -> Compute {
+    if uses_installed_distribution() {
+        // A certified installation already owns an immutable, complete runtime
+        // bundle. Provider state must not shadow it with the mutable managed
+        // runtime store.
+        Compute::new()
+    } else {
+        Compute::with_distribution_root(runtimes.root().to_path_buf())
+    }
+}
+
+fn uses_installed_distribution() -> bool {
+    compute_core::paths::installation_root().is_some()
+}
+
 impl Default for LocalProvider {
     fn default() -> Self {
         Self::new()
@@ -780,7 +795,7 @@ impl LocalProvider {
     /// prepared by either are ready for both.
     pub fn sharing_runtimes(&self, identity: ProviderIdentity) -> Self {
         let runtimes = self.runtimes.sharing();
-        let compute = Compute::with_distribution_root(runtimes.root().to_path_buf());
+        let compute = provider_compute(&runtimes);
         Self {
             compute,
             runtimes,
@@ -795,7 +810,7 @@ impl LocalProvider {
     fn with_identity_and_catalog(identity: ProviderIdentity, catalog: RuntimeCatalog) -> Self {
         let provider_key = serde_json::to_string(&identity).expect("provider identity serializes");
         let runtimes = RuntimeManager::new(&provider_key, catalog);
-        let compute = Compute::with_distribution_root(runtimes.root().to_path_buf());
+        let compute = provider_compute(&runtimes);
         Self {
             compute,
             runtimes,
@@ -1012,29 +1027,43 @@ impl LocalProvider {
 
     async fn facts(&self, bundle: &WorkloadBundle) -> ProviderFacts {
         let distribution = self.compute.installed_distribution_identity().ok();
-        let installed_version = self
-            .compute
-            .runtime(bundle.workload.runtime, None)
-            .await
-            .ok()
-            .and_then(|runtime| runtime.version);
-        let managed = self.runtimes.resolve(
-            ProviderRuntimeRequirement {
-                runtime: bundle.workload.runtime,
-                version: bundle.workload.runtime_version.clone(),
-                platform: Some(compute_core::PlatformIdentity {
-                    runtime_abi: None,
-                    ..compute_core::PlatformIdentity::current()
-                }),
-            },
-            self.compute
-                .capabilities(bundle.workload.runtime)
-                .unwrap_or_else(|_| compute_core::RuntimeCapabilities::process()),
-        );
-        let runtime_version = managed
-            .distribution
-            .map(|distribution| distribution.version)
-            .or(installed_version);
+        let installed_distribution = uses_installed_distribution();
+        let runtime_version = if installed_distribution {
+            // Inventory versions come from the installed manifest. Runtime
+            // availability versions are observed banner text and belong in
+            // receipts, not deterministic admission facts.
+            self.compute.inventory().await.ok().and_then(|inventory| {
+                inventory
+                    .runtimes
+                    .into_iter()
+                    .find(|runtime| runtime.id == bundle.workload.runtime)
+                    .map(|runtime| runtime.version)
+            })
+        } else {
+            let installed_version = self
+                .compute
+                .runtime(bundle.workload.runtime, None)
+                .await
+                .ok()
+                .and_then(|runtime| runtime.version);
+            self.runtimes
+                .resolve(
+                    ProviderRuntimeRequirement {
+                        runtime: bundle.workload.runtime,
+                        version: bundle.workload.runtime_version.clone(),
+                        platform: Some(compute_core::PlatformIdentity {
+                            runtime_abi: None,
+                            ..compute_core::PlatformIdentity::current()
+                        }),
+                    },
+                    self.compute
+                        .capabilities(bundle.workload.runtime)
+                        .unwrap_or_else(|_| compute_core::RuntimeCapabilities::process()),
+                )
+                .distribution
+                .map(|distribution| distribution.version)
+                .or(installed_version)
+        };
         ProviderFacts {
             identity: self.identity(),
             distribution_id: distribution.as_ref().map(|value| value.id.clone()),
@@ -1384,6 +1413,7 @@ impl ComputeProvider for LocalProvider {
             .inventory()
             .await
             .map_err(classify_compute_error)?;
+        let installed_distribution = uses_installed_distribution();
         for entry in &mut inventory.runtimes {
             if entry.available && entry.compatible {
                 entry.lifecycle = Some(
@@ -1393,6 +1423,16 @@ impl ComputeProvider for LocalProvider {
                         RuntimeLifecycleStatus::Installed
                     },
                 );
+            }
+            // A certified installation is already the complete immutable
+            // runtime store. Its inventory must not be replaced by the
+            // mutable provider catalog or advertised as needing preparation.
+            if installed_distribution {
+                // Banner text is execution evidence, not placement or
+                // admission identity. The installed manifest's exact version
+                // is the stable fact shared by discovery and execution.
+                entry.detected_version = None;
+                continue;
             }
             let resolution = self.runtimes.resolve(
                 ProviderRuntimeRequirement {
@@ -1504,6 +1544,31 @@ impl ComputeProvider for LocalProvider {
                 distribution: None,
                 detail: Some("runtime is restricted by provider policy".into()),
             });
+        }
+        if uses_installed_distribution() {
+            return match self
+                .compute
+                .runtime(requirement.runtime, requirement.version.as_deref())
+                .await
+            {
+                Ok(installed) if installed.available && installed.compatible => {
+                    Ok(RuntimeResolution {
+                        requirement,
+                        status: RuntimeLifecycleStatus::Ready,
+                        distribution: None,
+                        detail: None,
+                    })
+                }
+                Ok(installed) => Ok(RuntimeResolution {
+                    requirement,
+                    status: RuntimeLifecycleStatus::Unsupported,
+                    distribution: None,
+                    detail: installed.remediation.or(Some(
+                        "runtime is unavailable in the installed Compute distribution".into(),
+                    )),
+                }),
+                Err(error) => Err(classify_compute_error(error)),
+            };
         }
         let capabilities = self
             .compute
