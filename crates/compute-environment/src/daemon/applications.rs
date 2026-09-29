@@ -600,7 +600,18 @@ impl Daemon {
         what: &str,
         wanted: impl Fn(&ComputerView) -> bool,
     ) -> Result<ComputerView, EnvironmentError> {
-        let deadline = tokio::time::Instant::now() + STEP_DEADLINE;
+        self.await_computer_within(environment, what, STEP_DEADLINE, wanted)
+            .await
+    }
+
+    pub(crate) async fn await_computer_within(
+        &self,
+        environment: &str,
+        what: &str,
+        within: Duration,
+        wanted: impl Fn(&ComputerView) -> bool,
+    ) -> Result<ComputerView, EnvironmentError> {
+        let deadline = tokio::time::Instant::now() + within;
         loop {
             let view = self.computer(environment).await?;
             if wanted(&view) {

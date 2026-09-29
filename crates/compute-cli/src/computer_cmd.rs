@@ -773,10 +773,21 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
             computer,
             json,
         } => {
+            // Without requirement flags the computer is replaced with one that
+            // meets the requirements it already has.
+            let requirements = if computer.requested() {
+                computer.requirements()
+            } else {
+                let current: ComputerView = client
+                    .get(&format!("/environments/{environment}/computer"))
+                    .await
+                    .map_err(error)?;
+                current.requirements
+            };
             let view: ComputerView = client
                 .post(
                     &format!("/environments/{environment}/replace"),
-                    Some(&computer.requirements()),
+                    Some(&requirements),
                 )
                 .await
                 .map_err(error)?;

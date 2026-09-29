@@ -312,12 +312,28 @@ The requirements are the only thing that provisions a new machine:
 compute environment replace myapp --cpu 8 --memory 16Gi
 ```
 
-Replacement increments `spec_generation`, checks that a target can host
-the new requirements (refusing, with reasons, before anything changes),
-and records `computer.replacing`. The controller places and provisions
-the new machine, reconciles the same desired contents onto it, and only
-then retires the old session (`retired`, with the time and reason). A
-provider answer about the old generation can no longer change the record.
+With no flags the computer is replaced with one that meets the
+requirements it already has.
+
+**A running computer is replaced without losing its workspace, and without
+the old machine ever being switched off first.** The old computer stays
+current and untouched while a replacement is prepared alongside it: the
+workspace is exported and seeded onto the new machine and verified
+([workspace.md](workspace.md)), the declared contents are applied and
+reconciled there, and the source is re-measured. Only then does one fenced
+transaction hand the new machine to the environment's computer record and
+retire the old session. If anything fails before that, the old computer
+remains current, and the new one is stopped and inert. See
+[replace.md](replace.md).
+
+A computer that cannot be exported from (`lost`, `unreachable`, `failed`,
+`stopped`) has no workspace to preserve. It is replaced the older way:
+`spec_generation` increments, a target is checked (refusing, with reasons,
+before anything changes), `computer.replacing` is recorded, and the
+controller provisions a new machine and reconciles the same desired contents
+onto it. Only what is declared survives that. In both cases the old session
+becomes a retired session (torn down, never reused) and a provider answer
+about it can no longer change the record.
 
 ## Durability and fencing
 

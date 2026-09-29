@@ -519,22 +519,35 @@ impl Daemon {
             .set_environment_state(name, DesiredState::Stopped, false)
             .await
             .is_ok();
-        if let Ok(record) = self.owned_environment(name, operator).await {
-            let change = self.event(
-                Change::new(),
-                events::ENVIRONMENT_COMMAND,
-                Scope::environment(name),
-                format!("{composition} of {source} into {name} failed while {phase}"),
-                json!({
-                    "environment_id": record.id, "command": composition, "source": source,
-                    "outcome": "failed", "phase": phase, "workspace_verified": false,
-                    "stopped": stopped, "error": error.to_string(),
-                }),
-            );
-            let _ = self.apply(change).await;
+        let data = |id: &str| {
+            json!({
+                "environment_id": id, "command": composition, "source": source,
+                "candidate": name, "outcome": "failed", "phase": phase,
+                "workspace_verified": false, "stopped": stopped, "error": error.to_string(),
+            })
+        };
+        let message = format!("{composition} of {source} into {name} failed while {phase}");
+        // Recorded on the new environment and on the source it came from.
+        for scope in [name, source] {
+            if let Ok(record) = self.owned_environment(scope, operator).await {
+                let change = self.event(
+                    Change::new(),
+                    events::ENVIRONMENT_COMMAND,
+                    Scope::environment(scope),
+                    message.clone(),
+                    data(&record.id),
+                );
+                let _ = self.apply(change).await;
+            }
         }
+        // A composition that replaces leaves its source current and untouched.
+        let source_note = if composition == "replace" {
+            format!("; {source} is unchanged and its computer remains current")
+        } else {
+            String::new()
+        };
         EnvironmentError::Conflict(format!(
-            "{composition} of {source} into {name} failed while {phase}; {name} exists, is stopped, and its workspace is unverified: {error}"
+            "{composition} of {source} into {name} failed while {phase}; {name} exists, is stopped, and its workspace is unverified{source_note}: {error}"
         ))
     }
 }

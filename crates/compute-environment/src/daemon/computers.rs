@@ -975,6 +975,23 @@ impl Daemon {
         definition: ComputerEnvironmentDefinition,
         operator: &str,
     ) -> Result<EnvironmentView, EnvironmentError> {
+        // A name that ends this way is a replacement candidate: only a
+        // replacement creates one.
+        if super::replace::is_candidate(&definition.name) {
+            return Err(EnvironmentError::Invalid(format!(
+                "names ending {:?} are reserved for replacement candidates",
+                super::replace::CANDIDATE_SUFFIX
+            )));
+        }
+        self.create_computer_environment_inner(definition, operator)
+            .await
+    }
+
+    pub(crate) async fn create_computer_environment_inner(
+        self: &Arc<Self>,
+        definition: ComputerEnvironmentDefinition,
+        operator: &str,
+    ) -> Result<EnvironmentView, EnvironmentError> {
         validate_name("environment", &definition.name)?;
         validate_env("environment", &definition.env)?;
         if let Some(policy) = &definition.policy {
@@ -1143,7 +1160,7 @@ impl Daemon {
         })
     }
 
-    async fn fresh_computer_view(
+    pub(crate) async fn fresh_computer_view(
         &self,
         environment: &str,
     ) -> Result<ComputerView, EnvironmentError> {
@@ -1851,9 +1868,13 @@ impl Daemon {
         self.fresh_computer_view(environment).await
     }
 
-    /// Replace the computer with one that meets new requirements. This is
-    /// the one change that provisions a new machine, so it is explicit.
-    pub async fn replace_computer(
+    /// Replace a computer that cannot be exported from (lost, unreachable,
+    /// failed, stopped) with one that meets new requirements: the
+    /// controller provisions a new machine for the same declared contents
+    /// and retires the old session. Nothing is preserved but what is
+    /// declared; a running computer is replaced by
+    /// [`Daemon::replace_computer`], which preserves the workspace.
+    pub(crate) async fn request_replacement(
         self: &Arc<Self>,
         environment: &str,
         operator: &str,

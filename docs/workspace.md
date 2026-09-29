@@ -135,7 +135,8 @@ computer may exist; nothing is rolled back.
 
 ## Consumers (not built here)
 
-`clone` exists. `replace` (preserve workspace across a new machine), `fork`,
-`restore`, backup, migration, and checkpoint (workspace + declared-state
-generation + provenance + lineage + receipt) are each a composition of these
-three operations; none needs new mechanism.
+`clone` and [`replace`](replace.md) (a computer replaced while the
+environment and its workspace survive) exist. `fork`, `restore`, backup,
+migration, and checkpoint (workspace + declared-state generation + provenance +
+lineage + receipt) are each a composition of these three operations; none needs
+new mechanism.

@@ -23,6 +23,7 @@ mod operators;
 mod processes;
 mod reconcile;
 mod release;
+mod replace;
 mod supervision;
 mod upgrades;
 
@@ -139,6 +140,9 @@ pub struct DaemonConfig {
     /// How long a target has to answer a confirmation before the computer
     /// is reported unreachable.
     pub computer_liveness_timeout: Duration,
+    /// How long a replacement waits for its new machine to run, and for it
+    /// to hold the declared contents, each.
+    pub replacement_deadline: Duration,
 }
 
 impl DaemonConfig {
@@ -177,6 +181,7 @@ impl DaemonConfig {
             computer_probe: Duration::from_secs(15),
             computer_liveness: Duration::from_secs(10),
             computer_liveness_timeout: Duration::from_secs(10),
+            replacement_deadline: Duration::from_secs(5 * 60),
         }
     }
 }
@@ -715,6 +720,9 @@ pub struct Daemon {
     computer_drivers: std::sync::Mutex<BTreeSet<String>>,
     /// Wakes computer drivers after a change to what they drive.
     computer_wake: Notify,
+    /// Environments with a replacement in progress on this daemon: a guard
+    /// against two at once, never state (a candidate is recorded durably).
+    replacing: std::sync::Mutex<BTreeSet<String>>,
     /// When each computer was last confirmed with its target, and at which
     /// record generation: live evidence, never durable. A confirmation of
     /// an older generation confirms nothing about the current one.
@@ -1003,6 +1011,7 @@ impl Daemon {
             lock: std::sync::Mutex::new(Some(lock)),
             computer_drivers: std::sync::Mutex::new(BTreeSet::new()),
             computer_wake: Notify::new(),
+            replacing: std::sync::Mutex::new(BTreeSet::new()),
             computer_confirmed: std::sync::Mutex::new(BTreeMap::new()),
             orphan_sweep: std::sync::Mutex::new(None),
             operation_drivers: std::sync::Mutex::new(BTreeSet::new()),

@@ -44,6 +44,10 @@ struct Steered {
     fail_provision: AtomicBool,
     /// Refuse any command whose text contains this (a fault to inject).
     fail_exec_containing: std::sync::Mutex<Option<String>>,
+    /// Called (once, then cleared) before any command whose text contains
+    /// the marker, with the workspace directory the command runs in.
+    tamper: std::sync::Mutex<Option<(String, Box<dyn Fn(&Path) + Send + Sync>)>>,
+    root: PathBuf,
     gate: Option<Arc<Semaphore>>,
 }
 
@@ -59,6 +63,8 @@ impl Steered {
             provisions: AtomicUsize::new(0),
             fail_provision: AtomicBool::new(false),
             fail_exec_containing: std::sync::Mutex::new(None),
+            tamper: std::sync::Mutex::new(None),
+            root: root.to_path_buf(),
             gate,
         })
     }
@@ -112,6 +118,16 @@ impl SessionProvider for Steered {
                 ProviderErrorKind::ProviderUnavailable,
                 "an injected fault",
             ));
+        }
+        let due = {
+            let mut tamper = self.tamper.lock().unwrap();
+            let matched = tamper.as_ref().is_some_and(|(marker, _)| {
+                command.command.iter().any(|part| part.contains(marker))
+            });
+            if matched { tamper.take() } else { None }
+        };
+        if let Some((_, tamper)) = due {
+            tamper(&self.root.join(&environment.provider_session_id));
         }
         self.inner.exec(environment, command).await
     }
@@ -319,6 +335,7 @@ async fn start_daemon(
     config.computer_probe = Duration::from_millis(400);
     config.computer_liveness = Duration::from_millis(300);
     config.computer_liveness_timeout = Duration::from_secs(3);
+    config.replacement_deadline = Duration::from_secs(20);
     let seed = (std::process::id() % 400) as u16 * 20;
     config.port_range = (41000 + seed, 41000 + seed + 9);
     config.instance_port_range = (49000 + seed, 49000 + seed + 9);
@@ -3489,4 +3506,343 @@ async fn a_failed_clone_never_leaves_an_unverified_environment_running() {
     assert_eq!(failure.1["workspace_verified"], false);
     // The source is untouched.
     assert!(daemon.computer("origin").await.unwrap().converged);
+}
+
+/// The identity of a computer's machine, and of what it holds.
+struct Facts {
+    environment_id: String,
+    session: String,
+    resource: String,
+}
+
+fn facts(view: &ComputerView) -> Facts {
+    Facts {
+        environment_id: view.environment_id.clone(),
+        session: view.session_id.clone().unwrap(),
+        resource: view.machine.as_ref().unwrap().resource.clone().unwrap(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replacing_a_computer_keeps_the_environment_and_its_workspace() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    daemon
+        .create_computer_environment(
+            definition(
+                "app",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    let first = computer_where(&daemon, "app", "converge", |view| view.converged).await;
+    sh(
+        &daemon,
+        "app",
+        "mkdir -p data/nested empty && printf hello > data/notes.txt && printf deep > data/nested/x.bin \\
+         && printf '#!/bin/sh\\necho hi\\n' > run.sh && chmod +x run.sh",
+    )
+    .await;
+    let digest = daemon
+        .verify_workspace("app", "alice", WorkspaceVerifyRequest { digest: None })
+        .await
+        .unwrap()
+        .digest;
+    let before = facts(&first);
+    let old_pid = first.observed.processes["api"].pid;
+
+    // Names ending the candidate suffix are reserved.
+    let reserved = daemon
+        .create_computer_environment(
+            definition(
+                "x--replacing",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                empty_contents(),
+            ),
+            "alice",
+        )
+        .await;
+    assert!(
+        matches!(reserved, Err(EnvironmentError::Invalid(_))),
+        "{reserved:?}"
+    );
+
+    let bigger = ComputerRequirements {
+        cpu_count: Some(2),
+        ..requirements()
+    };
+    let replaced = daemon
+        .replace_computer("app", "alice", bigger.clone())
+        .await
+        .unwrap();
+
+    // The Environment survives; the Computer does not.
+    let after = facts(&replaced);
+    assert_eq!(after.environment_id, before.environment_id);
+    assert_ne!(after.session, before.session);
+    assert_ne!(after.resource, before.resource);
+    assert_eq!(replaced.requirements, bigger);
+    assert_eq!(
+        (replaced.spec_generation, replaced.running_generation),
+        (2, 2)
+    );
+    assert_eq!(replaced.owner, first.owner);
+    assert_eq!(
+        replaced.desired, first.desired,
+        "declared contents are untouched"
+    );
+    assert_eq!(replaced.config, first.config);
+
+    // The workspace is the one that was captured, verified on the new machine.
+    let verified = daemon
+        .verify_workspace(
+            "app",
+            "alice",
+            WorkspaceVerifyRequest {
+                digest: Some(digest.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(verified.verified, "{verified:?}");
+    assert_eq!(
+        sh(&daemon, "app", "cat data/notes.txt data/nested/x.bin").await,
+        "hellodeep"
+    );
+    assert_eq!(
+        sh(&daemon, "app", "test -x run.sh && echo x").await.trim(),
+        "x"
+    );
+    assert_eq!(
+        sh(&daemon, "app", "test -d empty && echo yes").await.trim(),
+        "yes"
+    );
+
+    // Reality: converged and running, the process on the new machine.
+    let now = computer_where(&daemon, "app", "running and converged", |view| {
+        view.converged && view.reality.observed == "running"
+    })
+    .await;
+    assert_eq!(now.observed.processes["api"].state, ProcessState::Running);
+    assert_ne!(now.observed.processes["api"].pid, old_pid);
+    assert_eq!(sh(&daemon, "app", "cat running-version").await, "v1");
+
+    // The old machine is retired: its session does not survive.
+    eventually("the old session to end", async || {
+        target
+            .client()
+            .session(&before.session)
+            .await
+            .ok()
+            .filter(|s| s.status.is_terminal())
+    })
+    .await;
+    // The candidate is gone; nothing of it outlives a successful replacement.
+    assert!(daemon.computer("app--replacing").await.is_err());
+    assert_eq!(target.provider.provisions.load(Ordering::SeqCst), 2);
+
+    // The evidence tells the truth about the handoff.
+    let recorded = events(&daemon, "app").await;
+    let handoff = recorded
+        .iter()
+        .find(|(kind, _)| kind == "computer.replaced")
+        .expect("the handoff is recorded");
+    assert_eq!(handoff.1["from_session"], before.session.as_str());
+    assert_eq!(handoff.1["to_session"], after.session.as_str());
+    assert_eq!(handoff.1["workspace"], digest.as_str());
+    assert_eq!(handoff.1["workspace_verified"], true);
+    assert!(handoff.1["jobs"].as_array().unwrap().len() >= 4);
+
+    // And it can be done again: the candidate name is free.
+    let again = daemon
+        .replace_computer("app", "alice", bigger)
+        .await
+        .unwrap();
+    assert_ne!(again.session_id.as_deref(), Some(after.session.as_str()));
+    assert_eq!((again.spec_generation, again.running_generation), (3, 3));
+    assert!(
+        daemon
+            .verify_workspace(
+                "app",
+                "alice",
+                WorkspaceVerifyRequest {
+                    digest: Some(digest)
+                }
+            )
+            .await
+            .unwrap()
+            .verified
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replacement_that_fails_before_the_handoff_leaves_the_old_computer_current() {
+    let (_repositories, source) = repository();
+    let workspaces = tempfile::tempdir().unwrap();
+    let steered = Steered::new(workspaces.path(), full(), None);
+    let target = Target::start(steered.clone(), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (daemon, _node) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    daemon
+        .create_computer_environment(
+            definition(
+                "app",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                contents(&source, "v1"),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    let first = computer_where(&daemon, "app", "converge", |view| view.converged).await;
+    sh(
+        &daemon,
+        "app",
+        "mkdir data && printf hello > data/notes.txt",
+    )
+    .await;
+    let digest = daemon
+        .verify_workspace("app", "alice", WorkspaceVerifyRequest { digest: None })
+        .await
+        .unwrap()
+        .digest;
+    let before = facts(&first);
+    let pid = first.observed.processes["api"].pid;
+
+    // Every failure below must leave: A current, converged, running the same
+    // process, with the same workspace; and the candidate stopped and not ready.
+    let assert_old_is_current =
+        |phase: &'static str, failed: Result<ComputerView, EnvironmentError>| {
+            let daemon = daemon.clone();
+            let digest = digest.clone();
+            let session = before.session.clone();
+            async move {
+                let Err(EnvironmentError::Conflict(reason)) = &failed else {
+                    panic!("{phase}: {failed:?}")
+                };
+                assert!(reason.contains(&format!("while {phase}")), "{reason}");
+                assert!(
+                    reason.contains("remains current") && reason.contains("unverified"),
+                    "{reason}"
+                );
+                let current = daemon.computer("app").await.unwrap();
+                assert_eq!(current.session_id.as_deref(), Some(session.as_str()));
+                assert!(current.converged);
+                assert_eq!(current.observed.processes["api"].pid, pid);
+                assert!(
+                    daemon
+                        .verify_workspace(
+                            "app",
+                            "alice",
+                            WorkspaceVerifyRequest {
+                                digest: Some(digest)
+                            }
+                        )
+                        .await
+                        .unwrap()
+                        .verified,
+                    "{phase}: the old workspace is untouched"
+                );
+                // The candidate is stopped, never presented as running or ready.
+                let candidate =
+                    computer_where(&daemon, "app--replacing", "the candidate to stop", |view| {
+                        view.reality.observed == "stopped"
+                    })
+                    .await;
+                assert_eq!(candidate.reality.desired, "stopped");
+                let recorded = events(&daemon, "app").await;
+                let failure = recorded
+                    .iter()
+                    .rev()
+                    .find(|(_, data)| data["command"] == "replace" && data["outcome"] == "failed")
+                    .expect("the failure is recorded on the environment");
+                assert_eq!(failure.1["phase"], phase);
+                assert_eq!(failure.1["workspace_verified"], false);
+                assert!(
+                    !recorded.iter().any(|(kind, _)| kind == "computer.replaced"),
+                    "no handoff"
+                );
+            }
+        };
+
+    // Seed failure.
+    *steered.fail_exec_containing.lock().unwrap() = Some("tar -xf".into());
+    let failed = daemon
+        .replace_computer("app", "alice", requirements())
+        .await;
+    assert_old_is_current("seeding", failed).await;
+    *steered.fail_exec_containing.lock().unwrap() = None;
+
+    // Verification failure: the seeded workspace is not the archive's.
+    *steered.tamper.lock().unwrap() = Some((
+        "workspace_check\ndigest".into(),
+        Box::new(|workspace: &Path| std::fs::write(workspace.join("stray"), "x").unwrap()),
+    ));
+    let failed = daemon
+        .replace_computer("app", "alice", requirements())
+        .await;
+    assert_old_is_current("seeding", failed).await;
+
+    // The source changed after it was captured: what would move is not what
+    // was captured, so nothing moves.
+    let source_workspace = workspaces.path().join(&before.resource);
+    *steered.tamper.lock().unwrap() = Some((
+        "tar -xf".into(),
+        Box::new(move |_| std::fs::write(source_workspace.join("late"), "x").unwrap()),
+    ));
+    let failed = daemon
+        .replace_computer("app", "alice", requirements())
+        .await;
+    assert!(
+        matches!(&failed, Err(EnvironmentError::Conflict(reason)) if reason.contains("no longer the")),
+        "{failed:?}"
+    );
+    sh(&daemon, "app", "rm late").await;
+    assert_old_is_current("verifying the source", failed).await;
+
+    // Reconcile failure: the declared contents cannot be brought up on the
+    // new machine, so it is not presented as ready and nothing moves.
+    *steered.fail_exec_containing.lock().unwrap() = Some("git fetch".into());
+    let failed = daemon
+        .replace_computer("app", "alice", requirements())
+        .await;
+    assert_old_is_current("reconciling", failed).await;
+    *steered.fail_exec_containing.lock().unwrap() = None;
+
+    // A later replacement clears the leftover candidate and succeeds.
+    let replaced = daemon
+        .replace_computer("app", "alice", requirements())
+        .await
+        .unwrap();
+    assert_ne!(
+        replaced.session_id.as_deref(),
+        Some(before.session.as_str())
+    );
+    computer_where(&daemon, "app", "the replacement to converge", |view| {
+        view.converged
+    })
+    .await;
+    assert!(daemon.computer("app--replacing").await.is_err());
+    assert!(
+        daemon
+            .verify_workspace(
+                "app",
+                "alice",
+                WorkspaceVerifyRequest {
+                    digest: Some(digest)
+                }
+            )
+            .await
+            .unwrap()
+            .verified
+    );
 }

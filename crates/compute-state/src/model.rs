@@ -1280,6 +1280,7 @@ pub mod events {
     pub const COMPUTER_DESTROYED: &str = "computer.destroyed";
     pub const COMPUTER_EXPIRED: &str = "computer.expired";
     pub const COMPUTER_REPLACING: &str = "computer.replacing";
+    pub const COMPUTER_REPLACED: &str = "computer.replaced";
     pub const COMPUTER_ORPHAN_DESTROYED: &str = "computer.orphan_destroyed";
     pub const COMPUTER_ENVIRONMENT_LOST: &str = "computer.environment_lost";
     /// The controller could not confirm the computer with its target.
