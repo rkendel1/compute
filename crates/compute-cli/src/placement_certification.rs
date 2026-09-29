@@ -260,7 +260,14 @@ impl PlacementHarness {
                 return Err("priority-100 incompatible provider was not excluded".into());
             }
         }
-        let again = self.place(&self.discover(None).await, &requirements, &admission, None);
+        // Determinism is defined over the same placement inputs. A fresh
+        // discovery is a different input because provider availability (for
+        // example free memory and disk) may legitimately change between
+        // observations. Reverse the discovered records to also prove that
+        // provider response order cannot affect the decision.
+        let mut reordered = records.clone();
+        reordered.reverse();
+        let again = self.place(&reordered, &requirements, &admission, None);
         if again.placement_id != report.placement_id
             || again.selected != report.selected
             || again.explanation != report.explanation
