@@ -43,11 +43,6 @@ if ! docker run --rm \
   exit 1
 fi
 
-# Keep the cross-boundary portion observable: most of its assertions write
-# machine-readable evidence to files, so a failing command is otherwise absent
-# from CI's log.
-set -x
-
 cat > "$temporary/main.py" <<'PY'
 import os
 data = open(os.path.join(os.environ["COMPUTE_WORK_DIR"], "input.txt"), encoding="utf-8").read()
@@ -301,7 +296,17 @@ for denied in "$temporary/slow.compute" "$temporary/policy/denied.compute"; do
     echo "policy server executed a disallowed workload: $denied" >&2
     exit 1
   fi
-  grep -q "AdmissionDenied" "$temporary/policy/denied-run.err"
+  if ! jq -e '
+    .error.code == "admission_denied"
+    and .error.provider_error == "admission_denied"
+    and .error.retried == false
+    and (.error.admission.reasons | length > 0)' \
+    "$temporary/policy/denied-run.json" >/dev/null; then
+    echo "policy rejection did not contain structured admission evidence: $denied" >&2
+    cat "$temporary/policy/denied-run.json" >&2
+    cat "$temporary/policy/denied-run.err" >&2
+    exit 1
+  fi
   if policy_remote submit --provider policy \
     --bundle "$denied" --json > /dev/null 2>&1; then
     echo "policy server accepted a job for a disallowed workload: $denied" >&2
