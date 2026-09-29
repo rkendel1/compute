@@ -27,19 +27,28 @@ jobs:
           [[ "$tag" == v* ]]
           version="${tag#v}"
           asset="compute-$version-linux-x86_64.tar.gz"
+          configured_asset="compute-configured-$version-linux-x86_64.tar.gz"
           archive_url=$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
           checksum_url=$(jq -r --arg name "$asset.sha256" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
+          configured_url=$(jq -r --arg name "$configured_asset" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
+          configured_checksum_url=$(jq -r --arg name "$configured_asset.sha256" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
           test -n "$archive_url"
           test -n "$checksum_url"
+          test -n "$configured_url"
+          test -n "$configured_checksum_url"
           checksum=$(curl -fsSL --proto '=https' --proto-redir '=https' "$checksum_url" | cut -d ' ' -f 1)
+          configured_checksum=$(curl -fsSL --proto '=https' --proto-redir '=https' "$configured_checksum_url" | cut -d ' ' -f 1)
           [[ "$checksum" =~ ^[0-9a-fA-F]{64}$ ]]
+          [[ "$configured_checksum" =~ ^[0-9a-fA-F]{64}$ ]]
           echo "available=true" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
+          echo "configured_checksum=$configured_checksum" >> "$GITHUB_OUTPUT"
           echo "archive_url=$archive_url" >> "$GITHUB_OUTPUT"
+          echo "configured_url=$configured_url" >> "$GITHUB_OUTPUT"
       - name: Render formula from release checksum
         if: steps.release.outputs.available == 'true'
-        run: scripts/update-formula.sh '${{ steps.release.outputs.version }}' '${{ steps.release.outputs.checksum }}'
+        run: scripts/update-formula.sh '${{ steps.release.outputs.version }}' '${{ steps.release.outputs.checksum }}' '${{ steps.release.outputs.configured_checksum }}'
       - name: Verify formula contract
         if: steps.release.outputs.available == 'true'
         shell: bash
@@ -47,14 +56,18 @@ jobs:
           grep -F 'url "${{ steps.release.outputs.archive_url }}"' Formula/compute.rb
           grep -F 'version "${{ steps.release.outputs.version }}"' Formula/compute.rb
           grep -F 'sha256 "${{ steps.release.outputs.checksum }}"' Formula/compute.rb
+          grep -F 'url "${{ steps.release.outputs.configured_url }}"' Formula/compute-configured.rb
+          grep -F 'version "${{ steps.release.outputs.version }}"' Formula/compute-configured.rb
+          grep -F 'sha256 "${{ steps.release.outputs.configured_checksum }}"' Formula/compute-configured.rb
           ruby -c Formula/compute.rb
+          ruby -c Formula/compute-configured.rb
       - name: Publish formula
         if: steps.release.outputs.available == 'true'
         shell: bash
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add Formula/compute.rb
+          git add Formula/compute.rb Formula/compute-configured.rb
           if git diff --cached --quiet; then
             exit 0
           fi

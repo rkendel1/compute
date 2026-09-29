@@ -1,0 +1,46 @@
+require "json"
+
+class ComputeConfigured < Formula
+  desc "Compute with the certified configured ecosystem stack"
+  homepage "https://github.com/rkendel1/compute"
+  url "https://github.com/rkendel1/compute/releases/download/v@VERSION@/compute-configured-@VERSION@-linux-x86_64.tar.gz"
+  version "@VERSION@"
+  sha256 "@CONFIGURED_SHA256@"
+  license "MIT"
+
+  depends_on "rkendel1/compute/compute"
+  depends_on "node@24"
+  depends_on :linux
+  depends_on arch: :x86_64
+
+  def install
+    configured = Pathname.pwd
+    configured /= "compute-configured" unless (configured/"stack.json").exist?
+    libexec.install configured.children
+    (bin/"compute-configured").write <<~SH
+      #!/bin/sh
+      export COMPUTE_STACKS="#{libexec}/stacks${COMPUTE_STACKS:+:$COMPUTE_STACKS}"
+      exec "#{Formula["compute"].opt_bin}/compute" "$@"
+    SH
+    (bin/"compute-configured-verify").write <<~SH
+      #!/bin/sh
+      version=$("#{Formula["compute"].opt_bin}/compute" --version) || exit
+      version=${version#compute }
+      COMPUTE_INSTALLED_VERSION="$version" exec "#{Formula["node@24"].opt_bin}/node" "#{libexec}/verify.mjs"
+    SH
+    (bin/"compute-configured-setup").write <<~SH
+      #!/bin/sh
+      "#{bin}/compute-configured-verify" >/dev/null || exit
+      printf '%s\n' 'Configured Compute is certified and active through COMPUTE_STACKS.'
+    SH
+  end
+
+  test do
+    assert_equal "compute #{version}\n", shell_output("#{Formula["compute"].opt_bin}/compute --version")
+    assert_equal version.to_s, JSON.parse((libexec/"stack.json").read).fetch("compute")
+    assert_match '"result": "pass"', shell_output("#{bin}/compute-configured-verify")
+    assert_match "certified and active", shell_output("#{bin}/compute-configured-setup")
+    assert_predicate libexec/"node_modules/@appport/github/package.json", :file?
+    assert_predicate libexec/"stacks/configured/stack.toml", :file?
+  end
+end

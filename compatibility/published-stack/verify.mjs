@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,7 +20,25 @@ const lock = JSON.parse(await readFile(new URL('package-lock.json', here), 'utf8
 const checks = [];
 const pass = (name, detail) => checks.push({ name, result: 'pass', detail });
 
-assert.equal(stack.format, 'compute.stack-compatibility@1');
+assert.equal(stack.format, 'compute.distribution-profile@1');
+assert.equal(stack.profile, 'configured');
+assert.equal(stack.distribution.identity, `compute-configured-${stack.compute}-${stack.platform}`);
+assert.equal(stack.distribution.certification_status, 'certified');
+assert.equal(stack.runtime.implementation, 'base-compute');
+assert.equal(stack.runtime.shared_binary, true);
+assert.equal(stack.runtime.shared_cli, true);
+assert.equal(stack.runtime.shared_ui, true);
+assert.equal(stack.state.root, 'COMPUTE_HOME');
+assert.equal(stack.state.authoritative_durable_backend, 'compute-state-feltdb');
+assert.equal(stack.state.shared_with_base, true);
+assert.deepEqual(stack.state.additional_stores, []);
+assert.equal(stack.configuration.activation, 'COMPUTE_STACKS');
+assert.equal(stack.configuration.idempotent, true);
+assert.deepEqual(stack.migrations, []);
+if (process.env.COMPUTE_INSTALLED_VERSION) {
+  assert.equal(process.env.COMPUTE_INSTALLED_VERSION, stack.compute, 'Base Compute version drift');
+}
+pass('distribution_profile', 'configured is an additive certified profile over the same Compute binary, UI, CLI, and FeltDB-backed state model');
 for (const [name, version] of Object.entries(stack.packages)) {
   assert.equal(lock.packages[`node_modules/${name}`]?.version, version, `${name} version drift`);
 }
@@ -138,12 +157,27 @@ try {
   await rm(work, { recursive: true, force: true });
 }
 
+const certificationMaterial = JSON.stringify({
+  profile: stack,
+  lockfile_version: lock.lockfileVersion,
+  packages: Object.fromEntries(Object.entries(lock.packages).map(([path, entry]) => [path, {
+    version: entry.version,
+    resolved: entry.resolved,
+    integrity: entry.integrity,
+  }])),
+});
+const certificationId = `sha256:${createHash('sha256').update(certificationMaterial).digest('hex')}`;
 const evidence = {
   format: 'compute.stack-compatibility-evidence@1',
   result: 'pass',
-  generated_at: new Date().toISOString(),
+  status: 'certified',
+  certification_id: certificationId,
+  certified_at: new Date(Number(process.env.SOURCE_DATE_EPOCH ?? 0) * 1000).toISOString(),
   platform: `${process.platform}-${process.arch}`,
   node: process.version,
+  compute: stack.compute,
+  distribution: stack.distribution,
+  state: stack.state,
   packages: Object.fromEntries(Object.entries(stack.packages).map(([name, version]) => [name, {
     version,
     source: lock.packages[`node_modules/${name}`].resolved,

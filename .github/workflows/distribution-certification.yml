@@ -17,6 +17,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: compatibility/published-stack/package-lock.json
       - uses: actions/cache@v4
         with:
           path: ~/.cache/compute/runtimes
@@ -48,12 +53,36 @@ jobs:
           gzip -dc "$asset" | cmp - compute-distribution.tar
           sha256sum "$asset" > "$asset.sha256"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      - name: Assemble the configured product from published packages
+        id: configured
+        shell: bash
+        run: |
+          npm ci --ignore-scripts --prefix compatibility/published-stack
+          SOURCE_DATE_EPOCH=0 COMPUTE_COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/configured-evidence.json" \
+            npm run verify --prefix compatibility/published-stack
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "compute-cli") | .version')
+          test "$(jq -r .compute compatibility/published-stack/stack.json)" = "$version"
+          root=compute-configured
+          mkdir -p "$root/stacks/configured"
+          cp compatibility/published-stack/package.json "$root/package.json"
+          cp compatibility/published-stack/package-lock.json "$root/package-lock.json"
+          cp compatibility/published-stack/stack.json "$root/stack.json"
+          cp compatibility/published-stack/verify.mjs "$root/verify.mjs"
+          cp compatibility/published-stack/stack.toml "$root/stacks/configured/stack.toml"
+          cp "$RUNNER_TEMP/configured-evidence.json" "$root/evidence.json"
+          cp -a compatibility/published-stack/node_modules "$root/node_modules"
+          asset="compute-configured-$version-linux-x86_64.tar.gz"
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - "$root" | gzip -n -9 > "$asset"
+          sha256sum "$asset" > "$asset.sha256"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: certified-compute-linux-x86_64
           path: |
             ${{ steps.package.outputs.asset }}
             ${{ steps.package.outputs.asset }}.sha256
+            ${{ steps.configured.outputs.asset }}
+            ${{ steps.configured.outputs.asset }}.sha256
           if-no-files-found: error
       - name: Publish the certified release assets
         if: startsWith(github.ref, 'refs/tags/v')
@@ -62,6 +91,8 @@ jobs:
           files: |
             ${{ steps.package.outputs.asset }}
             ${{ steps.package.outputs.asset }}.sha256
+            ${{ steps.configured.outputs.asset }}
+            ${{ steps.configured.outputs.asset }}.sha256
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

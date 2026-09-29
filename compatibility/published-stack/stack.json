@@ -1,6 +1,37 @@
 {
-  "format": "compute.stack-compatibility@1",
+  "format": "compute.distribution-profile@1",
+  "profile": "configured",
   "name": "published-compute-ecosystem",
+  "compute": "0.1.2",
+  "platform": "linux-x86_64",
+  "distribution": {
+    "identity": "compute-configured-0.1.2-linux-x86_64",
+    "certification_status": "certified",
+    "base_asset": "compute-0.1.2-linux-x86_64.tar.gz",
+    "configured_asset": "compute-configured-0.1.2-linux-x86_64.tar.gz",
+    "pipeline": "distribution-certification",
+    "release": "https://github.com/rkendel1/compute/releases/tag/v0.1.2"
+  },
+  "runtime": {
+    "implementation": "base-compute",
+    "shared_binary": true,
+    "shared_cli": true,
+    "shared_ui": true
+  },
+  "state": {
+    "owner": "compute",
+    "root": "COMPUTE_HOME",
+    "model": "compute-state",
+    "authoritative_durable_backend": "compute-state-feltdb",
+    "shared_with_base": true,
+    "additional_stores": []
+  },
+  "configuration": {
+    "stack_path": "stacks/configured/stack.toml",
+    "activation": "COMPUTE_STACKS",
+    "idempotent": true
+  },
+  "migrations": [],
   "packages": {
     "@appport/core": "1.0.3",
     "@appport/github": "1.0.2",

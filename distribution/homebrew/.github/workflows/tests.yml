@@ -83,3 +83,35 @@ jobs:
           expected=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$tap/Formula/compute.rb")
           test "$(compute --version)" = "compute $expected"
           compute distribution verify "$(brew --prefix compute)/libexec"
+
+  configured-linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@fd832223f9f99ebf0244dd20658680e5d4aca049
+        with:
+          core: true
+          cask: false
+      - name: Install Base, preserve state, and extend it to Configured Compute
+        env:
+          COMPUTE_HOME: ${{ runner.temp }}/compute-state
+        shell: bash
+        run: |
+          brew tap rkendel1/compute "$GITHUB_WORKSPACE"
+          brew install --build-from-source rkendel1/compute/compute
+          mkdir -p "$COMPUTE_HOME"
+          printf 'base state\n' > "$COMPUTE_HOME/base-to-configured"
+          brew install --build-from-source rkendel1/compute/compute-configured
+          test "$(cat "$COMPUTE_HOME/base-to-configured")" = "base state"
+          compute-configured --version
+          compute-configured-verify
+          compute-configured-setup
+          brew test rkendel1/compute/compute-configured
+      - name: Remove configured assets without deleting Base state
+        env:
+          COMPUTE_HOME: ${{ runner.temp }}/compute-state
+        run: |
+          brew uninstall compute-configured
+          compute --version
+          test "$(cat "$COMPUTE_HOME/base-to-configured")" = "base state"

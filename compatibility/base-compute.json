@@ -1,11 +1,15 @@
 {
-  "format": "compute.base-compatibility@1",
-  "compute": "0.1.1",
+  "format": "compute.distribution-profile@1",
+  "profile": "base",
+  "compute": "0.1.2",
   "platform": "linux-x86_64",
   "distribution": {
-    "release": "https://github.com/rkendel1/compute/releases/tag/v0.1.1",
-    "asset": "compute-0.1.1-linux-x86_64.tar.gz",
-    "checksum": "release-asset:.sha256"
+    "identity": "compute-base-0.1.2-linux-x86_64",
+    "certification_status": "certified",
+    "release": "https://github.com/rkendel1/compute/releases/tag/v0.1.2",
+    "asset": "compute-0.1.2-linux-x86_64.tar.gz",
+    "checksum": "release-asset:.sha256",
+    "provenance": "distribution-certification"
   },
   "homebrew": {
     "tap": "rkendel1/compute",
@@ -15,7 +19,16 @@
   "state": {
     "owner": "compute",
     "root": "COMPUTE_HOME",
-    "separate_from_installation": true
+    "separate_from_installation": true,
+    "model": "compute-state",
+    "authoritative_durable_backend": "compute-state-feltdb",
+    "development_backends": ["compute-state-file", "compute-state-memory"],
+    "shared_with_configured": true
   },
-  "ecosystem_packages_required": []
+  "ecosystem_packages_required": [],
+  "configuration": {
+    "required_profiles": [],
+    "same_cli_and_ui_as_configured": true
+  },
+  "migrations": []
 }
