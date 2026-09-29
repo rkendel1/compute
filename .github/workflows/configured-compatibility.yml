@@ -36,6 +36,7 @@ jobs:
       - name: Verify package, contract, and runtime compatibility
         working-directory: compatibility/published-stack
         env:
+          SOURCE_DATE_EPOCH: 0
           COMPUTE_COMPATIBILITY_EVIDENCE: evidence.json
         run: npm run verify
       - uses: actions/upload-artifact@v4

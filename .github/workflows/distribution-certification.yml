@@ -58,7 +58,7 @@ jobs:
         shell: bash
         run: |
           npm ci --ignore-scripts --prefix compatibility/published-stack
-          COMPUTE_COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/configured-evidence.json" \
+          SOURCE_DATE_EPOCH=0 COMPUTE_COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/configured-evidence.json" \
             npm run verify --prefix compatibility/published-stack
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "compute-cli") | .version')
           test "$(jq -r .compute compatibility/published-stack/stack.json)" = "$version"

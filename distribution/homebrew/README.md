@@ -18,6 +18,7 @@ ecosystem set in its compatibility manifest:
 brew install compute-configured
 compute-configured --version
 compute-configured-verify
+compute-configured-setup
 ```
 
 The formula is currently available only on Linux x86_64, the platform for

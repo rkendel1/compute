@@ -24,7 +24,14 @@ class ComputeConfigured < Formula
     SH
     (bin/"compute-configured-verify").write <<~SH
       #!/bin/sh
-      exec "#{Formula["node@24"].opt_bin}/node" "#{libexec}/verify.mjs"
+      version=$("#{Formula["compute"].opt_bin}/compute" --version) || exit
+      version=${version#compute }
+      COMPUTE_INSTALLED_VERSION="$version" exec "#{Formula["node@24"].opt_bin}/node" "#{libexec}/verify.mjs"
+    SH
+    (bin/"compute-configured-setup").write <<~SH
+      #!/bin/sh
+      "#{bin}/compute-configured-verify" >/dev/null || exit
+      printf '%s\n' 'Configured Compute is certified and active through COMPUTE_STACKS.'
     SH
   end
 
@@ -32,6 +39,7 @@ class ComputeConfigured < Formula
     assert_equal "compute #{version}\n", shell_output("#{Formula["compute"].opt_bin}/compute --version")
     assert_equal version.to_s, JSON.parse((libexec/"stack.json").read).fetch("compute")
     assert_match '"result": "pass"', shell_output("#{bin}/compute-configured-verify")
+    assert_match "certified and active", shell_output("#{bin}/compute-configured-setup")
     assert_predicate libexec/"node_modules/@appport/github/package.json", :file?
     assert_predicate libexec/"stacks/configured/stack.toml", :file?
   end

@@ -106,6 +106,7 @@ jobs:
           test "$(cat "$COMPUTE_HOME/base-to-configured")" = "base state"
           compute-configured --version
           compute-configured-verify
+          compute-configured-setup
           brew test rkendel1/compute/compute-configured
       - name: Remove configured assets without deleting Base state
         env:
