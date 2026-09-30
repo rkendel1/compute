@@ -18,8 +18,8 @@ pub fn catalog() -> compute_provider::RuntimeCatalog {
 }
 
 /// A consumer's wait for readiness: returns once Compute admits workloads
-/// to the environment (`ready` or `degraded`), and panics with Compute's
-/// own explanation if it does not within the deadline.
+/// to the environment (`ready`), and panics with Compute's own explanation
+/// and the environment's events if it does not within the deadline.
 #[allow(dead_code)]
 pub async fn wait_admitting(daemon: &compute_environment::Daemon, name: &str) {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
@@ -30,10 +30,23 @@ pub async fn wait_admitting(daemon: &compute_environment::Daemon, name: &str) {
         {
             return;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "{name} never admitted workloads: {readiness:?}"
-        );
+        if tokio::time::Instant::now() >= deadline {
+            let history = daemon
+                .events(compute_environment::EventFilter {
+                    environment: Some(name.to_owned()),
+                    ..Default::default()
+                })
+                .await
+                .map(|events| {
+                    events
+                        .iter()
+                        .map(|event| format!("{} {}", event.kind, event.message))
+                        .collect::<Vec<_>>()
+                        .join("\n  ")
+                })
+                .unwrap_or_default();
+            panic!("{name} never admitted workloads: {readiness:?}\nevents:\n  {history}");
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
