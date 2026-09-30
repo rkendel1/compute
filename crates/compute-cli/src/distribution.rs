@@ -935,7 +935,7 @@ fn distribution_identity(
     starter_recipes: &BTreeMap<String, String>,
     runtimes: &BTreeMap<String, ManifestRuntime>,
 ) -> Result<String> {
-    let bytes = serde_json::to_vec(&(
+    compute_core::distribution_identity_v3(
         compute,
         platform,
         profile,
@@ -943,9 +943,7 @@ fn distribution_identity(
         lock,
         starter_recipes,
         runtimes,
-    ))
-    .map_err(error)?;
-    Ok(format!("sha256:{}", sha256_bytes(&bytes)))
+    )
 }
 
 fn expected_starter_recipes() -> BTreeMap<String, String> {

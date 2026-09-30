@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -1150,6 +1151,29 @@ pub fn sha256_identity(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
+/// Canonical identity of a v3 assembled Compute distribution. Keep this in
+/// the shared receipt contract: builders and execution-time receipt
+/// verification must hash exactly the same fields in exactly the same order.
+pub fn distribution_identity_v3<R: Serialize>(
+    compute_version: &str,
+    platform: &str,
+    profile: &str,
+    release_status: &str,
+    runtime_lock_sha256: &str,
+    starter_recipes: &BTreeMap<String, String>,
+    runtimes: &R,
+) -> Result<String> {
+    Ok(sha256_identity(&serde_json::to_vec(&(
+        compute_version,
+        platform,
+        profile,
+        release_status,
+        runtime_lock_sha256,
+        starter_recipes,
+        runtimes,
+    ))?))
+}
+
 pub fn validate_sha256_identity(value: &str) -> Result<()> {
     let Some(digest) = value.strip_prefix("sha256:") else {
         return Err(invalid("digest algorithm must be sha256"));
@@ -1171,6 +1195,35 @@ fn invalid(message: impl Into<String>) -> ComputeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distribution_v3_identity_binds_the_starter_catalog() {
+        let mut starters = BTreeMap::from([("dev".to_owned(), "a".repeat(64))]);
+        let runtimes = serde_json::json!({"shell": {"version": "1"}});
+        let first = distribution_identity_v3(
+            "0.1.8",
+            "linux-x86_64",
+            "base",
+            "certified",
+            &"b".repeat(64),
+            &starters,
+            &runtimes,
+        )
+        .unwrap();
+        starters.insert("dev".into(), "c".repeat(64));
+        let changed = distribution_identity_v3(
+            "0.1.8",
+            "linux-x86_64",
+            "base",
+            "certified",
+            &"b".repeat(64),
+            &starters,
+            &runtimes,
+        )
+        .unwrap();
+        assert_ne!(first, changed);
+        validate_sha256_identity(&first).unwrap();
+    }
     use crate::{
         BoundaryStatus, IsolationEvidence, IsolationProfile, Output, ResourceLimits, ResourceUsage,
         RuntimeSpec,
