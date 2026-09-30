@@ -373,6 +373,10 @@ pub fn unsupported(provider: &str, operation: &str) -> ProviderError {
     )
 }
 
+/// How long a cancelled execution may take to be recorded terminal before
+/// stopping or destroying its session fails with `termination_failed`.
+const EXECUTION_TERMINATION_DEADLINE: Duration = Duration::from_secs(20);
+
 /// Environments on this node: a private workspace directory per session,
 /// with commands run as durable jobs by the node's own runtimes. It is the
 /// provider `compute serve` offers; it is not a security boundary beyond the
@@ -422,6 +426,7 @@ impl SessionProvider for WorkspaceSessionProvider {
             suspend: true,
             resume: true,
             claim: true,
+            process_tree_termination: crate::processes::ownership_scan_available(),
         }
     }
 
@@ -497,7 +502,11 @@ impl SessionProvider for WorkspaceSessionProvider {
 
     async fn stop(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         // Executions are cancelled by the manager; the workspace is kept.
-        self.directory(provider_session_id)?;
+        // What the environment left running (a service started detached, a
+        // descendant that outlived its job) is terminated and confirmed
+        // gone: a stopped environment has no processes, only state.
+        let directory = self.directory(provider_session_id)?;
+        crate::processes::terminate_owned(&directory).await?;
         Ok(())
     }
 
@@ -513,7 +522,12 @@ impl SessionProvider for WorkspaceSessionProvider {
     }
 
     async fn destroy(&self, provider_session_id: &str) -> Result<(), ProviderError> {
-        match fs::remove_dir_all(self.directory(provider_session_id)?) {
+        // Terminate first, and remove nothing until every owned process is
+        // confirmed gone: a workspace is never deleted out from under
+        // running workloads, and a survivor is reported, not hidden.
+        let directory = self.directory(provider_session_id)?;
+        crate::processes::terminate_owned(&directory).await?;
+        match fs::remove_dir_all(directory) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(transport_error(error)),
@@ -1213,7 +1227,12 @@ impl SessionManager {
                 }
                 SessionStatus::Provisioning => self.provision(session).await?,
                 SessionStatus::Stopping => {
-                    self.cancel_executions(&session).await;
+                    if let Err(error) = self.terminate_executions(&session).await {
+                        let failure = self.failure(SessionPhase::Stopping, &error);
+                        self.record_failure(&session, "stop_failed", failure)
+                            .await?;
+                        return Err(self.provider_error(error));
+                    }
                     if session.capabilities.suspend
                         && let Some(provider_session_id) = &session.provider_session_id
                         && let Err(error) = self.provider.stop(provider_session_id).await
@@ -1486,7 +1505,19 @@ impl SessionManager {
                 .await?;
             return Err(error);
         }
-        self.cancel_executions(&session).await;
+        let phase = if expiring {
+            SessionPhase::Expiration
+        } else {
+            SessionPhase::Teardown
+        };
+        // Executions are confirmed ended before the environment is touched:
+        // a destroy is never reported over a command still running.
+        if let Err(error) = self.terminate_executions(&session).await {
+            let failure = self.failure(phase, &error);
+            self.record_failure(&session, "teardown_failed", failure)
+                .await?;
+            return Err(self.provider_error(error));
+        }
         if let Some(provider_session_id) = &session.provider_session_id
             && let Err(error) = self.provider.destroy(provider_session_id).await
         {
@@ -1518,6 +1549,41 @@ impl SessionManager {
             },
         )
         .await?;
+        Ok(())
+    }
+
+    /// Cancel every active execution and wait until each is recorded
+    /// terminal. `Ok` means no command of this session is still running; a
+    /// command that does not end is a `termination_failed`, not a success.
+    async fn terminate_executions(&self, session: &ComputeSession) -> Result<(), ProviderError> {
+        self.cancel_executions(session).await;
+        for execution in session.active_executions() {
+            let ended = tokio::time::timeout(
+                EXECUTION_TERMINATION_DEADLINE,
+                self.jobs.wait_terminal(&execution.job_id, &session.owner),
+            )
+            .await;
+            match ended {
+                Ok(Ok(_)) => {}
+                // A job whose evidence is gone is not running.
+                Ok(Err(error))
+                    if matches!(
+                        error.kind,
+                        ProviderErrorKind::UnknownJob | ProviderErrorKind::JobExpired
+                    ) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(_) => {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::TerminationFailed,
+                        format!(
+                            "execution {} did not end within {}s of being cancelled",
+                            execution.job_id,
+                            EXECUTION_TERMINATION_DEADLINE.as_secs()
+                        ),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1717,7 +1783,8 @@ impl SessionManager {
             message: error.message.clone(),
             retryable: matches!(
                 error.kind,
-                ProviderErrorKind::ProviderUnavailable
+                ProviderErrorKind::TerminationFailed
+                    | ProviderErrorKind::ProviderUnavailable
                     | ProviderErrorKind::TransportFailure
                     | ProviderErrorKind::ProviderInterrupted
                     | ProviderErrorKind::RuntimeUnavailable

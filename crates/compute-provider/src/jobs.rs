@@ -925,6 +925,12 @@ impl JobManager {
             .map_err(transport_error)?,
         ));
         job.status = status;
+        // A requested cancellation is effective only now: the runtime has
+        // terminated the process tree and reported it.
+        if status == JobStatus::Cancelled && job.cancellation.requested {
+            job.cancellation.effective = true;
+            job.cancellation.phase = Some("execution_terminated".into());
+        }
         let released = release_reservation(&mut job);
         job.updated_at = Utc::now();
         self.write_job(&job)?;
@@ -1053,6 +1059,12 @@ impl JobManager {
         let control = self.active.lock().await.get(job_id).cloned();
         let _guard = self.mutation.lock().await;
         let mut job = self.read_job(job_id)?;
+        // Cancelling is idempotent: a job that already ended keeps the
+        // terminal result it has, and asking again changes nothing.
+        if job.status.is_terminal() {
+            return Ok(job);
+        }
+        let first_request = !job.cancellation.requested;
         job.cancellation.requested = true;
         match job.status {
             JobStatus::Created
@@ -1065,17 +1077,16 @@ impl JobManager {
                 job.cancellation.effective = true;
                 job.cancellation.phase = Some("before_execution".into());
             }
-            JobStatus::Preparing | JobStatus::Running => {
-                job.cancellation.effective = control.is_some();
+            _ => {
+                // The execution is running. Cancellation is *requested*, not
+                // done: the job stays running, and `effective` stays false,
+                // until the runtime reports the process tree terminated and
+                // the job is recorded `cancelled` (`persist_result`).
                 job.cancellation.phase = Some(if control.is_some() {
                     "execution_interrupt_requested".into()
                 } else {
                     "execution_control_unavailable".into()
                 });
-            }
-            _ => {
-                job.cancellation.effective = false;
-                job.cancellation.phase = Some("already_terminal".into());
             }
         }
         job.updated_at = Utc::now();
@@ -1087,7 +1098,9 @@ impl JobManager {
         self.write_job(&job)?;
         if let Some(control) = control {
             control.cancel();
-            self.append_event(job_id, "cancellation_requested")?;
+            if first_request {
+                self.append_event(job_id, "cancellation_requested")?;
+            }
         }
         if job.status == JobStatus::Cancelled {
             self.append_event(job_id, "terminal")?;

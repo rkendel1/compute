@@ -91,6 +91,7 @@ fn everything() -> SessionCapabilities {
         suspend: true,
         resume: true,
         claim: true,
+        process_tree_termination: true,
     }
 }
 
@@ -105,6 +106,7 @@ fn minimal() -> SessionCapabilities {
         suspend: false,
         resume: false,
         claim: false,
+        process_tree_termination: true,
     }
 }
 

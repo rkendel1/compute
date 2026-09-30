@@ -166,6 +166,7 @@ contain repositories, commands, or source, or carry configuration values.
   (shown as `implied_capabilities`). It does **not** promise the data survives
   the machine; ask for that by requiring `persistent_storage`, and
   `compute recipe resolve` says so when a persistent recipe does not.
+* What stop, destroy, and cancel guarantee is Compute's ([lifecycle.md](lifecycle.md)), not the recipe's; a recipe that needs the guarantee requires the capability `process_tree_termination`.
 * A persistent recipe with a TTL, or a zero TTL, is *invalid*: the same rule
   `environment create` enforces.
 * `interactive` is the `terminal` capability. "Bounded" is an ephemeral TTL.

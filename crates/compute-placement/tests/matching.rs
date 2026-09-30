@@ -688,6 +688,7 @@ fn a_computer_is_placed_by_what_it_needs_never_by_provider() {
     );
     let full = compute_core::SessionCapabilities {
         claim: true,
+        process_tree_termination: true,
         ..session_capabilities(true)
     };
 
@@ -769,6 +770,7 @@ fn runtime_aware_computers_require_a_substrate_that_can_see_the_runtime_store() 
     );
     container.sessions = Some(compute_core::SessionCapabilities {
         claim: true,
+        process_tree_termination: true,
         ..session_capabilities(true)
     });
     assert_eq!(
@@ -823,6 +825,7 @@ fn a_target_is_described_by_what_it_can_host() {
             &["firecracker", "kvm"],
             compute_core::SessionCapabilities {
                 claim: true,
+                process_tree_termination: true,
                 ..session_capabilities(true)
             },
         )),

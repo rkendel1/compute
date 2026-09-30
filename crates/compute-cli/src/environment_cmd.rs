@@ -1119,14 +1119,87 @@ pub async fn environment(command: EnvironmentCommand) -> compute_core::Result<()
                 .delete(&format!("/environments/{environment}"))
                 .await
                 .map_err(error)?;
-            if json {
-                print_json(&value);
+            // Asking for a destroy is not a destroy. An environment with a
+            // computer is reported destroyed only when its target confirmed
+            // it; otherwise say what is true and exit non-zero.
+            let value = if value.get("status").is_some() {
+                await_destroyed(&client, &environment).await?
             } else {
-                println!("Destroyed environment {environment}");
+                value
+            };
+            match destroy_outcome(&value) {
+                DestroyOutcome::Destroyed => {
+                    if json {
+                        print_json(&value);
+                    } else {
+                        println!("Destroyed environment {environment}");
+                    }
+                }
+                DestroyOutcome::Pending => {
+                    if json {
+                        print_json(&value);
+                    }
+                    return Err(ComputeError::Runtime(format!(
+                        "environment {environment} is still being destroyed: not confirmed"
+                    )));
+                }
+                DestroyOutcome::Failed(code, message) => {
+                    if json {
+                        print_json(&value);
+                    }
+                    return Err(ComputeError::Runtime(format!(
+                        "environment {environment} was not destroyed: {code}: {message}"
+                    )));
+                }
             }
         }
     }
     Ok(())
+}
+
+enum DestroyOutcome {
+    Destroyed,
+    Pending,
+    /// `termination_failed` or `destruction_failed`, and why.
+    Failed(String, String),
+}
+
+fn destroy_outcome(value: &serde_json::Value) -> DestroyOutcome {
+    match value.get("status").and_then(|status| status.as_str()) {
+        // A node environment has no computer: its delete is synchronous.
+        None | Some("destroyed" | "expired") => DestroyOutcome::Destroyed,
+        Some(_) => match value.get("failure") {
+            Some(failure) if failure["phase"] == "teardown" => DestroyOutcome::Failed(
+                failure["code"]
+                    .as_str()
+                    .unwrap_or("destruction_failed")
+                    .into(),
+                failure["message"].as_str().unwrap_or_default().into(),
+            ),
+            _ => DestroyOutcome::Pending,
+        },
+    }
+}
+
+/// Follow a destroy until its computer is confirmed destroyed, the target
+/// reports why it cannot be, or a minute passes.
+async fn await_destroyed(
+    client: &DaemonClient,
+    environment: &str,
+) -> compute_core::Result<serde_json::Value> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let value: serde_json::Value = client
+            .get(&format!("/environments/{environment}/computer"))
+            .await
+            .map_err(error)?;
+        if !matches!(destroy_outcome(&value), DestroyOutcome::Pending)
+            || std::time::Instant::now() >= deadline
+        {
+            return Ok(value);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 /// `ENVIRONMENT` or `PROJECT/ENVIRONMENT`.

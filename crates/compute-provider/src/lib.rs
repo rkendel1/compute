@@ -30,6 +30,7 @@ use tokio::net::{TcpListener, TcpStream};
 mod containers;
 pub mod credentials;
 mod jobs;
+pub mod processes;
 mod runtime;
 mod sessions;
 pub use containers::{CONTAINER_WORKSPACE, ContainerSessionProvider};
@@ -80,6 +81,9 @@ pub enum ProviderErrorKind {
     SessionConflict,
     /// The provider does not offer this operation; its capabilities say so.
     OperationUnsupported,
+    /// The provider could not confirm that every process the environment
+    /// owns is gone. Nothing was reported stopped or destroyed.
+    TerminationFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2961,6 +2965,7 @@ fn error_status(kind: ProviderErrorKind) -> u16 {
         ProviderErrorKind::UnknownJob | ProviderErrorKind::UnknownSession => 404,
         ProviderErrorKind::SessionConflict => 409,
         ProviderErrorKind::OperationUnsupported => 400,
+        ProviderErrorKind::TerminationFailed => 500,
         ProviderErrorKind::JobExpired => 410,
         ProviderErrorKind::IdempotencyConflict => 409,
         ProviderErrorKind::EvidenceInvalid => 422,

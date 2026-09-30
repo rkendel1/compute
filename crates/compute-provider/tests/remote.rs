@@ -449,13 +449,20 @@ async fn queued_jobs_cancel_truthfully_and_terminal_jobs_expire() {
     let running_cancel = client.cancel_job(&first.job_id.0).await.unwrap();
     assert_eq!(running_cancel.status, compute_core::JobStatus::Running);
     assert!(running_cancel.cancellation.requested);
-    assert!(running_cancel.cancellation.effective);
+    // Requested, not done: a running job's cancellation is effective only
+    // once its process tree is confirmed ended and the job is `cancelled`.
+    assert!(!running_cancel.cancellation.effective);
     assert_eq!(
         running_cancel.cancellation.phase.as_deref(),
         Some("execution_interrupt_requested")
     );
     let first_terminal = wait_for_terminal(&client, &first.job_id.0).await;
     assert_eq!(first_terminal.status, compute_core::JobStatus::Cancelled);
+    assert!(first_terminal.cancellation.effective);
+    assert_eq!(
+        first_terminal.cancellation.phase.as_deref(),
+        Some("execution_terminated")
+    );
     assert_eq!(first_terminal.application.as_ref(), Some(&application));
     let final_logs = client.job_logs(&first.job_id.0).await.unwrap();
     assert!(final_logs.complete);

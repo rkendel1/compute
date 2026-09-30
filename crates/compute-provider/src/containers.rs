@@ -154,6 +154,9 @@ impl SessionProvider for ContainerSessionProvider {
             suspend: true,
             resume: true,
             claim: true,
+            // The engine ends every process in a container it stops or
+            // removes; the provider confirms the container's state after.
+            process_tree_termination: true,
         }
     }
 
@@ -276,9 +279,14 @@ impl SessionProvider for ContainerSessionProvider {
 
     async fn stop(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         let container = Self::container(provider_session_id)?;
-        self.checked(&["stop".into(), container.into()])
-            .await
-            .map(|_| ())
+        self.checked(&["stop".into(), container.into()]).await?;
+        if self.state(container).await?.as_deref() == Some("running") {
+            return Err(ProviderError::new(
+                ProviderErrorKind::TerminationFailed,
+                "the container is still running after it was stopped",
+            ));
+        }
+        Ok(())
     }
 
     async fn resume(&self, provider_session_id: &str) -> Result<(), ProviderError> {
@@ -299,6 +307,12 @@ impl SessionProvider for ContainerSessionProvider {
         if self.state(container).await?.is_some() {
             self.checked(&["rm".into(), "--force".into(), container.into()])
                 .await?;
+            if self.state(container).await?.is_some() {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::TerminationFailed,
+                    "the container still exists after it was removed",
+                ));
+            }
         }
         remove_workspace(&self.workspace(container))
     }

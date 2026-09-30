@@ -4047,6 +4047,23 @@ impl Daemon {
         match client.stop_session(&session_id).await {
             Ok(_) => {}
             Err(error) if error.kind == ProviderErrorKind::SessionConflict => {}
+            // The target answered and could not confirm the machine's
+            // processes are gone. The computer is not stopped: it stays
+            // `stopping`, with the failure recorded, and the stop is asked
+            // again. Nothing is marked stopped that is not.
+            Err(error) if error.kind == ProviderErrorKind::TerminationFailed => {
+                self.record_failure(
+                    stored,
+                    name,
+                    "stopping",
+                    "termination_failed",
+                    &error.message,
+                    true,
+                    Some(&target),
+                )
+                .await?;
+                return Ok(Step::Wait(BACKOFF));
+            }
             Err(error) => return self.target_unreachable(stored, name, &target, error).await,
         }
         value.status = ComputerStatus::Stopped;
@@ -4181,18 +4198,49 @@ impl Daemon {
             };
             if let Some(session_id) = session_id {
                 match client.destroy_session(&session_id).await {
-                    Ok(_) => {}
+                    Ok(session) if session.status.is_terminal() => {}
+                    // The target answered with a session that is not gone:
+                    // the destroy is not confirmed, whatever was asked.
+                    Ok(session) => {
+                        self.record_failure(
+                            stored,
+                            name,
+                            "teardown",
+                            "destruction_failed",
+                            &format!("the target reports the session {}", session.status),
+                            true,
+                            Some(&target),
+                        )
+                        .await?;
+                        return Ok(Step::Wait(BACKOFF));
+                    }
                     Err(error)
                         if matches!(
                             error.kind,
                             ProviderErrorKind::UnknownSession | ProviderErrorKind::SessionConflict
                         ) => {}
+                    // A destroy is `destroyed` only when the target confirmed
+                    // it. Why it was not is said precisely, because a caller
+                    // that must know whether resources were released acts on
+                    // the difference:
+                    //   termination_failed  a process of the machine survived
+                    //   destruction_failed  the target answered and could not
+                    //                       remove the machine
+                    //   target_unavailable  the target did not answer
                     Err(error) => {
+                        let code = match error.kind {
+                            ProviderErrorKind::TerminationFailed => "termination_failed",
+                            ProviderErrorKind::TransportFailure
+                            | ProviderErrorKind::ProviderUnavailable
+                            | ProviderErrorKind::ProviderInterrupted
+                            | ProviderErrorKind::Unauthorized => "target_unavailable",
+                            _ => "destruction_failed",
+                        };
                         self.record_failure(
                             stored,
                             name,
                             "teardown",
-                            "target_unavailable",
+                            code,
                             &error.message,
                             true,
                             Some(&target),

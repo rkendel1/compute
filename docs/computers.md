@@ -53,6 +53,10 @@ Status:
 | `unreachable` | Its target did not answer (`target_unreachable`) or refused this control plane's credential (`credential_rejected`). Still wanted; Compute keeps asking, and it is `running` again when the target answers with the same machine |
 | `lost` | Its target answered without the machine: the session is gone (`session_missing`), ended, or its provider no longer has the environment (`machine_missing`). Still wanted; never re-provisioned on its own. Replace it (a new machine, the same contents) or destroy it; a reconcile asks the target again |
 
+Stop and destroy are *confirmed* operations: a computer is `stopped` or
+`destroyed` only after every process it owns is confirmed gone, and a survivor
+is `termination_failed`, never success. See [lifecycle.md](lifecycle.md).
+
 ## Observed reality
 
 Status is what Compute last established, never what the environment wants.

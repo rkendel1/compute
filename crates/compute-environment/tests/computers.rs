@@ -1229,6 +1229,7 @@ async fn a_target_without_optional_capabilities_is_still_a_target() {
     let limited = SessionCapabilities {
         resume: false,
         claim: false,
+        process_tree_termination: true,
         ..full()
     };
     let target = Target::start(Steered::new(workspaces.path(), limited, None), &[]);
