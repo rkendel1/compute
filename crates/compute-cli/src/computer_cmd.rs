@@ -1674,6 +1674,19 @@ pub fn print_computer(view: &ComputerView, json: bool) {
     needs.push(format!("network {}", requirements.network));
     needs.extend(requirements.features.iter().cloned());
     println!("Needs:       {}", needs.join(", "));
+    // What Compute has verified, beside what was asked: the same view the
+    // API returns.
+    let readiness = &view.readiness;
+    println!("Readiness:   {}", readiness.state.as_str());
+    println!("             {}", readiness.explanation);
+    for condition in &readiness.conditions {
+        println!(
+            "             {} {}: {}",
+            if condition.satisfied { "✓" } else { "✗" },
+            condition.name,
+            condition.detail
+        );
+    }
     if view.running_generation != view.spec_generation {
         println!(
             "Replacing:   generation {} → {}",

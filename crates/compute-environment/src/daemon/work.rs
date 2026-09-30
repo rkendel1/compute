@@ -44,6 +44,7 @@ impl Daemon {
         request: ProjectCommandRequest,
     ) -> Result<ComputerExec, EnvironmentError> {
         let record = self.owned_environment(environment, operator).await?;
+        self.require_ready(&record).await?;
         let contents = record.value.contents.clone().unwrap_or_default();
         let project = contents
             .projects

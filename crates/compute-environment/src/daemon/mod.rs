@@ -24,6 +24,7 @@ mod lifecycle;
 pub(crate) mod network;
 mod operators;
 mod processes;
+mod readiness;
 mod recipes;
 mod reconcile;
 mod release;
@@ -736,6 +737,10 @@ pub struct Daemon {
     /// record generation: live evidence, never durable. A confirmation of
     /// an older generation confirms nothing about the current one.
     computer_confirmed: std::sync::Mutex<BTreeMap<String, computers::Confirmation>>,
+    /// When each target's capabilities were last re-discovered for a
+    /// readiness verdict. A working cache: a verdict is at most
+    /// `read_cache` old; the answer is always the target's own.
+    readiness_probed: std::sync::Mutex<BTreeMap<String, std::time::Instant>>,
     /// When targets were last swept for orphaned computers.
     orphan_sweep: std::sync::Mutex<Option<std::time::Instant>>,
     /// Publishes and rollouts a task is driving: working state, rebuilt
@@ -1022,6 +1027,7 @@ impl Daemon {
             computer_wake: Notify::new(),
             claims: std::sync::Mutex::new(BTreeSet::new()),
             computer_confirmed: std::sync::Mutex::new(BTreeMap::new()),
+            readiness_probed: std::sync::Mutex::new(BTreeMap::new()),
             orphan_sweep: std::sync::Mutex::new(None),
             operation_drivers: std::sync::Mutex::new(BTreeSet::new()),
             operations_polled: std::sync::Mutex::new(None),

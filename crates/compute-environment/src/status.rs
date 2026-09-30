@@ -516,6 +516,75 @@ pub struct ComputerView {
     pub ended_at: Option<DateTime<Utc>>,
     /// Desired and observed state, told apart: what every surface shows.
     pub reality: ComputerReality,
+    /// Whether the environment can run workloads now, verified against its
+    /// own target. Observed, never stored: `requirements` is what it must
+    /// satisfy; this is what Compute has just verified.
+    pub readiness: EnvironmentReadiness,
+}
+
+/// Where an environment is between "asked for" and "can run workloads".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessState {
+    /// It exists; its machine is not being provisioned yet.
+    Created,
+    /// Its machine is being provisioned or resumed, or it is still being
+    /// brought to the contents it declares.
+    Starting,
+    /// Verified: the machine is confirmed, its target satisfies the
+    /// requirements now, and it holds what it declares.
+    Ready,
+    /// It runs and its requirements hold, but something declared is
+    /// impaired or could not be re-verified. Workloads are admitted.
+    Degraded,
+    /// It cannot run workloads: stopped, unreachable, lost, or its target no
+    /// longer satisfies its requirements.
+    Unavailable,
+    /// Establishing it failed. Distinct from unsatisfied requirements.
+    Failed,
+}
+
+impl ReadinessState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Whether a workload may be admitted.
+    pub const fn admits_workloads(self) -> bool {
+        matches!(self, Self::Ready | Self::Degraded)
+    }
+}
+
+/// One thing that must hold for the environment to be ready.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessCondition {
+    /// `machine`, `requirements`, `contents`, or `processes`.
+    pub name: String,
+    pub satisfied: bool,
+    pub detail: String,
+}
+
+/// What Compute has verified about an environment, from its own computer
+/// and target. Read-only to evaluate and never persisted: a claim of
+/// readiness that depends on provider reality is not kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentReadiness {
+    pub state: ReadinessState,
+    pub conditions: Vec<ReadinessCondition>,
+    /// Requirements the target does not satisfy, in placement's own terms
+    /// (`runtime_unavailable`, `isolation_unsupported`, ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsatisfied: Vec<compute_placement::IncompatibilityReason>,
+    /// What this means and what to do about it.
+    pub explanation: String,
+    pub evaluated_at: DateTime<Utc>,
 }
 
 /// What the environment wants of its computer, and what Compute last
