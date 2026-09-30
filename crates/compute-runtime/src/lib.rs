@@ -1018,14 +1018,33 @@ fn receipt_environment(
         } else {
             let distribution_profile = string("distribution_profile")?;
             let release_status = string("release_status")?;
-            sha256_identity(&serde_json::to_vec(&(
-                compute_version,
-                declared_platform,
-                distribution_profile,
-                release_status,
-                lock.clone(),
-                &runtimes,
-            ))?)
+            if schema >= 3 {
+                let starter_recipes: BTreeMap<String, String> = serde_json::from_value(
+                    manifest.get("starter_recipes").cloned().ok_or_else(|| {
+                        ComputeError::InvalidReceipt(
+                            "distribution manifest is missing starter_recipes".into(),
+                        )
+                    })?,
+                )?;
+                compute_core::distribution_identity_v3(
+                    &compute_version,
+                    &declared_platform,
+                    &distribution_profile,
+                    &release_status,
+                    &lock,
+                    &starter_recipes,
+                    &runtimes,
+                )?
+            } else {
+                sha256_identity(&serde_json::to_vec(&(
+                    compute_version,
+                    declared_platform,
+                    distribution_profile,
+                    release_status,
+                    lock.clone(),
+                    &runtimes,
+                ))?)
+            }
         };
         if id != expected_distribution {
             return Err(ComputeError::InvalidReceipt(
@@ -1306,6 +1325,67 @@ mod tests {
         assert!(inspection.manifest);
         assert_eq!(inspection.runtime.unwrap().kind, RuntimeKind::Python);
         assert!(inspection.entrypoint.ends_with(PathBuf::from("main.py")));
+    }
+
+    #[test]
+    fn receipt_environment_accepts_v3_distribution_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let lock = "a".repeat(64);
+        let starters = BTreeMap::from([("dev".to_owned(), "b".repeat(64))]);
+        let runtimes = BTreeMap::from([(
+            "shell".to_owned(),
+            ReceiptManifestRuntime {
+                version: "test".into(),
+                executable: "<embedded>".into(),
+                artifact_sha256: "c".repeat(64),
+                payload_sha256: "d".repeat(64),
+                reported_version: "test".into(),
+                availability: "available".into(),
+                support_status: "supported".into(),
+                unavailable_reason: None,
+                distribution_id: None,
+                distribution_digest: None,
+                capabilities: None,
+            },
+        )]);
+        let distribution_id = compute_core::distribution_identity_v3(
+            env!("CARGO_PKG_VERSION"),
+            &platform,
+            "base",
+            "certified",
+            &lock,
+            &starters,
+            &runtimes,
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("runtime-manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 3,
+                "compute_version": env!("CARGO_PKG_VERSION"),
+                "platform": platform,
+                "distribution_profile": "base",
+                "release_status": "certified",
+                "runtime_lock_sha256": lock,
+                "starter_recipes": starters,
+                "runtimes": runtimes,
+                "distribution_id": distribution_id,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let resolved = compute_core::ResolvedRuntime {
+            kind: RuntimeKind::Shell,
+            requested_version: None,
+            resolved_version: Some("test".into()),
+            executable: None,
+        };
+        let environment =
+            receipt_environment(&DelayedReadAdapter, &resolved, Some(root.path())).unwrap();
+
+        assert_eq!(environment.distribution.id, distribution_id);
     }
 
     struct DelayedReadAdapter;

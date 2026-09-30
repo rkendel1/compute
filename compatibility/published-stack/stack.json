@@ -2,15 +2,15 @@
   "format": "compute.distribution-profile@1",
   "profile": "configured",
   "name": "published-compute-ecosystem",
-  "compute": "0.1.7",
+  "compute": "0.1.8",
   "platform": "linux-x86_64",
   "distribution": {
-    "identity": "compute-configured-0.1.7-linux-x86_64",
+    "identity": "compute-configured-0.1.8-linux-x86_64",
     "certification_status": "certified",
-    "base_asset": "compute-0.1.7-linux-x86_64.tar.gz",
-    "configured_asset": "compute-configured-0.1.7-linux-x86_64.tar.gz",
+    "base_asset": "compute-0.1.8-linux-x86_64.tar.gz",
+    "configured_asset": "compute-configured-0.1.8-linux-x86_64.tar.gz",
     "pipeline": "distribution-certification",
-    "release": "https://github.com/rkendel1/compute/releases/tag/v0.1.7"
+    "release": "https://github.com/rkendel1/compute/releases/tag/v0.1.8"
   },
   "runtime": {
     "implementation": "base-compute",
