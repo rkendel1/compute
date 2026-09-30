@@ -30,6 +30,9 @@ pub struct Faults {
     pub destruction: std::sync::atomic::AtomicBool,
     /// The target does not offer `process_tree_termination`.
     pub without_termination_guarantee: std::sync::atomic::AtomicBool,
+    /// Provisioning a machine fails: the target accepted the request and
+    /// could not establish it.
+    pub provisioning: std::sync::atomic::AtomicBool,
 }
 
 /// The real workspace provider behind a switchboard of [`Faults`].
@@ -58,6 +61,16 @@ impl SessionProvider for FaultyWorkspace {
         &self,
         request: &ProvisionRequest,
     ) -> Result<ProvisionedSession, ProviderError> {
+        if self
+            .faults
+            .provisioning
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProviderUnavailable,
+                "an injected provisioning failure",
+            ));
+        }
         self.inner.provision(request).await
     }
     async fn inspect(&self, id: &str) -> Result<EnvironmentState, ProviderError> {

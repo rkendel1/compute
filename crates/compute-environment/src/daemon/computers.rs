@@ -1187,6 +1187,16 @@ impl Daemon {
         &self,
         record: &Stored<EnvironmentRecord>,
     ) -> Option<ComputerView> {
+        self.computer_view_fresh(record, false).await
+    }
+
+    /// The view, with readiness verified against the target now when
+    /// `fresh` (admission), or as of the last verification otherwise.
+    pub(crate) async fn computer_view_fresh(
+        &self,
+        record: &Stored<EnvironmentRecord>,
+        fresh: bool,
+    ) -> Option<ComputerView> {
         let spec = record.value.computer.clone()?;
         let computer = self
             .inner
@@ -1241,8 +1251,12 @@ impl Daemon {
             })
             .collect();
         let reality = self.reality(&record.value, &spec, &value, converged);
+        let readiness = self
+            .evaluate_readiness(&record.value, &spec, &value, converged, &reality, fresh)
+            .await;
         Some(ComputerView {
             reality,
+            readiness,
             environment: record.value.name.clone(),
             environment_id: record.id.clone(),
             owner: value.owner,
@@ -2030,6 +2044,7 @@ impl Daemon {
     ) -> Result<ComputerExec, EnvironmentError> {
         command.validate()?;
         let record = self.owned_environment(environment, operator).await?;
+        self.require_ready(&record).await?;
         let summary = format!(
             "{operator} ran {} in {}",
             command.command.first().cloned().unwrap_or_default(),
@@ -2383,6 +2398,35 @@ impl Daemon {
         Ok((report, create))
     }
 
+    /// What placement (and readiness) evaluate a computer against: its
+    /// requirements, the session it asks for, and the admission context.
+    /// ProcessSpec is the durable runtime intent, so needs are derived from
+    /// the current contents: a caller cannot place a runtime-aware process
+    /// using only the session shell requirement.
+    pub(crate) fn placement_inputs(
+        &self,
+        environment: &EnvironmentRecord,
+        spec: &ComputerSpec,
+    ) -> Result<
+        (
+            PlacementRequirements,
+            SessionCreateRequest,
+            AdmissionContext,
+        ),
+        EnvironmentError,
+    > {
+        let computer_requirements =
+            requirements_for_contents(&spec.requirements, environment.contents.as_ref());
+        let (requirements, create) =
+            PlacementRequirements::for_computer(&computer_requirements, spec.lifecycle)
+                .map_err(|error| EnvironmentError::Invalid(error.to_string()))?;
+        let bundle = create.environment().map_err(target_error)?;
+        let contract = ExecutionContract::from_bundle(&bundle, Some(requirements.isolation))
+            .map_err(|error| EnvironmentError::Invalid(error.to_string()))?;
+        let context = AdmissionContext::new(&self.policy_sources(environment)?, contract);
+        Ok((requirements, create, context))
+    }
+
     /// Evaluate placement and admission for a computer's requirements
     /// against the pool's current capabilities. Nothing is recorded and
     /// nothing is provisioned: creating an environment places with this,
@@ -2393,18 +2437,7 @@ impl Daemon {
         spec: &ComputerSpec,
         target: Option<&str>,
     ) -> Result<(PlacementReport, SessionCreateRequest), EnvironmentError> {
-        // ProcessSpec is the durable runtime intent. Derive placement needs
-        // from the current contents so callers cannot accidentally place a
-        // runtime-aware process using only the session shell requirement.
-        let computer_requirements =
-            requirements_for_contents(&spec.requirements, environment.contents.as_ref());
-        let (requirements, create) =
-            PlacementRequirements::for_computer(&computer_requirements, spec.lifecycle)
-                .map_err(|error| EnvironmentError::Invalid(error.to_string()))?;
-        let bundle = create.environment().map_err(target_error)?;
-        let contract = ExecutionContract::from_bundle(&bundle, Some(requirements.isolation))
-            .map_err(|error| EnvironmentError::Invalid(error.to_string()))?;
-        let context = AdmissionContext::new(&self.policy_sources(environment)?, contract);
+        let (requirements, create, context) = self.placement_inputs(environment, spec)?;
         let records = {
             let mut cache = self.cache.lock().await;
             self.pool

@@ -254,6 +254,10 @@ environment's computer is later changed (`replace`), the environment's
 configuration in force, and released otherwise
 ([lifecycle.md](lifecycle.md#persistent-ephemeral-and-provenance)).
 
+Whether the environment a recipe produced is usable *now* is a separate
+answer, [environment readiness](readiness.md): resolution says where a policy
+can be placed; readiness says whether what exists satisfies it.
+
 ## User-defined recipes
 
 A recipe is data. `customer-demo`, `nightly-data`, `review-environment`,

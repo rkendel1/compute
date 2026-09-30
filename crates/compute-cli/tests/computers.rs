@@ -606,6 +606,12 @@ fn the_cli_reports_observed_reality_not_desired_state() {
         "{status}"
     );
     assert!(status.contains("Confirmed:"), "{status}");
+    // Readiness: the CLI text and the API's JSON are one view.
+    assert!(status.contains("Readiness:   ready"), "{status}");
+    assert!(status.contains("✓ requirements"), "{status}");
+    assert_eq!(running["readiness"]["state"], "ready");
+    let environment = cli.json(&["environment", "status", "myapp", "--json"]);
+    assert_eq!(environment["computer"]["readiness"]["state"], "ready");
 
     // The target goes away: unreachable, still wanted.
     drop(target.take());
@@ -624,6 +630,8 @@ fn the_cli_reports_observed_reality_not_desired_state() {
         "{status}"
     );
     assert!(status.contains("Compute keeps checking"), "{status}");
+    assert!(status.contains("Readiness:   unavailable"), "{status}");
+    assert_eq!(unreachable["readiness"]["state"], "unavailable");
     let listed = cli.json(&["environment", "list", "--json"]);
     let row = listed
         .as_array()
