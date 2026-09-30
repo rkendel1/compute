@@ -610,6 +610,9 @@ fn the_cli_reports_observed_reality_not_desired_state() {
     assert!(status.contains("Readiness:   ready"), "{status}");
     assert!(status.contains("✓ requirements"), "{status}");
     assert_eq!(running["readiness"]["state"], "ready");
+    assert!(status.contains("Bootstrap:   succeeded"), "{status}");
+    assert!(status.contains("✓ repository app"), "{status}");
+    assert_eq!(running["bootstrap"]["state"], "succeeded");
     let environment = cli.json(&["environment", "status", "myapp", "--json"]);
     assert_eq!(environment["computer"]["readiness"]["state"], "ready");
 

@@ -110,6 +110,9 @@ Not provider-dependent: idempotent cancel, the terminal-state rules, the
 `termination_failed`/`destruction_failed` distinction, and that a destroy is
 never reported over a failed termination.
 
+Bootstrap ([bootstrap.md](bootstrap.md)) is cancelled by stop and destroy the
+same way: the in-flight job is ended and confirmed, never left running.
+
 ## Persistent, ephemeral, and provenance
 
 An environment is one durable object. What it *is* is written down; what it

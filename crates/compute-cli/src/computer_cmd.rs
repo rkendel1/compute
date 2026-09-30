@@ -1674,8 +1674,66 @@ pub fn print_computer(view: &ComputerView, json: bool) {
     needs.push(format!("network {}", requirements.network));
     needs.extend(requirements.features.iter().cloned());
     println!("Needs:       {}", needs.join(", "));
-    // What Compute has verified, beside what was asked: the same view the
-    // API returns.
+    // What the requirements were verified against, then how far the
+    // environment has been brought to what it declares, then whether it is
+    // usable now: the same view the API returns.
+    if let Some(verified) = &view.readiness.configuration {
+        let mut parts = vec![];
+        if let Some(runtime) = &verified.runtime {
+            parts.push(format!("runtime {runtime}"));
+        }
+        if let Some(platform) = &verified.platform {
+            parts.push(platform.clone());
+        }
+        if let Some(distribution) = &verified.distribution {
+            parts.push(format!(
+                "distribution {}",
+                distribution.get(..19).unwrap_or(distribution)
+            ));
+        }
+        println!("Configuration: {} on {}", parts.join(", "), verified.target);
+    }
+    let bootstrap = &view.bootstrap;
+    println!(
+        "Bootstrap:   {}{}",
+        bootstrap.state.as_str(),
+        bootstrap
+            .completed_at
+            .map(|at| format!(" (completed {})", at.to_rfc3339()))
+            .unwrap_or_default()
+    );
+    for step in &bootstrap.steps {
+        println!(
+            "             {} {} {}{}",
+            match step.outcome.as_str() {
+                "succeeded" => "✓",
+                "failed" => "✗",
+                _ => "…",
+            },
+            step.kind,
+            step.name,
+            step.error
+                .as_deref()
+                .map(|error| format!(": {}", error.lines().next().unwrap_or_default()))
+                .unwrap_or_default()
+        );
+    }
+    if let Some(failure) = &bootstrap.failure {
+        println!(
+            "             {} in {}: {}{}",
+            failure.class.as_str(),
+            failure.operation,
+            failure.message,
+            if failure.retryable {
+                format!(
+                    "; retry with `compute environment reconcile {}`",
+                    view.environment
+                )
+            } else {
+                String::new()
+            }
+        );
+    }
     let readiness = &view.readiness;
     println!("Readiness:   {}", readiness.state.as_str());
     println!("             {}", readiness.explanation);
