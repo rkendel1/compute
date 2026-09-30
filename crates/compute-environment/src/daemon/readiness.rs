@@ -24,6 +24,18 @@ use crate::{
     FailureClass, ReadinessCondition, ReadinessState, VerifiedConfiguration,
 };
 
+/// How far a read verifies readiness against the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verify {
+    /// Not at all: the daemon's own polling reads (a wait for `converged`)
+    /// need the record, not a verdict, and must not ask the target.
+    Local,
+    /// An answer up to `read_cache` old is accepted: views.
+    Cached,
+    /// The target is asked now: workload admission.
+    Fresh,
+}
+
 /// What the computer's own target says about its requirements right now.
 enum Verdict {
     Satisfied,
@@ -45,7 +57,7 @@ impl Daemon {
         converged: bool,
         reality: &ComputerReality,
         bootstrap: &EnvironmentBootstrap,
-        fresh: bool,
+        verify: Verify,
     ) -> EnvironmentReadiness {
         let name = &environment.name;
         let target = computer.target.as_deref().unwrap_or("its target");
@@ -123,7 +135,7 @@ impl Daemon {
         // Running by its record. The requirements are re-verified against
         // the target as it is now.
         let (verdict, verified) =
-            Box::pin(self.target_verdict(environment, spec, computer, fresh)).await;
+            Box::pin(self.target_verdict(environment, spec, computer, verify)).await;
         let confirmed = reality.observed != "unverified";
         let mut conditions = vec![machine(
             confirmed,
@@ -309,8 +321,15 @@ impl Daemon {
         environment: &EnvironmentRecord,
         spec: &ComputerSpec,
         computer: &ComputerRecord,
-        fresh: bool,
+        verify: Verify,
     ) -> (Verdict, Option<VerifiedConfiguration>) {
+        if verify == Verify::Local {
+            return (
+                Verdict::Unknown("not verified: a read that did not ask the target".into()),
+                None,
+            );
+        }
+        let fresh = verify == Verify::Fresh;
         let Some(target) = computer.target.as_deref() else {
             return (Verdict::Unknown("the computer has no target".into()), None);
         };
@@ -419,7 +438,7 @@ impl Daemon {
         &self,
         record: &compute_state::Stored<EnvironmentRecord>,
     ) -> Result<(), EnvironmentError> {
-        let Some(view) = Box::pin(self.computer_view_fresh(record, true)).await else {
+        let Some(view) = Box::pin(self.computer_view_verified(record, Verify::Fresh)).await else {
             return Err(EnvironmentError::Conflict(format!(
                 "environment {} has no computer",
                 record.value.name

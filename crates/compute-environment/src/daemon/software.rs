@@ -1295,7 +1295,7 @@ impl Daemon {
             })?;
         let version = self.version(project, &active.version).await?;
         let current = self.active_rollout(&target.id, project).await?;
-        let from_view = self.computer(from).await?;
+        let from_view = self.computer_local(from).await?;
         let from_healthy = from_view.converged
             && from_view.endpoints.iter().all(|endpoint| endpoint.serving)
             && from_view
@@ -1527,7 +1527,7 @@ impl Daemon {
         }
         let mut value = stored.value.clone();
         let version = self.version(&value.project, &value.version).await?;
-        let Ok(view) = self.computer(&value.environment).await else {
+        let Ok(view) = self.computer_local(&value.environment).await else {
             value.status = RolloutStatus::Failed;
             value.failure = Some("the environment no longer has a computer".into());
             self.finish_rollout(&stored, value).await?;
@@ -1966,7 +1966,10 @@ impl Daemon {
         };
         let mut projects: BTreeMap<String, Vec<SoftwarePlacement>> = BTreeMap::new();
         for record in records {
-            let Some(view) = self.computer_view_of(&record).await else {
+            let Some(view) = self
+                .computer_view_verified(&record, super::readiness::Verify::Local)
+                .await
+            else {
                 continue;
             };
             if view.status.is_terminal() {

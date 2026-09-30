@@ -1167,9 +1167,29 @@ impl Daemon {
         self.computer_from_desired(environment).await
     }
 
+    /// The computer's view for the daemon's own use: the record, its
+    /// reality and bootstrap, and no readiness verdict from the target.
+    pub(crate) async fn computer_local(
+        &self,
+        environment: &str,
+    ) -> Result<ComputerView, EnvironmentError> {
+        self.refresh_for_read().await?;
+        self.computer_from_desired_verified(environment, super::readiness::Verify::Local)
+            .await
+    }
+
     async fn computer_from_desired(
         &self,
         environment: &str,
+    ) -> Result<ComputerView, EnvironmentError> {
+        self.computer_from_desired_verified(environment, super::readiness::Verify::Cached)
+            .await
+    }
+
+    async fn computer_from_desired_verified(
+        &self,
+        environment: &str,
+        verify: super::readiness::Verify,
     ) -> Result<ComputerView, EnvironmentError> {
         let record = self
             .inner
@@ -1179,9 +1199,11 @@ impl Daemon {
             .environment(environment)
             .cloned()
             .ok_or_else(|| EnvironmentError::NotFound(format!("environment {environment}")))?;
-        self.computer_view_of(&record).await.ok_or_else(|| {
-            EnvironmentError::NotFound(format!("environment {environment} has no computer"))
-        })
+        self.computer_view_verified(&record, verify)
+            .await
+            .ok_or_else(|| {
+                EnvironmentError::NotFound(format!("environment {environment} has no computer"))
+            })
     }
 
     pub(crate) async fn fresh_computer_view(
@@ -1196,15 +1218,17 @@ impl Daemon {
         &self,
         record: &Stored<EnvironmentRecord>,
     ) -> Option<ComputerView> {
-        self.computer_view_fresh(record, false).await
+        self.computer_view_verified(record, super::readiness::Verify::Cached)
+            .await
     }
 
-    /// The view, with readiness verified against the target now when
-    /// `fresh` (admission), or as of the last verification otherwise.
-    pub(crate) async fn computer_view_fresh(
+    /// The view, with readiness verified against the target as `verify`
+    /// says: now (admission), as of the last verification (views), or not
+    /// at all (the daemon's own polling reads).
+    pub(crate) async fn computer_view_verified(
         &self,
         record: &Stored<EnvironmentRecord>,
-        fresh: bool,
+        verify: super::readiness::Verify,
     ) -> Option<ComputerView> {
         let spec = record.value.computer.clone()?;
         let computer = self
@@ -1270,7 +1294,7 @@ impl Daemon {
             converged,
             &reality,
             &bootstrap,
-            fresh,
+            verify,
         ))
         .await;
         Some(ComputerView {

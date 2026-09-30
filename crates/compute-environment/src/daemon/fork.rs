@@ -107,7 +107,7 @@ impl Daemon {
             .derive_environment(&claim, &derivation, &export, vec![export.job_id.clone()])
             .await?;
         let contents = record.value.contents.clone().unwrap_or_default();
-        let original = self.computer(source).await?;
+        let original = self.computer_local(source).await?;
         let repositories = contents
             .repositories
             .iter()

@@ -466,7 +466,7 @@ impl Daemon {
         let not_deployed = || {
             EnvironmentError::NotFound(format!("application {name} is not deployed on this node"))
         };
-        let computer = match self.computer(&application_environment(name)).await {
+        let computer = match self.computer_local(&application_environment(name)).await {
             Ok(computer) => computer,
             Err(EnvironmentError::NotFound(_)) => return Err(not_deployed()),
             Err(error) => return Err(error),
@@ -617,7 +617,7 @@ impl Daemon {
         // yet: absent is tolerated briefly, then it is an error as before.
         let grace = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            let view = match self.computer(environment).await {
+            let view = match self.computer_local(environment).await {
                 Ok(view) => view,
                 Err(EnvironmentError::NotFound(_)) if tokio::time::Instant::now() < grace => {
                     tokio::time::sleep(Duration::from_millis(100)).await;
