@@ -1,19 +1,17 @@
 class Compute < Formula
   desc "Runtime-neutral workload execution"
   homepage "https://github.com/rkendel1/compute"
+  platform = OS.mac? ? "macos-aarch64" : "linux-x86_64"
+  checksum = if OS.mac?
+    "@MACOS_SHA256@"
+  else
+    "@LINUX_SHA256@"
+  end
+  url "https://github.com/rkendel1/compute/releases/download/v@VERSION@/compute-@VERSION@-#{platform}.tar.gz"
+  sha256 checksum
   license "MIT"
 
-  on_linux do
-    url "https://github.com/rkendel1/compute/releases/download/v@VERSION@/compute-@VERSION@-linux-x86_64.tar.gz"
-    sha256 "@LINUX_SHA256@"
-    depends_on arch: :x86_64
-  end
-
-  on_macos do
-    url "https://github.com/rkendel1/compute/releases/download/v@VERSION@/compute-@VERSION@-macos-aarch64.tar.gz"
-    sha256 "@MACOS_SHA256@"
-    depends_on arch: :arm64
-  end
+  depends_on arch: OS.mac? ? :arm64 : :x86_64
 
   # The release manifest covers every byte under libexec, including Python
   # package metadata that Homebrew's generic cleaner would otherwise rewrite.
@@ -22,8 +20,17 @@ class Compute < Formula
   def install
     distribution = Pathname.pwd
     distribution /= "compute-distribution" unless (distribution/"bin/compute").exist?
+    system "tar", "-cf", prefix/"runtime-payload.tar", "-C", distribution, "runtimes"
     libexec.install distribution.children
     bin.install_symlink libexec/"bin/compute"
+  end
+
+  post_install_steps do
+    # Homebrew's linkage pass rewrites Mach-O payloads after `install`. Restore
+    # the certified runtime tree afterwards so its manifest hashes stay exact.
+    remove "runtimes", base: :libexec, recursive: true
+    run "tar", args: ["-xf", "{{prefix}}/runtime-payload.tar", "-C", "{{libexec}}"]
+    remove "runtime-payload.tar", base: :prefix
   end
 
   test do

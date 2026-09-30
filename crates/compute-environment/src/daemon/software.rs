@@ -1640,30 +1640,36 @@ impl Daemon {
                     set(&mut value.steps, "Build", StepStatus::Running, None, None);
                 }
                 Some(built) if built.commit.as_deref() == Some(commit.as_str()) => {
-                    if built.evidence.outcome == "succeeded" {
-                        set(
-                            &mut value.steps,
-                            "Build",
-                            StepStatus::Succeeded,
-                            Some(format!("built {}", &commit[..commit.len().min(12)])),
-                            Some((
-                                built.evidence.job_id.as_str(),
-                                built.evidence.execution_id.as_str(),
-                            )),
-                        );
-                    } else {
-                        let error = built
-                            .evidence
-                            .error
-                            .clone()
-                            .unwrap_or_else(|| "the build failed".into());
-                        let job = Some((
-                            built.evidence.job_id.clone(),
-                            built.evidence.execution_id.clone(),
-                        ));
-                        let value = fail(value, "Build", error, job);
-                        self.finish_rollout(&stored, value).await?;
-                        return Ok(false);
+                    match built.evidence.outcome.as_str() {
+                        "succeeded" => {
+                            set(
+                                &mut value.steps,
+                                "Build",
+                                StepStatus::Succeeded,
+                                Some(format!("built {}", &commit[..commit.len().min(12)])),
+                                Some((
+                                    built.evidence.job_id.as_str(),
+                                    built.evidence.execution_id.as_str(),
+                                )),
+                            );
+                        }
+                        "running" => {
+                            set(&mut value.steps, "Build", StepStatus::Running, None, None);
+                        }
+                        _ => {
+                            let error = built
+                                .evidence
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "the build failed".into());
+                            let job = Some((
+                                built.evidence.job_id.clone(),
+                                built.evidence.execution_id.clone(),
+                            ));
+                            let value = fail(value, "Build", error, job);
+                            self.finish_rollout(&stored, value).await?;
+                            return Ok(false);
+                        }
                     }
                 }
                 _ => {
@@ -1690,10 +1696,25 @@ impl Daemon {
                     .map(|seen| seen.evidence.clone());
                 let restart = step(&value.steps, "Restart applications");
                 let recorded = restart.and_then(|index| value.steps[index].job_id.clone());
+                let existing_receipt = restart.and_then(|index| value.steps[index].receipt.clone());
+                let receipt = match &started {
+                    Some(evidence)
+                        if recorded.as_deref() == Some(evidence.job_id.as_str())
+                            && existing_receipt.is_some() =>
+                    {
+                        existing_receipt
+                    }
+                    Some(evidence) => self.job_receipt_id(&view, &evidence.job_id).await,
+                    None => None,
+                };
                 set(
                     &mut value.steps,
                     "Restart applications",
-                    StepStatus::Succeeded,
+                    if processes.is_empty() || receipt.is_some() {
+                        StepStatus::Succeeded
+                    } else {
+                        StepStatus::Running
+                    },
                     Some(if processes.is_empty() {
                         "nothing runs from it".into()
                     } else {
@@ -1703,11 +1724,8 @@ impl Daemon {
                         .as_ref()
                         .map(|evidence| (evidence.job_id.as_str(), evidence.execution_id.as_str())),
                 );
-                if let (Some(index), Some(evidence)) = (restart, &started)
-                    && (recorded.as_deref() != Some(evidence.job_id.as_str())
-                        || value.steps[index].receipt.is_none())
-                {
-                    value.steps[index].receipt = self.job_receipt_id(&view, &evidence.job_id).await;
+                if let Some(index) = restart {
+                    value.steps[index].receipt = receipt;
                 }
             } else {
                 set(

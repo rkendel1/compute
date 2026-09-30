@@ -39,6 +39,11 @@ impl Daemon {
                 "provider {provider} is not in the daemon's pool"
             )));
         }
+        // Keep the snapshot used to reject a duplicate and the create commit
+        // in one reconciliation epoch. Otherwise a full refresh already in
+        // flight can replace the working copy after the commit but before the
+        // read-your-writes reconciliation below.
+        let cycle = self.reconciling.lock().await;
         self.refresh().await?;
         if self
             .inner
@@ -90,6 +95,7 @@ impl Daemon {
             json!({ "environment_id": id }),
         );
         self.apply(change).await?;
+        drop(cycle);
         self.changed().await;
         self.environment(&definition.name).await
     }

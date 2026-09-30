@@ -405,7 +405,10 @@ async fn an_application_deployment_is_the_canonical_computer_lifecycle() {
                 "Health check"
             ]
         );
-        assert!(view.receipt.is_some() && view.canonical.as_ref().unwrap().job_id.is_some());
+        assert!(
+            view.receipt.is_some() && view.canonical.as_ref().unwrap().job_id.is_some(),
+            "{label}: {view:#?}"
+        );
     }
     let computer = daemon.computer(&records.environment).await.unwrap();
     assert_eq!(
