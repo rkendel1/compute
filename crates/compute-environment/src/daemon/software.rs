@@ -1599,7 +1599,7 @@ impl Daemon {
                     );
                 }
                 Some(seen)
-                    if matches!(seen.evidence.outcome.as_str(), "failed" | "cancelled")
+                    if !matches!(seen.evidence.outcome.as_str(), "succeeded" | "running")
                         && seen.revision == repository.revision =>
                 {
                     let error = seen.evidence.error.clone().unwrap_or_default();
@@ -1635,6 +1635,10 @@ impl Daemon {
         // Build.
         if checked_out && let Some(spec) = project.as_ref().filter(|spec| !spec.build.is_empty()) {
             match view.observed.builds.get(&spec.name) {
+                // Claimed and in flight: the build is still running.
+                Some(built) if built.evidence.outcome == "running" => {
+                    set(&mut value.steps, "Build", StepStatus::Running, None, None);
+                }
                 Some(built) if built.commit.as_deref() == Some(commit.as_str()) => {
                     match built.evidence.outcome.as_str() {
                         "succeeded" => {
