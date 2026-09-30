@@ -22,6 +22,15 @@ compute-configured-verify
 compute-configured-setup
 ```
 
+Both formulas install the same seven certified/preview starter recipe assets.
+List them without starting a controller, then make an editable user recipe:
+
+```sh
+compute recipe starters
+compute recipe create developer --from dev
+compute environment create workstation --recipe developer
+```
+
 The formula selects a platform release artifact:
 
 - Linux x86_64 is Certified and contains the complete certified runtime set.

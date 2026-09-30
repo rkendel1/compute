@@ -27,6 +27,7 @@ pub mod identity;
 pub mod manifest;
 pub mod model;
 pub mod recipe;
+pub mod starters;
 pub mod status;
 pub mod tls;
 pub mod upgrade;
@@ -40,6 +41,7 @@ pub use daemon::{
 };
 pub use model::*;
 pub use recipe::*;
+pub use starters::*;
 pub use status::*;
 
 #[derive(Debug, thiserror::Error)]

@@ -42,7 +42,10 @@ artifact network access and fails on the first cache miss. An absent platform
 entry is an error; another architecture is never substituted.
 
 The output contains `runtime-manifest.json`, `runtime-inventory.json`, the lock,
-the Compute executable, all runtime payloads, and—when `--verify` is used—the
+the Compute executable, all runtime payloads, and the seven immutable recipe
+templates under `recipes/starters`. Their hashes are part of the distribution
+identity, and verification launches the packaged binary to prove they are
+discoverable without a controller. When `--verify` is used it also contains the
 compiled certification fixtures. The adjacent uncompressed `.tar` has sorted
 entries, normalized ownership, permissions, timestamps, and a fixed internal
 root name, so the same source, binary, lock, and platform produce identical
@@ -55,8 +58,8 @@ compute distribution inspect dist/compute-distribution --json
 compute distribution verify dist/compute-distribution --json
 ```
 
-Verification rechecks lock compatibility, manifest identity, every payload-tree
-hash, every required executable, and every runtime version probe. `--verify`
+Verification rechecks lock compatibility, manifest identity, every starter and
+payload-tree hash, every required executable, and every runtime version probe. `--verify`
 also runs `compute doctor` and `compute certify` with all runtimes required and
 with the existing poisoned-host environment checks.
 

@@ -445,9 +445,17 @@ async function environmentsView() {
 }
 
 async function createEnvironment() {
-  const targets = await api('GET', '/targets').catch(() => []);
+  const [targets, starters] = await Promise.all([
+    api('GET', '/targets').catch(() => []),
+    api('GET', '/recipes/starters').catch(() => []),
+  ]);
   const hasComputerHost = targets.some((target) => target.hosts_computers);
   const name = h('input', { id: 'environment-name', placeholder: 'my-app', autocomplete: 'off' });
+  const starter = h('select', { id: 'environment-starter' },
+    h('option', { value: '' }, 'Custom computer'),
+    starters.map((item) => h('option', { value: item.id }, `${item.display_name} · ${item.spec.lifecycle}`)));
+  const recipeName = h('input', { id: 'environment-recipe-name', placeholder: 'developer', autocomplete: 'off', disabled: true });
+  const starterDetail = h('div', { class: 'meta' }, 'Custom requirements are entered below.');
   // Modest defaults: a computer that fits on a laptop. Ask for more.
   const cpu = h('input', { id: 'environment-cpu', type: 'number', min: '1', value: '1' });
   const memory = h('input', { id: 'environment-memory', type: 'number', min: '1', value: '1' });
@@ -458,10 +466,23 @@ async function createEnvironment() {
   const temporary = h('input', { type: 'radio', name: 'environment-lifetime', value: 'ephemeral' });
   const target = h('input', { id: 'environment-target', placeholder: 'placement chooses', autocomplete: 'off' });
   const node = h('input', { id: 'environment-node', type: 'checkbox', checked: !hasComputerHost, disabled: !hasComputerHost });
-  for (const input of [cpu, memory, storage, endpoint, features, keep, temporary, target]) input.disabled = !hasComputerHost;
+  const customInputs = [cpu, memory, storage, endpoint, features, keep, temporary];
+  for (const input of [...customInputs, starter, recipeName, target]) input.disabled = !hasComputerHost;
+  starter.onchange = () => {
+    const chosen = starters.find((item) => item.id === starter.value);
+    for (const input of customInputs) input.disabled = !hasComputerHost || Boolean(chosen);
+    recipeName.disabled = !hasComputerHost || !chosen;
+    starterDetail.textContent = chosen
+      ? `${chosen.spec.description} This copies the immutable ${chosen.id} starter into a user-owned recipe you can edit.`
+      : 'Custom requirements are entered below.';
+    if (chosen && !recipeName.value) recipeName.value = chosen.id;
+  };
   modal('New environment', h('div', {},
     h('label', { for: 'environment-name' }, 'Name'), name,
     !hasComputerHost ? h('div', { class: 'panel note' }, 'No computer host is configured. This environment will run on the control-plane node; configure a target before creating a computer.') : null,
+    h('label', { for: 'environment-starter' }, 'Starter recipe'), starter,
+    starterDetail,
+    h('label', { for: 'environment-recipe-name' }, 'User recipe name'), recipeName,
     h('p', {}, h('strong', {}, 'What kind of computer do you need?'), ' Compute places it on a target that can provide it.'),
     h('label', { for: 'environment-cpu' }, 'CPUs'), cpu,
     h('label', { for: 'environment-memory' }, 'Memory (GiB)'), memory,
@@ -476,23 +497,40 @@ async function createEnvironment() {
     h('button', { onclick: close }, 'Cancel'),
     h('button', { class: 'primary', onclick: async () => {
       close();
-      const definition = { name: name.value };
-      if (!node.checked) {
-        const capabilities = [storage.checked ? 'persistent_storage' : null, endpoint.checked ? 'public_endpoint' : null].filter(Boolean);
-        definition.computer = {
-          lifecycle: temporary.checked ? 'ephemeral' : 'persistent',
-          requirements: {
-            cpu_count: Number(cpu.value) || undefined,
-            memory_bytes: Number(memory.value) ? Math.round(Number(memory.value) * 2 ** 30) : undefined,
-            capabilities,
-            features: features.value.split(',').map((item) => item.trim()).filter(Boolean),
-          },
-          target: target.value.trim() || undefined,
-        };
-        if (temporary.checked) definition.computer.ttl_seconds = 3600;
-      }
-      const created = await act(`Environment ${name.value} created`, () => api('POST', '/environments', definition));
-      if (created && definition.computer && document.body.dataset.mode === 'work') location.hash = `#/work/${enc(name.value)}`;
+      const created = await act(`Environment ${name.value} created`, async () => {
+        const definition = { name: name.value };
+        const chosen = starters.find((item) => item.id === starter.value);
+        if (chosen) {
+          const resolution = await api('POST', '/recipes/resolve', {
+            spec: chosen.spec,
+            target: target.value.trim() || undefined,
+          });
+          if (resolution.verdict !== 'satisfiable') {
+            const reasons = resolution.problems || (resolution.placement && resolution.placement.providers || []).flatMap((provider) => provider.reasons.map((reason) => reason.code));
+            throw new Error(`recipe is ${resolution.verdict}: ${(reasons || []).join(', ')}`);
+          }
+          const owned = await api('POST', '/recipes', { name: recipeName.value.trim(), spec: chosen.spec });
+          definition.computer = resolution.resolved.computer;
+          definition.policy = resolution.resolved.policy;
+          definition.recipe = { name: owned.name, version: owned.version, digest: owned.digest };
+          if (target.value.trim()) definition.computer.target = target.value.trim();
+        } else if (!node.checked) {
+          const capabilities = [storage.checked ? 'persistent_storage' : null, endpoint.checked ? 'public_endpoint' : null].filter(Boolean);
+          definition.computer = {
+            lifecycle: temporary.checked ? 'ephemeral' : 'persistent',
+            requirements: {
+              cpu_count: Number(cpu.value) || undefined,
+              memory_bytes: Number(memory.value) ? Math.round(Number(memory.value) * 2 ** 30) : undefined,
+              capabilities,
+              features: features.value.split(',').map((item) => item.trim()).filter(Boolean),
+            },
+            target: target.value.trim() || undefined,
+          };
+          if (temporary.checked) definition.computer.ttl_seconds = 3600;
+        }
+        return api('POST', '/environments', definition);
+      });
+      if (created && created.computer && document.body.dataset.mode === 'work') location.hash = `#/work/${enc(name.value)}`;
     } }, 'Create'),
   ]);
   name.focus();

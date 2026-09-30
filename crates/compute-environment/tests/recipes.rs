@@ -356,28 +356,21 @@ async fn any_recipe_a_user_writes_resolves_through_the_same_mechanism() {
     daemon.shutdown().await;
 }
 
-/// The starter recipes are ordinary documents: they parse as specs, validate,
-/// and resolve; nothing in the daemon knows their names.
+/// The shipped catalog uses ordinary specs: they validate and resolve through
+/// the same pure resolver, and taking a copy cannot mutate the templates.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_starter_recipes_are_ordinary_documents() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/recipes");
-    let mut names = vec![];
-    for entry in std::fs::read_dir(&root).unwrap() {
-        let path = entry.unwrap().path();
-        if path
-            .extension()
-            .is_some_and(|extension| extension == "json")
-        {
-            let spec: RecipeSpec = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-            let problems = spec.problems();
-            assert!(problems.is_empty(), "{}: {problems:?}", path.display());
-            assert!(compute_environment::resolve(&spec).is_ok());
-            names.push(path.file_stem().unwrap().to_str().unwrap().to_owned());
-        }
+    let starters = compute_environment::recipe_starters();
+    for starter in &starters {
+        let problems = starter.spec.problems();
+        assert!(problems.is_empty(), "{}: {problems:?}", starter.id);
+        assert!(compute_environment::resolve(&starter.spec).is_ok());
     }
-    names.sort();
     assert_eq!(
-        names,
+        starters
+            .iter()
+            .map(|starter| starter.id.as_str())
+            .collect::<Vec<_>>(),
         [
             "agent-task",
             "ci",
@@ -387,6 +380,12 @@ async fn the_starter_recipes_are_ordinary_documents() {
             "production",
             "staging"
         ]
+    );
+    let mut copy = compute_environment::recipe_starter("dev").unwrap();
+    copy.spec.description = Some("user changed this copy".into());
+    assert_ne!(
+        copy.spec,
+        compute_environment::recipe_starter("dev").unwrap().spec
     );
 }
 

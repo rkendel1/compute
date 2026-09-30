@@ -258,8 +258,8 @@ fn every_execution_site_is_classified() {
             },
             Allowed {
                 file: "crates/compute-cli/src/distribution.rs",
-                count: 8,
-                why: "building a distribution (curl, npm, scripts, the built binary)",
+                count: 9,
+                why: "building and verifying a distribution (curl, npm, scripts, and read-only probes of the built binary)",
             },
             Allowed {
                 file: "crates/compute-runtime-conformance/src/lib.rs",

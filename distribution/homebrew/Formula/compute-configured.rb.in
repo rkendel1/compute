@@ -48,7 +48,9 @@ class ComputeConfigured < Formula
     assert_match '"result": "pass"', shell_output("#{bin}/compute-configured-verify")
     expected_status = OS.mac? ? "preview" : "certified"
     assert_match "#{expected_status} and active", shell_output("#{bin}/compute-configured-setup")
+    assert_equal 7, JSON.parse(shell_output("#{bin}/compute-configured recipe starters --json")).length
     assert_predicate libexec/"node_modules/@appport/github/package.json", :file?
+    assert_predicate libexec/"recipes/starters/dev.json", :file?
     assert_predicate libexec/"stacks/configured/stack.toml", :file?
   end
 end

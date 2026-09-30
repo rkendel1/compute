@@ -1,3 +1,5 @@
+require "json"
+
 class Compute < Formula
   desc "Runtime-neutral workload execution"
   homepage "https://github.com/rkendel1/compute"
@@ -40,7 +42,9 @@ class Compute < Formula
 
     assert_equal "compute #{version}\n", shell_output("#{bin}/compute --version")
     system bin/"compute", "distribution", "verify", libexec
+    assert_equal 7, JSON.parse(shell_output("#{bin}/compute recipe starters --json")).length
     assert_predicate libexec/"runtimes", :directory?
+    assert_predicate libexec/"recipes/starters/dev.json", :file?
     assert_predicate libexec/"runtime-manifest.json", :file?
     assert_equal "preserve me\n", (testpath/"state"/"homebrew-state").read
   end

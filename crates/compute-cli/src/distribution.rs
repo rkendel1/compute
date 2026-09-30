@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 const LOCK_SCHEMA: u32 = 2;
-const MANIFEST_SCHEMA: u32 = 2;
+const MANIFEST_SCHEMA: u32 = 3;
 
 pub struct BuildOptions {
     pub output: PathBuf,
@@ -86,6 +86,7 @@ pub(crate) struct DistributionManifest {
     runtime_lock_sha256: String,
     certification_status: String,
     build: BuildMetadata,
+    starter_recipes: BTreeMap<String, String>,
     runtimes: BTreeMap<String, ManifestRuntime>,
 }
 
@@ -176,6 +177,7 @@ pub fn build(options: BuildOptions) -> Result<()> {
     let root = staging.path().join("root");
     fs::create_dir_all(root.join("bin")).map_err(error)?;
     fs::create_dir_all(root.join("runtimes")).map_err(error)?;
+    let starter_recipes = install_starter_recipes(&root)?;
 
     let compute_binary = options
         .compute_binary
@@ -277,6 +279,7 @@ pub fn build(options: BuildOptions) -> Result<()> {
         "base",
         &options.release_status,
         &lock_hash,
+        &starter_recipes,
         &runtimes,
     )?;
     let mut manifest = DistributionManifest {
@@ -296,9 +299,10 @@ pub fn build(options: BuildOptions) -> Result<()> {
             "not_run".into()
         },
         build: BuildMetadata {
-            format: "compute-distribution-v2".into(),
+            format: "compute-distribution-v3".into(),
             reproducible: true,
         },
+        starter_recipes,
         runtimes,
     };
     write_json(&root.join("runtime-manifest.json"), &manifest)?;
@@ -317,6 +321,7 @@ pub fn build(options: BuildOptions) -> Result<()> {
             &manifest.distribution_profile,
             &manifest.release_status,
             &manifest.runtime_lock_sha256,
+            &manifest.starter_recipes,
             &manifest.runtimes,
         )?;
         write_json(&root.join("runtime-manifest.json"), &manifest)?;
@@ -545,6 +550,33 @@ pub(crate) fn verify_root(root: &Path) -> VerificationReport {
         compute_valid,
         "Compute executable exists and reports the manifest version",
     );
+    let expected_starters = expected_starter_recipes();
+    let installed_starters = installed_starter_recipes(root);
+    let starters_discoverable = Command::new(&compute_binary)
+        .args(["recipe", "starters", "--json"])
+        .env("COMPUTE_DISTRIBUTION_ROOT", root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            serde_json::from_slice::<Vec<compute_environment::RecipeStarter>>(&output.stdout).ok()
+        })
+        .is_some_and(|starters| {
+            starters == compute_environment::recipe_starters()
+                && starters
+                    .iter()
+                    .all(|starter| starter.spec.problems().is_empty())
+        });
+    push_check(
+        &mut report,
+        "starter_recipes",
+        manifest.starter_recipes == expected_starters
+            && installed_starters
+                .as_ref()
+                .is_ok_and(|installed| installed == &expected_starters)
+            && starters_discoverable,
+        "all seven immutable starter recipes match the manifest and are discoverable",
+    );
     let inventory =
         read_json::<BTreeMap<String, ManifestRuntime>>(&root.join("runtime-inventory.json"));
     push_check(
@@ -655,6 +687,7 @@ pub(crate) fn verify_root(root: &Path) -> VerificationReport {
         &manifest.distribution_profile,
         &manifest.release_status,
         &manifest.runtime_lock_sha256,
+        &manifest.starter_recipes,
         &manifest.runtimes,
     );
     push_check(
@@ -899,11 +932,58 @@ fn distribution_identity(
     profile: &str,
     release_status: &str,
     lock: &str,
+    starter_recipes: &BTreeMap<String, String>,
     runtimes: &BTreeMap<String, ManifestRuntime>,
 ) -> Result<String> {
-    let bytes = serde_json::to_vec(&(compute, platform, profile, release_status, lock, runtimes))
-        .map_err(error)?;
+    let bytes = serde_json::to_vec(&(
+        compute,
+        platform,
+        profile,
+        release_status,
+        lock,
+        starter_recipes,
+        runtimes,
+    ))
+    .map_err(error)?;
     Ok(format!("sha256:{}", sha256_bytes(&bytes)))
+}
+
+fn expected_starter_recipes() -> BTreeMap<String, String> {
+    compute_environment::recipe_starter_assets()
+        .map(|(id, bytes)| (id.to_owned(), sha256_bytes(bytes)))
+        .collect()
+}
+
+fn install_starter_recipes(root: &Path) -> Result<BTreeMap<String, String>> {
+    let directory = root.join("recipes/starters");
+    fs::create_dir_all(&directory).map_err(error)?;
+    for (id, bytes) in compute_environment::recipe_starter_assets() {
+        fs::write(directory.join(format!("{id}.json")), bytes).map_err(error)?;
+    }
+    Ok(expected_starter_recipes())
+}
+
+fn installed_starter_recipes(root: &Path) -> Result<BTreeMap<String, String>> {
+    let directory = root.join("recipes/starters");
+    if !directory.is_dir() {
+        return fail(format!("missing starter recipes: {}", directory.display()));
+    }
+    let mut installed = BTreeMap::new();
+    for entry in fs::read_dir(&directory).map_err(error)? {
+        let entry = entry.map_err(error)?;
+        let path = entry.path();
+        if !path.is_file() || path.extension() != Some(OsStr::new("json")) {
+            return fail(format!(
+                "unexpected starter recipe asset: {}",
+                path.display()
+            ));
+        }
+        let id = path.file_stem().and_then(OsStr::to_str).ok_or_else(|| {
+            ComputeError::Runtime(format!("invalid starter path: {}", path.display()))
+        })?;
+        installed.insert(id.to_owned(), sha256_file(&path)?);
+    }
+    Ok(installed)
 }
 
 fn hash_tree(root: &Path) -> Result<String> {

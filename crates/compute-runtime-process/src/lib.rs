@@ -221,6 +221,8 @@ struct DistributionManifest {
     _certification_status: String,
     #[serde(rename = "build")]
     _build: serde_json::Value,
+    #[serde(default, rename = "starter_recipes")]
+    _starter_recipes: BTreeMap<String, String>,
     runtimes: BTreeMap<String, DistributionRuntime>,
 }
 
