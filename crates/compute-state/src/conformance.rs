@@ -40,6 +40,7 @@ fn event(nonce: &str, sequence: u64) -> EventRecord {
 fn environment(name: &str) -> EnvironmentRecord {
     EnvironmentRecord {
         configuration: None,
+        recipe: None,
         name: name.into(),
         desired_state: DesiredState::Running,
         config: BTreeMap::from([("LOG_LEVEL".into(), "info".into())]),
@@ -696,6 +697,25 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
             files: 3,
             directories: 1,
             capture_job_id: "job_1".into(),
+            created_at: now,
+        },
+    )
+    .await;
+    round_trip(
+        state,
+        &ids::recipe(&format!("recipe{run}"), 1),
+        RecipeRecord {
+            recipe_id: ids::recipe(&format!("recipe{run}"), 1),
+            name: format!("recipe{run}"),
+            version: 1,
+            status: RecipeStatus::Current,
+            digest: "sha256:recipe".into(),
+            spec: compute_core::RecipeSpec {
+                lifecycle: compute_core::ComputerLifecycle::Ephemeral,
+                ttl_seconds: Some(600),
+                ..Default::default()
+            },
+            author: "operator-1".into(),
             created_at: now,
         },
     )

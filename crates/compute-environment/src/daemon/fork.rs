@@ -223,6 +223,7 @@ impl Daemon {
                     ttl_seconds: None,
                 },
                 contents: Default::default(),
+                recipe: None,
             },
             operator,
         )

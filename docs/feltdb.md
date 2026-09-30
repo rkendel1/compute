@@ -120,6 +120,14 @@ not index `_id`, `In`, ranges, or orderings. So:
 - **Configuration** (generation 11). `Environment.configuration` is JSON
   beside `config`: each variable's sensitivity and source, and the generation
   the configuration last changed at. Never values.
+- **Recipes** (generation 12). A `Recipe` is one immutable version of a
+  lifecycle policy (`rcp_` + name and version: an identity lookup). `name`
+  and `status` are indexed: the current version of a name is one indexed
+  equality on both, and the recipes list is one on `status = current`,
+  limited by FeltDB. An edit writes the next version and supersedes the
+  previous one in one transaction, so there is exactly one current version
+  per name. `Environment.recipe` (JSON) records the name, version, and digest
+  an environment was made from. Nothing scans the collection.
 - **Checkpoints** (generation 10). `Checkpoint.environment_id` is indexed:
   an environment's checkpoints are one indexed equality, newest first and
   limited by FeltDB; a checkpoint is read by identity (`ckp_` + its artifact

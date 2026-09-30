@@ -24,6 +24,7 @@ mod lifecycle;
 pub(crate) mod network;
 mod operators;
 mod processes;
+mod recipes;
 mod reconcile;
 mod release;
 mod replace;

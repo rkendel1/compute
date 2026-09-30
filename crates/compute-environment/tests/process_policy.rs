@@ -108,6 +108,7 @@ async fn computer(daemon: &Arc<Daemon>, name: &str, process: ProcessSpec) {
                     processes: vec![process],
                     ..Default::default()
                 },
+                recipe: None,
             },
             "alice",
         )

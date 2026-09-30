@@ -48,6 +48,8 @@ app compute {
     // Generation 11: what is known about config (sensitivity, sources,
     // generation), never its values.
     configuration: json?
+    // Generation 12: the recipe version the environment was made from.
+    recipe: json?
     index name using hash(name)
     record_id: text?
     index record_id using hash(record_id)
@@ -508,6 +510,24 @@ app compute {
     index record_id using hash(record_id)
   }
 
+  // Generation 12: immutable versions of a user-owned lifecycle policy.
+  // The current version of a name is found by (name, status), never by
+  // scanning; a version's spec never changes.
+  collection Recipe {
+    recipe_id: text
+    name: text
+    version: integer
+    status: enum(current, superseded)
+    digest: text
+    spec: json
+    author: text
+    created_at: datetime
+    index name using hash(name)
+    index status using hash(status)
+    record_id: text?
+    index record_id using hash(record_id)
+  }
+
   policy Project {
     read: authenticated
     write: authenticated
@@ -609,6 +629,10 @@ app compute {
     write: authenticated
   }
   policy Checkpoint {
+    read: authenticated
+    write: authenticated
+  }
+  policy Recipe {
     read: authenticated
     write: authenticated
   }

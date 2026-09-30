@@ -132,6 +132,7 @@ impl Daemon {
                     ttl_seconds,
                 },
                 contents: Default::default(),
+                recipe: None,
             },
             operator,
         )

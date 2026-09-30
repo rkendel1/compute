@@ -172,6 +172,12 @@ pub struct ComputerEnvironmentDefinition {
     pub computer: ComputerRequest,
     #[serde(default)]
     pub contents: compute_core::EnvironmentContents,
+    /// The recipe version this request was resolved from. Evidence, not a
+    /// second way to ask: the control plane refuses it unless `computer`
+    /// and `policy` are what that version resolves to (only `target` may
+    /// differ), then records it on the environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<compute_core::RecipeRef>,
 }
 
 /// Fork an environment: a new environment, on a new computer, from the

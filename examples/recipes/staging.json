@@ -1,0 +1,5 @@
+{
+  "description": "A persistent computer whose target must offer persistent storage and a public endpoint, so a build can be deployed to it and reached.",
+  "lifecycle": "persistent",
+  "requirements": { "capabilities": ["persistent_storage", "public_endpoint"] }
+}

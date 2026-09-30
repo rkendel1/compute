@@ -26,6 +26,7 @@ pub mod dataplane;
 pub mod identity;
 pub mod manifest;
 pub mod model;
+pub mod recipe;
 pub mod status;
 pub mod tls;
 pub mod upgrade;
@@ -38,6 +39,7 @@ pub use daemon::{
     application_environment, desired_snapshot, observed_snapshot,
 };
 pub use model::*;
+pub use recipe::*;
 pub use status::*;
 
 #[derive(Debug, thiserror::Error)]

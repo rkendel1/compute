@@ -117,6 +117,10 @@ reconciled on the same machine; the control plane's Manage and Work modes
 act on the same environment. See [docs/computers.md](docs/computers.md) and
 [docs/environment-control-plane.md](docs/environment-control-plane.md).
 
+How that execution should be *used* (ephemeral or persistent, isolated, for how
+long) is policy, declared as a Recipe that resolves into these same
+primitives and adds no execution of its own: see [docs/recipes.md](docs/recipes.md).
+
 ```sh
 compute environment create myapp --cpu 4 --memory 8Gi --persistent
 compute environment repo add myapp app --url https://git.example/app.git --revision v2

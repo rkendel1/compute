@@ -90,6 +90,10 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
         | ("POST", ["environments", _, "exec" | "connect" | "run" | "propose"])
         | ("POST", ["environments", _, "workspace", "export" | "verify"])
         | ("POST", ["environments", _, "config", "discover"]) => Scope::Execute,
+        // Explaining a draft recipe changes nothing.
+        ("POST", ["recipes", "resolve"]) => Scope::Read,
+        // Recipes are shared, versioned policy: writing one is an operation.
+        ("POST", ["recipes"]) => Scope::Operate,
         // Versions and their rollouts are deployments.
         ("POST", ["software", _, "versions" | "deploy" | "promote" | "rollback"]) => {
             Scope::Deploy

@@ -252,6 +252,7 @@ impl Daemon {
                         policy: None,
                         computer,
                         contents: request.contents.clone().unwrap_or_default(),
+                        recipe: None,
                     },
                     operator,
                 )

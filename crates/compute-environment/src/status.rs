@@ -387,6 +387,10 @@ pub struct EnvironmentView {
     /// The environment's computer, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer: Option<ComputerView>,
+    /// The recipe version it was made from, when it was: which policy
+    /// produced it. Evidence, not intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<compute_core::RecipeRef>,
     /// What runs the environment's work.
     pub machine: MachineSummary,
 }
