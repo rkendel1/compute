@@ -1038,6 +1038,10 @@ impl Daemon {
                 "a computer's TTL must be greater than zero".into(),
             ));
         }
+        // Serialize the duplicate check and create with reconciliation. A
+        // full refresh that began before the commit must not replace the
+        // working copy between this write and its read-back below.
+        let cycle = self.reconciling.lock().await;
         self.refresh().await?;
         if self
             .inner
@@ -1157,6 +1161,7 @@ impl Daemon {
             }),
         );
         self.apply(change).await?;
+        drop(cycle);
         self.changed().await;
         self.environment(&definition.name).await
     }
