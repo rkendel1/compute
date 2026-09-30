@@ -383,11 +383,17 @@ async fn destroy_during_bootstrap_leaves_no_bootstrap_work_running() {
     assert_ne!(mid.readiness.state, ReadinessState::Ready);
     assert!(sh(&daemon, "dev", "echo no").await.is_err());
 
+    let requested = std::time::Instant::now();
     daemon.destroy_computer("dev", "alice").await.unwrap();
     let destroyed = view_where(&daemon, "dev", "dev destroyed", |view| {
         view.status == ComputerStatus::Destroyed
     })
     .await;
+    assert!(
+        requested.elapsed() < Duration::from_secs(30),
+        "destroy waited on a bootstrap job for {:?}",
+        requested.elapsed()
+    );
     assert!(
         recorded.iter().all(|pid| !alive(*pid)),
         "bootstrap work survived destruction: {recorded:?}"
@@ -419,6 +425,7 @@ async fn stop_during_bootstrap_is_cancelled_never_ready() {
         (found.len() >= 2 && found.iter().all(|pid| alive(*pid))).then_some(found)
     })
     .await;
+    let requested = std::time::Instant::now();
     daemon
         .set_environment_state("dev", DesiredState::Stopped, false)
         .await
@@ -427,6 +434,11 @@ async fn stop_during_bootstrap_is_cancelled_never_ready() {
         view.status == ComputerStatus::Stopped
     })
     .await;
+    assert!(
+        requested.elapsed() < Duration::from_secs(30),
+        "stop waited on a bootstrap job for {:?}",
+        requested.elapsed()
+    );
     assert!(
         recorded.iter().all(|pid| !alive(*pid)),
         "install survived a stop"
@@ -551,7 +563,7 @@ async fn a_recipe_environment_bootstraps_and_keeps_its_provenance() {
 
 /// Each failure is classified, with no provider internals: requirements the
 /// target no longer satisfies, a provider that could not provision, a
-/// declared process that will not start (degraded, workloads admitted), and a
+/// declared process that will not start (degraded, not ready), and a
 /// machine that could not be removed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn failures_are_classified() {
@@ -574,7 +586,9 @@ async fn failures_are_classified() {
     target.faults.provisioning.store(false, Ordering::SeqCst);
 
     // runtime_failed: a declared process exits as it starts. The environment
-    // is configured and usable, and says the process is not running.
+    // was configured (bootstrap succeeded), but it is not ready: readiness is
+    // degraded with the class, the process stays diagnosable, its restart
+    // policy is responsible for it, and no workload is admitted.
     let mut request = definition("runtime", vec![]);
     request.contents.processes = vec![ProcessSpec {
         name: "svc".into(),
@@ -595,16 +609,22 @@ async fn failures_are_classified() {
         .await
         .unwrap();
     let degraded = view_where(&daemon, "runtime", "a runtime failure", |view| {
-        view.bootstrap
-            .failure
-            .as_ref()
-            .is_some_and(|failure| failure.class == FailureClass::RuntimeFailed)
+        view.readiness.class == Some(FailureClass::RuntimeFailed)
     })
     .await;
-    assert_eq!(degraded.bootstrap.state, BootstrapState::Failed);
+    assert_eq!(degraded.bootstrap.state, BootstrapState::Succeeded);
+    assert!(degraded.bootstrap.failure.is_none());
     assert_eq!(degraded.readiness.state, ReadinessState::Degraded);
-    assert_eq!(degraded.readiness.class, Some(FailureClass::RuntimeFailed));
-    assert!(degraded.readiness.state.admits_workloads());
+    assert!(!degraded.readiness.state.admits_workloads());
+    assert!(
+        degraded
+            .readiness
+            .conditions
+            .iter()
+            .any(|condition| condition.name == "processes" && !condition.satisfied)
+    );
+    let refused = sh(&daemon, "runtime", "echo no").await.unwrap_err();
+    assert!(refused.to_string().contains("degraded"), "{refused}");
 
     // requirements_unsatisfied: the target stops offering what was required.
     daemon
@@ -662,12 +682,12 @@ async fn nothing_is_added_that_was_not_declared() {
     daemon.shutdown().await;
 }
 
-/// A controller that restarts in the middle of bootstrap has no record that
-/// the in-flight item finished, so it applies the item again (a declared
-/// package is an idempotent install) and reports success only when the
-/// evidence exists, never before.
+/// A controller that restarts in the middle of bootstrap finds the durable
+/// claim on the in-flight item and adopts the job the target is still
+/// running: it does not submit a second one, does not forget the bootstrap,
+/// and reports success only when the evidence exists, never before.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_restart_during_bootstrap_reapplies_and_never_claims_success_early() {
+async fn a_restart_during_bootstrap_adopts_the_running_job_and_never_claims_success_early() {
     let target = Target::start();
     let scratch = tempfile::tempdir().unwrap();
     let (started, counter) = (
@@ -722,7 +742,195 @@ async fn a_restart_during_bootstrap_reapplies_and_never_claims_success_early() {
             .iter()
             .all(|step| step.outcome == "succeeded")
     );
-    assert!(attempts(&counter) >= 1);
+    assert_eq!(
+        attempts(&started),
+        1,
+        "a duplicate bootstrap job was submitted"
+    );
+    assert_eq!(attempts(&counter), 1, "the install ran more than once");
     assert_eq!(sh(&daemon, "dev", "echo ok").await.unwrap(), "ok\n");
+    daemon.shutdown().await;
+}
+
+// ---- mechanical architecture invariants -------------------------------------
+
+fn source(path: &str) -> String {
+    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap()
+}
+
+/// Code without comments or the test module: what the module does.
+fn code(path: &str) -> String {
+    let text = source(path);
+    let text = text.split("#[cfg(test)]").next().unwrap();
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Bootstrap and readiness observe and derive; they do not execute, place,
+/// provision, store, or change a recipe. Configuration is applied by the
+/// existing reconciler, verification is placement's own evaluation, and
+/// admission is the only door.
+#[test]
+fn bootstrap_and_readiness_are_derivations_not_second_systems() {
+    for module in ["src/daemon/bootstrap.rs", "src/daemon/readiness.rs"] {
+        let code = code(module);
+        for forbidden in [
+            "Command::new(",
+            "tokio::spawn",
+            "std::thread::spawn",
+            "session_exec",
+            "exec_in(",
+            "impl SessionProvider",
+            "impl ComputeProvider",
+            "StateStore",
+            ".apply(",
+            "write_recipe",
+            "create_computer_environment",
+            "destroy_computer",
+            "set_environment_state",
+            "RecipeSpec",
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "{module} must not use `{forbidden}`: it derives, it does not act"
+            );
+        }
+    }
+    // Bootstrap derives from records alone: no daemon, no target, no placement.
+    let bootstrap = code("src/daemon/bootstrap.rs");
+    for forbidden in [
+        "place_with_policy",
+        "Daemon",
+        "RemoteProvider",
+        "DiscoveryMode",
+    ] {
+        assert!(
+            !bootstrap.contains(forbidden),
+            "bootstrap.rs must not use `{forbidden}`"
+        );
+    }
+    // Readiness verifies through placement's evaluation; it implements none.
+    let readiness = code("src/daemon/readiness.rs");
+    assert!(readiness.contains("place_with_policy"));
+    assert!(!readiness.contains("fn place"), "readiness must not place");
+    // The docs state the distinction.
+    let docs = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/bootstrap.md"),
+    )
+    .unwrap();
+    assert!(docs.contains("Bootstrap is configuration. Readiness is verification."));
+}
+
+/// Every path that can run a user's work in an environment's computer goes
+/// through the readiness gate: `exec_in` (the only door to a session's
+/// command) is called only by entry points that call `require_ready`, and so
+/// is the terminal (`connect_session`). The controller's own configuration
+/// jobs (`run_job`) are the allowed exception: they are bootstrap.
+#[test]
+fn every_workload_entry_point_passes_the_readiness_gate() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/daemon");
+    let mut found = vec![];
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut function = String::new();
+        let mut body = String::new();
+        let mut sites: Vec<(String, String)> = vec![];
+        let flush = |function: &str, body: &str, sites: &mut Vec<(String, String)>| {
+            for pattern in [".exec_in(", ".connect_session(", ".session_exec("] {
+                if body.contains(pattern) {
+                    sites.push((function.to_owned(), body.to_owned()));
+                    break;
+                }
+            }
+        };
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if let Some(index) = trimmed.find("fn ")
+                && (trimmed.starts_with("fn ")
+                    || trimmed.starts_with("pub fn ")
+                    || trimmed.starts_with("async fn ")
+                    || trimmed.starts_with("pub async fn ")
+                    || trimmed.starts_with("pub(crate) async fn ")
+                    || trimmed.starts_with("pub(crate) fn "))
+            {
+                flush(&function, &body, &mut sites);
+                function = trimmed[index + 3..]
+                    .split(['(', '<'])
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                body.clear();
+            }
+            body.push_str(line);
+            body.push('\n');
+        }
+        flush(&function, &body, &mut sites);
+        for (name, body) in sites {
+            found.push((
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                name,
+                body.contains("require_ready("),
+            ));
+        }
+    }
+    assert!(!found.is_empty());
+    for (file, function, gated) in &found {
+        // Controller configuration jobs and the primitive `exec_in` itself
+        // (its callers are what this test checks) are not entry points.
+        let allowed = matches!(function.as_str(), "run_job" | "exec_in");
+        assert!(
+            *gated || allowed,
+            "{file}::{function} can run work in a computer without `require_ready`"
+        );
+    }
+    let gated: Vec<&str> = found
+        .iter()
+        .filter(|(_, _, gated)| *gated)
+        .map(|(_, function, _)| function.as_str())
+        .collect();
+    for entry in ["computer_exec", "project_command", "computer_connect"] {
+        assert!(gated.contains(&entry), "{entry} is not gated: {gated:?}");
+    }
+}
+
+/// Admission needs all of it: a computer that is running is not enough. While
+/// bootstrap runs the machine is `running` and execution is rejected, with the
+/// state in the reason; so is the terminal. Only ready admits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_computer_is_not_an_admitted_environment() {
+    let target = Target::start();
+    let scratch = tempfile::tempdir().unwrap();
+    let pids = workspace(&scratch, "pids");
+    let (daemon, _node) = start_daemon(Arc::new(MemoryState::new()), Some(pool(&target))).await;
+    daemon
+        .create_computer_environment(definition("dev", vec![slow_package(&pids)]), "alice")
+        .await
+        .unwrap();
+    wait_until("the install to be running", async || {
+        let text = std::fs::read_to_string(&pids).unwrap_or_default();
+        (text.lines().count() >= 2).then_some(())
+    })
+    .await;
+    let mid = daemon.computer("dev").await.unwrap();
+    assert_eq!(mid.status, ComputerStatus::Running);
+    assert_eq!(mid.bootstrap.state, BootstrapState::Running);
+    assert_eq!(mid.readiness.state, ReadinessState::Starting);
+    let refused = sh(&daemon, "dev", "echo no").await.unwrap_err();
+    assert!(
+        refused.to_string().contains("starting") && refused.to_string().contains("bootstrapping"),
+        "{refused}"
+    );
+    let terminal = daemon.computer_connect("dev", "alice").await.unwrap_err();
+    assert!(terminal.to_string().contains("not ready"), "{terminal}");
+    daemon.destroy_computer("dev", "alice").await.unwrap();
     daemon.shutdown().await;
 }

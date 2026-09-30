@@ -110,8 +110,14 @@ Not provider-dependent: idempotent cancel, the terminal-state rules, the
 `termination_failed`/`destruction_failed` distinction, and that a destroy is
 never reported over a failed termination.
 
-Bootstrap ([bootstrap.md](bootstrap.md)) is cancelled by stop and destroy the
-same way: the in-flight job is ended and confirmed, never left running.
+Bootstrap ([bootstrap.md](bootstrap.md)) is a lifecycle operation, and stop
+and destroy never wait on it. While a bootstrap job (a repository sync, a
+package install, a build) runs, the driver watches for the environment being
+stopped or destroyed; when it is, the job is cancelled through the existing
+confirmed cancellation, the target confirms every process of it gone (the
+guarantees above), its claim is cleared so a start applies it again, and the
+stop or destroy proceeds. Bootstrap work is never left running, and nothing
+waits an hour for it.
 
 ## Persistent, ephemeral, and provenance
 

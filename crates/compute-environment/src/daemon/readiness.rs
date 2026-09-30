@@ -187,27 +187,38 @@ impl Daemon {
             })
             .map(|(process, reality)| format!("{process} is {}", reality.process))
             .collect();
+        let warming: Vec<String> = reality
+            .processes
+            .iter()
+            .filter(|(_, process)| {
+                process.desired == "running"
+                    && matches!(process.process.as_str(), "pending" | "starting")
+            })
+            .map(|(process, reality)| format!("{process} is {}", reality.process))
+            .collect();
         conditions.push(ReadinessCondition {
             name: "processes".into(),
-            satisfied: impaired.is_empty(),
-            detail: if impaired.is_empty() {
+            satisfied: impaired.is_empty() && warming.is_empty(),
+            detail: if impaired.is_empty() && warming.is_empty() {
                 "every declared process that should run is running".into()
             } else {
-                impaired.join(", ")
+                impaired
+                    .iter()
+                    .chain(&warming)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             },
         });
 
         // A configuration or provider failure means the environment is not
-        // what was declared: failed, and nothing is admitted. A declared
-        // process that will not start is a runtime impairment its restart
-        // policy already manages: degraded, class `runtime_failed`.
-        let bootstrap_failure = (bootstrap.state == BootstrapState::Failed)
+        // what was declared: failed. A declared process that is unhealthy is
+        // a runtime impairment its restart policy is responsible for: the
+        // environment is degraded (`runtime_failed`), diagnosable here, and
+        // not ready.
+        let bootstrap_failed = (bootstrap.state == BootstrapState::Failed)
             .then(|| bootstrap.failure.as_ref())
             .flatten();
-        let runtime_failure =
-            bootstrap_failure.filter(|failure| failure.class == FailureClass::RuntimeFailed);
-        let bootstrap_failed =
-            bootstrap_failure.filter(|failure| failure.class != FailureClass::RuntimeFailed);
         let mut readiness = match verdict {
             Verdict::Unsatisfied(_, detail) => classed(
                 done(
@@ -243,21 +254,6 @@ impl Daemon {
                     "{name}'s requirements could not be re-verified: {detail}. It is not reported ready."
                 ),
             ),
-            Verdict::Satisfied if runtime_failure.is_some() => {
-                let failure = runtime_failure.expect("checked");
-                classed(
-                    done(
-                        ReadinessState::Degraded,
-                        conditions,
-                        unsatisfied,
-                        format!(
-                            "{name} is configured, but a declared process is not running: {}. Workloads are admitted; retry with `reconcile`.",
-                            failure.message
-                        ),
-                    ),
-                    Some(failure.class),
-                )
-            }
             Verdict::Satisfied if !confirmed => done(
                 ReadinessState::Degraded,
                 conditions,
@@ -272,11 +268,23 @@ impl Daemon {
                 unsatisfied,
                 format!("{name} is bootstrapping: Compute is bringing it to what it declares."),
             ),
-            Verdict::Satisfied if !impaired.is_empty() => done(
-                ReadinessState::Degraded,
+            Verdict::Satisfied if !impaired.is_empty() => classed(
+                done(
+                    ReadinessState::Degraded,
+                    conditions,
+                    unsatisfied,
+                    format!(
+                        "{name} is configured, but a declared process is unhealthy: {}. Not ready; its restart policy is responsible for recovering it.",
+                        impaired.join(", ")
+                    ),
+                ),
+                Some(FailureClass::RuntimeFailed),
+            ),
+            Verdict::Satisfied if !warming.is_empty() => done(
+                ReadinessState::Starting,
                 conditions,
                 unsatisfied,
-                format!("{name} is running but impaired: {}.", impaired.join(", ")),
+                format!("{name}'s processes are starting: {}.", warming.join(", ")),
             ),
             Verdict::Satisfied if !converged => done(
                 ReadinessState::Degraded,

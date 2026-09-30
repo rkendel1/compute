@@ -66,6 +66,12 @@ readiness is evaluated from the target and the observed state
 
 ## Bootstrap state
 
+Durable: bootstrap is read from the durable `Environment` and `Computer`
+records (declared contents, per-item evidence, `converged_generation`, and the
+computer's failure), all in the state store, so it survives a controller
+restart and is never held only in memory. The `state` itself is derived from
+them, so it cannot disagree with them.
+
 Derived from the observed contents and the computer's failure; not stored.
 
 | State | Means |
@@ -87,7 +93,7 @@ succeeded.
 | `requirements_unsatisfied` | The target no longer satisfies the requirements (placement's reasons; at creation, placement refuses and records nothing) | `unavailable` | replace, or change requirements |
 | `configuration_failed` | A repository sync, package install, or build failed | `failed` | `reconcile` |
 | `provider_failed` | The target accepted the machine and could not provision or resume it | `failed` | `reconcile` / replace |
-| `runtime_failed` | A declared process could not start or resolve its runtime | `degraded` (workloads admitted; a service its restart policy manages is an impairment) | `reconcile` |
+| `runtime_failed` | A declared process is unhealthy (would not start, or its runtime would not resolve) | `degraded`: not ready, no workload admitted, diagnosable through readiness; bootstrap itself stays `succeeded` | its restart policy recovers it; `reconcile` asks again |
 | `bootstrap_cancelled` | Stopped or destroyed before configuration completed | `unavailable` | start; the item is applied again |
 | `destruction_failed` | The machine could not be removed | `unavailable` | destroy again |
 
@@ -95,11 +101,31 @@ Each failure names the existing operation that failed (`package install`,
 `repository sync`, `build`, `process start`, `provisioning`, `destroy`), and
 carries the job when there is one. No provider internals are exposed.
 
+### Configuration failure versus runtime failure
+
+```text
+configuration_failed   The environment could not be configured.
+                       A declared repository, package, or build failed.
+                       Bootstrap = failed. Readiness = failed. Retry: reconcile.
+
+runtime_failed         A runtime/process is unhealthy.
+                       The environment was configured; its restart policy is
+                       responsible for recovering the process.
+                       Bootstrap = succeeded. Readiness = degraded (not ready),
+                       class runtime_failed, diagnosable through readiness.
+```
+
+A crash-looping service does not fail the whole bootstrap, because the
+declared environment *was* established. It also does not let workloads in:
+only a `ready` environment admits them.
+
 ## Lifecycle
 
 - **Create.** `create` is the bootstrap: the driver applies the contents as
   soon as the machine runs. There is one authoritative lifecycle and no
   separate endpoint. `not_started → running → succeeded`, then readiness.
+- **Invoking bootstrap.** Bootstrap is invoked by `create` and re-invoked by
+  `reconcile`; there is one lifecycle and no second endpoint.
 - **Bootstrap again.** `compute environment reconcile NAME` (existing) asks
   the driver to retry failed items; on a converged environment it changes
   nothing (the package is not run again, the machine is not replaced).
@@ -115,6 +141,21 @@ carries the job when there is one. No provider internals are exposed.
   restart during an install has no record that it finished, so the driver
   applies the item again: a declared package must be an idempotent install.
   Success is never reported without evidence.
+
+## Admission
+
+```text
+workload admitted  ⇔  Computer running
+                      AND bootstrap succeeded
+                      AND readiness ready
+```
+
+Readiness includes the first two among its conditions and adds the target's
+verdict on the requirements. Every path that can run work in an environment's
+computer (`exec`, project commands, the terminal) passes `require_ready`; a
+source check (`every_workload_entry_point_passes_the_readiness_gate`) fails if
+a new one does not. Tests that used to exec as soon as the machine was running
+now wait for readiness, as a consumer does.
 
 ## What bootstrap does not do
 
