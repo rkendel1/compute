@@ -15,25 +15,26 @@ macos_configured_checksum=222222222222222222222222222222222222222222222222222222
 
 formula="$work/tap/Formula/compute.rb"
 ruby -c "$formula" | grep -q 'Syntax OK'
-grep -q "releases/download/v$version/compute-$version-linux-x86_64.tar.gz" "$formula"
-grep -q "releases/download/v$version/compute-$version-macos-aarch64.tar.gz" "$formula"
+grep -q "releases/download/v$version/compute-$version-#{platform}.tar.gz" "$formula"
+grep -q 'platform = OS.mac? ? "macos-aarch64" : "linux-x86_64"' "$formula"
 if grep -q '^  version ' "$formula"; then
   echo "formula must let Homebrew derive the version from the release URL" >&2
   exit 1
 fi
-grep -q "sha256 \"$checksum\"" "$formula"
-grep -q "sha256 \"$macos_checksum\"" "$formula"
-grep -q 'depends_on arch: :x86_64' "$formula"
-grep -q 'depends_on arch: :arm64' "$formula"
+grep -q "\"$checksum\"" "$formula"
+grep -q "\"$macos_checksum\"" "$formula"
+grep -q 'depends_on arch: OS.mac? ? :arm64 : :x86_64' "$formula"
 grep -q 'skip_clean "libexec"' "$formula"
 grep -q 'libexec.install' "$formula"
+grep -q 'post_install_steps do' "$formula"
+grep -q 'runtime-payload.tar' "$formula"
 grep -q 'COMPUTE_HOME' "$formula"
 configured_formula="$work/tap/Formula/compute-configured.rb"
 ruby -c "$configured_formula" | grep -q 'Syntax OK'
-grep -q "compute-configured-$version-linux-x86_64.tar.gz" "$configured_formula"
-grep -q "compute-configured-$version-macos-aarch64.tar.gz" "$configured_formula"
-grep -q "sha256 \"$configured_checksum\"" "$configured_formula"
-grep -q "sha256 \"$macos_configured_checksum\"" "$configured_formula"
+grep -q "compute-configured-$version-#{platform}.tar.gz" "$configured_formula"
+grep -q 'platform = OS.mac? ? "macos-aarch64" : "linux-x86_64"' "$configured_formula"
+grep -q "\"$configured_checksum\"" "$configured_formula"
+grep -q "\"$macos_configured_checksum\"" "$configured_formula"
 grep -q 'depends_on "rkendel1/compute/compute"' "$configured_formula"
 grep -q 'skip_clean "libexec"' "$configured_formula"
 if grep -q 'depends_on "node' "$configured_formula"; then
