@@ -267,6 +267,24 @@ impl Daemon {
     /// computer and policy requested are what that version resolves to.
     /// The evidence recorded on an environment cannot describe a computer
     /// the recipe did not ask for.
+    /// The recipe evidence a derived environment (fork, restore) or a
+    /// replaced computer may keep: the reference itself while that recipe
+    /// version still resolves to exactly the configuration now in force
+    /// (only `target` may differ), otherwise none. Provenance is carried
+    /// only while it is true; the creation event keeps the history.
+    pub(crate) async fn surviving_recipe(
+        &self,
+        reference: Option<&RecipeRef>,
+        computer: &crate::model::ComputerRequest,
+        policy: Option<&compute_policy::Policy>,
+    ) -> Option<RecipeRef> {
+        let reference = reference?;
+        self.verify_recipe_reference(reference, computer, policy)
+            .await
+            .is_ok()
+            .then(|| reference.clone())
+    }
+
     pub(crate) async fn verify_recipe_reference(
         &self,
         reference: &RecipeRef,

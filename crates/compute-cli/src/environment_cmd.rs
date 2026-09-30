@@ -1244,9 +1244,16 @@ fn print_environment(view: &EnvironmentView, json: bool) {
         label(&view.health)
     );
     println!("Policy: {}", view.policy_id);
+    if let Some(recipe) = &view.recipe {
+        println!(
+            "Recipe: {}@{} ({}), provenance at creation",
+            recipe.name, recipe.version, recipe.digest
+        );
+    }
     if let Some(provider) = &view.provider {
         println!("Provider: {provider}");
     }
+    println!("Workloads: {}", view.workload_count);
     println!("Disk: {} bytes", view.disk_bytes);
     println!("\nPROJECT\tREVISION\tDESIRED\tACTUAL\tHEALTH");
     for project in &view.projects {
