@@ -280,6 +280,7 @@ async fn the_node_model_never_enters_a_computer_environment() {
                     ttl_seconds: None,
                 },
                 contents: Default::default(),
+                recipe: None,
             },
             "alice",
         )

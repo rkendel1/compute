@@ -33,6 +33,8 @@ mod sessions;
 pub use sessions::*;
 mod computers;
 pub use computers::*;
+mod recipes;
+pub use recipes::*;
 
 pub mod application_artifact;
 pub use application_artifact::{

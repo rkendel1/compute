@@ -1,0 +1,5 @@
+{
+  "description": "A developer-owned computer that is kept until it is destroyed, with a terminal.",
+  "lifecycle": "persistent",
+  "requirements": { "capabilities": ["terminal"] }
+}

@@ -68,6 +68,17 @@ pub struct ComputerArgs {
     /// Initial contents (JSON: repositories, packages, processes).
     #[arg(long)]
     pub contents: Option<PathBuf>,
+    /// Ask for the computer a recipe resolves to (`NAME` or `NAME@VERSION`;
+    /// see `compute recipe resolve`) instead of stating requirements here.
+    /// Only `--target` and `--contents` combine with it.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "cpu", "memory", "disk", "architecture", "network", "isolation", "require",
+            "features", "persistent", "ephemeral", "ttl"
+        ]
+    )]
+    pub recipe: Option<String>,
 }
 
 impl ComputerArgs {
@@ -82,6 +93,7 @@ impl ComputerArgs {
             || self.ephemeral
             || self.target.is_some()
             || self.contents.is_some()
+            || self.recipe.is_some()
     }
 
     fn requirements(&self) -> ComputerRequirements {
@@ -113,6 +125,54 @@ pub async fn create(
         Some(path) => serde_json::from_slice::<EnvironmentContents>(&std::fs::read(path)?)?,
         None => EnvironmentContents::default(),
     };
+    let (request, policy, recipe) = match &computer.recipe {
+        Some(selector) => {
+            if policy.is_some() {
+                return Err(ComputeError::InvalidWorkload(
+                    "a recipe brings its own execution policy; drop --environment-policy".into(),
+                ));
+            }
+            // The recipe is resolved by the control plane, read-only; what
+            // it resolves to is sent back as the ordinary request, with the
+            // version's identity as evidence. Invalid and unsatisfied are
+            // told apart here, before anything is recorded.
+            let (recipe, version) = match selector.split_once('@') {
+                Some((recipe, version)) => (
+                    recipe,
+                    Some(version.parse::<u64>().map_err(|_| {
+                        ComputeError::InvalidWorkload(format!(
+                            "recipe version {version:?} is not a number"
+                        ))
+                    })?),
+                ),
+                None => (selector.as_str(), None),
+            };
+            let resolution =
+                crate::recipe_cmd::resolution(client, recipe, version, computer.target.as_deref())
+                    .await?;
+            if let Some(refusal) = crate::recipe_cmd::unusable(recipe, &resolution) {
+                return Err(refusal);
+            }
+            let resolved = resolution.resolved.expect("a satisfiable recipe resolves");
+            let mut request = resolved.computer;
+            request.target = computer.target.clone();
+            (request, resolved.policy, resolution.recipe)
+        }
+        None => (
+            ComputerRequest {
+                lifecycle: if computer.ephemeral {
+                    ComputerLifecycle::Ephemeral
+                } else {
+                    ComputerLifecycle::Persistent
+                },
+                requirements: computer.requirements(),
+                target: computer.target.clone(),
+                ttl_seconds: computer.ttl.map(|ttl| ttl.as_secs().max(1)),
+            },
+            policy,
+            None,
+        ),
+    };
     let definition = ComputerEnvironmentDefinition {
         name,
         desired_state: if stopped {
@@ -122,17 +182,9 @@ pub async fn create(
         },
         env,
         policy,
-        computer: ComputerRequest {
-            lifecycle: if computer.ephemeral {
-                ComputerLifecycle::Ephemeral
-            } else {
-                ComputerLifecycle::Persistent
-            },
-            requirements: computer.requirements(),
-            target: computer.target.clone(),
-            ttl_seconds: computer.ttl.map(|ttl| ttl.as_secs().max(1)),
-        },
+        computer: request,
         contents,
+        recipe,
     };
     client
         .post("/environments", Some(&definition))

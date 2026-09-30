@@ -151,6 +151,7 @@ impl Daemon {
                 },
             },
             computer,
+            recipe: record.value.recipe.clone(),
         })
     }
 

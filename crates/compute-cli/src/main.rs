@@ -29,6 +29,7 @@ mod policy_cmd;
 mod pool;
 mod project_run;
 mod receipt;
+mod recipe_cmd;
 mod session_cmd;
 mod stack_run;
 mod version_cmd;
@@ -115,6 +116,8 @@ enum Commands {
     Rollback(application::RollbackCommand),
     /// Create, inspect, and operate environments.
     Environment(environment_cmd::EnvironmentCommand),
+    /// Lifecycle policy as data: list, inspect, write, validate, and explain recipes.
+    Recipe(recipe_cmd::RecipeCommand),
     /// Add, remove, inspect, and operate projects within an environment.
     Project(environment_cmd::ProjectCommand),
     /// Operate one service or task within a project.
@@ -1652,6 +1655,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::History(command) => application::history(command).await?,
         Commands::Rollback(command) => application::rollback(command).await?,
         Commands::Environment(command) => environment_cmd::environment(command).await?,
+        Commands::Recipe(command) => recipe_cmd::recipe(command).await?,
         Commands::Project(command) => environment_cmd::project(command).await?,
         Commands::Workload(command) => environment_cmd::workload(command).await?,
         Commands::Execution(command) => environment_cmd::execution(command).await?,

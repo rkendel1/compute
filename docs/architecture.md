@@ -121,6 +121,7 @@ applications are a compatibility name for exactly these records (below).
 | **Workspace** | The computer's portable filesystem state | Nothing durable until captured |
 | **Observed** | Reality and evidence: the Computer record, jobs, receipts, events | What the controller and targets proved |
 | **Captured** | A Checkpoint record plus its immutable artifact (`compute.checkpoint@1`) | None. Evidence of a past workspace, never a source of truth |
+| **Policy** | A Recipe record, one immutable version per write (`compute.recipe@1`): lifecycle intent that resolves to the request an environment is created with ([recipes.md](recipes.md)) | The recipe's author. It says what to ask for; it is not what was made, and holds no execution state or source |
 
 `.env` is a configuration *source*, not a kind of state: it is parsed and
 imported ([configuration.md](configuration.md)). Workspace is filesystem state.
@@ -532,6 +533,7 @@ that breaks one fails them.
 | 27 | Stopped means stopped: a process stopped by its desired state (or with its computer) is never restarted automatically, whatever its restart policy, across controller restarts. | `process_policy.rs`: `an_explicit_stop_is_never_undone_by_a_restart_policy`; unit test `stopped_means_no_automatic_restart`; `compute-cli/tests/computers.rs` (across a controller process restart) |
 | 28 | A restart is recorded, fenced on the computer record, before its job runs, and only in the session that record names: a replaced or lost machine is never restarted into, and a replacement's count starts afresh. | `process_policy.rs`: `a_replaced_machine_is_never_restarted_into` |
 | 29 | Restart authority lives in control state, not in a controller: a controller that restarts neither loses a restart, counts one twice, nor duplicates a running process, and recovers a process that exited while no controller ran. | `process_policy.rs`: `restarts_are_durable_across_controller_restarts_and_never_duplicated` (control state reopened from disk); `compute-cli/tests/computers.rs`: `readiness_and_restarts_are_shown_and_survive_controller_process_restarts` (the controller as a separate process, stopped and started) |
+| 30 | Recipes express lifecycle policy but do not implement execution. All Recipe execution must resolve into existing Compute Computer, Configured Environment, workload, process, provider, persistence, isolation, and lifecycle primitives. A recipe resolves, read only, to the `ComputerRequest` and policy `POST /environments` already takes; it has no computer, workload, scheduler, supervisor, or cleanup of its own, and the environment it makes records the version it came from. | `compute-environment/tests/recipes.rs`: `recipes_express_policy_and_implement_no_execution` (the recipe modules cannot spawn, drive a computer, or reach a provider; the resolution is the existing type; the invariant is stated in the docs), `an_environment_is_made_from_a_recipe_by_the_ordinary_create`, `a_recipe_reference_must_be_what_the_request_resolves_to`, `resolving_acquires_nothing`, `any_recipe_a_user_writes_resolves_through_the_same_mechanism` |
 
 ## Failure kinds
 

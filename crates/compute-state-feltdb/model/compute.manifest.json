@@ -135,6 +135,11 @@
           "required": false
         },
         {
+          "name": "recipe",
+          "type": "json",
+          "required": false
+        },
+        {
           "name": "record_id",
           "type": "text",
           "required": false
@@ -1926,6 +1931,60 @@
           "required": false
         }
       ]
+    },
+    {
+      "name": "Recipe",
+      "fields": [
+        {
+          "name": "recipe_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "version",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "required": true,
+          "enum_values": [
+            "current",
+            "superseded"
+          ]
+        },
+        {
+          "name": "digest",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "spec",
+          "type": "json",
+          "required": true
+        },
+        {
+          "name": "author",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "record_id",
+          "type": "text",
+          "required": false
+        }
+      ]
     }
   ],
   "indexes": [
@@ -2504,6 +2563,30 @@
         "record_id"
       ],
       "unique": false
+    },
+    {
+      "name": "Recipe.name",
+      "collection": "Recipe",
+      "fields": [
+        "name"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Recipe.status",
+      "collection": "Recipe",
+      "fields": [
+        "status"
+      ],
+      "unique": false
+    },
+    {
+      "name": "Recipe.record_id",
+      "collection": "Recipe",
+      "fields": [
+        "record_id"
+      ],
+      "unique": false
     }
   ],
   "references": [],
@@ -2695,6 +2778,13 @@
     {
       "name": "Checkpoint",
       "resource": "Checkpoint",
+      "read": "authenticated",
+      "write": "authenticated",
+      "capabilities": []
+    },
+    {
+      "name": "Recipe",
+      "resource": "Recipe",
       "read": "authenticated",
       "write": "authenticated",
       "capabilities": []

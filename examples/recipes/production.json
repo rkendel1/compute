@@ -1,0 +1,8 @@
+{
+  "description": "A persistent, durable computer: never expired by Compute, on a target that promises persistent storage and a public endpoint, under the strongest isolation the target enforces.",
+  "lifecycle": "persistent",
+  "requirements": {
+    "isolation": "strict",
+    "capabilities": ["persistent_storage", "public_endpoint"]
+  }
+}

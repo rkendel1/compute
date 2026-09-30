@@ -1176,6 +1176,26 @@
     ]
    },
    "notes": "No agent-specific identity or delegation; an agent is an operator."
+  },
+  {
+   "id": "recipes",
+   "area": "lifecycle policy",
+   "name": "Recipes: user-owned lifecycle policy that resolves into existing Compute primitives",
+   "status": "IMPLEMENTED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-core/src/recipes.rs",
+     "crates/compute-environment/src/recipe.rs",
+     "crates/compute-environment/src/daemon/recipes.rs",
+     "crates/compute-cli/src/recipe_cmd.rs"
+    ],
+    "docs": [
+     "docs/recipes.md"
+    ]
+   },
+   "notes": "Policy only: resolves to ComputerRequest + Policy for `environment create`. No recipe execution, scheduler, or lifecycle engine (see docs/recipes.md for the gaps)."
   }
  ],
  "journeys": [
@@ -3691,6 +3711,66 @@
    "authority": "n/a",
    "ui": "none",
    "tests": []
+  },
+  {
+   "command": "compute recipe list",
+   "about": "List recipes at their current version",
+   "help_defect": null,
+   "interface": "daemon API /recipes",
+   "state": "durable",
+   "authority": "daemon scopes (read; operate to write)",
+   "ui": null,
+   "tests": []
+  },
+  {
+   "command": "compute recipe get",
+   "about": "Show a recipe: its current version, or one immutable version",
+   "help_defect": null,
+   "interface": "daemon API /recipes",
+   "state": "durable",
+   "authority": "daemon scopes (read; operate to write)",
+   "ui": null,
+   "tests": []
+  },
+  {
+   "command": "compute recipe validate",
+   "about": "Check a recipe without acquiring anything: invalid, unsatisfied, or satisfiable; distinct exit statuses",
+   "help_defect": null,
+   "interface": "daemon API /recipes",
+   "state": "durable",
+   "authority": "daemon scopes (read; operate to write)",
+   "ui": null,
+   "tests": []
+  },
+  {
+   "command": "compute recipe resolve",
+   "about": "Explain what a recipe resolves to (the existing ComputerRequest, lifecycle, operations, and placement) before anything runs",
+   "help_defect": null,
+   "interface": "daemon API /recipes",
+   "state": "durable",
+   "authority": "daemon scopes (read; operate to write)",
+   "ui": null,
+   "tests": []
+  },
+  {
+   "command": "compute recipe create",
+   "about": "Create a recipe (compute.recipe@1) from a JSON file",
+   "help_defect": null,
+   "interface": "daemon API /recipes",
+   "state": "durable",
+   "authority": "daemon scopes (read; operate to write)",
+   "ui": null,
+   "tests": []
+  },
+  {
+   "command": "compute recipe edit",
+   "about": "Write a recipe's next version, fenced by the version read",
+   "help_defect": null,
+   "interface": "daemon API /recipes",
+   "state": "durable",
+   "authority": "daemon scopes (read; operate to write)",
+   "ui": null,
+   "tests": []
   }
  ],
  "api": [
@@ -4959,6 +5039,51 @@
    "path": "/services/{service}",
    "scope": "Operate",
    "ui": true,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/recipes",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/recipes",
+   "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/recipes/resolve",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/recipes/{recipe}",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/recipes/{recipe}/resolve",
+   "scope": "Read",
+   "ui": false,
    "cli": true,
    "appport": false,
    "http_path_in_tests": false

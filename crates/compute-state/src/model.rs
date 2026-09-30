@@ -70,7 +70,11 @@ pub const STATE_VERSION: &str = "compute.state@1";
 ///   configuration last changed at; never values, which stay in
 ///   `Environment.config`) and `Computer.observed` processes gain
 ///   `config_generation`. Additive.
-pub const MODEL_GENERATION: u32 = 11;
+/// - 12: recipes: the `Recipe` collection (immutable versions of a
+///   user-owned lifecycle policy) and `Environment.recipe` (the name,
+///   version, and digest of the recipe version an environment was made
+///   from, inside its JSON). Additive.
+pub const MODEL_GENERATION: u32 = 12;
 
 /// A typed document of one collection.
 pub trait Document: Serialize + DeserializeOwned + Clone + Send + Sync {
@@ -293,6 +297,11 @@ pub struct EnvironmentRecord {
     /// variable is then sensitive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration: Option<compute_core::ConfigurationState>,
+    /// The recipe version the environment was made from: evidence of which
+    /// policy produced it, never read back as intent. What the recipe says
+    /// now does not change the environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<compute_core::RecipeRef>,
 }
 document!(EnvironmentRecord, Environment);
 
@@ -396,6 +405,35 @@ pub struct CheckpointRecord {
     pub created_at: DateTime<Utc>,
 }
 document!(CheckpointRecord, Checkpoint);
+
+/// Whether a recipe version is the one new environments resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecipeStatus {
+    Current,
+    Superseded,
+}
+
+/// One immutable version of a recipe: lifecycle policy, declared as data
+/// (`compute.recipe@1`). Editing a recipe writes the next version and marks
+/// the previous one superseded in the same transaction; a version's spec
+/// never changes, so an environment that recorded it can always be
+/// explained. A recipe holds no execution state and no source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeRecord {
+    /// `rcp_` + a digest of the name and version: an identity lookup.
+    pub recipe_id: String,
+    pub name: String,
+    pub version: u64,
+    pub status: RecipeStatus,
+    /// `sha256:` of the canonical spec.
+    pub digest: String,
+    pub spec: compute_core::RecipeSpec,
+    /// The operator who wrote this version.
+    pub author: String,
+    pub created_at: DateTime<Utc>,
+}
+document!(RecipeRecord, Recipe);
 
 /// How a work session relates to its environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1340,6 +1378,9 @@ pub mod events {
     pub const COMPUTER_EXPIRED: &str = "computer.expired";
     pub const COMPUTER_REPLACING: &str = "computer.replacing";
     pub const COMPUTER_REPLACED: &str = "computer.replaced";
+    /// A recipe version was written. The event names the version and its
+    /// digest, never the spec.
+    pub const RECIPE_WRITTEN: &str = "recipe.written";
     /// A checkpoint was captured, verified, and recorded.
     pub const CHECKPOINT_CAPTURED: &str = "checkpoint.captured";
     /// A capture failed before anything was recorded.
@@ -1393,6 +1434,10 @@ pub fn short_digest(parts: &[&str]) -> String {
 
 pub mod ids {
     use super::short_digest;
+
+    pub fn recipe(name: &str, version: u64) -> String {
+        format!("rcp_{}", short_digest(&[name, &version.to_string()]))
+    }
 
     pub fn project(name: &str) -> String {
         format!("prj_{}", short_digest(&[name]))
@@ -1551,5 +1596,6 @@ pub fn decode_document(
         C::Version => decode::<VersionRecord>(value),
         C::Rollout => decode::<RolloutRecord>(value),
         C::Checkpoint => decode::<CheckpointRecord>(value),
+        C::Recipe => decode::<RecipeRecord>(value),
     }
 }

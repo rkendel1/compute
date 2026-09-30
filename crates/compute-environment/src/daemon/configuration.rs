@@ -471,6 +471,7 @@ mod tests {
             computer: None,
             contents: None,
             configuration: None,
+            recipe: None,
         }
     }
 

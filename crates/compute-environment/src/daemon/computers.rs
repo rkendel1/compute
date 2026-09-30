@@ -1002,6 +1002,14 @@ impl Daemon {
         }
         definition.computer.requirements.validate()?;
         definition.contents.validate()?;
+        if let Some(reference) = &definition.recipe {
+            self.verify_recipe_reference(
+                reference,
+                &definition.computer,
+                definition.policy.as_ref(),
+            )
+            .await?;
+        }
         if let Some(target) = &definition.computer.target
             && self.pool.member(target).is_none()
         {
@@ -1053,6 +1061,7 @@ impl Daemon {
         contents.generation = 1;
         let mut record = EnvironmentRecord {
             configuration: None,
+            recipe: definition.recipe.clone(),
             name: definition.name.clone(),
             desired_state: definition.desired_state,
             config: definition.env.clone(),
@@ -1116,7 +1125,10 @@ impl Daemon {
             events::ENVIRONMENT_CREATED,
             Scope::environment(&definition.name),
             format!("Environment {} created", definition.name),
-            json!({ "environment_id": id }),
+            match &definition.recipe {
+                Some(recipe) => json!({ "environment_id": id, "recipe": recipe }),
+                None => json!({ "environment_id": id }),
+            },
         );
         let change = self.event(
             change,
@@ -2334,35 +2346,7 @@ impl Daemon {
         spec: &ComputerSpec,
         target: Option<&str>,
     ) -> Result<(PlacementReport, SessionCreateRequest), EnvironmentError> {
-        // ProcessSpec is the durable runtime intent. Derive placement needs
-        // from the current contents so callers cannot accidentally place a
-        // runtime-aware process using only the session shell requirement.
-        let computer_requirements =
-            requirements_for_contents(&spec.requirements, environment.contents.as_ref());
-        let (requirements, create) =
-            PlacementRequirements::for_computer(&computer_requirements, spec.lifecycle)
-                .map_err(|error| EnvironmentError::Invalid(error.to_string()))?;
-        let bundle = create.environment().map_err(target_error)?;
-        let contract = ExecutionContract::from_bundle(&bundle, Some(requirements.isolation))
-            .map_err(|error| EnvironmentError::Invalid(error.to_string()))?;
-        let context = AdmissionContext::new(&self.policy_sources(environment)?, contract);
-        let records = {
-            let mut cache = self.cache.lock().await;
-            self.pool
-                .capabilities(&mut cache, DiscoveryMode::Refresh, target, Utc::now())
-                .await
-        };
-        let policy = target
-            .map(|id| PlacementPolicy::Provider(id.to_owned()))
-            .unwrap_or_default();
-        let report = place_with_policy(
-            &self.pool.configs(),
-            self.pool.policy(),
-            &records,
-            &requirements,
-            &context,
-            policy,
-        );
+        let (report, create) = self.evaluate_placement(environment, spec, target).await?;
         if report.outcome != PlacementOutcome::Placed {
             let reasons = report
                 .providers
@@ -2396,6 +2380,48 @@ impl Daemon {
                 }
             )));
         }
+        Ok((report, create))
+    }
+
+    /// Evaluate placement and admission for a computer's requirements
+    /// against the pool's current capabilities. Nothing is recorded and
+    /// nothing is provisioned: creating an environment places with this,
+    /// and so does previewing a recipe.
+    pub(crate) async fn evaluate_placement(
+        &self,
+        environment: &EnvironmentRecord,
+        spec: &ComputerSpec,
+        target: Option<&str>,
+    ) -> Result<(PlacementReport, SessionCreateRequest), EnvironmentError> {
+        // ProcessSpec is the durable runtime intent. Derive placement needs
+        // from the current contents so callers cannot accidentally place a
+        // runtime-aware process using only the session shell requirement.
+        let computer_requirements =
+            requirements_for_contents(&spec.requirements, environment.contents.as_ref());
+        let (requirements, create) =
+            PlacementRequirements::for_computer(&computer_requirements, spec.lifecycle)
+                .map_err(|error| EnvironmentError::Invalid(error.to_string()))?;
+        let bundle = create.environment().map_err(target_error)?;
+        let contract = ExecutionContract::from_bundle(&bundle, Some(requirements.isolation))
+            .map_err(|error| EnvironmentError::Invalid(error.to_string()))?;
+        let context = AdmissionContext::new(&self.policy_sources(environment)?, contract);
+        let records = {
+            let mut cache = self.cache.lock().await;
+            self.pool
+                .capabilities(&mut cache, DiscoveryMode::Refresh, target, Utc::now())
+                .await
+        };
+        let policy = target
+            .map(|id| PlacementPolicy::Provider(id.to_owned()))
+            .unwrap_or_default();
+        let report = place_with_policy(
+            &self.pool.configs(),
+            self.pool.policy(),
+            &records,
+            &requirements,
+            &context,
+            policy,
+        );
         Ok((report, create))
     }
 

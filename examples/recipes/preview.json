@@ -1,0 +1,6 @@
+{
+  "description": "A short-lived, isolated computer a person can reach for review.",
+  "lifecycle": "ephemeral",
+  "ttl_seconds": 86400,
+  "requirements": { "isolation": "sandboxed", "capabilities": ["public_endpoint"] }
+}

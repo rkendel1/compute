@@ -17,10 +17,10 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use crate::EnvironmentError;
 use crate::auth::{Principal, RequestContext, required_scope};
 use crate::daemon::{Daemon, EventFilter};
 use crate::model::*;
+use crate::{EnvironmentError, RecipeResolveRequest};
 
 pub const API_VERSION: &str = "compute.api@1";
 const MAX_BODY_BYTES: usize = 512 * 1024 * 1024;
@@ -153,6 +153,11 @@ pub const ROUTES: &[(&str, &str)] = &[
         "POST",
         "/environments/{environment}/processes/{process}/restart",
     ),
+    ("GET", "/recipes"),
+    ("POST", "/recipes"),
+    ("POST", "/recipes/resolve"),
+    ("GET", "/recipes/{recipe}"),
+    ("GET", "/recipes/{recipe}/resolve"),
     ("GET", "/targets"),
     // Software: projects, their versions, and where they run.
     ("GET", "/software"),
@@ -1072,6 +1077,31 @@ async fn route(
         ("POST", ["environments", id, "fork"]) => created(to_value(
             Box::pin(daemon.fork_environment(id, &principal.operator_id, parse(body)?)).await?,
         )?),
+        // Recipes: lifecycle policy as data. Resolving is read only.
+        ("GET", ["recipes"]) => ok(to_value(Box::pin(daemon.recipes()).await?)?),
+        ("POST", ["recipes"]) => created(to_value(
+            Box::pin(daemon.write_recipe(&principal.operator_id, parse(body)?)).await?,
+        )?),
+        ("POST", ["recipes", "resolve"]) => {
+            let request: RecipeResolveRequest = parse(body)?;
+            let spec = request.spec.ok_or_else(|| {
+                EnvironmentError::Invalid("a draft recipe resolution needs a `spec`".into())
+            })?;
+            ok(to_value(
+                Box::pin(daemon.resolve_spec(None, &spec, request.target.as_deref())).await?,
+            )?)
+        }
+        ("GET", ["recipes", name]) => ok(to_value(
+            Box::pin(daemon.recipe(name, query_version(query)?)).await?,
+        )?),
+        ("GET", ["recipes", name, "resolve"]) => ok(to_value(
+            Box::pin(daemon.resolve_recipe(
+                name,
+                query_version(query)?,
+                query.get("target").map(String::as_str),
+            ))
+            .await?,
+        )?),
         ("POST", ["checkpoints", id, "restore"]) => created(to_value(
             Box::pin(daemon.restore_checkpoint(id, &principal.operator_id, parse(body)?)).await?,
         )?),
@@ -1472,6 +1502,17 @@ async fn route(
             request.path
         ))),
     }
+}
+
+fn query_version(query: &BTreeMap<String, String>) -> Result<Option<u64>, EnvironmentError> {
+    query
+        .get("version")
+        .map(|version| {
+            version.parse().map_err(|_| {
+                EnvironmentError::Invalid(format!("recipe version {version:?} is not a number"))
+            })
+        })
+        .transpose()
 }
 
 fn event_filter(query: &BTreeMap<String, String>) -> EventFilter {

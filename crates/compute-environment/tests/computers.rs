@@ -458,6 +458,7 @@ fn definition(
             ttl_seconds: None,
         },
         contents,
+        recipe: None,
     }
 }
 

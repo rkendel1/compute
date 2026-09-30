@@ -1,0 +1,6 @@
+{
+  "description": "A temporary computer to run a migration from. The persistent environment it acts on is its own recipe; see docs/recipes.md (gaps).",
+  "lifecycle": "ephemeral",
+  "ttl_seconds": 7200,
+  "requirements": { "isolation": "sandboxed" }
+}
