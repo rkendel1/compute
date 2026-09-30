@@ -1400,7 +1400,10 @@ async fn drift_is_reconciled_and_processes_follow_their_desired_state() {
         .await
         .unwrap();
     let failed = computer_where(&daemon, "drift", "the failure", |view| {
-        view.observed.packages.contains_key("broken")
+        view.observed
+            .packages
+            .get("broken")
+            .is_some_and(|package| package.evidence.outcome != "running")
     })
     .await;
     assert_eq!(

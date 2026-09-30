@@ -1262,17 +1262,17 @@ impl Daemon {
             .collect();
         let reality = self.reality(&record.value, &spec, &value, converged);
         let bootstrap = super::bootstrap::derive_bootstrap(&record.value, &spec, &value, converged);
-        let readiness = self
-            .evaluate_readiness(
-                &record.value,
-                &spec,
-                &value,
-                converged,
-                &reality,
-                &bootstrap,
-                fresh,
-            )
-            .await;
+        // Boxed: the verdict's futures are large, and this is on every request path.
+        let readiness = Box::pin(self.evaluate_readiness(
+            &record.value,
+            &spec,
+            &value,
+            converged,
+            &reality,
+            &bootstrap,
+            fresh,
+        ))
+        .await;
         Some(ComputerView {
             reality,
             readiness,
@@ -4064,8 +4064,7 @@ impl Daemon {
         command: SessionCommand,
         timeout: Duration,
     ) -> (OperationEvidence, String) {
-        self.run_job(client, session_id, command, timeout, None)
-            .await
+        Box::pin(self.run_job(client, session_id, command, timeout, None)).await
     }
 
     /// Like `run_in_computer_command`, for the work that brings a computer to
@@ -4081,8 +4080,7 @@ impl Daemon {
         timeout: Duration,
         claim: &ItemClaim,
     ) -> (OperationEvidence, String) {
-        self.run_job(client, session_id, command, timeout, Some(claim))
-            .await
+        Box::pin(self.run_job(client, session_id, command, timeout, Some(claim))).await
     }
 
     /// The computer record of the environment that owns `session_id`, read
