@@ -147,6 +147,7 @@ async fn running(daemon: &Arc<Daemon>, name: &str) -> ComputerView {
 }
 
 async fn sh(daemon: &Arc<Daemon>, name: &str, script: &str) -> String {
+    common::wait_admitting(daemon, name).await;
     let exec = daemon
         .computer_exec(
             name,

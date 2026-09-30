@@ -20,7 +20,8 @@ use compute_state::{ComputerRecord, EnvironmentRecord};
 
 use super::Daemon;
 use crate::{
-    ComputerReality, EnvironmentError, EnvironmentReadiness, ReadinessCondition, ReadinessState,
+    BootstrapState, ComputerReality, EnvironmentBootstrap, EnvironmentError, EnvironmentReadiness,
+    FailureClass, ReadinessCondition, ReadinessState, VerifiedConfiguration,
 };
 
 /// What the computer's own target says about its requirements right now.
@@ -43,6 +44,7 @@ impl Daemon {
         computer: &ComputerRecord,
         converged: bool,
         reality: &ComputerReality,
+        bootstrap: &EnvironmentBootstrap,
         fresh: bool,
     ) -> EnvironmentReadiness {
         let name = &environment.name;
@@ -52,12 +54,19 @@ impl Daemon {
             .as_ref()
             .map(|failure| format!("{} ({})", failure.message, failure.code))
             .unwrap_or_default();
+        let recorded_class = bootstrap.failure.as_ref().map(|failure| failure.class);
         let done = |state, conditions, unsatisfied, explanation: String| EnvironmentReadiness {
             state,
             conditions,
             unsatisfied,
             explanation,
+            class: None,
+            configuration: None,
             evaluated_at: Utc::now(),
+        };
+        let classed = |mut readiness: EnvironmentReadiness, class: Option<FailureClass>| {
+            readiness.class = class;
+            readiness
         };
         let machine = |satisfied: bool, detail: String| ReadinessCondition {
             name: "machine".into(),
@@ -82,11 +91,14 @@ impl Daemon {
                 );
             }
             ComputerStatus::Failed => {
-                return done(
-                    ReadinessState::Failed,
-                    vec![machine(false, failure.clone())],
-                    vec![],
-                    format!("Establishing {name} failed: {failure}."),
+                return classed(
+                    done(
+                        ReadinessState::Failed,
+                        vec![machine(false, failure.clone())],
+                        vec![],
+                        format!("Establishing {name} failed: {failure}."),
+                    ),
+                    Some(FailureClass::ProviderFailed),
                 );
             }
             ComputerStatus::Running => {}
@@ -96,18 +108,21 @@ impl Daemon {
                     ComputerStatus::Unreachable | ComputerStatus::Lost => failure.clone(),
                     other => other.to_string(),
                 };
-                return done(
-                    ReadinessState::Unavailable,
-                    vec![machine(false, detail.clone())],
-                    vec![],
-                    format!("{name} cannot run workloads: its computer is {status}. {detail}"),
+                return classed(
+                    done(
+                        ReadinessState::Unavailable,
+                        vec![machine(false, detail.clone())],
+                        vec![],
+                        format!("{name} cannot run workloads: its computer is {status}. {detail}"),
+                    ),
+                    recorded_class.filter(|class| *class == FailureClass::DestructionFailed),
                 );
             }
         }
 
         // Running by its record. The requirements are re-verified against
         // the target as it is now.
-        let verdict = self
+        let (verdict, verified) = self
             .target_verdict(environment, spec, computer, fresh)
             .await;
         let confirmed = reality.observed != "unverified";
@@ -142,6 +157,16 @@ impl Daemon {
         };
         conditions.push(requirements);
         conditions.push(ReadinessCondition {
+            name: "bootstrap".into(),
+            satisfied: bootstrap.state == BootstrapState::Succeeded,
+            detail: match (&bootstrap.state, &bootstrap.failure) {
+                (BootstrapState::Failed, Some(failure)) => {
+                    format!("failed: {} ({})", failure.message, failure.class.as_str())
+                }
+                (state, _) => state.as_str().replace('_', " "),
+            },
+        });
+        conditions.push(ReadinessCondition {
             name: "contents".into(),
             satisfied: converged,
             detail: if converged {
@@ -172,15 +197,44 @@ impl Daemon {
             },
         });
 
-        match verdict {
-            Verdict::Unsatisfied(_, detail) => done(
-                ReadinessState::Unavailable,
-                conditions,
-                unsatisfied,
-                format!(
-                    "{name} runs on {target}, but {target} no longer satisfies its requirements: {detail}. No workload is admitted; replace the computer or change its requirements."
+        // A configuration or provider failure means the environment is not
+        // what was declared: failed, and nothing is admitted. A declared
+        // process that will not start is a runtime impairment its restart
+        // policy already manages: degraded, class `runtime_failed`.
+        let bootstrap_failure = (bootstrap.state == BootstrapState::Failed)
+            .then(|| bootstrap.failure.as_ref())
+            .flatten();
+        let runtime_failure =
+            bootstrap_failure.filter(|failure| failure.class == FailureClass::RuntimeFailed);
+        let bootstrap_failed =
+            bootstrap_failure.filter(|failure| failure.class != FailureClass::RuntimeFailed);
+        let mut readiness = match verdict {
+            Verdict::Unsatisfied(_, detail) => classed(
+                done(
+                    ReadinessState::Unavailable,
+                    conditions,
+                    unsatisfied,
+                    format!(
+                        "{name} runs on {target}, but {target} no longer satisfies its requirements: {detail}. No workload is admitted; replace the computer or change its requirements."
+                    ),
                 ),
+                Some(FailureClass::RequirementsUnsatisfied),
             ),
+            _ if bootstrap_failed.is_some() => {
+                let failure = bootstrap_failed.expect("checked");
+                classed(
+                    done(
+                        ReadinessState::Failed,
+                        conditions,
+                        unsatisfied,
+                        format!(
+                            "{name}'s bootstrap failed in {}: {}. It is not ready; fix the cause and retry with `reconcile`.",
+                            failure.operation, failure.message
+                        ),
+                    ),
+                    Some(failure.class),
+                )
+            }
             Verdict::Unknown(detail) => done(
                 ReadinessState::Degraded,
                 conditions,
@@ -189,6 +243,21 @@ impl Daemon {
                     "{name}'s requirements could not be re-verified: {detail}. It is not reported ready."
                 ),
             ),
+            Verdict::Satisfied if runtime_failure.is_some() => {
+                let failure = runtime_failure.expect("checked");
+                classed(
+                    done(
+                        ReadinessState::Degraded,
+                        conditions,
+                        unsatisfied,
+                        format!(
+                            "{name} is configured, but a declared process is not running: {}. Workloads are admitted; retry with `reconcile`.",
+                            failure.message
+                        ),
+                    ),
+                    Some(failure.class),
+                )
+            }
             Verdict::Satisfied if !confirmed => done(
                 ReadinessState::Degraded,
                 conditions,
@@ -197,6 +266,12 @@ impl Daemon {
                     "{name} is running by its record, but {target} has not confirmed the machine recently; Compute is checking."
                 ),
             ),
+            Verdict::Satisfied if bootstrap.state == BootstrapState::Running => done(
+                ReadinessState::Starting,
+                conditions,
+                unsatisfied,
+                format!("{name} is bootstrapping: Compute is bringing it to what it declares."),
+            ),
             Verdict::Satisfied if !impaired.is_empty() => done(
                 ReadinessState::Degraded,
                 conditions,
@@ -204,10 +279,10 @@ impl Daemon {
                 format!("{name} is running but impaired: {}.", impaired.join(", ")),
             ),
             Verdict::Satisfied if !converged => done(
-                ReadinessState::Starting,
+                ReadinessState::Degraded,
                 conditions,
                 unsatisfied,
-                format!("{name} is running; Compute is bringing it to what it declares."),
+                format!("{name} is configured; Compute is applying a scheduled change."),
             ),
             Verdict::Satisfied => done(
                 ReadinessState::Ready,
@@ -215,7 +290,9 @@ impl Daemon {
                 unsatisfied,
                 format!("{name} is ready: verified against {target}."),
             ),
-        }
+        };
+        readiness.configuration = verified;
+        readiness
     }
 
     /// Ask the computer's own target whether it satisfies the requirements:
@@ -226,13 +303,13 @@ impl Daemon {
         spec: &ComputerSpec,
         computer: &ComputerRecord,
         fresh: bool,
-    ) -> Verdict {
+    ) -> (Verdict, Option<VerifiedConfiguration>) {
         let Some(target) = computer.target.as_deref() else {
-            return Verdict::Unknown("the computer has no target".into());
+            return (Verdict::Unknown("the computer has no target".into()), None);
         };
         let (requirements, _create, context) = match self.placement_inputs(environment, spec) {
             Ok(inputs) => inputs,
-            Err(error) => return Verdict::Unknown(error.to_string()),
+            Err(error) => return (Verdict::Unknown(error.to_string()), None),
         };
         let recent = self
             .readiness_probed
@@ -270,9 +347,27 @@ impl Daemon {
             .iter()
             .find(|provider| provider.provider_id == target)
         else {
-            return Verdict::Unknown(format!("target {target} is not in the daemon's pool"));
+            return (
+                Verdict::Unknown(format!("target {target} is not in the daemon's pool")),
+                None,
+            );
         };
-        match evaluation.status {
+        let verified = Some(VerifiedConfiguration {
+            target: target.to_owned(),
+            distribution: evaluation
+                .runtime_distribution
+                .as_ref()
+                .map(|distribution| distribution.id.clone()),
+            runtime: evaluation
+                .runtime_distribution
+                .as_ref()
+                .map(|distribution| format!("{}@{}", distribution.runtime, distribution.version)),
+            platform: evaluation
+                .platform
+                .as_ref()
+                .map(|platform| format!("{}/{}", platform.os, platform.architecture)),
+        });
+        let verdict = match evaluation.status {
             EvaluationStatus::Compatible | EvaluationStatus::ExcludedUnhealthy => {
                 Verdict::Satisfied
             }
@@ -305,7 +400,8 @@ impl Daemon {
                 "{target}'s capabilities could not be discovered ({:?})",
                 evaluation.status
             )),
-        }
+        };
+        (verdict, verified)
     }
 
     /// Admit a user's workload only when the environment can run it: the

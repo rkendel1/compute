@@ -520,6 +520,121 @@ pub struct ComputerView {
     /// own target. Observed, never stored: `requirements` is what it must
     /// satisfy; this is what Compute has just verified.
     pub readiness: EnvironmentReadiness,
+    /// Whether the computer has been brought to what the environment
+    /// declares: the existing contents reconciliation, told apart from
+    /// readiness (bootstrap configures; readiness verifies).
+    pub bootstrap: EnvironmentBootstrap,
+}
+
+/// Why an environment is not usable, in terms a consumer can act on. One
+/// class per condition; none carries provider internals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureClass {
+    /// The target does not satisfy the requirements (placement's reasons).
+    RequirementsUnsatisfied,
+    /// A declared repository, package, or build failed to apply.
+    ConfigurationFailed,
+    /// The target or provider failed to provision or resume the machine.
+    ProviderFailed,
+    /// A declared process could not start or resolve its runtime.
+    RuntimeFailed,
+    /// Stopped or being destroyed before the configuration completed.
+    BootstrapCancelled,
+    /// The machine could not be removed.
+    DestructionFailed,
+}
+
+impl FailureClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RequirementsUnsatisfied => "requirements_unsatisfied",
+            Self::ConfigurationFailed => "configuration_failed",
+            Self::ProviderFailed => "provider_failed",
+            Self::RuntimeFailed => "runtime_failed",
+            Self::BootstrapCancelled => "bootstrap_cancelled",
+            Self::DestructionFailed => "destruction_failed",
+        }
+    }
+}
+
+/// Where establishing the configured environment stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootstrapState {
+    /// No machine is running yet, so nothing has been applied.
+    NotStarted,
+    /// The machine runs and is being brought to what is declared.
+    Running,
+    /// Everything declared has been applied and is held.
+    Succeeded,
+    /// Something declared failed, or the machine could not be established.
+    /// Retry with `reconcile`; the environment stays inspectable.
+    Failed,
+}
+
+impl BootstrapState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotStarted => "not_started",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// One declared item and the outcome of applying it, with the durable job
+/// that did it. Derived from the computer's observed contents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapStep {
+    /// `repository`, `package`, `build`, or `process`.
+    pub kind: String,
+    pub name: String,
+    /// `pending`, `succeeded`, or `failed`.
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// What failed, by the existing operation that failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapFailure {
+    pub class: FailureClass,
+    /// The existing operation: `provisioning`, `repository sync`,
+    /// `package install`, `build`, `process start`, `stop`, `destroy`.
+    pub operation: String,
+    pub message: String,
+    /// Whether `reconcile` may retry it.
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<DateTime<Utc>>,
+}
+
+/// Bootstrap, derived from the computer's existing observed contents and
+/// failure record. Nothing here is stored separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentBootstrap {
+    pub state: BootstrapState,
+    /// The contents generation declared, and the one the computer last
+    /// fully held.
+    pub contents_generation: u64,
+    pub converged_generation: u64,
+    pub steps: Vec<BootstrapStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<BootstrapFailure>,
 }
 
 /// Where an environment is between "asked for" and "can run workloads".
@@ -584,7 +699,27 @@ pub struct EnvironmentReadiness {
     pub unsatisfied: Vec<compute_placement::IncompatibilityReason>,
     /// What this means and what to do about it.
     pub explanation: String,
+    /// Why it is not usable, when it is not, as a class a consumer can act on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<FailureClass>,
+    /// What the target was verified to be: the distribution and platform the
+    /// requirements were checked against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<VerifiedConfiguration>,
     pub evaluated_at: DateTime<Utc>,
+}
+
+/// The target a readiness verdict was made against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedConfiguration {
+    pub target: String,
+    /// The runtime distribution the target reports (`id`, `runtime@version`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 /// What the environment wants of its computer, and what Compute last

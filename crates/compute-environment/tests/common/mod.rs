@@ -16,3 +16,24 @@ pub fn catalog() -> compute_provider::RuntimeCatalog {
         .expect("fixture runtime catalog")
         .catalog
 }
+
+/// A consumer's wait for readiness: returns once Compute admits workloads
+/// to the environment (`ready` or `degraded`), and panics with Compute's
+/// own explanation if it does not within the deadline.
+#[allow(dead_code)]
+pub async fn wait_admitting(daemon: &compute_environment::Daemon, name: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+    loop {
+        let readiness = daemon.computer(name).await.map(|view| view.readiness);
+        if let Ok(readiness) = &readiness
+            && readiness.state.admits_workloads()
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{name} never admitted workloads: {readiness:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}

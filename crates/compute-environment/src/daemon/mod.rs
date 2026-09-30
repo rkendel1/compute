@@ -13,6 +13,7 @@
 //! running and should not.
 
 mod applications;
+mod bootstrap;
 mod candidate;
 mod checkpoint;
 mod computers;

@@ -516,6 +516,7 @@ async fn run(
     operator: &str,
     command: &[&str],
 ) -> (String, ComputerJob) {
+    common::wait_admitting(daemon, name).await;
     let exec = daemon
         .computer_exec(
             name,
@@ -1534,6 +1535,7 @@ async fn deployment_is_reconciliation_of_the_same_computer() {
     // Build, test, and project commands run inside the environment's
     // computer — the target's workspace — never on the daemon's node.
     for command in ["build", "test", "where"] {
+        common::wait_admitting(&daemon, "myapp").await;
         let exec = daemon
             .project_command(
                 "myapp",

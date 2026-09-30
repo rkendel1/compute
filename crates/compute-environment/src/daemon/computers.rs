@@ -1209,6 +1209,7 @@ impl Daemon {
         let desired = record.value.contents.clone().unwrap_or_default();
         let value = computer.value;
         let converged = value.status == ComputerStatus::Running
+            && !super::bootstrap::configuration_failed(&value.observed)
             && value.spec_generation == spec.generation
             && value.observed.converged_generation == desired.generation
             // A restart its policy scheduled is work still to do.
@@ -1251,12 +1252,22 @@ impl Daemon {
             })
             .collect();
         let reality = self.reality(&record.value, &spec, &value, converged);
+        let bootstrap = super::bootstrap::derive_bootstrap(&record.value, &spec, &value, converged);
         let readiness = self
-            .evaluate_readiness(&record.value, &spec, &value, converged, &reality, fresh)
+            .evaluate_readiness(
+                &record.value,
+                &spec,
+                &value,
+                converged,
+                &reality,
+                &bootstrap,
+                fresh,
+            )
             .await;
         Some(ComputerView {
             reality,
             readiness,
+            bootstrap,
             environment: record.value.name.clone(),
             environment_id: record.id.clone(),
             owner: value.owner,
@@ -3420,7 +3431,11 @@ impl Daemon {
         }
         let mut value = computer.clone();
         let mut event = None;
-        if value.observed.converged_generation != contents.generation {
+        // Converged means held, not attempted: a failed repository, package, or
+        // build leaves the generation unconverged until a retry succeeds.
+        if value.observed.converged_generation != contents.generation
+            && !super::bootstrap::configuration_failed(&value.observed)
+        {
             value.observed.converged_generation = contents.generation;
             event = Some((
                 events::CONTENTS_CONVERGED,
@@ -3521,7 +3536,7 @@ impl Daemon {
         let (item, kind, evidence) = match action {
             Action::SyncRepository(repository, wanted) => {
                 let (evidence, output) = self
-                    .run_in_computer(
+                    .run_interruptible(
                         client,
                         session_id,
                         script(
@@ -3582,7 +3597,7 @@ impl Daemon {
                 let mut arguments = vec![package.repository.clone().unwrap_or_default()];
                 arguments.extend(package.install.iter().cloned());
                 let (evidence, _) = self
-                    .run_in_computer(
+                    .run_interruptible(
                         client,
                         session_id,
                         script(INSTALL_PACKAGE, arguments),
@@ -3609,12 +3624,7 @@ impl Daemon {
                 let mut command = script(INSTALL_PACKAGE, arguments);
                 command.env = record.value.config.clone();
                 let (evidence, _) = self
-                    .run_in_computer_command(
-                        client,
-                        session_id,
-                        command,
-                        Duration::from_secs(60 * 60),
-                    )
+                    .run_interruptible(client, session_id, command, Duration::from_secs(60 * 60))
                     .await;
                 let commit = commit_of(&project.repository, &value.observed);
                 value.observed.builds.insert(
@@ -3870,6 +3880,11 @@ impl Daemon {
                 )
             }
         };
+        // Interrupted by a stop or a destroy: nothing was applied and nothing
+        // failed. The attempt is not recorded, so a start applies it again.
+        if evidence.outcome == "cancelled" {
+            return Ok(());
+        }
         let succeeded = evidence.outcome == "succeeded";
         if !succeeded {
             value.failure = Some(ComputerFailure {
@@ -3936,8 +3951,65 @@ impl Daemon {
         &self,
         client: &RemoteProvider,
         session_id: &str,
+        command: SessionCommand,
+        timeout: Duration,
+    ) -> (OperationEvidence, String) {
+        self.run_job(client, session_id, command, timeout, false)
+            .await
+    }
+
+    /// Like `run_in_computer_command`, for the work that brings a computer to
+    /// what its environment declares (a repository, a package, a build): if
+    /// the environment is stopped or destroyed while it runs, the job is
+    /// cancelled, confirmed ended, and reported `cancelled`, so a stop or a
+    /// destroy never waits on, or leaves behind, bootstrap work.
+    async fn run_interruptible(
+        &self,
+        client: &RemoteProvider,
+        session_id: &str,
+        command: SessionCommand,
+        timeout: Duration,
+    ) -> (OperationEvidence, String) {
+        self.run_job(client, session_id, command, timeout, true)
+            .await
+    }
+
+    /// Why the environment owning `session_id` no longer wants its
+    /// configuration applied, when it does not.
+    async fn interruption(&self, session_id: &str) -> Option<&'static str> {
+        let _ = self.refresh_targeted().await;
+        let inner = self.inner.lock().await;
+        let computer = inner
+            .desired
+            .computers
+            .values()
+            .find(|computer| computer.value.session_id.as_deref() == Some(session_id))?;
+        let environment = inner
+            .desired
+            .environments
+            .values()
+            .find(|environment| environment.id == computer.value.environment_id)?;
+        if environment
+            .value
+            .computer
+            .as_ref()
+            .is_some_and(|spec| spec.destroy_requested_at.is_some())
+        {
+            Some("destroyed")
+        } else if environment.value.desired_state == DesiredState::Stopped {
+            Some("stopped")
+        } else {
+            None
+        }
+    }
+
+    async fn run_job(
+        &self,
+        client: &RemoteProvider,
+        session_id: &str,
         mut command: SessionCommand,
         timeout: Duration,
+        interruptible: bool,
     ) -> (OperationEvidence, String) {
         command.timeout = Some(timeout);
         let failed = |job_id: String, execution_id: String, error: String| {
@@ -4006,6 +4078,34 @@ impl Daemon {
                     job_id,
                     submission.execution_id,
                     "the job did not finish in time".into(),
+                );
+            }
+            if interruptible && let Some(why) = self.interruption(session_id).await {
+                // Cancellation is confirmed by the target: wait for the job
+                // to be over, so nothing of it outlives the stop or destroy.
+                let _ = tokio::time::timeout(patience, client.cancel_job(&job_id)).await;
+                let end = std::time::Instant::now() + patience;
+                loop {
+                    let over = matches!(
+                        tokio::time::timeout(patience, client.job_status(&job_id)).await,
+                        Ok(Ok(job)) if job.status.is_terminal()
+                    );
+                    if over || std::time::Instant::now() >= end {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                return (
+                    OperationEvidence {
+                        job_id,
+                        execution_id: submission.execution_id,
+                        outcome: "cancelled".into(),
+                        at: Utc::now(),
+                        error: Some(format!(
+                            "cancelled: the environment was {why} before it finished"
+                        )),
+                    },
+                    String::new(),
                 );
             }
             tokio::time::sleep(delay).await;

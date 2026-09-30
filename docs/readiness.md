@@ -54,6 +54,13 @@ environment.
 | `unavailable` | It cannot run workloads: stopped, stopping, unreachable, lost, destroyed, or its target no longer satisfies its requirements (placement's reasons are listed) | no |
 | `failed` | Establishing it failed (a provisioning failure). Distinct from unsatisfied requirements | no |
 
+Bootstrap ([bootstrap.md](bootstrap.md)) is its own condition: a failed
+repository, package, build, or provisioning makes the environment `failed`
+with a class (`configuration_failed`, `provider_failed`) and the operation
+that failed; a declared process that will not start is `degraded`
+(`runtime_failed`). A machine that is running but still being configured is
+`starting`.
+
 **Unsatisfied is not failed.** A target that cannot satisfy the requirements
 is `unavailable` with `unsatisfied` reasons (`session_capability_unsupported`,
 `runtime_unavailable`, …); at creation it is refused by placement and nothing

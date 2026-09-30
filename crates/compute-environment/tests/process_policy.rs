@@ -171,6 +171,7 @@ async fn holds(
 /// Run a command in the computer, through its session, and return its
 /// output.
 async fn run(daemon: &Arc<Daemon>, name: &str, command: &[&str]) -> String {
+    common::wait_admitting(daemon, name).await;
     let exec = daemon
         .computer_exec(
             name,
