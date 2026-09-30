@@ -650,7 +650,8 @@ pub enum ReadinessState {
     /// requirements now, and it holds what it declares.
     Ready,
     /// It runs and its requirements hold, but something declared is
-    /// impaired or could not be re-verified. Workloads are admitted.
+    /// impaired or could not be re-verified. Not ready: no workload is
+    /// admitted; it stays diagnosable through readiness.
     Degraded,
     /// It cannot run workloads: stopped, unreachable, lost, or its target no
     /// longer satisfies its requirements.
@@ -671,9 +672,9 @@ impl ReadinessState {
         }
     }
 
-    /// Whether a workload may be admitted.
+    /// Whether a workload may be admitted: only when verified ready.
     pub const fn admits_workloads(self) -> bool {
-        matches!(self, Self::Ready | Self::Degraded)
+        matches!(self, Self::Ready)
     }
 }
 

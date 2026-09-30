@@ -265,6 +265,16 @@ fn package_fingerprint(package: &PackageSpec, observed: &ObservedContents) -> St
     fingerprint(&(package, commit))
 }
 
+/// The durable claim on one repository, package, or build while its job runs:
+/// written (with the job's identity) as soon as the job is submitted, so a
+/// controller that restarts adopts the job instead of submitting a second
+/// one, and cleared (back to what it was) if the work is cancelled.
+pub(crate) struct ItemClaim {
+    pub fingerprint: String,
+    pub get: Box<dyn Fn(&ObservedContents) -> Option<(String, OperationEvidence)> + Send + Sync>,
+    pub set: Box<dyn Fn(&mut ObservedContents, Option<(String, OperationEvidence)>) + Send + Sync>,
+}
+
 /// Plan the next action, in order: repositories, packages, processes to
 /// stop, processes to start. A failed attempt at an unchanged item is not
 /// retried until the item changes or a reconcile is requested; a process
@@ -281,7 +291,7 @@ pub(crate) fn plan(
         if observed
             .repositories
             .get(&repository.name)
-            .is_none_or(|seen| seen.fingerprint != wanted)
+            .is_none_or(|seen| seen.fingerprint != wanted || seen.evidence.outcome == "running")
         {
             return Some(Action::SyncRepository(repository.clone(), wanted));
         }
@@ -296,7 +306,7 @@ pub(crate) fn plan(
         if observed
             .packages
             .get(&package.name)
-            .is_none_or(|seen| seen.fingerprint != wanted)
+            .is_none_or(|seen| seen.fingerprint != wanted || seen.evidence.outcome == "running")
         {
             return Some(Action::InstallPackage(package.clone(), wanted));
         }
@@ -315,7 +325,7 @@ pub(crate) fn plan(
         if observed
             .builds
             .get(&project.name)
-            .is_none_or(|seen| seen.fingerprint != wanted)
+            .is_none_or(|seen| seen.fingerprint != wanted || seen.evidence.outcome == "running")
         {
             return Some(Action::Build(project.clone(), wanted));
         }
@@ -2332,6 +2342,8 @@ impl Daemon {
         operator: &str,
     ) -> Result<compute_core::SessionConnectionGrant, EnvironmentError> {
         let record = self.owned_environment(environment, operator).await?;
+        // A terminal is a workload channel: admitted like any other.
+        self.require_ready(&record).await?;
         let (computer, client, session_id) = self.running(&record).await?;
         let grant = client
             .connect_session(&session_id)
@@ -3535,6 +3547,35 @@ impl Daemon {
         let mut extra = vec![];
         let (item, kind, evidence) = match action {
             Action::SyncRepository(repository, wanted) => {
+                let claim = {
+                    let (name, revision) = (repository.name.clone(), repository.revision.clone());
+                    let (getter, setter) = (name.clone(), name.clone());
+                    ItemClaim {
+                        fingerprint: wanted.clone(),
+                        get: Box::new(move |observed| {
+                            observed
+                                .repositories
+                                .get(&getter)
+                                .map(|seen| (seen.fingerprint.clone(), seen.evidence.clone()))
+                        }),
+                        set: Box::new(move |observed, value| match value {
+                            Some((fingerprint, evidence)) => {
+                                observed.repositories.insert(
+                                    setter.clone(),
+                                    ObservedRepository {
+                                        revision: revision.clone(),
+                                        commit: None,
+                                        fingerprint,
+                                        evidence,
+                                    },
+                                );
+                            }
+                            None => {
+                                observed.repositories.remove(&setter);
+                            }
+                        }),
+                    }
+                };
                 let (evidence, output) = self
                     .run_interruptible(
                         client,
@@ -3548,6 +3589,7 @@ impl Daemon {
                             ],
                         ),
                         Duration::from_secs(30 * 60),
+                        &claim,
                     )
                     .await;
                 let commit = (evidence.outcome == "succeeded")
@@ -3596,12 +3638,39 @@ impl Daemon {
             Action::InstallPackage(package, wanted) => {
                 let mut arguments = vec![package.repository.clone().unwrap_or_default()];
                 arguments.extend(package.install.iter().cloned());
+                let claim = {
+                    let (getter, setter) = (package.name.clone(), package.name.clone());
+                    ItemClaim {
+                        fingerprint: wanted.clone(),
+                        get: Box::new(move |observed| {
+                            observed
+                                .packages
+                                .get(&getter)
+                                .map(|seen| (seen.fingerprint.clone(), seen.evidence.clone()))
+                        }),
+                        set: Box::new(move |observed, value| match value {
+                            Some((fingerprint, evidence)) => {
+                                observed.packages.insert(
+                                    setter.clone(),
+                                    ObservedPackage {
+                                        fingerprint,
+                                        evidence,
+                                    },
+                                );
+                            }
+                            None => {
+                                observed.packages.remove(&setter);
+                            }
+                        }),
+                    }
+                };
                 let (evidence, _) = self
                     .run_interruptible(
                         client,
                         session_id,
                         script(INSTALL_PACKAGE, arguments),
                         Duration::from_secs(60 * 60),
+                        &claim,
                     )
                     .await;
                 value.observed.packages.insert(
@@ -3623,8 +3692,42 @@ impl Daemon {
                 arguments.extend(project.build.iter().cloned());
                 let mut command = script(INSTALL_PACKAGE, arguments);
                 command.env = record.value.config.clone();
+                let claim = {
+                    let (getter, setter) = (project.name.clone(), project.name.clone());
+                    let commit = commit_of(&project.repository, &value.observed);
+                    ItemClaim {
+                        fingerprint: wanted.clone(),
+                        get: Box::new(move |observed| {
+                            observed
+                                .builds
+                                .get(&getter)
+                                .map(|seen| (seen.fingerprint.clone(), seen.evidence.clone()))
+                        }),
+                        set: Box::new(move |observed, value| match value {
+                            Some((fingerprint, evidence)) => {
+                                observed.builds.insert(
+                                    setter.clone(),
+                                    ObservedBuild {
+                                        commit: commit.clone(),
+                                        fingerprint,
+                                        evidence,
+                                    },
+                                );
+                            }
+                            None => {
+                                observed.builds.remove(&setter);
+                            }
+                        }),
+                    }
+                };
                 let (evidence, _) = self
-                    .run_interruptible(client, session_id, command, Duration::from_secs(60 * 60))
+                    .run_interruptible(
+                        client,
+                        session_id,
+                        command,
+                        Duration::from_secs(60 * 60),
+                        &claim,
+                    )
                     .await;
                 let commit = commit_of(&project.repository, &value.observed);
                 value.observed.builds.insert(
@@ -3931,6 +4034,14 @@ impl Daemon {
             }),
         )];
         events.extend(extra);
+        // A claim moved the record's version while the job ran: write the
+        // outcome against the record as it is now.
+        let refreshed = if matches!(kind, "repository" | "package" | "build") {
+            self.fresh_computer(&stored.value.environment_id).await
+        } else {
+            None
+        };
+        let stored = refreshed.as_ref().unwrap_or(stored);
         self.advance_all(stored, name, value.clone(), events).await
     }
 
@@ -3954,7 +4065,7 @@ impl Daemon {
         command: SessionCommand,
         timeout: Duration,
     ) -> (OperationEvidence, String) {
-        self.run_job(client, session_id, command, timeout, false)
+        self.run_job(client, session_id, command, timeout, None)
             .await
     }
 
@@ -3969,9 +4080,41 @@ impl Daemon {
         session_id: &str,
         command: SessionCommand,
         timeout: Duration,
+        claim: &ItemClaim,
     ) -> (OperationEvidence, String) {
-        self.run_job(client, session_id, command, timeout, true)
+        self.run_job(client, session_id, command, timeout, Some(claim))
             .await
+    }
+
+    /// The computer record of the environment that owns `session_id`, read
+    /// back fresh.
+    async fn computer_of_session(&self, session_id: &str) -> Option<Stored<ComputerRecord>> {
+        let _ = self.refresh_targeted().await;
+        self.inner
+            .lock()
+            .await
+            .desired
+            .computers
+            .values()
+            .find(|computer| computer.value.session_id.as_deref() == Some(session_id))
+            .cloned()
+    }
+
+    /// Write (or clear) the claim, fenced on the record it was read from.
+    async fn store_claim(
+        &self,
+        session_id: &str,
+        claim: &ItemClaim,
+        value: Option<(String, OperationEvidence)>,
+    ) -> Result<(), EnvironmentError> {
+        let stored = self
+            .computer_of_session(session_id)
+            .await
+            .ok_or_else(|| EnvironmentError::Conflict("the computer record moved".into()))?;
+        let mut record = stored.value.clone();
+        (claim.set)(&mut record.observed, value);
+        let name = record.environment.clone();
+        self.advance(&stored, &name, record, None).await
     }
 
     /// Why the environment owning `session_id` no longer wants its
@@ -4009,7 +4152,7 @@ impl Daemon {
         session_id: &str,
         mut command: SessionCommand,
         timeout: Duration,
-        interruptible: bool,
+        claim: Option<&ItemClaim>,
     ) -> (OperationEvidence, String) {
         command.timeout = Some(timeout);
         let failed = |job_id: String, execution_id: String, error: String| {
@@ -4027,21 +4170,65 @@ impl Daemon {
         // Every call is bounded: a target that stops answering mid-job
         // must not hold the controller, which has to notice it is gone.
         let patience = self.config.computer_liveness_timeout;
-        let submission =
-            match tokio::time::timeout(patience, client.session_exec(session_id, &command)).await {
-                Ok(Ok(submission)) => submission,
-                Ok(Err(error)) => {
-                    return failed(String::new(), String::new(), error.to_string());
+        // A job this environment already has in flight for the same item (its
+        // controller restarted) is adopted, never submitted twice.
+        let adopted = match claim {
+            Some(claim) => self
+                .computer_of_session(session_id)
+                .await
+                .and_then(|stored| (claim.get)(&stored.value.observed))
+                .filter(|(fingerprint, evidence)| {
+                    *fingerprint == claim.fingerprint
+                        && evidence.outcome == "running"
+                        && !evidence.job_id.is_empty()
+                })
+                .map(|(_, evidence)| (evidence.job_id, evidence.execution_id)),
+            None => None,
+        };
+        let (job_id, execution_id) = match adopted {
+            Some(ids) => ids,
+            None => {
+                let submission =
+                    match tokio::time::timeout(patience, client.session_exec(session_id, &command))
+                        .await
+                    {
+                        Ok(Ok(submission)) => submission,
+                        Ok(Err(error)) => {
+                            return failed(String::new(), String::new(), error.to_string());
+                        }
+                        Err(_) => {
+                            return failed(
+                                String::new(),
+                                String::new(),
+                                "the target did not accept the command in time".into(),
+                            );
+                        }
+                    };
+                let ids = (submission.job_id.0.clone(), submission.execution_id.clone());
+                if let Some(claim) = claim {
+                    let running = OperationEvidence {
+                        job_id: ids.0.clone(),
+                        execution_id: ids.1.clone(),
+                        outcome: "running".into(),
+                        at: Utc::now(),
+                        error: None,
+                    };
+                    if let Err(error) = self
+                        .store_claim(
+                            session_id,
+                            claim,
+                            Some((claim.fingerprint.clone(), running)),
+                        )
+                        .await
+                    {
+                        // Not recorded, so not ours to leave running.
+                        let _ = tokio::time::timeout(patience, client.cancel_job(&ids.0)).await;
+                        return failed(ids.0, ids.1, format!("could not record the job: {error}"));
+                    }
                 }
-                Err(_) => {
-                    return failed(
-                        String::new(),
-                        String::new(),
-                        "the target did not accept the command in time".into(),
-                    );
-                }
-            };
-        let job_id = submission.job_id.0.clone();
+                ids
+            }
+        };
         let mut delay = Duration::from_millis(50);
         let deadline = std::time::Instant::now() + timeout + patience;
         let mut unanswered_since: Option<std::time::Instant> = None;
@@ -4053,14 +4240,14 @@ impl Daemon {
                     self.touch_session(session_id);
                 }
                 Ok(Err(error)) if error.kind == ProviderErrorKind::UnknownJob => {
-                    return failed(job_id, submission.execution_id, error.to_string());
+                    return failed(job_id, execution_id.clone(), error.to_string());
                 }
                 Ok(Err(error)) => {
                     let since = *unanswered_since.get_or_insert_with(std::time::Instant::now);
                     if since.elapsed() >= patience {
                         return failed(
                             job_id,
-                            submission.execution_id,
+                            execution_id.clone(),
                             format!("the target stopped answering for the job: {error}"),
                         );
                     }
@@ -4068,7 +4255,7 @@ impl Daemon {
                 Err(_) => {
                     return failed(
                         job_id,
-                        submission.execution_id,
+                        execution_id.clone(),
                         "the target stopped answering for the job".into(),
                     );
                 }
@@ -4076,11 +4263,13 @@ impl Daemon {
             if std::time::Instant::now() >= deadline {
                 return failed(
                     job_id,
-                    submission.execution_id,
+                    execution_id.clone(),
                     "the job did not finish in time".into(),
                 );
             }
-            if interruptible && let Some(why) = self.interruption(session_id).await {
+            if claim.is_some()
+                && let Some(why) = self.interruption(session_id).await
+            {
                 // Cancellation is confirmed by the target: wait for the job
                 // to be over, so nothing of it outlives the stop or destroy.
                 let _ = tokio::time::timeout(patience, client.cancel_job(&job_id)).await;
@@ -4095,10 +4284,14 @@ impl Daemon {
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
+                // Nothing was applied: the claim goes, so a start applies it.
+                if let Some(claim) = claim {
+                    let _ = self.store_claim(session_id, claim, None).await;
+                }
                 return (
                     OperationEvidence {
                         job_id,
-                        execution_id: submission.execution_id,
+                        execution_id: execution_id.clone(),
                         outcome: "cancelled".into(),
                         at: Utc::now(),
                         error: Some(format!(
@@ -4131,7 +4324,7 @@ impl Daemon {
         (
             OperationEvidence {
                 job_id,
-                execution_id: job.execution_id.unwrap_or(submission.execution_id),
+                execution_id: job.execution_id.unwrap_or(execution_id.clone()),
                 outcome: if succeeded { "succeeded" } else { "failed" }.into(),
                 at: Utc::now(),
                 error,
@@ -4675,13 +4868,13 @@ impl Daemon {
 fn forget_failures(observed: &mut ObservedContents) {
     observed
         .repositories
-        .retain(|_, seen| seen.evidence.outcome == "succeeded");
+        .retain(|_, seen| matches!(seen.evidence.outcome.as_str(), "succeeded" | "running"));
     observed
         .packages
-        .retain(|_, seen| seen.evidence.outcome == "succeeded");
+        .retain(|_, seen| matches!(seen.evidence.outcome.as_str(), "succeeded" | "running"));
     observed
         .builds
-        .retain(|_, seen| seen.evidence.outcome == "succeeded");
+        .retain(|_, seen| matches!(seen.evidence.outcome.as_str(), "succeeded" | "running"));
     for seen in observed.processes.values_mut() {
         let given_up = seen.state == ProcessState::Failed
             || (seen.state == ProcessState::Exited && seen.retry_at.is_none());

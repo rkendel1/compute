@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use compute_core::{
     ComputerLifecycle, ComputerRequirements, EnvironmentContents, HttpReadiness, NetworkPolicy,
-    ProcessDesired, ProcessKind, ProcessRestartPolicy, ProcessSpec, ProcessState, SessionCommand,
+    ProcessDesired, ProcessKind, ProcessRestartPolicy, ProcessSpec, ProcessState,
 };
 use compute_environment::*;
 use compute_state::StateStore;
@@ -168,28 +168,26 @@ async fn holds(
     }
 }
 
-/// Run a command in the computer, through its session, and return its
-/// output.
+/// Run a command in the computer's workspace, on the host, and return its
+/// output. These tests inspect and disturb environments whose declared
+/// process is unready, restarting, or failed: those are not ready, so no
+/// workload is admitted to them, and the test reaches the machine's
+/// directory directly instead of asking Compute to run work in it.
 async fn run(daemon: &Arc<Daemon>, name: &str, command: &[&str]) -> String {
-    common::wait_admitting(daemon, name).await;
-    let exec = daemon
-        .computer_exec(
-            name,
-            "alice",
-            SessionCommand::new(command.iter().map(|part| part.to_string()).collect()),
-        )
+    let resource = daemon
+        .computer(name)
         .await
+        .unwrap()
+        .machine
+        .unwrap()
+        .resource
         .unwrap();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        if let Ok(job) = daemon.computer_job(name, "alice", &exec.job_id).await
-            && let Some(result) = job.result
-        {
-            return result.result.stdout.text;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "the command");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let output = std::process::Command::new(command[0])
+        .args(&command[1..])
+        .current_dir(workspace_of(&resource))
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 /// How many times the service has started in this computer.

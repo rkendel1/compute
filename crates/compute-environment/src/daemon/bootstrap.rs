@@ -34,10 +34,11 @@ fn step(kind: &str, name: &str, evidence: Option<&OperationEvidence>) -> Bootstr
         Some(evidence) => BootstrapStep {
             kind: kind.into(),
             name: name.into(),
-            outcome: if evidence.outcome == "succeeded" {
-                "succeeded".into()
-            } else {
-                "failed".into()
+            outcome: match evidence.outcome.as_str() {
+                "succeeded" => "succeeded".into(),
+                // Claimed and in flight: applying it is not over.
+                "running" => "running".into(),
+                _ => "failed".into(),
             },
             job_id: Some(evidence.job_id.clone()),
             execution_id: Some(evidence.execution_id.clone()),
@@ -57,7 +58,7 @@ pub(crate) fn configuration_failed(observed: &ObservedContents) -> bool {
         .map(|seen| &seen.evidence)
         .chain(observed.packages.values().map(|seen| &seen.evidence))
         .chain(observed.builds.values().map(|seen| &seen.evidence))
-        .any(|evidence| evidence.outcome != "succeeded")
+        .any(|evidence| !matches!(evidence.outcome.as_str(), "succeeded" | "running"))
 }
 
 /// Every declared item and how applying it went: the existing evidence,
@@ -133,8 +134,7 @@ fn failed_operation(kind: &str) -> (&'static str, FailureClass) {
     match kind {
         "repository" => ("repository sync", FailureClass::ConfigurationFailed),
         "package" => ("package install", FailureClass::ConfigurationFailed),
-        "build" => ("build", FailureClass::ConfigurationFailed),
-        _ => ("process start", FailureClass::RuntimeFailed),
+        _ => ("build", FailureClass::ConfigurationFailed),
     }
 }
 
@@ -156,7 +156,13 @@ pub(crate) fn derive_bootstrap(
         .max()
         .or(computer.ready_at)
         .filter(|_| held);
-    let failed_step = steps.iter().find(|step| step.outcome == "failed");
+    // Only configuration steps fail a bootstrap. A declared process that
+    // will not start is a runtime impairment: the environment was
+    // configured, and readiness reports the process (its restart policy is
+    // responsible for recovering it).
+    let failed_step = steps
+        .iter()
+        .find(|step| step.outcome == "failed" && step.kind != "process");
     let recorded = computer.failure.as_ref();
     let wants_stop = environment.desired_state == compute_state::DesiredState::Stopped
         || spec.destroy_requested_at.is_some();

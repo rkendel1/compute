@@ -268,7 +268,27 @@ pub fn member(target: &Target, token_file: &Path) -> ProviderConfig {
     }
 }
 
+/// Every target's workspace root in this test binary, so a test can look at
+/// a machine's directory on the host without going through its session.
+static ROOTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// The host directory of a machine (its `resource`).
+#[allow(dead_code)]
+pub fn workspace_of(resource: &str) -> PathBuf {
+    ROOTS
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|root| root.join(resource))
+        .find(|path| path.exists())
+        .unwrap_or_else(|| panic!("no workspace {resource}"))
+}
+
 pub fn pool(target: &Target) -> PoolConfig {
+    ROOTS
+        .lock()
+        .unwrap()
+        .push(target.workspaces.path().to_owned());
     PoolConfig {
         pool: Default::default(),
         providers: [("target-a".to_owned(), member(target, &target.token_file))].into(),

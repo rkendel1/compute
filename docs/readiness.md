@@ -43,6 +43,21 @@ The gap: nothing said, after creation, that the target *still* satisfies
 what the environment requires, and a running computer was treated as a usable
 environment.
 
+## Three different facts
+
+```text
+Computer running   ≠   Environment bootstrapped   ≠   Environment ready
+execution is           the declared configuration   Compute verified, now, that the
+available              was established              actual environment satisfies its
+                       (bootstrap.state ==          requirements
+                       succeeded)                   (readiness.state == ready)
+```
+
+Admission needs all three: the computer is running, bootstrap succeeded, and
+readiness is `ready`. `running` alone admits nothing, and neither does
+`succeeded` alone; readiness is always evaluated, never inferred from
+bootstrap.
+
 ## The states
 
 | State | Means | Admits workloads |
@@ -50,15 +65,16 @@ environment.
 | `created` | The environment exists; its machine is not being provisioned yet | no |
 | `starting` | Its machine is being provisioned or resumed, or it is still being brought to its declared contents | no |
 | `ready` | Verified: machine confirmed by its target, requirements satisfied by that target now, declared contents held, no declared process impaired | yes |
-| `degraded` | It runs and its requirements hold, but a declared process is impaired, the target has not confirmed the machine recently, or the requirements could not be re-verified. It is never reported `ready` | yes |
+| `degraded` | It runs and its requirements hold, but a declared process is unhealthy (`runtime_failed`), the target has not confirmed the machine recently, or the requirements could not be re-verified. It is never reported `ready`, and stays diagnosable here | **no** |
 | `unavailable` | It cannot run workloads: stopped, stopping, unreachable, lost, destroyed, or its target no longer satisfies its requirements (placement's reasons are listed) | no |
 | `failed` | Establishing it failed (a provisioning failure). Distinct from unsatisfied requirements | no |
 
 Bootstrap ([bootstrap.md](bootstrap.md)) is its own condition: a failed
 repository, package, build, or provisioning makes the environment `failed`
 with a class (`configuration_failed`, `provider_failed`) and the operation
-that failed; a declared process that will not start is `degraded`
-(`runtime_failed`). A machine that is running but still being configured is
+that failed; a declared process that is unhealthy is `degraded`
+(`runtime_failed`): the environment was configured, its restart policy is
+responsible for the process, and no workload is admitted until it is `ready`. A machine that is running but still being configured is
 `starting`.
 
 **Unsatisfied is not failed.** A target that cannot satisfy the requirements
@@ -111,9 +127,10 @@ back. Repair, if it is ever wanted, is a separate explicit operation.
 
 ## Workload admission
 
-Compute owns the boundary. `exec` and project commands ask the environment
-to be `ready` or `degraded`, verified against the target now, and otherwise
-are refused with the state and why:
+Compute owns the boundary. `exec`, project commands, and the terminal
+(`connect`) require the environment to be `ready`, verified against the
+target now, and are otherwise refused with the state and why. Only `ready`
+admits; `degraded` does not:
 
 ```text
 environment dev is unavailable, not ready for workloads: dev runs on target-a,
