@@ -1196,6 +1196,25 @@
     ]
    },
    "notes": "Policy only: resolves to ComputerRequest + Policy for `environment create`. No recipe execution, scheduler, or lifecycle engine (see docs/recipes.md for the gaps)."
+  },
+  {
+   "id": "lifecycle-confirmed-termination",
+   "area": "lifecycle",
+   "name": "Stop, destroy, and cancel are confirmed: owned process trees are terminated and verified gone before a terminal state is reported",
+   "status": "IMPLEMENTED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-provider/src/processes.rs",
+     "crates/compute-provider/src/sessions.rs",
+     "crates/compute-environment/src/daemon/computers.rs"
+    ],
+    "docs": [
+     "docs/lifecycle.md"
+    ]
+   },
+   "notes": "Tree termination is guaranteed by the workspace provider on Linux (owner-marker scan) and declared per provider as process_tree_termination; other hosts say so. Node environments keep their earlier delete path."
   }
  ],
  "journeys": [

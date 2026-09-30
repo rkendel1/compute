@@ -39,9 +39,9 @@ Rules:
 
 ## Existing capabilities (verified in code)
 
-`SessionCapabilities` has nine fields: `exec`, `terminal`, `filesystem`,
+`SessionCapabilities` has ten fields: `exec`, `terminal`, `filesystem`,
 `network`, `public_endpoint`, `persistent_storage`, `suspend`, `resume`,
-`claim` (`compute-core/src/sessions.rs:122-132`).
+`claim`, and `process_tree_termination` (`compute-core/src/sessions.rs`).
 
 | Capability | Workspace provider | Container provider | Source |
 | --- | --- | --- | --- |
@@ -52,6 +52,7 @@ Rules:
 | `terminal` | **no** | **no** | same |
 | `public_endpoint` | **no** | **no** | same |
 | `persistent_storage` | **no** | **no** | same |
+| `process_tree_termination` | **yes on Linux** (owner-marker scan); no elsewhere | yes (the engine ends the container's processes; unverified against an engine) | [lifecycle.md](lifecycle.md#provider-guarantees) |
 
 `persistent_storage` means "storage outlives the session"; `filesystem` +
 `resume` is what keeps a workspace across stop/resume. The two are different

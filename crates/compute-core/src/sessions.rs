@@ -129,10 +129,17 @@ pub struct SessionCapabilities {
     pub suspend: bool,
     pub resume: bool,
     pub claim: bool,
+    /// `stop` and `destroy` return only once every process the environment
+    /// owns, however deep in its process tree, is confirmed gone; otherwise
+    /// they fail with `termination_failed`. A provider that cannot offer the
+    /// guarantee says so here, so it can be required (or refused) before
+    /// anything is acquired.
+    #[serde(default)]
+    pub process_tree_termination: bool,
 }
 
 impl SessionCapabilities {
-    pub const NAMES: [&'static str; 9] = [
+    pub const NAMES: [&'static str; 10] = [
         "exec",
         "terminal",
         "filesystem",
@@ -142,6 +149,7 @@ impl SessionCapabilities {
         "suspend",
         "resume",
         "claim",
+        "process_tree_termination",
     ];
 
     /// Whether the named capability is present; `None` for an unknown name.
@@ -156,6 +164,7 @@ impl SessionCapabilities {
             "suspend" => self.suspend,
             "resume" => self.resume,
             "claim" => self.claim,
+            "process_tree_termination" => self.process_tree_termination,
             _ => return None,
         })
     }

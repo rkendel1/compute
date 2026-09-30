@@ -10,7 +10,11 @@ use std::time::Duration;
 
 use compute_environment::*;
 use compute_placement::{PoolConfig, ProviderConfig, ProviderKind};
-use compute_provider::{RemoteProvider, ServerConfig, WorkspaceSessionProvider};
+use compute_provider::{
+    EnvironmentState, ProviderConnection, ProviderError, ProviderErrorKind, ProviderRequest,
+    ProvisionRequest, ProvisionedSession, RemoteProvider, ServerConfig, SessionEnvironment,
+    SessionProvider, WorkspaceSessionProvider,
+};
 use compute_state::{ControlState, StateStore};
 use tokio::runtime::Runtime;
 
@@ -18,14 +22,103 @@ use super::common;
 
 // ---- A target: `compute serve` hosting sessions, in a runtime of its own --
 
+/// Faults a test can turn on at a target: a machine that cannot be proven
+/// empty of processes, and one that cannot be removed.
+#[derive(Default)]
+pub struct Faults {
+    pub termination: std::sync::atomic::AtomicBool,
+    pub destruction: std::sync::atomic::AtomicBool,
+    /// The target does not offer `process_tree_termination`.
+    pub without_termination_guarantee: std::sync::atomic::AtomicBool,
+}
+
+/// The real workspace provider behind a switchboard of [`Faults`].
+struct FaultyWorkspace {
+    inner: WorkspaceSessionProvider,
+    faults: Arc<Faults>,
+}
+
+#[async_trait::async_trait]
+impl SessionProvider for FaultyWorkspace {
+    fn kind(&self) -> String {
+        self.inner.kind()
+    }
+    fn capabilities(&self) -> compute_core::SessionCapabilities {
+        let mut capabilities = self.inner.capabilities();
+        if self
+            .faults
+            .without_termination_guarantee
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            capabilities.process_tree_termination = false;
+        }
+        capabilities
+    }
+    async fn provision(
+        &self,
+        request: &ProvisionRequest,
+    ) -> Result<ProvisionedSession, ProviderError> {
+        self.inner.provision(request).await
+    }
+    async fn inspect(&self, id: &str) -> Result<EnvironmentState, ProviderError> {
+        self.inner.inspect(id).await
+    }
+    async fn exec(
+        &self,
+        environment: &SessionEnvironment,
+        command: &compute_core::SessionCommand,
+    ) -> Result<ProviderRequest, ProviderError> {
+        self.inner.exec(environment, command).await
+    }
+    async fn connect(
+        &self,
+        environment: &SessionEnvironment,
+    ) -> Result<ProviderConnection, ProviderError> {
+        self.inner.connect(environment).await
+    }
+    async fn stop(&self, id: &str) -> Result<(), ProviderError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.faults.termination.load(SeqCst) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::TerminationFailed,
+                "an injected survivor: 1 process is still alive",
+            ));
+        }
+        self.inner.stop(id).await
+    }
+    async fn resume(&self, id: &str) -> Result<(), ProviderError> {
+        self.inner.resume(id).await
+    }
+    async fn claim(&self, id: &str) -> Result<(), ProviderError> {
+        self.inner.claim(id).await
+    }
+    async fn destroy(&self, id: &str) -> Result<(), ProviderError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.faults.termination.load(SeqCst) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::TerminationFailed,
+                "an injected survivor: 1 process is still alive",
+            ));
+        }
+        if self.faults.destruction.load(SeqCst) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RemoteExecutionFailure,
+                "an injected failure removing the machine",
+            ));
+        }
+        self.inner.destroy(id).await
+    }
+}
+
 pub struct Target {
+    pub faults: Arc<Faults>,
     runtime: Option<Runtime>,
     pub endpoint: String,
     address: std::net::SocketAddr,
     trust: PathBuf,
     pub token_file: PathBuf,
     stores: tempfile::TempDir,
-    workspaces: tempfile::TempDir,
+    pub workspaces: tempfile::TempDir,
 }
 
 impl Target {
@@ -41,6 +134,7 @@ impl Target {
         let socket = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let address = socket.local_addr().unwrap();
         let mut target = Self {
+            faults: Arc::new(Faults::default()),
             runtime: None,
             endpoint: format!("http://{address}"),
             address,
@@ -76,9 +170,10 @@ impl Target {
         );
         config.job_store = self.stores.path().join("jobs");
         config.session_store = self.stores.path().join("sessions");
-        config.session_provider = Some(Arc::new(WorkspaceSessionProvider::new(
-            self.workspaces.path(),
-        )));
+        config.session_provider = Some(Arc::new(FaultyWorkspace {
+            inner: WorkspaceSessionProvider::new(self.workspaces.path()),
+            faults: self.faults.clone(),
+        }));
         config.execution.sessions = true;
         config.session_sweep = Duration::from_millis(100);
         runtime.spawn(async move {
