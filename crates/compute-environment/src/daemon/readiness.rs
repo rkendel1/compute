@@ -122,9 +122,8 @@ impl Daemon {
 
         // Running by its record. The requirements are re-verified against
         // the target as it is now.
-        let (verdict, verified) = self
-            .target_verdict(environment, spec, computer, fresh)
-            .await;
+        let (verdict, verified) =
+            Box::pin(self.target_verdict(environment, spec, computer, fresh)).await;
         let confirmed = reality.observed != "unverified";
         let mut conditions = vec![machine(
             confirmed,
@@ -420,7 +419,7 @@ impl Daemon {
         &self,
         record: &compute_state::Stored<EnvironmentRecord>,
     ) -> Result<(), EnvironmentError> {
-        let Some(view) = self.computer_view_fresh(record, true).await else {
+        let Some(view) = Box::pin(self.computer_view_fresh(record, true)).await else {
             return Err(EnvironmentError::Conflict(format!(
                 "environment {} has no computer",
                 record.value.name
