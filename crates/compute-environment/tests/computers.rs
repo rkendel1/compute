@@ -364,6 +364,7 @@ async fn start_daemon_tuned(
     config.pool = Some(pool);
     config.reconcile_interval = Duration::from_millis(200);
     config.computer_probe = Duration::from_millis(400);
+    config.orphan_sweep = Duration::from_secs(1);
     config.computer_liveness = Duration::from_millis(300);
     config.computer_liveness_timeout = Duration::from_secs(3);
     config.replacement_deadline = Duration::from_secs(20);

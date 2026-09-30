@@ -145,6 +145,8 @@ pub struct DaemonConfig {
     pub execution: compute_provider::ExecutionModes,
     /// How often a running computer's processes are checked for drift.
     pub computer_probe: Duration,
+    /// How often targets are swept for computer sessions no computer owns.
+    pub orphan_sweep: Duration,
     /// How often every running (or unreachable) computer is confirmed with
     /// its target: the target answers, and still has the machine.
     pub computer_liveness: Duration,
@@ -190,6 +192,7 @@ impl DaemonConfig {
                 sessions: false,
             },
             computer_probe: Duration::from_secs(15),
+            orphan_sweep: Duration::from_secs(60),
             computer_liveness: Duration::from_secs(10),
             computer_liveness_timeout: Duration::from_secs(10),
             replacement_deadline: Duration::from_secs(5 * 60),

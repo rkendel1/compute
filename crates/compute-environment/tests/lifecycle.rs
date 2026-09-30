@@ -615,3 +615,51 @@ async fn a_target_without_the_termination_guarantee_is_refused_before_acquisitio
     daemon.destroy_computer("lenient", "alice").await.unwrap();
     daemon.shutdown().await;
 }
+
+/// A fork and a replacement take over the machine their candidate
+/// provisioned, so the session's reference names a candidate that is gone.
+/// The orphan sweep (every second here) must still see the session as owned:
+/// destroying it would lose a live environment's machine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_a_fork_or_replacement_took_over_is_never_swept_as_an_orphan() {
+    let target = Target::start();
+    let pids = tempfile::tempdir().unwrap();
+    let (daemon, _node) = start_daemon(Arc::new(MemoryState::new()), Some(pool(&target))).await;
+    create(&daemon, "alpha", pids.path()).await;
+    running(&daemon, "alpha").await;
+    daemon
+        .fork_environment(
+            "alpha",
+            "alice",
+            ForkRequest {
+                name: "beta".into(),
+                target: None,
+                copy_config: false,
+            },
+        )
+        .await
+        .unwrap();
+    running(&daemon, "beta").await;
+    daemon
+        .replace_computer("alpha", "alice", requirements())
+        .await
+        .unwrap();
+    running(&daemon, "alpha").await;
+
+    // Many sweeps later, both machines are still theirs.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    for name in ["alpha", "beta"] {
+        let view = daemon.computer(name).await.unwrap();
+        assert_eq!(view.status, ComputerStatus::Running, "{name}: {view:#?}");
+        assert_eq!(sh(&daemon, name, "echo alive").await, "alive\n");
+    }
+    let swept = daemon
+        .events(EventFilter::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "computer.orphan_destroyed")
+        .count();
+    assert_eq!(swept, 0, "a live machine was swept as an orphan");
+    daemon.shutdown().await;
+}

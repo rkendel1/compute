@@ -308,6 +308,9 @@ pub async fn start_daemon(
     config.pool = pool;
     config.reconcile_interval = Duration::from_millis(200);
     config.computer_probe = Duration::from_millis(400);
+    // Sweep for orphans constantly, so a session a fork or a replacement took
+    // over is proven not to be one in every test that makes one.
+    config.orphan_sweep = Duration::from_secs(1);
     config.computer_liveness = Duration::from_millis(300);
     config.computer_liveness_timeout = Duration::from_secs(3);
     // Endpoints this test's applications listen on: a window of its own.

@@ -181,6 +181,18 @@ provenance API. Tests: `crates/compute-environment/tests/provenance.rs`.
 | Replace / fork | Independent by construction (pid files not transferred); untested for process trees |
 | Recovery | Sessions and computers resumed `destroying`; a failed teardown was recorded as `target_unavailable` whatever the cause |
 
+## A latent bug this work found: adopted sessions were swept
+
+After a fork, restore, or replacement the machine's session keeps the
+`reference` of the candidate that provisioned it, and the candidate's records
+are deleted. The orphan sweep (every 60 s) looked the owner up by that
+reference, found nothing, and destroyed the live machine's session as an
+orphan: the environment became `lost` within a minute of being forked or
+replaced. It went unseen because tests finish inside the first sweep interval.
+The sweep now treats a session as owned when *any* live computer holds it
+(`a_session_a_fork_or_replacement_took_over_is_never_swept_as_an_orphan`, with
+the sweep interval configurable and set to 1 s in the test harness).
+
 ## What this does not change
 
 No developer-environment subsystem, CI/deployment/agent lifecycle, scheduler,

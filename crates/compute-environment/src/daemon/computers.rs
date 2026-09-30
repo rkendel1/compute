@@ -2599,7 +2599,7 @@ impl Daemon {
         }
         let due = {
             let mut sweep = self.orphan_sweep.lock().expect("sweep");
-            let due = sweep.is_none_or(|at| at.elapsed() > Duration::from_secs(60));
+            let due = sweep.is_none_or(|at| at.elapsed() > self.config.orphan_sweep);
             if due {
                 *sweep = Some(std::time::Instant::now());
             }
@@ -4845,7 +4845,11 @@ impl Daemon {
                 if !computer_id.starts_with("cmp_") {
                     continue;
                 }
-                let owned = computers.get(computer_id).is_some_and(|computer| {
+                // Owned by any live computer, not only the one the reference
+                // names: a fork, restore, or replacement takes over the
+                // machine its candidate provisioned, so the session's
+                // reference names a candidate that no longer exists.
+                let owned = computers.values().any(|computer| {
                     !computer.status.is_terminal()
                         && (computer.reference.as_ref() == Some(reference)
                             || computer.session_id.as_ref() == Some(&session.session_id.0)
