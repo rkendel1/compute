@@ -1201,7 +1201,7 @@ mod tests {
         let mut starters = BTreeMap::from([("dev".to_owned(), "a".repeat(64))]);
         let runtimes = serde_json::json!({"shell": {"version": "1"}});
         let first = distribution_identity_v3(
-            "0.1.8",
+            "0.1.9",
             "linux-x86_64",
             "base",
             "certified",
@@ -1212,7 +1212,7 @@ mod tests {
         .unwrap();
         starters.insert("dev".into(), "c".repeat(64));
         let changed = distribution_identity_v3(
-            "0.1.8",
+            "0.1.9",
             "linux-x86_64",
             "base",
             "certified",
