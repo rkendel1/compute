@@ -345,10 +345,9 @@ pub(crate) fn plan(
         repository.as_ref().is_some_and(|repository| {
             contents.projects.iter().any(|project| {
                 &project.repository == repository
-                    && observed
-                        .builds
-                        .get(&project.name)
-                        .is_some_and(|seen| seen.evidence.outcome != "succeeded")
+                    && observed.builds.get(&project.name).is_some_and(|seen| {
+                        !matches!(seen.evidence.outcome.as_str(), "succeeded" | "running")
+                    })
             })
         })
     };
