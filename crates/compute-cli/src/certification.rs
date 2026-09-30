@@ -91,6 +91,7 @@ struct DistributionManifest {
     runtime_lock_sha256: String,
     certification_status: String,
     build: serde_json::Value,
+    starter_recipes: BTreeMap<String, String>,
     runtimes: BTreeMap<String, ManifestRuntime>,
 }
 
@@ -233,7 +234,7 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
     );
 
     let metadata_valid = lock.schema_version == 2
-        && manifest.schema_version == 2
+        && manifest.schema_version == 3
         && fixtures.schema_version == 1
         && lock.runtimes.iter().all(|(name, locked)| {
             manifest.runtimes.get(name).is_some_and(|installed| {
@@ -245,6 +246,7 @@ pub async fn certify(compute: &Compute) -> CertificationReport {
         && manifest.platform == format!("{}-{}", manifest.os, manifest.architecture)
         && manifest.runtime_lock_sha256.len() == 64
         && manifest.distribution_profile == "base"
+        && manifest.starter_recipes.len() == 7
         && manifest.release_status == "certified"
         && matches!(manifest.certification_status.as_str(), "not_run" | "pass")
         && manifest.runtimes.values().all(|runtime| {

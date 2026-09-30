@@ -1,7 +1,5 @@
-# Starter recipes
+# Recipe examples moved
 
-Ordinary `compute.recipe@1` documents, not special cases: `compute recipe
-create NAME --file dev.json` writes one, and the name it is given is the
-user's. Nothing in Compute knows what `ci` or `production` mean.
-[docs/recipes.md](../../docs/recipes.md) says what each expresses and what it
-does not.
+The authoritative starter catalog is [`recipes/starters`](../../recipes/starters).
+Discover it with `compute recipe starters` and copy a template into a durable,
+user-owned recipe with `compute recipe create NAME --from STARTER`.

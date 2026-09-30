@@ -6,7 +6,7 @@ and running workloads across WASM and common process-backed runtimes.
 
 ## Install
 
-The supported product distribution is currently Linux x86_64:
+Linux x86_64 is Certified; macOS ARM64 is available as Preview:
 
 ```sh
 brew tap rkendel1/compute
@@ -122,6 +122,10 @@ long) is policy, declared as a Recipe that resolves into these same
 primitives and adds no execution of its own: see [docs/recipes.md](docs/recipes.md).
 
 ```sh
+compute recipe starters
+compute recipe create developer --from dev
+compute environment create workstation --recipe developer
+
 compute environment create myapp --cpu 4 --memory 8Gi --persistent
 compute environment repo add myapp app --url https://git.example/app.git --revision v2
 compute environment service add myapp api --repository app -- npm start

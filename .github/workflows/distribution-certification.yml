@@ -31,6 +31,7 @@ jobs:
       - run: cargo build --release --locked
       - run: target/release/compute distribution build --output compute-distribution --status certified --verify
       - run: target/release/compute distribution verify compute-distribution --json
+      - run: test "$(compute-distribution/bin/compute recipe starters --json | jq length)" = 7
       - run: distribution/certify-distribution.sh compute-distribution
       - run: |
           mv compute-distribution compute-distribution-first
@@ -74,7 +75,9 @@ jobs:
           cp compatibility/published-stack/verify.mjs "$root/verify.mjs"
           cp compatibility/published-stack/stack.toml "$root/stacks/configured/stack.toml"
           cp "$RUNNER_TEMP/configured-evidence.json" "$root/evidence.json"
+          cp -a compute-distribution/recipes "$root/recipes"
           cp -a compatibility/published-stack/node_modules "$root/node_modules"
+          test "$(find "$root/recipes/starters" -name '*.json' -type f | wc -l)" = 7
           asset="compute-configured-$version-linux-x86_64.tar.gz"
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - "$root" | gzip -n -9 > "$asset"
           sha256sum "$asset" > "$asset.sha256"
@@ -107,6 +110,7 @@ jobs:
       - run: cargo build --release --locked
       - run: target/release/compute distribution build --output compute-distribution --status preview
       - run: target/release/compute distribution verify compute-distribution --json
+      - run: test "$(compute-distribution/bin/compute recipe starters --json | jq length)" = 7
       - name: Verify preview evidence
         run: |
           test "$(jq -r .release_status compute-distribution/runtime-manifest.json)" = preview
@@ -154,7 +158,9 @@ jobs:
           cp configured-stack/verify.mjs "$root/verify.mjs"
           cp configured-stack/stack.toml "$root/stacks/configured/stack.toml"
           cp "$RUNNER_TEMP/configured-evidence.json" "$root/evidence.json"
+          cp -a compute-distribution/recipes "$root/recipes"
           cp -a configured-stack/node_modules "$root/node_modules"
+          test "$(find "$root/recipes/starters" -name '*.json' -type f | wc -l)" = 7
           asset="compute-configured-$version-macos-aarch64.tar.gz"
           brew install gnu-tar
           gtar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - "$root" | gzip -n -9 > "$asset"

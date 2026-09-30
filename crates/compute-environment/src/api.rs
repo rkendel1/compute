@@ -154,6 +154,7 @@ pub const ROUTES: &[(&str, &str)] = &[
         "/environments/{environment}/processes/{process}/restart",
     ),
     ("GET", "/recipes"),
+    ("GET", "/recipes/starters"),
     ("POST", "/recipes"),
     ("POST", "/recipes/resolve"),
     ("GET", "/recipes/{recipe}"),
@@ -1079,6 +1080,7 @@ async fn route(
         )?),
         // Recipes: lifecycle policy as data. Resolving is read only.
         ("GET", ["recipes"]) => ok(to_value(Box::pin(daemon.recipes()).await?)?),
+        ("GET", ["recipes", "starters"]) => ok(to_value(crate::recipe_starters())?),
         ("POST", ["recipes"]) => created(to_value(
             Box::pin(daemon.write_recipe(&principal.operator_id, parse(body)?)).await?,
         )?),

@@ -83,6 +83,43 @@ fn application_deployment_commands_have_product_level_spellings() {
         ));
 }
 
+#[test]
+fn shipped_recipe_starters_are_controller_free_and_machine_readable() {
+    let output = Command::cargo_bin("compute")
+        .unwrap()
+        .env("COMPUTE_DAEMON", "http://127.0.0.1:1")
+        .args(["recipe", "starters", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let starters: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        starters
+            .iter()
+            .map(|starter| starter["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "agent-task",
+            "ci",
+            "dev",
+            "migration",
+            "preview",
+            "production",
+            "staging"
+        ]
+    );
+    assert!(starters.iter().all(|starter| {
+        starter["source"] == "compute-distribution"
+            && starter["template_status"] == "immutable"
+            && starter["platforms"].as_array().unwrap().len() == 2
+            && starter["spec"]["lifecycle"].is_string()
+    }));
+}
+
 fn fixture_distribution_lock(
     artifact: &[u8],
     platform: &str,
@@ -160,6 +197,34 @@ fn distribution_build_is_reproducible_and_verify_detects_tampering() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"passed\": true"));
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(first.join("runtime-manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["schema_version"], 3);
+    assert_eq!(manifest["starter_recipes"].as_object().unwrap().len(), 7);
+    assert!(first.join("recipes/starters/dev.json").is_file());
+    let installed_output = std::process::Command::new(first.join("bin/compute"))
+        .env("COMPUTE_DISTRIBUTION_ROOT", &first)
+        .args(["recipe", "starters", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        installed_output.status.success(),
+        "the installed binary discovers starters without a controller: {}",
+        String::from_utf8_lossy(&installed_output.stderr)
+    );
+
+    let dev_path = first.join("recipes/starters/dev.json");
+    let dev = std::fs::read(&dev_path).unwrap();
+    std::fs::write(&dev_path, b"{}").unwrap();
+    Command::cargo_bin("compute")
+        .unwrap()
+        .args(["distribution", "verify", first.to_str().unwrap(), "--json"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("starter_recipes"));
+    std::fs::write(&dev_path, dev).unwrap();
 
     std::fs::write(first.join("runtimes/fixture/bin/fixture"), b"tampered").unwrap();
     Command::cargo_bin("compute")

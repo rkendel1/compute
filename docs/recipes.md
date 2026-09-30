@@ -8,9 +8,9 @@
 > Environment, workload, process, provider, persistence, isolation, and
 > lifecycle primitives.
 
-**Status:** implemented as a policy layer: `compute recipe list | get |
-validate | resolve | create | edit`, `compute environment create --recipe`,
-`GET`/`POST /recipes`, `GET /recipes/{recipe}[/resolve]`,
+**Status:** implemented as a policy layer: `compute recipe starters | list |
+get | validate | resolve | create | edit`, `compute environment create --recipe`,
+`GET /recipes/starters`, `GET`/`POST /recipes`, `GET /recipes/{recipe}[/resolve]`,
 `POST /recipes/resolve`. Code: `compute-core/src/recipes.rs` (the spec),
 `compute-environment/src/recipe.rs` (the pure resolver),
 `compute-environment/src/daemon/recipes.rs` (versions and the read-only
@@ -47,7 +47,7 @@ module gains a way to execute.
 
 **CI is a Recipe. Production is a Recipe. Preview is a Recipe. Agent work is
 a Recipe. Migration is a Recipe.** They are not separate Compute products.
-Their recipes exist ([`examples/recipes`](../examples/recipes)); that does
+Their immutable starter templates ship from [`recipes/starters`](../recipes/starters); that does
 *not* mean a CI, deployment, staging, preview, agent, or migration system is
 implemented. Those are uses of Recipes, and they belong to their consumers.
 
@@ -212,10 +212,11 @@ caller constraint, never a recipe field) narrows placement.
 ## Using a recipe
 
 ```sh
-compute recipe create review --file examples/recipes/preview.json
+compute recipe starters                          # works without a controller
+compute recipe create review --from preview      # copies into a user-owned recipe
 compute recipe resolve review                 # what will happen, before it does
 compute recipe validate review                # exit 0 / 2 unsatisfied / 3 invalid
-compute environment create pr-42 --recipe review --contents contents.json
+compute environment create pr-42 --recipe review
 compute environment destroy pr-42             # release: the existing operation
 ```
 
@@ -282,8 +283,15 @@ edit NAME --file spec.json`.
 
 ## Starter recipes
 
-[`examples/recipes`](../examples/recipes) holds ordinary documents, not
-special cases. What each expresses, and what it does not:
+[`recipes/starters`](../recipes/starters) is the single authoritative catalog
+shipped in the Linux x86_64 Certified and macOS ARM64 Preview distributions.
+`compute recipe starters --json` reads the catalog without a controller;
+`GET /recipes/starters` exposes the same ordered data to UI and API consumers.
+The templates are immutable and never seeded into control state. `recipe create
+NAME --from STARTER` copies a template into an ordinary durable, user-owned,
+versioned recipe; subsequent `get`, `edit`, `validate`, `resolve`, and
+`environment create --recipe` use the existing recipe path. What each starter
+expresses, and what it does not:
 
 | Recipe | Expresses | Does not (and why) |
 | --- | --- | --- |

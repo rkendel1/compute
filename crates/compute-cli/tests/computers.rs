@@ -104,10 +104,19 @@ impl Cli {
     }
 
     fn computer_until(&self, what: &str, wanted: impl Fn(&Value) -> bool) -> Value {
+        self.named_computer_until("myapp", what, wanted)
+    }
+
+    fn named_computer_until(
+        &self,
+        name: &str,
+        what: &str,
+        wanted: impl Fn(&Value) -> bool,
+    ) -> Value {
         let deadline = Instant::now() + Duration::from_secs(90);
         let mut last = Value::Null;
         loop {
-            let output = self.run(&["environment", "computer", "myapp", "--json"]);
+            let output = self.run(&["environment", "computer", name, "--json"]);
             if output.status.success() {
                 last = serde_json::from_slice(&output.stdout).unwrap();
                 if wanted(&last) {
@@ -205,6 +214,54 @@ fn a_computer_is_created_once_and_changed_in_place_from_the_cli() {
         .find(|target| target["target_id"] == "target-a")
         .unwrap();
     assert_eq!(target["hosts_computers"], true);
+
+    // A shipped starter is copied into the existing durable recipe model.
+    let recipe = cli.json(&["recipe", "create", "developer", "--from", "dev", "--json"]);
+    assert_eq!(recipe["name"], "developer");
+    assert_eq!(recipe["version"], 1);
+    assert_eq!(recipe["spec"]["lifecycle"], "persistent");
+    assert!(
+        !cli.run(&["recipe", "create", "developer", "--from", "dev"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        cli.json(&["recipe", "get", "developer", "--json"])["digest"],
+        recipe["digest"]
+    );
+    // It is now an ordinary user recipe: edit it for this target, which has
+    // no interactive-terminal capability, without changing the starter.
+    let mut edited_spec = recipe["spec"].clone();
+    edited_spec["requirements"]["capabilities"] = serde_json::json!([]);
+    let edited_path = root.join("developer.json");
+    std::fs::write(
+        &edited_path,
+        serde_json::to_vec_pretty(&edited_spec).unwrap(),
+    )
+    .unwrap();
+    let edited = cli.json(&[
+        "recipe",
+        "edit",
+        "developer",
+        "--file",
+        edited_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(edited["version"], 2);
+    assert_ne!(edited["digest"], recipe["digest"]);
+    let resolved = cli.json(&["recipe", "resolve", "developer", "--json"]);
+    assert_eq!(resolved["verdict"], "satisfiable", "{resolved:#}");
+    let from_recipe = cli.json(&[
+        "environment",
+        "create",
+        "devbox",
+        "--recipe",
+        "developer",
+        "--json",
+    ]);
+    assert_eq!(from_recipe["recipe"]["name"], "developer");
+    assert_eq!(from_recipe["computer"]["lifecycle"], "persistent");
+    cli.ok(&["environment", "destroy", "devbox"]);
 
     // Describe the computer; Compute decides where it runs.
     let created = cli.json(&[
@@ -968,6 +1025,9 @@ fn a_checkpoint_and_a_fork_carry_the_same_verified_workspace_from_the_cli() {
     assert_eq!(restored["workspace_verified"], true);
     assert_ne!(restored["environment_id"], origin["environment_id"]);
     assert_ne!(restored["computer"]["session_id"], origin["session_id"]);
+    cli.named_computer_until("revived-two", "the restored computer", |view| {
+        view["reality"]["observed"] == "running"
+    });
     assert_eq!(
         cli.ok(&[
             "environment",

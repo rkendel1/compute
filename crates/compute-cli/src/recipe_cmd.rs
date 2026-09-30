@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use compute_core::{ComputeError, RecipeSpec};
 use compute_environment::{
-    RecipeDefinition, RecipeResolution, RecipeResolveRequest, RecipeVerdict, RecipeView,
+    RecipeDefinition, RecipeResolution, RecipeResolveRequest, RecipeStarter, RecipeVerdict,
+    RecipeView, recipe_starter, recipe_starters,
 };
 
 use crate::environment_cmd::{DaemonLocation, error, print_json};
@@ -31,6 +32,11 @@ pub struct RecipeCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum RecipeCommands {
+    /// List the immutable starter templates shipped with this Compute build.
+    Starters {
+        #[arg(long)]
+        json: bool,
+    },
     /// List recipes at their current version.
     List {
         #[arg(long)]
@@ -50,11 +56,14 @@ pub enum RecipeCommands {
     Validate(ResolveArgs),
     /// Explain what a recipe will cause Compute to do, before it does it.
     Resolve(ResolveArgs),
-    /// Create a recipe from a `compute.recipe@1` JSON file.
+    /// Create a user-owned recipe from a file or shipped starter.
     Create {
         name: String,
-        #[arg(long)]
-        file: PathBuf,
+        #[arg(long, required_unless_present = "from", conflicts_with = "from")]
+        file: Option<PathBuf>,
+        /// Copy an immutable shipped starter into an ordinary user recipe.
+        #[arg(long, required_unless_present = "file", conflicts_with = "file")]
+        from: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -171,6 +180,26 @@ fn print_view(view: &RecipeView, json: bool) {
     print_json(&view.spec);
 }
 
+fn print_starters(starters: &[RecipeStarter], json: bool) {
+    if json {
+        print_json(&starters);
+        return;
+    }
+    println!("STARTER\tNAME\tLIFECYCLE\tPLATFORMS\tSOURCE\tSTATUS\tDESCRIPTION");
+    for starter in starters {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            starter.id,
+            starter.display_name,
+            starter.spec.lifecycle.as_str(),
+            starter.platforms.join(","),
+            starter.source,
+            starter.template_status,
+            starter.spec.description.as_deref().unwrap_or("")
+        );
+    }
+}
+
 fn print_resolution(resolution: &RecipeResolution) {
     match &resolution.recipe {
         Some(recipe) => println!(
@@ -248,8 +277,13 @@ async fn resolve_args(
 }
 
 pub async fn recipe(command: RecipeCommand) -> compute_core::Result<()> {
+    if let RecipeCommands::Starters { json } = &command.command {
+        print_starters(&recipe_starters(), *json);
+        return Ok(());
+    }
     let client = command.daemon.client()?;
     match command.command {
+        RecipeCommands::Starters { .. } => unreachable!("handled without a controller"),
         RecipeCommands::List { json } => {
             let recipes: Vec<RecipeView> = client.get("/recipes").await.map_err(error)?;
             if json {
@@ -299,10 +333,31 @@ pub async fn recipe(command: RecipeCommand) -> compute_core::Result<()> {
                 RecipeVerdict::Invalid => std::process::exit(INVALID_EXIT),
             }
         }
-        RecipeCommands::Create { name, file, json } => {
+        RecipeCommands::Create {
+            name,
+            file,
+            from,
+            json,
+        } => {
+            let spec = match (file, from) {
+                (Some(file), None) => read_spec(&file)?,
+                (None, Some(starter)) => recipe_starter(&starter)
+                    .map(|starter| starter.spec)
+                    .ok_or_else(|| {
+                        ComputeError::InvalidWorkload(format!(
+                            "unknown starter {starter:?}; choose one of {}",
+                            recipe_starters()
+                                .iter()
+                                .map(|starter| starter.id.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ))
+                    })?,
+                _ => unreachable!("clap requires exactly one recipe source"),
+            };
             let definition = RecipeDefinition {
                 name,
-                spec: read_spec(&file)?,
+                spec,
                 expected_version: None,
             };
             let view: RecipeView = client

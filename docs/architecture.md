@@ -289,7 +289,8 @@ legacy deployment model:
 | Daemon `/compute/*` (its node as a caller's provider) | job records | the daemon API's execute scope | the daemon host | none | one-shot jobs in the daemon's job store | none | the daemon's receipt for the job | as provider jobs | **B** one-shot job primitive |
 
 Everything else that starts a process starts Compute itself (the daemon,
-the target, the supervisor, an upgraded controller) or a tool (curl, npm,
+the target, the supervisor, an upgraded controller, or the packaged binary
+for read-only version and starter-catalog verification) or a tool (curl, npm,
 compilers, the FeltDB verifier, the read-only `pax` project observer,
 runtime acquisition, container engines behind a target's container
 sessions); none runs a workload.

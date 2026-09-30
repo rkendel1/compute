@@ -1188,6 +1188,7 @@
     "source": [
      "crates/compute-core/src/recipes.rs",
      "crates/compute-environment/src/recipe.rs",
+     "crates/compute-environment/src/starters.rs",
      "crates/compute-environment/src/daemon/recipes.rs",
      "crates/compute-cli/src/recipe_cmd.rs"
     ],
@@ -3732,6 +3733,18 @@
    "tests": []
   },
   {
+   "command": "compute recipe starters",
+   "about": "List the immutable starter recipe templates shipped with this Compute build without contacting a controller",
+   "help_defect": null,
+   "interface": "embedded distribution catalog; API /recipes/starters",
+   "state": "immutable distribution",
+   "authority": "local read",
+   "ui": "new environment starter selector",
+   "tests": [
+    "crates/compute-cli/tests/cli.rs#shipped_recipe_starters_are_controller_free_and_machine_readable"
+   ]
+  },
+  {
    "command": "compute recipe list",
    "about": "List recipes at their current version",
    "help_defect": null,
@@ -3773,7 +3786,7 @@
   },
   {
    "command": "compute recipe create",
-   "about": "Create a recipe (compute.recipe@1) from a JSON file",
+   "about": "Create a user-owned recipe (compute.recipe@1) from a JSON file or immutable shipped starter",
    "help_defect": null,
    "interface": "daemon API /recipes",
    "state": "durable",
@@ -5072,10 +5085,19 @@
    "http_path_in_tests": false
   },
   {
+   "method": "GET",
+   "path": "/recipes/starters",
+   "scope": "Read",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
    "method": "POST",
    "path": "/recipes",
    "scope": "Operate",
-   "ui": false,
+   "ui": true,
    "cli": true,
    "appport": false,
    "http_path_in_tests": false
@@ -5084,7 +5106,7 @@
    "method": "POST",
    "path": "/recipes/resolve",
    "scope": "Read",
-   "ui": false,
+   "ui": true,
    "cli": true,
    "appport": false,
    "http_path_in_tests": false
