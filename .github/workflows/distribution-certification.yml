@@ -77,7 +77,7 @@ jobs:
           cp "$RUNNER_TEMP/configured-evidence.json" "$root/evidence.json"
           cp -a compute-distribution/recipes "$root/recipes"
           cp -a compatibility/published-stack/node_modules "$root/node_modules"
-          test "$(find "$root/recipes/starters" -name '*.json' -type f | wc -l)" = 7
+          test "$(find "$root/recipes/starters" -name '*.json' -type f | wc -l | tr -d '[:space:]')" = 7
           asset="compute-configured-$version-linux-x86_64.tar.gz"
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - "$root" | gzip -n -9 > "$asset"
           sha256sum "$asset" > "$asset.sha256"
@@ -160,7 +160,7 @@ jobs:
           cp "$RUNNER_TEMP/configured-evidence.json" "$root/evidence.json"
           cp -a compute-distribution/recipes "$root/recipes"
           cp -a configured-stack/node_modules "$root/node_modules"
-          test "$(find "$root/recipes/starters" -name '*.json' -type f | wc -l)" = 7
+          test "$(find "$root/recipes/starters" -name '*.json' -type f | wc -l | tr -d '[:space:]')" = 7
           asset="compute-configured-$version-macos-aarch64.tar.gz"
           brew install gnu-tar
           gtar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - "$root" | gzip -n -9 > "$asset"
