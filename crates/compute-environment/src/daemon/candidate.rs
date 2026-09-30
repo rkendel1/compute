@@ -150,7 +150,13 @@ impl Daemon {
             Err(EnvironmentError::NotFound(_)) => return Ok(()),
             Err(error) => return Err(error),
         };
-        self.destroy_computer(candidate, operator).await?;
+        // Already gone (a handoff removed it between the two reads) is cleared.
+        match self.destroy_computer(candidate, operator).await {
+            Err(EnvironmentError::NotFound(_)) => return Ok(()),
+            other => {
+                other?;
+            }
+        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         loop {
             self.refresh().await?;
