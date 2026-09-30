@@ -210,20 +210,26 @@ impl Daemon {
         } else {
             Default::default()
         };
+        // Same configuration, so the same provenance: kept only while the
+        // source's recipe version still resolves to what is inherited.
+        let computer = ComputerRequest {
+            lifecycle: spec.lifecycle,
+            requirements: spec.requirements,
+            target: derivation.target.clone(),
+            ttl_seconds: None,
+        };
+        let recipe = self
+            .surviving_recipe(source.value.recipe.as_ref(), &computer, policy.as_ref())
+            .await;
         self.create_computer_environment_inner(
             ComputerEnvironmentDefinition {
                 name: candidate.clone(),
                 desired_state: DesiredState::Running,
                 env: config,
                 policy,
-                computer: ComputerRequest {
-                    lifecycle: spec.lifecycle,
-                    requirements: spec.requirements,
-                    target: derivation.target.clone(),
-                    ttl_seconds: None,
-                },
+                computer,
                 contents: Default::default(),
-                recipe: None,
+                recipe,
             },
             operator,
         )

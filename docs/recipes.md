@@ -249,8 +249,10 @@ must not depend on whatever the recipe says now:
 
 `recipe` on the environment records **provenance at creation**. If the
 environment's computer is later changed (`replace`), the environment's
-`computer` remains the authority and the recipe record is not updated; fork,
-restore, and replace do not carry it.
+`computer` remains the authority. The evidence is carried through `replace`,
+`fork`, and `restore` only while that version still resolves to the
+configuration in force, and released otherwise
+([lifecycle.md](lifecycle.md#persistent-ephemeral-and-provenance)).
 
 ## User-defined recipes
 
@@ -312,7 +314,7 @@ Kept explicit; each names the missing primitive rather than a workaround.
 | Checkpoint/fork policy | Operations, not lifetimes |
 | Environment contents, configuration in a recipe | Deliberately absent: project reality is PAX's; values are secrets |
 | Recipes for raw target sessions (`compute session create`) and work sessions | The resolved `ComputerRequest` fits `OpenSessionRequest`, but recording the recipe there is not built |
-| Recipe drift after `replace`/`fork` | The recorded version is provenance at creation, not a live comparison |
+| Recipe drift after `replace`/`fork` | Provenance is kept only while the recorded version still resolves to the configuration; there is no live comparison against newer versions |
 | Deleting or archiving a recipe | Not built: versions are immutable evidence; only the current one lists |
 | Authorization beyond `compute.operate` | Recipes are shared; no per-recipe owner |
 | Foundry CI's implementation | Not in this repository; its policy is derived, not observed |

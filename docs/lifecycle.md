@@ -110,6 +110,38 @@ Not provider-dependent: idempotent cancel, the terminal-state rules, the
 `termination_failed`/`destruction_failed` distinction, and that a destroy is
 never reported over a failed termination.
 
+## Persistent, ephemeral, and provenance
+
+An environment is one durable object. What it *is* is written down; what it
+is *doing* is not.
+
+| Persistent (survives stop, replace, and a controller restart) | Ephemeral (never survives; re-derived or ended) |
+| --- | --- |
+| environment id, owner, name | processes and pids, running jobs |
+| configured requirements, lifecycle, policy, declared contents | readiness and restart state, observed contents |
+| the workspace (kept by stop; moved by replace/fork) | cancellation state, provider-local handles |
+| recipe evidence `{name, version, digest}`, while true | the machine's session and connection |
+
+**Recipe evidence** is provenance: which recipe version produced the
+configuration. It is carried only while it is still true, by one rule:
+
+> An operation keeps the recipe only if that version still resolves to the
+> configuration now in force (only `target` may differ). Otherwise it
+> releases it. The creation event keeps the history either way.
+
+| Operation | Recipe | Why |
+| --- | --- | --- |
+| stop / start / controller restart | kept | same environment, same configuration |
+| replace, same requirements | kept | same configuration on a new machine |
+| replace, different requirements | **released**; `computer.replaced` names it (`recipe_released`) | a different configuration; the record must not claim otherwise |
+| fork | kept if it still resolves to what is inherited; a new environment with its own identity | same configuration, new identity |
+| restore | same rule, against the source's current configuration | derived through the same path as fork |
+| destroy | the record stays as evidence | nothing is rewritten |
+
+`compute environment inspect` shows the recipe (and the workload count) and
+`GET /environments/{name}` returns it as `recipe`; there is no separate
+provenance API. Tests: `crates/compute-environment/tests/provenance.rs`.
+
 ## Recovery
 
 * A session's state is written before the provider acts. A `destroying`

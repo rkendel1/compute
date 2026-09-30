@@ -241,6 +241,29 @@ impl Daemon {
             spec.requirements = requirements.clone();
             spec.generation += 1;
             let generation = spec.generation;
+            // New requirements are a different configuration: the recipe is
+            // kept only if it still resolves to them, else released.
+            let policy: Option<compute_policy::Policy> = env
+                .value
+                .policy
+                .clone()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| EnvironmentError::Invalid(format!("{name}'s policy: {error}")))?;
+            let kept = self
+                .surviving_recipe(
+                    env.value.recipe.as_ref(),
+                    &ComputerRequest {
+                        lifecycle: spec.lifecycle,
+                        requirements: requirements.clone(),
+                        target: None,
+                        ttl_seconds: None,
+                    },
+                    policy.as_ref(),
+                )
+                .await;
+            let released = env.value.recipe.clone().filter(|_| kept.is_none());
+            new_env.recipe = kept;
 
             let mut moved = current.value.clone();
             if let (Some(target), Some(session_id)) =
@@ -279,6 +302,7 @@ impl Daemon {
                 "spec_generation": generation,
                 "candidate": candidate,
                 "jobs": jobs,
+                "recipe_released": released,
             });
             let scope = Scope::environment(&name);
             let mut change = Change::new().with(|batch| {
