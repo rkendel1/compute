@@ -724,48 +724,14 @@ async fn async_main() {
             // failure there, like `certify`, must stay one JSON document), so
             // the envelope is the last line of stderr.
             let command = contract::command_path::<Cli>(&arguments);
-            eprintln!("{}", contract::error_envelope(&command, &error, 1));
+            let endpoint = contract::daemon_endpoint(&arguments);
+            eprintln!(
+                "{}",
+                contract::error_envelope(&command, &error, 1, &endpoint)
+            );
         }
         std::process::exit(1);
     }
-}
-
-/// The flat list of what `compute doctor` verified: one entry per runtime on
-/// this host and, when a controller was asked, one for it. `status` is `pass`
-/// or `fail`; a failing check says what to do in `remediation`.
-fn doctor_checks(
-    reports: &[compute_core::RuntimeReport],
-    controller: Option<&serde_json::Value>,
-) -> Vec<serde_json::Value> {
-    let mut checks = reports
-        .iter()
-        .map(|report| {
-            let availability = &report.availability;
-            serde_json::json!({
-                "id": format!("runtime:{}", report.runtime),
-                "status": if availability.available { "pass" } else { "fail" },
-                "detail": availability.version,
-                "remediation": availability.remediation,
-            })
-        })
-        .collect::<Vec<_>>();
-    if let Some(controller) = controller {
-        let reachable = controller["reachable"].as_bool().unwrap_or(false);
-        let authenticated = controller.get("authentication").is_none();
-        checks.push(serde_json::json!({
-            "id": "controller",
-            "status": if reachable && authenticated { "pass" } else { "fail" },
-            "detail": controller["endpoint"],
-            "remediation": if !reachable {
-                controller["remediation"].clone()
-            } else if !authenticated {
-                controller["authentication"].clone()
-            } else {
-                serde_json::Value::Null
-            },
-        }));
-    }
-    checks
 }
 
 fn parse_cli() -> Cli {
@@ -803,7 +769,29 @@ fn parse_cli() -> Cli {
     {
         arguments.insert(2, "inspect".into());
     }
-    Cli::parse_from(arguments)
+    match Cli::try_parse_from(&arguments) {
+        Ok(cli) => cli,
+        Err(error) => {
+            // Usage errors keep clap's message and exit status (2). Help and
+            // version are not errors and print as usual. With `--json`, a real
+            // usage error also ends stderr with the failure envelope.
+            let usage_error = error.use_stderr();
+            let _ = error.print();
+            if usage_error && contract::json_requested(&arguments) {
+                let failure = compute_core::ComputeError::Coded {
+                    code: "invalid_arguments".into(),
+                    message: error.render().to_string().trim_end().to_owned(),
+                };
+                let command = contract::command_path::<Cli>(&arguments);
+                let endpoint = contract::daemon_endpoint(&arguments);
+                eprintln!(
+                    "{}",
+                    contract::error_envelope(&command, &failure, error.exit_code(), &endpoint)
+                );
+            }
+            std::process::exit(error.exit_code());
+        }
+    }
 }
 
 async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
@@ -1453,12 +1441,9 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
             } else {
                 Some(node_cmd::controller_diagnosis(&json_flag.daemon).await)
             };
-            let checks = doctor_checks(&reports, controller.as_ref());
-            let failing = checks
-                .iter()
-                .filter(|check| check["status"] != "pass")
-                .count();
-            let strict_failure = json_flag.strict && failing > 0;
+            let checks = contract::doctor_checks(&reports, controller.as_ref());
+            let (failing, strict_exit) = contract::doctor_outcome(&checks, json_flag.strict);
+            let strict_failure = strict_exit != 0;
             if json_flag.json {
                 let reports = reports
                     .into_iter()

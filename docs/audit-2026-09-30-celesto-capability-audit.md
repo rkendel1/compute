@@ -18,8 +18,12 @@ receipt).
 > and `docs/github-runner-protocol.md` are headed "Nothing here is implemented"
 > and were treated accordingly.)
 
-Status key: **EXISTS**, **PARTIAL**, **MISSING**, **CONFLICTS** (conflicts with
-architecture), **N/A**.
+Status vocabulary. Section 2 describes Compute **as found at `c50218a`**, before
+any change, using EXISTS / PARTIAL / MISSING (and CONFLICTS where a capability
+contradicts the architecture). The final table under **Result** gives the status
+after this work in the vocabulary EXISTS / PARTIAL / IMPLEMENTED / INTENTIONALLY
+DEFERRED / NOT APPLICABLE. A correction pass (2026-10-01) re-verified the landed
+work; see **Correction pass**.
 
 ## 1. What was inspected
 
@@ -43,8 +47,8 @@ test layout (`crates/*/tests`).
 | **Persistent environment lifecycle** | **EXISTS** | `ComputerLifecycle::{Persistent,Ephemeral}` (`compute-core/src/computers.rs:21`); `ComputerStatus` pending/provisioning/running/stopping/stopped/resuming/failed/destroying/destroyed/expired/unreachable/lost (`:51`); `SessionStatus` incl. distinct `Ready` vs `Running` (`compute-core/src/sessions.rs:67-81`); `compute environment create/apply/start/stop/restart/destroy` (`environment_cmd.rs:914-982`); stop/destroy confirmation, `termination_failed`, process-tree termination (`compute-provider/src/processes.rs`, `docs/lifecycle.md`); tests `compute-environment/tests/{lifecycle,readiness,computers}.rs` | none found that justify new code; "complete" is `JobStatus`, not an environment state | No change |
 | **Doctor / host preflight** | **PARTIAL** | `compute doctor [--json] [--runtimes-only]` (`main.rs:419-428`, handler `:1393`); per-runtime `RuntimeReport` (`compute-runtime/src/lib.rs:257`) with availability and `remediation`; controller diagnosis with reachability/auth findings (`node_cmd.rs:516`); host isolation report (`compute-core/src/host.rs:501`); distribution provenance (`distribution.rs:408`); test `cli.rs:676` | no `--strict` (exit status is 0 whatever the findings); JSON has no `ok`/`exit_code`/`error` fields and no flat `checks` list an agent can iterate | Add `--strict` and an **additive** envelope + `data.checks`; keep `runtimes`/`controller` keys byte-compatible |
 | **Stable machine-readable CLI output** | **PARTIAL** | `--json` is a per-command flag with per-command shapes (e.g. `main.rs:410`, `session_cmd.rs`, `pool.rs::print_json`); typed error kinds exist server-side: `EnvironmentError::kind()` (`compute-environment/src/lib.rs:106`) | success shapes are heterogeneous (existing consumers depend on them); **failures are not machine-readable**: `async_main` prints `{error}` to stderr (`main.rs:710-714`) and `environment_cmd::error` flattens `EnvironmentError` into `ComputeError::Runtime(String)` (`environment_cmd.rs:52`), losing the kind | Do not rewrite success shapes. Add a uniform **failure** envelope for any command run with `--json`, derived from a stable code |
-| **Actionable recovery in errors** | **PARTIAL** | Human remediation text exists: `"start the controller with \`compute start\`"` (`node_cmd.rs:536`), client message (`compute-environment/src/client.rs:145`), `RuntimeReport.availability.remediation`, destroy failure phases (`docs/lifecycle.md`) | recovery is prose only | Add a structured `recovery` object where the action is deterministic: `controller_unavailable → compute start`, `runtime_unavailable → compute doctor`. Nothing inferred elsewhere |
-| **Read-only host mounts, explicit writable escalation** | **EXISTS** (stronger form), writable **CONFLICTS** | `Mount { host_path, execution_path }` (`compute-core/src/lib.rs:240`) is **copied** into a staged workspace (`:2401-2404`, `copy_path`), symlinks refused (`:2605`), `..`/prefix components refused by `sanitize_execution_path` (`:2587-2600`, `ComputeError::InvalidMountPath`). There is no host→guest bind, so a guest can never write to the host; results leave only through declared `outputs` | no test covers any of this (`grep Mount {` finds none in tests). No writable mount exists | **Test** read-only-by-construction, invalid path, symlink, cleanup. **Writable host mounts: not implemented.** A write-through bind would bypass the declared-outputs/receipt-digest model, so it conflicts with the staging architecture (see Result) |
+| **Actionable recovery in errors** | **PARTIAL** | Human remediation text exists: `"start the controller with \`compute start\`"` (`node_cmd.rs:536`), client message (`compute-environment/src/client.rs:145`), `RuntimeReport.availability.remediation`, destroy failure phases (`docs/lifecycle.md`) | recovery is prose only | Add a structured `recovery` object only where the action is deterministic. (Landed with two cases; the correction pass cut it to one, `controller_unavailable` on the default local endpoint → `compute start`) |
+| **Host mounts; read-only vs writable** | **MISSING** as a mount; **EXISTS** as copy-in | Compute has no host mount. `Mount { host_path, execution_path }` (`compute-core/src/lib.rs:240`, CLI `--mount`) is **copy-in / input materialization**: `stage_workload` copies the host path into the execution's private workspace (`:2401-2404`, `copy_path`), refuses symlinks (`:2605`) and `..`/prefix components (`sanitize_execution_path`, `ComputeError::InvalidMountPath`). The workload sees only the copy; nothing is copied back. Results leave only as declared `outputs`, which the receipt digests | the name `mount` is historical and misleading; before this work no test covered copy-in. Copy-in is **not** a sandbox: under `process` isolation the workload can write anywhere its user can (the receipt says `filesystem: unavailable`) | Tests and accurate terminology. **Writable host mounts: not implemented**: a write-through bind would change the host outside the declared-output/receipt model |
 | **Network policy** | **PARTIAL** | `NetworkPolicy::{None,Localhost,Network}` default `None` (`compute-core/src/lib.rs:245-252`); per-runtime capability matrix (`:1726-1794`); OS-level enforcement or refusal `plan()` in `compute-core/src/host.rs:300-360` (netns for none/localhost; `network_isolation_unavailable` refusal otherwise, fail-closed; tests `host.rs:558-619`); recipes carry `requirements.network` (`recipes/starters/*.json`); admission: `compute-placement/src/requirements.rs:178` | no `restricted`/allowlist mode, and **no runtime can enforce a domain/CIDR allowlist** (`compute-network` is *ingress* — domains, DNS, certificates — not egress) | **Deferred.** Adding a `restricted` variant that nothing enforces would be a lie on the wire; fail-closed refusal would be its only behaviour. Stated in `docs/execution-capabilities.md`; fail-closed behaviour now tested |
 | **Snapshots / restore** | **EXISTS** | `compute environment checkpoint`, `restore`, `fork` (`compute-environment/src/daemon/{checkpoint,restore,fork}.rs`); content-addressed artifact; tree-digest verification; lineage; `docs/checkpoint.md`, `restore.md`, `fork.md`; tests `crates/compute-environment/tests` | filesystem checkpoints only; no memory/VM snapshot (documented as deliberately not offered, `docs/compute-capabilities.md`) | No change |
 | **Browser-specific environments** | **MISSING** | Chromium appears only in UI tests (`compute-cli/tests/work_mode_ui.rs:54`, `product_journey.rs:41`) and `compute up` opening the control UI (`launch_cmd.rs:223`). No CDP, no browser capability: `SessionCapabilities` has ten fixed names (`sessions.rs:142`) and `TARGET_FEATURES` six (`computers.rs:129`) | no capability, runtime, or recipe | **Deferred** (see Result) |
@@ -93,8 +97,9 @@ test layout (`crates/*/tests`).
 ## 4. Decisions
 
 - **Doctor / JSON / recovery (A, B):** extend the existing surfaces additively.
-- **Mounts (E):** the existing copy-in model already gives "host → guest is
-  read-only"; add the missing tests; do not add writable mounts.
+- **Copy-in (E):** Compute copies declared inputs in and declared outputs out;
+  it has no host mount. Add the missing tests and correct the terminology; do not
+  add writable mounts.
 - **Network (F):** no change to the enum; document what is enforced.
 - **Snapshots (G):** exists; untouched.
 - **Browser / desktop (H, I):** deferred. A capability name cannot be added to
@@ -126,7 +131,7 @@ change what can be promised.
    status describes how the execution *ended*; the command's own failure is
    `exit_code`. The worker and CLI therefore treat `Completed` + non-zero exit as
    failure, as `compute run` already does.
-3. **A refused mount is a failed execution with a receipt, not an `Err`.** Staging
+3. **A refused copy-in is a failed execution with a receipt, not an `Err`.** Staging
    errors (`..`, symlink, missing host path) surface as `status: failed`,
    `error.kind: preparation`, `started: false`, and the receipt records them.
 4. **Fail-closed network is observable.** The `shell` runtime under the `process`
@@ -137,21 +142,25 @@ change what can be promised.
    waits for the output pipes.** On timeout and cancellation the whole process
    group is killed (tested). When the command exits on its own, a descendant that
    still holds stdout/stderr keeps the execution open until it ends or the wall
-   time passes, and one that detached its stdio survives. This is the engine every
-   session job runs on, and background work started by a session command is
-   deliberately allowed to continue (`docs/lifecycle.md`, Process ownership), so
-   it was **not** changed. The GitHub worker needs the strict behaviour, so its
-   script ends its own process group when it exits
-   (`a_runner_that_exits_leaves_no_descendant_behind`).
+   time passes, and one that detached its stdio survives. Session jobs rely on
+   this (background work started by a session command is deliberately allowed to
+   continue, `docs/lifecycle.md`, Process ownership), so the runtime was **not**
+   changed. The correction pass confirmed the GitHub runner *does* create
+   descendants (listener, worker, job steps) and so the worker script ends its
+   own process group when it exits, captures the runner's output to a file
+   rather than a pipe, and is covered by tests for success, failure, timeout and
+   cancellation (`a_runner_that_exits_leaves_no_descendant_behind`, the CLI
+   timeout and signal tests). A descendant that ignores `SIGTERM` is not
+   force-killed on the normal-exit path; the wall-time limit bounds it.
 
 ## 6. What was implemented
 
 | # | Change | Where | Tests |
 | --- | --- | --- | --- |
-| A | `compute doctor --strict`; additive envelope and `data.checks` | `compute-cli/src/main.rs` | `compute-cli/tests/contract.rs` |
-| B | `--json` failure envelope; `ComputeError::code()`/`recovery()`; `Coded` variant | `compute-core/src/lib.rs`, `compute-cli/src/contract.rs`, `environment_cmd.rs`, `application.rs` | `contract.rs`, unit tests in `compute-core` and `contract.rs`, `architecture.rs` |
+| A | `compute doctor --strict`; additive envelope and `data.checks` with `pass`/`warn`/`fail` | `compute-cli/src/main.rs` | `compute-cli/tests/contract.rs` |
+| B | `--json` failure envelope; `ComputeError::code()`; `Coded` variant; recovery computed in the CLI | `compute-core/src/lib.rs`, `compute-cli/src/contract.rs`, `environment_cmd.rs`, `application.rs` | `contract.rs`, unit tests in `compute-core` and `contract.rs`, `architecture.rs` |
 | D | Cleanup tests for success, command failure, timeout, cancellation; `Compute::run_controlled` | `compute-runtime/src/lib.rs` | `compute-runtime/tests/ephemeral.rs` |
-| E | Mount tests (read-only by construction, escape, symlink, missing path, cleanup, concurrency) | tests only | `compute-runtime/tests/mounts.rs` |
+| E | Copy-in tests (original untouched, escape, symlink, missing path, cleanup, concurrency; and that `process` isolation is not a boundary) | tests only | `compute-runtime/tests/copy_in.rs` |
 | F | Fail-closed network test | tests only | `compute-runtime/tests/network.rs` |
 | L | `compute-worker-github` crate, `compute worker github-actions run`, recipe | `crates/compute-worker-github`, `compute-cli/src/worker_cmd.rs`, `examples/recipes/github-actions-runner.json` | `compute-worker-github/tests/{runner,github_api}.rs`, `compute-cli/tests/worker.rs` |
 | Guards | Architecture invariants | `compute-cli/tests/architecture.rs`; `docs/audit.json` entry for the new command (extends `audit.rs`) | same |
@@ -178,21 +187,25 @@ Nothing was added to `compute-state`, FeltDB, the wire protocol, or
 
 ## Result
 
-| Celesto capability | Decision | Why |
+Final status after this work and the correction pass. "Source" points at what
+the claim rests on.
+
+| Capability | Status | Source and note |
 | --- | --- | --- |
-| Persistent environment lifecycle | **EXISTS — no change** | Complete and covered: create/start/stop/restart/destroy, distinct `Ready`/`Running`, confirmed stop/destroy, process-tree termination, failed-provision vs unsatisfied-requirements, recovery after restart (`compute-environment/tests/{lifecycle,readiness,computers}.rs`). The audit found no hole that justified code; a new state machine would have duplicated `ComputerStatus`/`SessionStatus` |
-| Doctor / host preflight | **PARTIAL — completed** | Doctor existed. Added `--strict` and a flat, stable `data.checks`; the original `runtimes`/`controller` keys are unchanged. No second health system |
-| Stable machine-readable CLI output | **PARTIAL — completed** | Success shapes deliberately untouched (existing consumers). Added the uniform failure envelope and stable error codes, and made controller error kinds survive to the CLI |
-| Actionable recovery in errors | **PARTIAL — completed** | `error.recovery.command` for the two deterministic cases (`controller_unavailable` → `compute start`; `runtime_unavailable`/`unknown_runtime` → `compute doctor`). Nothing else claims a recovery |
-| Read-only host mounts, writable escalation | **EXISTS — improved (tests); writable MISSING — intentionally deferred** | Copy-in staging already makes host → guest read-only by construction, and had no tests; now covered. A writable mount would bypass declared outputs and receipt digests, so it conflicts with the staging architecture |
-| Network policy | **PARTIAL — intentionally deferred (`restricted`); fail-closed EXISTS — improved (tests)** | `none`/`localhost`/`network` exist and fail closed; now tested at the runtime. A domain/CIDR allow-list has no enforcing runtime or target, and the network crate is ingress |
-| Snapshots / restore | **EXISTS — no change** | Filesystem checkpoint → restore/fork with lineage and verification already exist; VM/memory snapshots are deliberately not a portable promise |
-| Browser runtime | **MISSING — intentionally deferred** | No target can honestly advertise a browser/CDP endpoint; capabilities are a closed, wire-versioned set. Smallest future step: a `browser` capability on environments that can start Chromium, with CDP as an endpoint and a display only if requested |
-| Desktop runtime | **MISSING — intentionally deferred** | Same; display/keyboard/mouse/clipboard would be capabilities on an environment, built after the browser capability and a target that has a display |
-| Agent presets | **PARTIAL — intentionally deferred** | `agent-task` exists. Per-agent recipes would be requirement-identical (recipes hold no software) and add no reproducibility. Credentials stay out of recipes; a guard test now enforces it |
-| Interactive vs detached | **EXISTS — no change** | `compute run` is deterministic and never reads the TTY; detached/async paths exist (`session exec --detach`, `remote submit`). Guard test added. A PTY is not offered (`terminal` is `false` everywhere) |
-| Strict ephemeral cleanup | **PARTIAL — completed (tests + `run_controlled`)** | One-shot cleanup on success, failure, timeout and cancellation is now tested, and `run_controlled` exposes cancellation to adapters. Reaping descendants after a *normal* exit stays as is (Finding 5) |
-| Ephemeral GitHub Actions runner | **MISSING — implemented** | External adapter crate + CLI + optional recipe; token never persisted; receipt is Compute's. Not verified against a live GitHub runner (stated in `docs/github-actions-runner.md`) |
+| Persistent environment lifecycle | **EXISTS** | `compute-core/src/computers.rs:21,51`, `sessions.rs:67-81`; tests `compute-environment/tests/{lifecycle,readiness,computers}.rs`. No change |
+| Doctor / host preflight | **PARTIAL → IMPLEMENTED** | Doctor existed (`main.rs`, `Commands::Doctor`). Added `--strict`, statuses `pass`/`warn`/`fail`, a stable `data.checks`; original keys unchanged. Reports adapter and controller self-description only: no requirement or admission logic (`contract.rs::doctor_checks`) |
+| Stable machine-readable output | **PARTIAL → IMPLEMENTED** (failure side) | Success shapes untouched. Failure envelope on the last stderr line; controller error kinds survive via `ComputeError::Coded` (`environment_cmd.rs::error`, `EnvironmentError::kind`) |
+| Actionable recovery | **PARTIAL → IMPLEMENTED** (one case) | Only `controller_unavailable` on the default local endpoint → `compute start` (`contract.rs::recovery`). The earlier `runtime_unavailable`/`unknown_runtime` → `compute doctor` was removed in the correction pass: several fixes exist, so no single one is deterministic |
+| Host mounts (read-only / writable) | **EXISTS** (copy-in); **INTENTIONALLY DEFERRED** (writable mount) | Compute has copy-in, not host mounts (`stage_workload`, `lib.rs:2401`). Writable mounts would bypass declared outputs and receipt digests |
+| Network policy | **EXISTS** (`none`/`localhost`/`network`, fail closed); **INTENTIONALLY DEFERRED** (`restricted`) | `host.rs:300-360`, `compute-runtime/tests/network.rs`. No runtime enforces an allow-list; `compute-network` is ingress |
+| Snapshots / restore | **EXISTS** | `compute-environment/src/daemon/{checkpoint,restore,fork}.rs`. Filesystem checkpoints only |
+| Browser runtime | **INTENTIONALLY DEFERRED** | No capability or target; `SessionCapabilities::NAMES` is a closed, wire-versioned list |
+| Desktop runtime | **INTENTIONALLY DEFERRED** | Same |
+| Agent presets | **PARTIAL**; per-agent recipes **INTENTIONALLY DEFERRED** | `recipes/starters/agent-task.json` exists; recipes hold requirements only |
+| Interactive vs detached | **EXISTS** | `session exec --detach`, `remote submit`; a guard test enforces that no TTY is consulted |
+| Strict ephemeral cleanup | **PARTIAL → IMPLEMENTED** (one-shot path) | Tests for success, failure, timeout, cancellation (`compute-runtime/tests/ephemeral.rs`); `Compute::run_controlled` |
+| Ephemeral GitHub Actions runner | **IMPLEMENTED** (verified with a fake runner; **not** against live GitHub) | `crates/compute-worker-github`; see **Verification status** in `docs/github-actions-runner.md` |
+| `ExternalWorker` trait | **NOT APPLICABLE** | One integration exists |
 
 Also decided: **no `ExternalWorker` trait** (M). One integration exists; the
 adapter's only seam is the `GitHubApi` trait it needs for testing. A trait would
@@ -203,37 +216,40 @@ secret-input channel on the session path), runner deregistration through GitHub'
 removal API, a session-based worker host, and any change to the process
 runtime's post-exit behaviour.
 
+## Correction pass (2026-10-01)
+
+Re-verified against source; nothing from the first report was taken on trust.
+
+| Found | Fix |
+| --- | --- |
+| Runner job name/result were parsed from `_diag` logs; the real runner prints them to the terminal (`JobDispatcher.cs`) | read from the runner's captured output |
+| `file://` and unchecked URLs were accepted for the archive | https only (incl. redirects, TLS 1.2+); `--archive-file` for local archives; both verified by SHA-256 |
+| A job the runner reported as `Failed` still exited 0 | `job_failed`, exit 1 |
+| `doctor` reported an uninstalled runtime as `fail`, and a **healthy real controller as `fail`** (`authentication` is an info object there; mocks hid it) | `warn`/`fail` split; string-only auth problem; real-controller test |
+| Recovery `runtime_unavailable`/`unknown_runtime` → `compute doctor`, and `compute start` for any controller | only `controller_unavailable` on the default endpoint; recovery moved out of `compute-core` into the CLI |
+| Usage errors had no envelope | `invalid_arguments` (exit 2) on stderr in `--json` mode |
+| "Mounts" described as read-only host mounts and "guest cannot change the host" | copy-in terminology; `process` isolation is not a boundary (tested) |
+| `recipe` in the report implied the host satisfied it | renamed `declared_recipe`; documented as unevaluated |
+| Receipt lacked repository/runner identity | sealed `runner-metadata.json` now carries them |
+
+Verified against the **real** v2.337.0 runner archive (not mocked): token read
+from `ACTIONS_RUNNER_INPUT_TOKEN`; flags accepted; through the worker as an
+unprivileged user the runner reached GitHub, which returned 404 for a fake
+token; reported stage `configure`, cleanup complete. The recipe was accepted by
+a real controller (`recipe validate`: `satisfiable`, `recipe create`). **Not
+verified:** registration with a real token and a real job (the sandbox cannot
+reach the registration API with a valid credential).
+
 ## Test report
 
-Run with `cargo test --workspace --no-fail-fast` (debug, `CARGO_PROFILE_DEV_DEBUG=0`).
+Full `cargo test --workspace --no-fail-fast` on the hardened tree:
+**655 passed, 1 failed, 19 ignored** (baseline `c50218a`: 581 / 0 / 19).
 
-| Run | Passed | Failed | Ignored |
-| --- | --- | --- | --- |
-| Baseline, before any change (`c50218a`) | 581 | 0 | 19 |
-| Full workspace, with this work | 639 | 3 | 19 |
-| `compute-cli` re-run after the fix below (22 test binaries) | 125 | 0 | 3 |
-
-* **Failures caused by this PR: 3, fixed.** The first version of the failure
-  envelope wrote to stdout. Three existing `compute-cli/tests/cli.rs` tests
-  (`bundle_expected_identity_mismatch_fails_before_execution`,
-  `bundle_create_verify_inspect_dry_run_and_execute_are_one_engine_path`,
-  `certification_report_detects_a_broken_assembled_distribution`) assert that a
-  failed `--json` command leaves stdout empty, or exactly one JSON document. That
-  is an existing consumer contract, so the envelope moved to the last line of
-  stderr. Those tests are unchanged and pass.
-* **Pre-existing failures: none.** The 19 ignored tests (3 in `compute-cli`) are
-  ignored upstream (they need a FeltDB server, real packages, or Playwright) and
-  were not run; `FELTDB_SERVER_BIN` was not available, so the FeltDB consumer
-  tests that `AGENTS.md` says to run when state access changes were not exercised
-  (this work does not touch state access).
-* `cargo fmt --all -- --check` is clean. `cargo clippy --workspace --all-targets`
-  reports no warning in the code added here; the existing warnings elsewhere are
-  untouched.
-* **Not verified:** the worker against a real GitHub runner and the real
-  GitHub API (tests use a fake runner archive and a local API stand-in), and the
-  macOS paths (this session ran on Linux).
-
-New tests: `compute-worker-github` (3 unit, 5 API, 13 runner), `compute-runtime`
-(5 ephemeral, 6 mounts, 3 network), `compute-cli` (8 contract, 7 worker, 7
-architecture, 3 contract unit, 1 `compute-core` unit), plus the new
-`docs/audit.json` entry that the existing `audit.rs` guard requires.
+The one failure, `compute-cli/tests/recovery.rs::an_execution_that_ends_while_the_controller_is_down_is_recorded_after_recovery`
+(`left: 2, right: 1`), **fails identically on the untouched baseline `c50218a`**
+built in a clean worktree in this environment, and in isolation on the hardened
+tree, so it is not caused by this work. It passed earlier the same day, so it
+is environment-sensitive; it was not investigated further. `cargo fmt --check`
+is clean; `cargo clippy --workspace --all-targets` reports no warning in any
+file added or changed here (existing warnings elsewhere are untouched). The
+ignored tests need a FeltDB server, real packages or Playwright and were not run.

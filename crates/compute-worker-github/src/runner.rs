@@ -91,8 +91,8 @@ impl RunnerArch {
     }
 }
 
-/// Which recipe the environment came from: its name and the digest of the
-/// spec that was used (`compute_core::recipe_digest`).
+/// A recipe the caller declared: its name and the digest of the spec file
+/// (`compute_core::recipe_digest`). Provenance for a reader, not a check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipeEvidence {
     pub name: String,
@@ -116,16 +116,20 @@ pub struct RunnerSpec {
     /// The runner's name on GitHub. Generated when absent.
     pub name: Option<String>,
     /// Where to fetch the archive. Absent: the release URL for
-    /// `runner_version`. A mirror (or `file://` in tests) is allowed; the
-    /// checksum still decides.
+    /// `runner_version`. HTTPS only (redirects too); a mirror is allowed and
+    /// the checksum still decides what runs.
     pub download_url: Option<String>,
+    /// An archive already on this host, used instead of downloading. It is
+    /// verified against the checksum exactly like a download.
+    pub archive_file: Option<PathBuf>,
     /// The GitHub server the runner registers with.
     pub server_url: String,
     pub timeout: Duration,
     /// Run the runner's `installdependencies.sh` (needs privileges).
     pub install_dependencies: bool,
-    /// The recipe this run realizes, recorded in the report.
-    pub recipe: Option<RecipeEvidence>,
+    /// The recipe the caller says this run is for. It is recorded, not
+    /// evaluated: nothing checks this host against its requirements.
+    pub declared_recipe: Option<RecipeEvidence>,
 }
 
 impl RunnerSpec {
@@ -152,10 +156,11 @@ impl RunnerSpec {
             labels: vec![],
             name: None,
             download_url: None,
+            archive_file: None,
             server_url: DEFAULT_SERVER_URL.into(),
             timeout: DEFAULT_TIMEOUT,
             install_dependencies: false,
-            recipe: None,
+            declared_recipe: None,
         })
     }
 
@@ -211,10 +216,18 @@ impl RunnerSpec {
             return invalid("the server URL must be an https:// URL");
         }
         if let Some(url) = &self.download_url
-            && (!(url.starts_with("https://") || url.starts_with("file://"))
+            && (!url.starts_with("https://")
                 || url.chars().any(|c| c.is_whitespace() || c.is_control()))
         {
-            return invalid("the download URL must be https:// (or file://)");
+            return invalid("the download URL must be an https:// URL");
+        }
+        if let Some(path) = &self.archive_file
+            && (!path.is_absolute() || !path.is_file())
+        {
+            return invalid("the archive file must be an absolute path to an existing file");
+        }
+        if self.download_url.is_some() && self.archive_file.is_some() {
+            return invalid("give a download URL or an archive file, not both");
         }
         if self.timeout.is_zero() {
             return invalid("the timeout must be greater than zero");
@@ -270,7 +283,7 @@ pub struct RunnerReport {
     pub worker: String,
     pub repository: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub recipe: Option<RecipeEvidence>,
+    pub declared_recipe: Option<RecipeEvidence>,
     pub runner: RunnerIdentity,
     /// The execution environment: the runtime and the host that ran it.
     pub environment: String,
@@ -358,7 +371,7 @@ impl<A: GitHubApi> RunnerWorker<A> {
         let report = RunnerReport {
             worker: "github-actions".into(),
             repository: spec.repository.to_string(),
-            recipe: spec.recipe.clone(),
+            declared_recipe: spec.declared_recipe.clone(),
             runner: RunnerIdentity {
                 version: spec.runner_version.clone(),
                 os: spec.os,
@@ -422,6 +435,13 @@ fn request(spec: &RunnerSpec, name: &str, script: PathBuf, token: &Secret) -> Ex
         ),
         var("RUNNER_VERSION", spec.runner_version.clone()),
         var("RUNNER_DOWNLOAD_URL", spec.download_url()),
+        var(
+            "RUNNER_ARCHIVE_FILE",
+            spec.archive_file
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+        ),
         var("RUNNER_SHA256", spec.runner_sha256.to_ascii_lowercase()),
         var("RUNNER_NAME", name.into()),
         var("RUNNER_LABELS", spec.labels.join(",")),

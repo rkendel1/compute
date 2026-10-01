@@ -62,9 +62,14 @@ struct RunArgs {
     /// The runner's name on GitHub (generated when absent).
     #[arg(long)]
     name: Option<String>,
-    /// Fetch the archive from here instead of the GitHub release URL.
-    #[arg(long)]
+    /// Fetch the archive from this https:// URL instead of the GitHub release
+    /// URL. HTTPS only; the checksum decides what runs.
+    #[arg(long, conflicts_with = "archive_file")]
     download_url: Option<String>,
+    /// Use this runner archive (an absolute path) instead of downloading one.
+    /// It is verified against `--runner-sha256` like a download.
+    #[arg(long)]
+    archive_file: Option<PathBuf>,
     #[arg(long, default_value = DEFAULT_SERVER_URL)]
     server_url: String,
     #[arg(long, default_value = RestGitHubApi::DEFAULT_API_URL)]
@@ -79,9 +84,9 @@ struct RunArgs {
     /// the repository's runners.
     #[arg(long, default_value = DEFAULT_CREDENTIAL_ENV)]
     token_env: String,
-    /// The `github-actions-runner` recipe file this run realizes; its name
-    /// and digest are recorded in the report. The file is validated, and
-    /// holds no repository or credential.
+    /// The `github-actions-runner` recipe file this run is for. It is
+    /// validated and its name and digest are recorded in the report; it is not
+    /// evaluated against this host and does not change what runs.
     #[arg(long)]
     recipe_file: Option<PathBuf>,
     /// Write Compute's execution receipt here.
@@ -136,13 +141,14 @@ async fn run(args: RunArgs) -> compute_core::Result<()> {
     spec.labels = args.labels;
     spec.name = args.name;
     spec.download_url = args.download_url;
+    spec.archive_file = args.archive_file;
     spec.server_url = args.server_url;
     spec.install_dependencies = args.install_dependencies;
     if let Some(timeout) = args.timeout {
         spec.timeout = timeout;
     }
     if let Some(path) = &args.recipe_file {
-        spec.recipe = Some(recipe_evidence(path)?);
+        spec.declared_recipe = Some(recipe_evidence(path)?);
     }
 
     let api = RestGitHubApi::new(args.api_url).map_err(failure)?;
@@ -168,8 +174,18 @@ async fn run(args: RunArgs) -> compute_core::Result<()> {
         std::fs::write(path, receipt.encoded_bytes()?)?;
     }
 
-    let succeeded = run.result.status == ExecutionStatus::Completed
+    let runner_ok = run.result.status == ExecutionStatus::Completed
         && run.result.exit_code.is_none_or(|code| code == 0);
+    // An ephemeral runner exits 0 after its job whatever the job's result, so
+    // a job the runner reported as not succeeded is a failure here too. When
+    // the runner printed no result nothing is claimed.
+    let job_ok = run
+        .report
+        .job
+        .result
+        .as_deref()
+        .is_none_or(|result| result == "Succeeded");
+    let succeeded = runner_ok && job_ok;
     let exit_code = if succeeded {
         0
     } else {
@@ -178,11 +194,18 @@ async fn run(args: RunArgs) -> compute_core::Result<()> {
     if args.json {
         let error = (!succeeded).then(|| {
             json!({
-                "code": "runner_failed",
-                "message": format!(
-                    "the runner ended {:?} at stage {}",
-                    run.report.status, run.report.stage
-                ),
+                "code": if runner_ok { "job_failed" } else { "runner_failed" },
+                "message": if runner_ok {
+                    format!(
+                        "the job ended with result {}",
+                        run.report.job.result.as_deref().unwrap_or("unknown")
+                    )
+                } else {
+                    format!(
+                        "the runner ended {:?} at stage {}",
+                        run.report.status, run.report.stage
+                    )
+                },
             })
         });
         println!(

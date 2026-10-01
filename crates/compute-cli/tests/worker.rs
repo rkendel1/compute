@@ -43,6 +43,14 @@ struct Runner {
     sha256: String,
 }
 
+/// A runner whose job ends with `result`, then exits 0 as a real ephemeral
+/// runner does whatever the job's result.
+fn runner_with_job(result: &str) -> Runner {
+    runner(&format!(
+        "echo '2026-10-01 00:00:05Z: Job build completed with result: {result}'\nexit 0"
+    ))
+}
+
 fn runner(run_body: &str) -> Runner {
     let root = tempfile::tempdir().unwrap();
     let tree = root.path().join("tree");
@@ -55,9 +63,9 @@ fn runner(run_body: &str) -> Runner {
     std::fs::write(
         tree.join("run.sh"),
         format!(
-            "#!/bin/sh\nmkdir -p _diag\n\
-             echo 'Running job: build' >> _diag/Runner_1.log\n\
-             echo 'Job build completed with result: Succeeded' >> _diag/Runner_1.log\n{run_body}\n"
+            "#!/bin/sh\n\
+             echo '2026-10-01 00:00:00Z: Running job: build'\n\
+             {run_body}\n"
         ),
     )
     .unwrap();
@@ -89,6 +97,10 @@ fn runner(run_body: &str) -> Runner {
 }
 
 fn run(runner: &Runner, api: &str, extra: &[&str], credential: Option<&str>) -> Output {
+    build(runner, api, extra, credential).output().unwrap()
+}
+
+fn build(runner: &Runner, api: &str, extra: &[&str], credential: Option<&str>) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_compute"));
     runtimes::with_fixture_runtimes(&mut command);
     command.env_remove("GITHUB_TOKEN");
@@ -106,21 +118,22 @@ fn run(runner: &Runner, api: &str, extra: &[&str], credential: Option<&str>) -> 
             "2.331.0",
             "--runner-sha256",
             &runner.sha256,
-            "--download-url",
-            &format!("file://{}", runner.archive.display()),
             "--api-url",
             api,
             "--name",
             "cli-test",
             "--label",
             "compute",
-            "--timeout",
-            "60s",
             "--json",
         ])
-        .args(extra)
-        .output()
-        .unwrap()
+        .args(extra);
+    if !extra.contains(&"--timeout") {
+        command.args(["--timeout", "60s"]);
+    }
+    if !extra.contains(&"--download-url") && !extra.contains(&"--archive-file") {
+        command.args(["--archive-file", runner.archive.to_str().unwrap()]);
+    }
+    command
 }
 
 fn stdout_json(output: &Output) -> serde_json::Value {
@@ -155,7 +168,7 @@ fn token_body() -> String {
 
 #[test]
 fn one_ephemeral_job_is_run_reported_and_cleaned_up_without_leaking_secrets() {
-    let fake = runner("exit 0");
+    let fake = runner_with_job("Succeeded");
     let (api, received) = github(201, token_body());
     let receipt = fake.root.path().join("receipt.json");
     let output = run(
@@ -329,4 +342,224 @@ fn the_shipped_recipe_is_valid_names_no_repository_and_holds_no_credential() {
         .unwrap();
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("--recipe-file"));
+}
+
+/// Everything the process could have written lives under one root: its working
+/// directory, `$HOME`, `$TMPDIR` and its runtime store.
+struct Sandbox {
+    root: tempfile::TempDir,
+}
+
+impl Sandbox {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        for directory in ["cwd", "home", "tmp", "store"] {
+            std::fs::create_dir(root.path().join(directory)).unwrap();
+        }
+        Self { root }
+    }
+
+    fn confine(&self, command: &mut Command) {
+        command
+            .current_dir(self.root.path().join("cwd"))
+            .env("HOME", self.root.path().join("home"))
+            .env("TMPDIR", self.root.path().join("tmp"))
+            .env("COMPUTE_RUNTIME_STORE", self.root.path().join("store"));
+    }
+
+    /// No file under the root contains a secret, and no staged workspace is
+    /// left in `$TMPDIR`.
+    fn assert_clean(&self, what: &str) {
+        fn walk(directory: &Path, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(directory).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() && !path.is_symlink() {
+                    walk(&path, found);
+                } else {
+                    found.push(path);
+                }
+            }
+        }
+        let mut files = vec![];
+        walk(self.root.path(), &mut files);
+        for file in &files {
+            let bytes = std::fs::read(file).unwrap_or_default();
+            let text = String::from_utf8_lossy(&bytes);
+            // Skip the fake runner's own files, which hold neither.
+            assert!(
+                !text.contains(TOKEN) && !text.contains(CREDENTIAL),
+                "{what}: {} holds a secret",
+                file.display()
+            );
+        }
+        let left = std::fs::read_dir(self.root.path().join("tmp"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert!(left.is_empty(), "{what}: workspaces left behind: {left:?}");
+    }
+}
+
+fn run_sandboxed(sandbox: &Sandbox, fake: &Runner, api: &str, extra: &[&str]) -> Output {
+    let mut command = build(fake, api, extra, Some(CREDENTIAL));
+    sandbox.confine(&mut command);
+    command.output().unwrap()
+}
+
+#[test]
+fn nothing_secret_is_persisted_and_nothing_is_left_behind_whatever_the_outcome() {
+    // A runner that prints both secrets, then ends in each way.
+    let leaky = format!(
+        "echo \"token=$ACTIONS_RUNNER_INPUT_TOKEN credential={CREDENTIAL}\"\n\
+         echo \"token=$ACTIONS_RUNNER_INPUT_TOKEN\" >&2\n"
+    );
+    let cases: [(&str, String, i32); 3] = [
+        ("success", format!("{leaky}exit 0"), 0),
+        ("runner failure", format!("{leaky}exit 4"), 4),
+        (
+            "job failure",
+            format!("{leaky}echo 'x: Job build completed with result: Failed'\nexit 0"),
+            1,
+        ),
+    ];
+    for (what, body, expected) in cases {
+        let sandbox = Sandbox::new();
+        let fake = runner(&body);
+        let (api, _) = github(201, token_body());
+        let output = run_sandboxed(&sandbox, &fake, &api, &[]);
+        assert_eq!(output.status.code(), Some(expected), "{what}");
+        assert_no_secret(what, &output.stdout);
+        assert_no_secret(what, &output.stderr);
+        sandbox.assert_clean(what);
+    }
+}
+
+#[test]
+fn a_failed_job_is_a_failure_even_though_the_runner_exits_zero() {
+    let fake = runner_with_job("Failed");
+    let (api, _) = github(201, token_body());
+    let output = run(&fake, &api, &[], Some(CREDENTIAL));
+    assert_eq!(output.status.code(), Some(1));
+    let document = stdout_json(&output);
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["error"]["code"], "job_failed");
+    let report = &document["data"]["report"];
+    assert_eq!(report["exit_code"], 0, "the runner itself exited cleanly");
+    assert_eq!(report["job"]["result"], "Failed");
+    assert_eq!(report["job"]["name"], "build");
+}
+
+#[test]
+fn a_timeout_is_reported_cleaned_up_and_leaves_no_runner_process() {
+    let sandbox = Sandbox::new();
+    let pid_file = sandbox.root.path().join("pid");
+    let fake = runner(&format!(
+        "sleep 300 &\necho $! > {}\nwait",
+        pid_file.display()
+    ));
+    let (api, _) = github(201, token_body());
+    let output = {
+        let mut command = build(&fake, &api, &["--timeout", "3s"], Some(CREDENTIAL));
+        sandbox.confine(&mut command);
+        command.output().unwrap()
+    };
+    assert_eq!(output.status.code(), Some(1));
+    let document = stdout_json(&output);
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["error"]["code"], "runner_failed");
+    assert_eq!(document["data"]["report"]["status"], "timed_out");
+    assert_eq!(document["data"]["report"]["stage"], "run");
+    assert_eq!(
+        document["data"]["report"]["cleanup"]["workspace_removed"],
+        true
+    );
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        !alive(pid),
+        "the runner's descendant {pid} outlived the timeout"
+    );
+    assert_no_secret("stdout", &output.stdout);
+    sandbox.assert_clean("timeout");
+}
+
+#[test]
+fn a_signal_cancels_the_run_and_cleans_up() {
+    let sandbox = Sandbox::new();
+    let pid_file = sandbox.root.path().join("pid");
+    let fake = runner(&format!(
+        "sleep 300 &\necho $! > {}\nwait",
+        pid_file.display()
+    ));
+    let (api, _) = github(201, token_body());
+    let mut command = build(&fake, &api, &["--timeout", "120s"], Some(CREDENTIAL));
+    sandbox.confine(&mut command);
+    let child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    for _ in 0..200 {
+        if pid_file.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(pid_file.exists(), "the runner started");
+    let descendant: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let document = stdout_json(&output);
+    assert_eq!(document["data"]["report"]["status"], "cancelled");
+    assert_eq!(
+        document["data"]["report"]["cleanup"]["workspace_removed"],
+        true
+    );
+    assert!(
+        !alive(descendant),
+        "the descendant {descendant} outlived the cancellation"
+    );
+    assert_no_secret("stdout", &output.stdout);
+    assert_no_secret("stderr", &output.stderr);
+    sandbox.assert_clean("cancellation");
+}
+
+fn alive(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat
+            .rsplit(')')
+            .next()
+            .and_then(|rest| rest.split_whitespace().next())
+            .is_some_and(|state| state != "Z"),
+        Err(_) => false,
+    }
+}
+
+#[test]
+fn the_download_must_be_https_and_the_archive_file_absolute_and_real() {
+    let fake = runner_with_job("Succeeded");
+    for extra in [
+        vec!["--download-url", "http://example.com/runner.tar.gz"],
+        vec!["--download-url", "file:///etc/passwd"],
+        vec!["--download-url", "ftp://example.com/runner.tar.gz"],
+        vec!["--archive-file", "relative.tar.gz"],
+        vec!["--archive-file", "/does/not/exist.tar.gz"],
+    ] {
+        let output = run(&fake, "http://127.0.0.1:1", &extra, Some(CREDENTIAL));
+        assert_eq!(output.status.code(), Some(1), "{extra:?}");
+        assert_eq!(
+            stderr_envelope(&output)["error"]["code"],
+            "invalid_runner_spec",
+            "{extra:?}"
+        );
+    }
 }
