@@ -29,6 +29,8 @@ thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
 walkdir.workspace = true
+# Fetches a registered service's `/v1/ui` (see `service_ui`).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
 rcgen = "0.14"

@@ -325,3 +325,182 @@ Per the instruction to document before fixing: the 8787 default collision
 (`appport-services/src/cli.ts:203`; `compute-environment/src/client.rs:12`) is a
 one-line configuration choice on either side; and `docs/architecture.md` in
 `appport-services` is stale. Neither was changed.
+
+---
+
+# Implementation (follow-up, same day)
+
+The audit above describes the state **before** this change. Where it says the
+integration is missing, this section records what was then built. Nothing here
+copies AppPort Services into Compute.
+
+## PROTOCOL
+
+The authoritative contract is `AppPort/ui/1`, owned by `@appport/protocol`
+(`rkendel1/appport`, `packages/protocol/src/ui.ts`; published in
+`@appport/protocol@1.0.2`, which contains `dist/ui.js`). Read from source, not
+docs:
+
+* Discovery: `GET /v1/ui` (`UI_DISCOVERY_PATH`); the protocol server answers
+  `404 NOT_FOUND` "No composable UI is advertised" when it has none
+  (`packages/server/src/http.ts:199-207`).
+* Document: `{ protocol: "AppPort/ui/1", product: {id, version}, surfaces:
+  [{id, title, route, capabilities[], entities?, actions?}], navigation:
+  [{id, label, group, order, surface}], composition: { requires:
+  ("identity"|"tenant"|"application"|"environment")[] } }`, plus `capabilities[]`
+  in the discovery form (`UiDiscoveryDocument`).
+* Routes are same-application paths: they must start with `/`, not `//`, and
+  not contain `://` (`validateUiContribution`). Capabilities are protocol names
+  (`<namespace>.<operation>`, lowercase). It describes **all three** things:
+  routes (surfaces), navigation, and required capabilities.
+* There is **no JSON Schema** for it in `spec/schemas`; the TypeScript validator
+  is the schema. The protocol repository owns it. A host composes contributions
+  with `composeUi` (`packages/client/src/composition.ts`) and skips any whose
+  `composition.requires` it cannot supply.
+* Resolution of the audit's discrepancy: the old `APPPORT_UI_CONTRIBUTIONS`
+  (`[{protocol, id, requiredCapabilities}]`, API keys only) was not an
+  `AppPort/ui/1` document. It was **replaced** (not kept alongside) by a valid
+  one built with the protocol's own validator.
+* No embedding contract exists in the protocol: surfaces are routes, "not
+  remote code". No iframe protocol was invented.
+
+## APPPORT SERVICES
+
+Branch `claude/determined-curie-07x0a9` of `rkendel1/appport-services` (not
+merged; no PR opened).
+
+* `@appport/services` now depends on `@appport/protocol@^1.0.2` and builds its
+  contribution with `validateUiContribution`/`filterUiContribution`
+  (`src/runtime/ui.ts`): one surface per page it actually mounts, with the
+  capabilities the page drives (all checked against `SERVICE_CAPABILITY_MANIFEST`
+  by a test), navigation grouped as "AppPort Services", `composition.requires: []`.
+* `createManagementRouter` serves it at `GET /v1/ui` when it serves the pages
+  (`includeUi`), and `404`s with the protocol's body otherwise.
+* **Standalone `appport()` is unchanged**: it still serves the `/_appport/*`
+  API and no pages, so it answers no `/v1/ui` and appears in Compute as
+  "advertises no UI". Making it serve pages would change its behaviour for
+  existing consumers and its pages cannot authenticate against Bearer-only
+  standalone mode, so it was not done.
+* Discovery is anonymous (like `/_appport/capabilities`) and not filtered per
+  caller; each page still authorizes its own user. This differs from the
+  protocol server's per-caller filtering and is stated in `docs/management.md`.
+* Tests: 233 pass, 0 fail (`npm test`), including `tests/ui-discovery.test.ts`
+  (valid document accepted by the protocol validator, every route served,
+  capabilities real, invalid documents rejected, nothing mounted → none, no UI
+  → 404, no secrets in the document).
+
+## COMPUTE
+
+* **Registry:** unchanged `ServiceRecord` (name, capabilities, endpoint). No new
+  field, state, database or `.flow`.
+* **Protocol-based detection:** a service declares the capability string
+  `AppPort/ui/1` (the protocol id). No service name, path or page is known to
+  Compute.
+* **Discovery:** `compute-environment/src/service_ui.rs`; `Daemon::service_ui`;
+  `GET /services/{service}/ui` (scope read; listed in `ROUTES` and
+  `docs/audit.json`). Nothing is stored or cached.
+* **UI:** the Services page gains a **Management** column
+  (`crates/compute-environment/ui/app.js`, `serviceUiCell`): links to the
+  service's own pages, or a status chip and message. Navigation is unchanged.
+* **Embedding choice:** external links. See AUTH.
+* **CLI bug found and fixed on the way:** `compute service register --endpoint`
+  shared a clap id with the global daemon location, so registering a service
+  with an endpoint redirected the CLI to that endpoint and failed. It had never
+  been exercised (existing tests used the API directly). One-line fix
+  (`id = "service_endpoint"`), with `tests/service_register.rs`.
+* **UI bug found by the browser test:** appending an array rendered
+  `[object HTMLDivElement]`; fixed (`append(...links)`).
+
+## AUTH
+
+Unchanged and not unified. The browser signs in to Compute with an operator
+token and to the service by the service's own means (`@appport/services`: host
+session + AuthBoundry). Crossing the boundary is ordinary navigation to the
+service's URL. Compute sends the service no credential, cookie or token, and the
+discovery request is anonymous (a test asserts no `authorization`, `cookie`,
+`proxy-authorization` or `x-compute*` header). No shared cookie, token
+forwarding, credential proxy or AuthBoundry integration was added. Embedding was
+rejected because it would require exactly those.
+
+## STATE
+
+Unchanged. AppPort Services' state stays in `appport.flow` in the application's
+own FeltDB; Compute's service record stays in Compute's control state.
+Discovery results are computed per request and stored nowhere. No new
+database, `.flow` or cache.
+
+## STARTUP
+
+Nothing starts automatically. `compute` starts the control plane
+(`127.0.0.1:8787`); the AppPort application is started separately
+(`npm run dev`), and `compute service register … --capability AppPort/ui/1
+--endpoint …` tells Compute where it is. Compute does not launch AppPort
+Services and the docs say so (`docs/service-ui.md`). **Port collision:** real in
+the default workflow (`appport init`/`create-appport` and `compute` both
+defaulted to 8787). Compute's port was not changed; AppPort's *generated*
+default is now `4100` (`appport-services` `src/cli.ts`, example, tests, docs).
+An explicit port in an existing `appport.toml` is unchanged, and the parser's
+own default when `[http] port` is omitted is still 8787.
+
+## TESTS
+
+Compute, full `cargo test --workspace --no-fail-fast`: **673 passed, 1 failed,
+19 ignored** (baseline `c50218a`: 581 / 0 / 19). The one failure,
+`compute-cli/tests/recovery.rs::an_execution_that_ends_while_the_controller_is_down_is_recorded_after_recovery`,
+is pre-existing: it fails identically on the untouched baseline commit
+(verified in a clean worktree) and is unrelated to this change.
+
+New and relevant, all passing:
+
+| Suite | Result |
+| --- | --- |
+| `compute-environment/src/service_ui.rs` unit tests (validator) | 9 / 9 |
+| `compute-environment/tests/service_ui.rs` (real daemon + stand-in HTTP service; discovery, non-AppPort service, 14 failure modes, timeout, endpoint change/removal, header check, UI source guard) | 8 / 8 |
+| `compute-cli/tests/service_register.rs` (the `--endpoint` fix) | 1 / 1 |
+| `compute-cli` `audit`, `contract`, `architecture`, `execution_paths` | all pass |
+| `packages/compute-ui-e2e` (real Chromium, real daemon): the 3 existing tests plus `service-ui.test.mjs` | 4 / 4 |
+| `appport-services` `npm test` | 233 / 233 (incl. `tests/ui-discovery.test.ts`) |
+
+Also done by hand, once: a genuine `@appport/services` host
+(`createManagementRouter` on `127.0.0.1:4100`) registered in a genuine Compute
+daemon with `compute service register … --capability AppPort/ui/1`; the daemon
+returned `available` with the eight links it mounts, and the pages answered
+`401` to an anonymous request (the service owns its authentication). Not
+verified: `fmt`/`clippy` for `appport-services` (not part of its test script),
+and the published npm package (the branch is unmerged).
+
+## SECURITY
+
+Validation and isolation are described in `docs/service-ui.md`. Tested:
+unavailable, timeout, malformed (not JSON, array, empty), wrong protocol
+version, off-origin/scheme/`..` routes, oversized body, redirect to a metadata
+address (not followed), 401/403, 404, 5xx, a contribution requiring identity, an
+endpoint that is `file:`, `javascript:` or carries credentials, no endpoint,
+service removed, endpoint changed, capability dropped; and in a real browser,
+markup/script text, a `javascript:` route and an off-origin route (nothing runs,
+no unsafe link). The UI source is guarded against markup-parsing APIs.
+
+**Not added:** a Content-Security-Policy. The control-plane UI serves none today;
+that is outside this change and is noted as a hardening follow-up.
+
+## LIMITATIONS
+
+* Compute links to a service's pages; it does not embed or proxy them, and the
+  user signs in to the service separately.
+* Only hosts that mount `createManagementRouter` publish `/v1/ui`; a standalone
+  `appport()` app shows "advertises no UI".
+* Discovery is anonymous and unfiltered per caller; per-caller filtering by
+  Compute is impossible without forwarding an identity.
+* The Rust validator mirrors, and is stricter than, the TypeScript one; they are
+  kept aligned by a fixture generated from the real service, not by shared code.
+* `@appport/protocol` on npm is 1.0.2 while the repository is at 1.0.3;
+  `@appport/services` pins `^1.0.2`.
+* The Services page does not poll. Not verified: behaviour with a service behind
+  a TLS terminator with a private CA (the daemon uses the system roots).
+
+## NEXT
+
+One justified follow-up: publish `appport-services` with the new `/v1/ui` (the
+branch is unmerged), then register a real embedded host in Compute and confirm
+the page list matches. Embedding or per-user filtering needs an identity
+decision that no source requires yet, so none is proposed.

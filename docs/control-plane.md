@@ -286,6 +286,10 @@ artifact, served by `GET /receipts/:id` and verifiable with
 records a shared service and the capabilities it provides. This is the model
 boundary only: Compute doesn't yet manage a service catalog.
 
+A service that declares the `AppPort/ui/1` capability also contributes a
+management UI that the Services page links to; see
+[service-ui.md](service-ui.md).
+
 ## Limitations
 
 - **One daemon per control plane.** Two daemons against the same FeltDB

@@ -27,6 +27,7 @@ pub mod identity;
 pub mod manifest;
 pub mod model;
 pub mod recipe;
+pub mod service_ui;
 pub mod starters;
 pub mod status;
 pub mod tls;

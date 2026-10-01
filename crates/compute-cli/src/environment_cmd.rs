@@ -2586,7 +2586,10 @@ pub enum ServiceCommands {
         project: Option<String>,
         #[arg(long)]
         workload: Option<String>,
-        #[arg(long)]
+        /// The service's own URL. (Its clap id differs from the global daemon
+        /// location's `endpoint`: sharing one id made this flag also redirect
+        /// the CLI to the service instead of the daemon.)
+        #[arg(long = "endpoint", id = "service_endpoint")]
         endpoint: Option<String>,
         #[arg(long)]
         description: Option<String>,
