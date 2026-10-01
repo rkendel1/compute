@@ -15,7 +15,11 @@ use compute_state_memory::MemoryState;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+/// What `@appport/services` answers at `/v1/ui`: the protocol's caller-filtered
+/// view for a caller holding no capabilities (only the capability-free overview).
 const SERVICES_DOCUMENT: &str = include_str!("fixtures/appport-ui/appport-services.json");
+/// The full contribution, as a host with capability context would serve it.
+const FULL_DOCUMENT: &str = include_str!("fixtures/appport-ui/appport-services-full.json");
 
 fn config(node: &std::path::Path, store: Arc<dyn StateStore>) -> DaemonConfig {
     let artifacts = Arc::new(StateArtifacts::new(ControlState::new(store.clone())));
@@ -114,30 +118,11 @@ async fn a_service_that_declares_a_ui_is_discovered_and_exposed_as_links_to_its_
     let view = daemon.service_ui("services").await.unwrap();
     assert_eq!(view.status, UiStatus::Available, "{view:?}");
     assert_eq!(view.product.as_ref().unwrap().id, "appport-services");
-    assert!(view.links.len() >= 2);
-    // Compute knows no page by name: every link is the service's own route.
-    for link in &view.links {
-        assert!(
-            link.url.starts_with(&format!("{endpoint}/")),
-            "{}",
-            link.url
-        );
-    }
-    assert!(
-        view.links
-            .iter()
-            .any(|link| link.url == format!("{endpoint}/api-keys"))
-    );
-    assert!(
-        view.links
-            .iter()
-            .any(|link| link.url == format!("{endpoint}/webhooks"))
-    );
-    assert!(
-        view.links
-            .iter()
-            .all(|link| link.group == "AppPort Services")
-    );
+    // Compute knows no page by name: the link is the service's own route. An
+    // anonymous caller gets the protocol's filtered view, the overview page.
+    assert_eq!(view.links.len(), 1, "{view:?}");
+    assert_eq!(view.links[0].url, format!("{endpoint}/services"));
+    assert_eq!(view.links[0].group, "AppPort Services");
 
     // The request carried nothing about who asked: no credential, no cookie.
     let request = seen.lock().unwrap()[0].to_lowercase();
@@ -150,6 +135,37 @@ async fn a_service_that_declares_a_ui_is_discovered_and_exposed_as_links_to_its_
     ] {
         assert!(!request.contains(header), "{header} was sent: {request}");
     }
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_service_that_advertises_several_surfaces_gets_a_link_for_each_navigation_entry() {
+    let (_node, daemon) = daemon().await;
+    let (endpoint, _) = service(Reply::Json(200, FULL_DOCUMENT.into())).await;
+    register(&daemon, "full", &[UI], Some(&endpoint)).await;
+    let view = daemon.service_ui("full").await.unwrap();
+    assert_eq!(view.status, UiStatus::Available, "{view:?}");
+    assert_eq!(view.links.len(), 9);
+    for route in [
+        "/services",
+        "/api-keys",
+        "/webhooks",
+        "/jobs",
+        "/schedules",
+        "/notifications",
+        "/files",
+        "/configuration",
+        "/secrets",
+    ] {
+        assert!(
+            view.links
+                .iter()
+                .any(|l| l.url == format!("{endpoint}{route}")),
+            "{route}"
+        );
+    }
+    // Ordered by the service's own group and order: the overview first.
+    assert_eq!(view.links[0].url, format!("{endpoint}/services"));
     daemon.shutdown().await;
 }
 
@@ -178,8 +194,8 @@ async fn every_way_a_service_can_fail_ends_as_a_status() {
         ("not-json", Reply::Json(200, "<html>nope</html>".into()), UiStatus::Invalid),
         ("empty-body", Reply::Json(200, String::new()), UiStatus::Invalid),
         ("json-array", Reply::Json(200, "[]".into()), UiStatus::Invalid),
-        ("wrong-version", Reply::Json(200, SERVICES_DOCUMENT.replace("AppPort/ui/1", "AppPort/ui/2")), UiStatus::Invalid),
-        ("bad-route", Reply::Json(200, SERVICES_DOCUMENT.replace("\"/api-keys\"", "\"https://evil.example/\"")), UiStatus::Invalid),
+        ("wrong-version", Reply::Json(200, FULL_DOCUMENT.replace("AppPort/ui/1", "AppPort/ui/2")), UiStatus::Invalid),
+        ("bad-route", Reply::Json(200, FULL_DOCUMENT.replace("\"/api-keys\"", "\"https://evil.example/\"")), UiStatus::Invalid),
         ("oversize", Reply::Json(200, oversize), UiStatus::Invalid),
         ("garbage", Reply::Raw(b"\x00\x01 not http".to_vec()), UiStatus::Unreachable),
         ("closed", Reply::Raw(vec![]), UiStatus::Unreachable),
@@ -289,6 +305,8 @@ fn the_fixture_is_what_appport_services_publishes() {
     let document: serde_json::Value = serde_json::from_str(SERVICES_DOCUMENT).unwrap();
     assert_eq!(document["protocol"], "AppPort/ui/1");
     assert_eq!(document["product"]["id"], "appport-services");
+    let full: serde_json::Value = serde_json::from_str(FULL_DOCUMENT).unwrap();
+    assert_eq!(full["protocol"], "AppPort/ui/1");
 }
 
 /// The UI renders what a service sends only as text and as links the daemon

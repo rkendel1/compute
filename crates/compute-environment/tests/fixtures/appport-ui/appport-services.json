@@ -6,174 +6,23 @@
   },
   "surfaces": [
     {
-      "id": "api-keys",
-      "title": "API Keys",
-      "route": "/api-keys",
-      "capabilities": [
-        "apikeys.read",
-        "apikeys.create",
-        "apikeys.revoke"
-      ]
-    },
-    {
-      "id": "webhooks",
-      "title": "Webhooks",
-      "route": "/webhooks",
-      "capabilities": [
-        "webhooks.read",
-        "webhooks.register",
-        "webhooks.remove"
-      ]
-    },
-    {
-      "id": "jobs",
-      "title": "Jobs",
-      "route": "/jobs",
-      "capabilities": [
-        "jobs.read",
-        "jobs.create",
-        "jobs.retry"
-      ]
-    },
-    {
-      "id": "schedules",
-      "title": "Schedules",
-      "route": "/schedules",
-      "capabilities": [
-        "schedules.read",
-        "schedules.create",
-        "schedules.cancel"
-      ]
-    },
-    {
-      "id": "notifications",
-      "title": "Notifications",
-      "route": "/notifications",
-      "capabilities": [
-        "notifications.read",
-        "notifications.send",
-        "notifications.update",
-        "notifications.delete"
-      ]
-    },
-    {
-      "id": "files",
-      "title": "Files",
-      "route": "/files",
-      "capabilities": [
-        "files.read",
-        "files.write",
-        "files.delete"
-      ]
-    },
-    {
-      "id": "configuration",
-      "title": "Configuration",
-      "route": "/configuration",
-      "capabilities": [
-        "configuration.read",
-        "configuration.write",
-        "configuration.delete"
-      ]
-    },
-    {
-      "id": "secrets",
-      "title": "Secrets",
-      "route": "/secrets",
-      "capabilities": [
-        "configuration.read",
-        "credential.attach",
-        "credential.rotate",
-        "credential.detach"
-      ]
+      "id": "overview",
+      "title": "AppPort Services",
+      "route": "/services",
+      "capabilities": []
     }
   ],
   "navigation": [
     {
-      "id": "appport-services.api-keys",
-      "label": "API Keys",
+      "id": "appport-services.overview",
+      "label": "AppPort Services",
       "group": "AppPort Services",
-      "order": 10,
-      "surface": "api-keys"
-    },
-    {
-      "id": "appport-services.webhooks",
-      "label": "Webhooks",
-      "group": "AppPort Services",
-      "order": 20,
-      "surface": "webhooks"
-    },
-    {
-      "id": "appport-services.jobs",
-      "label": "Jobs",
-      "group": "AppPort Services",
-      "order": 30,
-      "surface": "jobs"
-    },
-    {
-      "id": "appport-services.schedules",
-      "label": "Schedules",
-      "group": "AppPort Services",
-      "order": 40,
-      "surface": "schedules"
-    },
-    {
-      "id": "appport-services.notifications",
-      "label": "Notifications",
-      "group": "AppPort Services",
-      "order": 50,
-      "surface": "notifications"
-    },
-    {
-      "id": "appport-services.files",
-      "label": "Files",
-      "group": "AppPort Services",
-      "order": 60,
-      "surface": "files"
-    },
-    {
-      "id": "appport-services.configuration",
-      "label": "Configuration",
-      "group": "AppPort Services",
-      "order": 70,
-      "surface": "configuration"
-    },
-    {
-      "id": "appport-services.secrets",
-      "label": "Secrets",
-      "group": "AppPort Services",
-      "order": 80,
-      "surface": "secrets"
+      "order": 0,
+      "surface": "overview"
     }
   ],
   "composition": {
     "requires": []
   },
-  "capabilities": [
-    "apikeys.create",
-    "apikeys.read",
-    "apikeys.revoke",
-    "configuration.delete",
-    "configuration.read",
-    "configuration.write",
-    "credential.attach",
-    "credential.detach",
-    "credential.rotate",
-    "files.delete",
-    "files.read",
-    "files.write",
-    "jobs.create",
-    "jobs.read",
-    "jobs.retry",
-    "notifications.delete",
-    "notifications.read",
-    "notifications.send",
-    "notifications.update",
-    "schedules.cancel",
-    "schedules.create",
-    "schedules.read",
-    "webhooks.read",
-    "webhooks.register",
-    "webhooks.remove"
-  ]
+  "capabilities": []
 }

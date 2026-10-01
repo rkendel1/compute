@@ -381,10 +381,18 @@ merged; no PR opened).
   "advertises no UI". Making it serve pages would change its behaviour for
   existing consumers and its pages cannot authenticate against Bearer-only
   standalone mode, so it was not done.
-* Discovery is anonymous (like `/_appport/capabilities`) and not filtered per
-  caller; each page still authorizes its own user. This differs from the
-  protocol server's per-caller filtering and is stated in `docs/management.md`.
-* Tests: 233 pass, 0 fail (`npm test`), including `tests/ui-discovery.test.ts`
+* **Corrected after review.** The first version served the full surface list
+  anonymously and unfiltered, which did not match the protocol: `GET /v1/ui` is
+  caller-contextual (`Server.uiDiscovery` filters by the caller's capabilities;
+  there is no public mode; capability-free surfaces are visible to everyone).
+  `@appport/services` cannot probe capabilities without side effects
+  (`ServiceGateway.authorize` throws on denial and records refusal evidence), so
+  it now returns the protocol's own filtered view for a caller with no asserted
+  capabilities: the capability-free **overview** surface. The full contribution
+  is still exported (`APPPORT_UI_CONTRIBUTIONS`) for hosts that know their
+  callers' capabilities. Compute's operator token is never forwarded to obtain
+  more.
+* Tests: 239 pass, 0 fail (`npm test`), including `tests/ui-discovery.test.ts` and `tests/runtime-boundaries.test.ts`
   (valid document accepted by the protocol validator, every route served,
   capabilities real, invalid documents rejected, nothing mounted → none, no UI
   → 404, no secrets in the document).
@@ -440,7 +448,9 @@ the default workflow (`appport init`/`create-appport` and `compute` both
 defaulted to 8787). Compute's port was not changed; AppPort's *generated*
 default is now `4100` (`appport-services` `src/cli.ts`, example, tests, docs).
 An explicit port in an existing `appport.toml` is unchanged, and the parser's
-own default when `[http] port` is omitted is still 8787.
+own default when `[http] port` is omitted is still 8787, on purpose (changing it
+would silently move existing apps). The two defaults are documented
+(`docs/configuration.md`) and pinned by tests.
 
 ## TESTS
 
@@ -455,19 +465,19 @@ New and relevant, all passing:
 | Suite | Result |
 | --- | --- |
 | `compute-environment/src/service_ui.rs` unit tests (validator) | 9 / 9 |
-| `compute-environment/tests/service_ui.rs` (real daemon + stand-in HTTP service; discovery, non-AppPort service, 14 failure modes, timeout, endpoint change/removal, header check, UI source guard) | 8 / 8 |
+| `compute-environment/tests/service_ui.rs` (real daemon + stand-in HTTP service; discovery incl. the filtered and the full documents, non-AppPort service, 14 failure modes, timeout, endpoint change/removal, header check, UI source guard) | 9 / 9 |
 | `compute-cli/tests/service_register.rs` (the `--endpoint` fix) | 1 / 1 |
 | `compute-cli` `audit`, `contract`, `architecture`, `execution_paths` | all pass |
 | `packages/compute-ui-e2e` (real Chromium, real daemon): the 3 existing tests plus `service-ui.test.mjs` | 4 / 4 |
-| `appport-services` `npm test` | 233 / 233 (incl. `tests/ui-discovery.test.ts`) |
+| `appport-services` `npm test` | 239 / 239 (incl. `tests/ui-discovery.test.ts`, `tests/runtime-boundaries.test.ts`); `tsc --noEmit` clean. That repository configures no formatter or linter (no `fmt`/`clippy` equivalent exists); the strict TypeScript build is its check |
 
 Also done by hand, once: a genuine `@appport/services` host
 (`createManagementRouter` on `127.0.0.1:4100`) registered in a genuine Compute
 daemon with `compute service register … --capability AppPort/ui/1`; the daemon
-returned `available` with the eight links it mounts, and the pages answered
-`401` to an anonymous request (the service owns its authentication). Not
-verified: `fmt`/`clippy` for `appport-services` (not part of its test script),
-and the published npm package (the branch is unmerged).
+returned `available` with the eight links it mounts (before the correction
+above; it now returns the one overview link), and the pages answered `401` to an
+anonymous request (the service owns its authentication). Not
+verified: the published npm package of `appport-services` (the branch is unmerged).
 
 ## SECURITY
 
@@ -489,12 +499,19 @@ that is outside this change and is noted as a hardening follow-up.
   user signs in to the service separately.
 * Only hosts that mount `createManagementRouter` publish `/v1/ui`; a standalone
   `appport()` app shows "advertises no UI".
-* Discovery is anonymous and unfiltered per caller; per-caller filtering by
-  Compute is impossible without forwarding an identity.
+* Compute is an anonymous caller, so it sees what the service publishes to a
+  caller with no capabilities (for `@appport/services`, the overview page); the
+  per-page list needs an identity Compute does not hold.
 * The Rust validator mirrors, and is stricter than, the TypeScript one; they are
   kept aligned by a fixture generated from the real service, not by shared code.
 * `@appport/protocol` on npm is 1.0.2 while the repository is at 1.0.3;
-  `@appport/services` pins `^1.0.2`.
+  `@appport/services` pins `^1.0.2` and is built and tested against the
+  **published** 1.0.2 (it contains `dist/ui.js`; the validator matches the
+  repository's). Publish order is protocol → services → consumers: the publish
+  script refuses to publish services unless a published protocol satisfies the
+  declared range (checked: `^1.0.2` passes, `^1.0.3` is refused), and a test fails
+  if the installed protocol is out of range or lacks the UI exports. Publishing
+  the protocol was not done (no credentials; and nothing here needs 1.0.3).
 * The Services page does not poll. Not verified: behaviour with a service behind
   a TLS terminator with a private CA (the daemon uses the system roots).
 
