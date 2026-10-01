@@ -1,0 +1,2 @@
+Compute provider listening on 127.0.0.1:63514 (http://127.0.0.1:63514)
+Authentication: target credentials in .compute/daemon/local/computers/credentials.json (1 active)

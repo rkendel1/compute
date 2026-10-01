@@ -1,0 +1,6 @@
+# Written by Compute: the local computer host and the credential
+# this control plane presents to it.
+[providers.this-machine]
+kind = "remote"
+endpoint = "http://127.0.0.1:63514"
+token_file = ".compute/daemon/local/control-plane/targets/this-machine.token"
