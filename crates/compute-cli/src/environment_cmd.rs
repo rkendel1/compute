@@ -49,8 +49,14 @@ impl DaemonLocation {
     }
 }
 
+/// An environment error keeps its stable kind (`not_found`, `conflict`,
+/// `controller_unavailable`, ...) so `--json` consumers can match on it; the
+/// text a person reads is what it always was.
 pub(crate) fn error(error: EnvironmentError) -> ComputeError {
-    ComputeError::Runtime(error.to_string())
+    ComputeError::Coded {
+        code: error.kind().into(),
+        message: format!("runtime error: {error}"),
+    }
 }
 
 pub(crate) fn print_json(value: &impl serde::Serialize) {

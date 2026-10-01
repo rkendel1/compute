@@ -1,0 +1,22 @@
+[package]
+name = "compute-worker-github"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "An external worker adapter that runs one ephemeral GitHub Actions runner job under Compute's execution lifecycle"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+compute-core = { path = "../compute-core" }
+compute-runtime = { path = "../compute-runtime" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true

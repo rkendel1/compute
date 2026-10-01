@@ -2788,6 +2788,57 @@ pub enum ComputeError {
     Json(#[from] serde_json::Error),
     #[error("runtime error: {0}")]
     Runtime(String),
+    /// An error that arrived with its own stable code (a controller's error
+    /// kind, an adapter's failure). `message` is the complete text a person
+    /// reads; `code` is what a program matches on.
+    #[error("{message}")]
+    Coded { code: String, message: String },
+}
+
+/// What a caller can do about an error, when exactly one action is known to
+/// be the right one. Absent means nothing is claimed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recovery {
+    pub command: String,
+}
+
+impl ComputeError {
+    /// A stable, machine-readable identifier. Codes are an interface:
+    /// they are added, never renamed.
+    pub fn code(&self) -> &str {
+        match self {
+            Self::AmbiguousRuntime(_) => "ambiguous_runtime",
+            Self::UnsupportedCapability { .. } => "unsupported_capability",
+            Self::UnsupportedWorkloadVersion { .. } => "unsupported_workload_version",
+            Self::UnknownRuntime(_) => "unknown_runtime",
+            Self::RuntimeUnavailable(_) => "runtime_unavailable",
+            Self::RuntimeVersionMismatch { .. } => "runtime_version_mismatch",
+            Self::InvalidWorkload(_) => "invalid_workload",
+            Self::InvalidIsolationProfile(_) => "invalid_isolation_profile",
+            Self::IsolationUnavailable { .. } => "isolation_unavailable",
+            Self::InvalidBundle(_) => "invalid_bundle",
+            Self::InvalidDependencyCapsule(_) => "invalid_dependency_capsule",
+            Self::InvalidReceipt(_) => "invalid_receipt",
+            Self::InvalidMountPath(_) => "invalid_mount_path",
+            Self::Io(_) => "io_error",
+            Self::Json(_) => "invalid_json",
+            Self::Runtime(_) => "runtime_error",
+            Self::Coded { code, .. } => code,
+        }
+    }
+
+    /// The one command that recovers from this error, when there is exactly
+    /// one. Only deterministic cases are listed; nothing is inferred.
+    pub fn recovery(&self) -> Option<Recovery> {
+        let command = match self.code() {
+            "controller_unavailable" => "compute start",
+            "runtime_unavailable" | "unknown_runtime" => "compute doctor",
+            _ => return None,
+        };
+        Some(Recovery {
+            command: command.into(),
+        })
+    }
 }
 
 pub type Result<T> = std::result::Result<T, ComputeError>;
@@ -3803,5 +3854,43 @@ mod tests {
             result.error.unwrap().kind,
             ExecutionErrorKind::OutputContract
         );
+    }
+    #[test]
+    fn errors_have_stable_codes_and_recovery_only_where_it_is_deterministic() {
+        let coded = |code: &str| ComputeError::Coded {
+            code: code.into(),
+            message: "x".into(),
+        };
+        assert_eq!(coded("conflict").code(), "conflict");
+        assert_eq!(
+            ComputeError::InvalidMountPath("..".into()).code(),
+            "invalid_mount_path"
+        );
+        assert_eq!(ComputeError::Runtime("x".into()).code(), "runtime_error");
+        assert_eq!(
+            ComputeError::UnknownRuntime("x".into())
+                .recovery()
+                .unwrap()
+                .command,
+            "compute doctor"
+        );
+        assert_eq!(
+            coded("controller_unavailable").recovery().unwrap().command,
+            "compute start"
+        );
+        assert_eq!(
+            coded("runtime_unavailable").recovery().unwrap().command,
+            "compute doctor"
+        );
+        for code in [
+            "conflict",
+            "not_found",
+            "admission_denied",
+            "state_unavailable",
+        ] {
+            assert_eq!(coded(code).recovery(), None, "{code}");
+        }
+        // A coded error reads exactly as its message.
+        assert_eq!(coded("conflict").to_string(), "x");
     }
 }

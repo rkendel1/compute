@@ -272,6 +272,12 @@ legacy deployment model:
  node environments (G-ARCH-5, blocked) ──▶ the daemon host's supervisor
 ```
 
+An external worker is **not** a third model: `compute worker github-actions run`
+([github-actions-runner.md](github-actions-runner.md)) is a caller of the
+`compute run` path (`Compute::run_controlled`), adding only the scheduler's
+registration and evidence. It spawns nothing itself, and nothing in the core
+knows it exists.
+
 ### Inventory
 
 | Path | Durable? | Authority | Execution host | Target session | Job | Endpoint | Receipt | Restart semantics | Disposition |

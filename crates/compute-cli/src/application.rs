@@ -1052,7 +1052,13 @@ fn provider_error(host: &Host, error: EnvironmentError) -> ComputeError {
         ProviderKind::Local => "local",
         ProviderKind::Remote => "remote",
     };
-    ComputeError::Runtime(format!("provider {} ({kind}): {error}", host.provider_id))
+    ComputeError::Coded {
+        code: error.kind().into(),
+        message: format!(
+            "runtime error: provider {} ({kind}): {error}",
+            host.provider_id
+        ),
+    }
 }
 
 /// Why no provider can take this application, in terms of what it asks

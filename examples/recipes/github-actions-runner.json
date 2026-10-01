@@ -1,0 +1,10 @@
+{
+  "description": "The environment for one ephemeral GitHub Actions runner job: it exists for the job, reaches GitHub, and is gone when the runner exits or the TTL passes. It names no repository and holds no credential: those are inputs to `compute worker github-actions run`.",
+  "lifecycle": "ephemeral",
+  "ttl_seconds": 21600,
+  "requirements": {
+    "network": "network",
+    "isolation": "process",
+    "capabilities": ["exec", "filesystem", "network", "process_tree_termination"]
+  }
+}

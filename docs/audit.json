@@ -1903,7 +1903,8 @@
    "authority": "none",
    "ui": "none",
    "tests": [
-    "crates/compute-cli/tests/cli.rs"
+    "crates/compute-cli/tests/cli.rs",
+    "crates/compute-cli/tests/contract.rs"
    ]
   },
   {
@@ -3731,6 +3732,20 @@
    "authority": "n/a",
    "ui": "none",
    "tests": []
+  },
+  {
+   "command": "compute worker github-actions run",
+   "about": "Register one ephemeral GitHub Actions runner, let it take exactly one job, and clean up. The GitHub credential is read from an environment variable; the registration token is never printed, stored, or put in a receipt",
+   "help_defect": null,
+   "interface": "local: an external worker adapter (crates/compute-worker-github) over the shell runtime; reaches the GitHub API",
+   "state": "none (a receipt file only when asked)",
+   "authority": "the GitHub token the caller supplies",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/worker.rs",
+    "crates/compute-worker-github/tests/runner.rs",
+    "crates/compute-worker-github/tests/github_api.rs"
+   ]
   },
   {
    "command": "compute recipe starters",

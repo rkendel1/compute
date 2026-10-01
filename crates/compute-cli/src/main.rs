@@ -16,6 +16,7 @@ mod admission;
 mod application;
 mod certification;
 mod computer_cmd;
+mod contract;
 mod control_state;
 mod direct;
 mod distribution;
@@ -34,6 +35,7 @@ mod session_cmd;
 mod stack_run;
 mod version_cmd;
 mod work_cmd;
+mod worker_cmd;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -153,6 +155,8 @@ enum Commands {
     /// The node's supervisor: service processes and endpoints that outlive
     /// the controller. `compute start` runs it.
     Supervisor(environment_cmd::SupervisorCommand),
+    /// External workers that run under Compute's execution lifecycle.
+    Worker(worker_cmd::WorkerCommand),
 }
 
 #[derive(Args, Debug)]
@@ -419,6 +423,10 @@ struct RuntimesCommand {
 struct DoctorCommand {
     #[arg(long)]
     json: bool,
+    /// Exit non-zero unless every check passes: every runtime available and,
+    /// unless `--runtimes-only`, a controller that answers.
+    #[arg(long)]
+    strict: bool,
     /// Only the runtimes of this host; do not contact a controller.
     #[arg(long)]
     runtimes_only: bool,
@@ -704,13 +712,60 @@ fn main() {
 }
 
 async fn async_main() {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    let json = contract::json_requested(&arguments);
     let cli = parse_cli();
     let compute = Compute::new();
 
     if let Err(error) = run(cli, compute).await {
         eprintln!("{error}");
+        if json {
+            // stdout belongs to the command's result (a command that reports a
+            // failure there, like `certify`, must stay one JSON document), so
+            // the envelope is the last line of stderr.
+            let command = contract::command_path::<Cli>(&arguments);
+            eprintln!("{}", contract::error_envelope(&command, &error, 1));
+        }
         std::process::exit(1);
     }
+}
+
+/// The flat list of what `compute doctor` verified: one entry per runtime on
+/// this host and, when a controller was asked, one for it. `status` is `pass`
+/// or `fail`; a failing check says what to do in `remediation`.
+fn doctor_checks(
+    reports: &[compute_core::RuntimeReport],
+    controller: Option<&serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut checks = reports
+        .iter()
+        .map(|report| {
+            let availability = &report.availability;
+            serde_json::json!({
+                "id": format!("runtime:{}", report.runtime),
+                "status": if availability.available { "pass" } else { "fail" },
+                "detail": availability.version,
+                "remediation": availability.remediation,
+            })
+        })
+        .collect::<Vec<_>>();
+    if let Some(controller) = controller {
+        let reachable = controller["reachable"].as_bool().unwrap_or(false);
+        let authenticated = controller.get("authentication").is_none();
+        checks.push(serde_json::json!({
+            "id": "controller",
+            "status": if reachable && authenticated { "pass" } else { "fail" },
+            "detail": controller["endpoint"],
+            "remediation": if !reachable {
+                controller["remediation"].clone()
+            } else if !authenticated {
+                controller["authentication"].clone()
+            } else {
+                serde_json::Value::Null
+            },
+        }));
+    }
+    checks
 }
 
 fn parse_cli() -> Cli {
@@ -1398,6 +1453,12 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
             } else {
                 Some(node_cmd::controller_diagnosis(&json_flag.daemon).await)
             };
+            let checks = doctor_checks(&reports, controller.as_ref());
+            let failing = checks
+                .iter()
+                .filter(|check| check["status"] != "pass")
+                .count();
+            let strict_failure = json_flag.strict && failing > 0;
             if json_flag.json {
                 let reports = reports
                     .into_iter()
@@ -1410,14 +1471,34 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                         value
                     })
                     .collect::<Vec<_>>();
+                // `runtimes` and `controller` are the original contract and are
+                // unchanged; the envelope fields and `data` are additive.
+                let error = strict_failure.then(|| {
+                    serde_json::json!({
+                        "code": "doctor_checks_failed",
+                        "message": format!("{failing} doctor check(s) did not pass"),
+                    })
+                });
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": !strict_failure,
+                        "command": "compute doctor",
+                        "exit_code": i32::from(strict_failure),
+                        "data": {
+                            "strict": json_flag.strict,
+                            "healthy": failing == 0,
+                            "checks": checks,
+                        },
+                        "error": error,
                         "runtimes": reports,
                         "controller": controller,
                     }))
                     .unwrap()
                 );
+                if strict_failure {
+                    std::process::exit(1);
+                }
             } else {
                 println!("Compute runtime capabilities");
                 for report in reports {
@@ -1453,6 +1534,12 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 }
                 if let Some(controller) = &controller {
                     node_cmd::print_diagnosis(controller);
+                }
+                if strict_failure {
+                    return Err(compute_core::ComputeError::Coded {
+                        code: "doctor_checks_failed".into(),
+                        message: format!("{failing} doctor check(s) did not pass"),
+                    });
                 }
             }
         }
@@ -1684,6 +1771,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Auth(command) => node_cmd::auth(command).await?,
         Commands::Node(command) => node_cmd::node(command).await?,
         Commands::Supervisor(command) => environment_cmd::supervisor(command).await?,
+        Commands::Worker(command) => worker_cmd::command(command).await?,
         Commands::Service(command) => environment_cmd::service(command).await?,
         Commands::ControlPlane(command) => control_state::control_plane(command).await?,
         Commands::Remote(command) => match command.command {
