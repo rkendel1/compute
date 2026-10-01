@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "compute-cli"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "assert_cmd",
  "async-trait",
@@ -476,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "compute-core"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "compute-environment"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "compute-network"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -547,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "compute-placement"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "compute-policy"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "compute-core",
  "serde",
@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "compute-project"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "compute-core",
  "serde",
@@ -592,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "compute-provider"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "compute-runtime"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -630,7 +630,7 @@ dependencies = [
 
 [[package]]
 name = "compute-runtime-conformance"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "compute-core",
  "serde_json",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "compute-runtime-process"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "compute-core",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "compute-runtime-wasm"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "compute-core",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "compute-state"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "compute-state-feltdb"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "compute-state-file"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "compute-state",
@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "compute-state-memory"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "compute-state",
@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "compute-worker-github"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "chrono",
