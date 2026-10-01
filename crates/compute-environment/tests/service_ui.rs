@@ -15,8 +15,11 @@ use compute_state_memory::MemoryState;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-/// What `@appport/services` answers at `/v1/ui`: the protocol's caller-filtered
-/// view for a caller holding no capabilities (only the capability-free overview).
+/// What the published `@appport/services@0.4.10` answers at `/v1/ui`: the
+/// protocol's caller-filtered view for a caller holding no capabilities (only
+/// the capability-free overview). Fetched from the shipped `appport-services
+/// serve` process, not hand-written; see
+/// `the_fixture_is_what_appport_services_publishes`.
 const SERVICES_DOCUMENT: &str = include_str!("fixtures/appport-ui/appport-services.json");
 /// The full contribution, as a host with capability context would serve it.
 const FULL_DOCUMENT: &str = include_str!("fixtures/appport-ui/appport-services-full.json");
@@ -300,13 +303,56 @@ fn the_route_is_listed() {
 
 #[test]
 fn the_fixture_is_what_appport_services_publishes() {
-    // Provenance: generated from `createUiDiscoveryDocument` in
-    // rkendel1/appport-services (see the documentation page).
+    // Provenance: fetched over HTTP from the *published*
+    // `@appport/services` 0.4.10 `appport-services serve` process the
+    // configured distribution ships (`compatibility/published-stack`). The
+    // served document is `GET /v1/ui` as the anonymous caller Compute is; the
+    // full one is that same package's `APPPORT_UI_CONTRIBUTIONS` entry for
+    // `appport-services`. Both were accepted by `@appport/protocol`'s own
+    // `validateUiContribution` when they were written.
     let document: serde_json::Value = serde_json::from_str(SERVICES_DOCUMENT).unwrap();
     assert_eq!(document["protocol"], "AppPort/ui/1");
     assert_eq!(document["product"]["id"], "appport-services");
+    assert_eq!(
+        document["product"]["version"], "0.4.10",
+        "the fixture must track the artifact the configured stack pins"
+    );
+    // An anonymous caller holds no AppPort capabilities, so the protocol's own
+    // filter leaves only the capability-free overview page.
+    let routes: Vec<&str> = document["surfaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|surface| surface["route"].as_str().unwrap())
+        .collect();
+    assert_eq!(routes, ["/services"]);
+
     let full: serde_json::Value = serde_json::from_str(FULL_DOCUMENT).unwrap();
     assert_eq!(full["protocol"], "AppPort/ui/1");
+    assert_eq!(full["product"]["id"], "appport-services");
+    assert_eq!(full["product"]["version"], "0.4.10");
+    // The full contribution advertises every packaged page, each with a route
+    // Compute will build a link to on the service's own host.
+    for route in [
+        "/services",
+        "/api-keys",
+        "/webhooks",
+        "/jobs",
+        "/schedules",
+        "/notifications",
+        "/files",
+        "/configuration",
+        "/secrets",
+    ] {
+        assert!(
+            full["surfaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|surface| surface["route"] == route),
+            "{route} is missing from the full contribution"
+        );
+    }
 }
 
 /// The UI renders what a service sends only as text and as links the daemon

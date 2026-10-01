@@ -23,9 +23,13 @@ class ComputeConfigured < Formula
     configured = Pathname.pwd
     configured /= "compute-configured" unless (configured/"stack.json").exist?
     libexec.install configured.children
+    # COMPUTE_STACKS selects the configured stack; COMPUTE_CONFIGURED_HOME is the
+    # installed distribution root, where the profile and the pinned node_modules
+    # (and therefore the services this profile declares it manages) live.
     (bin/"compute-configured").write <<~SH
       #!/bin/sh
       export COMPUTE_STACKS="#{libexec}/stacks${COMPUTE_STACKS:+:$COMPUTE_STACKS}"
+      export COMPUTE_CONFIGURED_HOME="#{libexec}"
       exec "#{formula_opt_bin("compute")}/compute" "$@"
     SH
     (bin/"compute-configured-verify").write <<~SH

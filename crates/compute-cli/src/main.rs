@@ -22,6 +22,7 @@ mod direct;
 mod distribution;
 mod environment_cmd;
 mod launch_cmd;
+mod managed;
 mod network_cmd;
 mod node_cmd;
 mod placement_certification;

@@ -270,6 +270,9 @@ legacy deployment model:
               ──▶  a local, non-deployment receipt (only when asked)
 
  node environments (G-ARCH-5, blocked) ──▶ the daemon host's supervisor
+
+ compute-configured (a configured installation) ──▶ the services its profile declares
+               (e.g. appport-services serve)  managed, readiness-probed, registered
 ```
 
 An external worker is **not** a third model: `compute worker github-actions run`
@@ -296,10 +299,20 @@ knows it exists.
 
 Everything else that starts a process starts Compute itself (the daemon,
 the target, the supervisor, an upgraded controller, or the packaged binary
-for read-only version and starter-catalog verification) or a tool (curl, npm,
+for read-only version and starter-catalog verification), a tool (curl, npm,
 compilers, the FeltDB verifier, the read-only `pax` project observer,
 runtime acquisition, container engines behind a target's container
-sessions); none runs a workload.
+sessions), or — only in a configured installation, and only an executable
+the installed distribution itself ships — a **managed service** declared in
+the distribution profile; none runs a workload.
+
+A managed service is not a third execution model. It is infrastructure of
+the configured installation, started and stopped with the control plane,
+and it is not a workload: Compute holds no desired state for it, places
+nothing, issues no receipt, and stores only the service registration needed
+to discover its endpoint. Each such service owns its own state, authority
+and lifecycle; Compute Configured only supervises the process. See
+[compatibility.md](compatibility.md).
 
 ### Two execution models, one legacy model
 

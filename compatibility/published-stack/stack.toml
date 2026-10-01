@@ -25,7 +25,7 @@ version = "1.0.3"
 name = "appport-services"
 kind = "package"
 source = "npm:@appport/services"
-version = "0.4.6"
+version = "0.4.10"
 
 [[component]]
 name = "appport-github"

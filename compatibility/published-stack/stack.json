@@ -2,15 +2,15 @@
   "format": "compute.distribution-profile@1",
   "profile": "configured",
   "name": "published-compute-ecosystem",
-  "compute": "0.1.10",
+  "compute": "0.1.11",
   "platform": "linux-x86_64",
   "distribution": {
-    "identity": "compute-configured-0.1.10-linux-x86_64",
+    "identity": "compute-configured-0.1.11-linux-x86_64",
     "certification_status": "certified",
-    "base_asset": "compute-0.1.10-linux-x86_64.tar.gz",
-    "configured_asset": "compute-configured-0.1.10-linux-x86_64.tar.gz",
+    "base_asset": "compute-0.1.11-linux-x86_64.tar.gz",
+    "configured_asset": "compute-configured-0.1.11-linux-x86_64.tar.gz",
     "pipeline": "distribution-certification",
-    "release": "https://github.com/rkendel1/compute/releases/tag/v0.1.10"
+    "release": "https://github.com/rkendel1/compute/releases/tag/v0.1.11"
   },
   "runtime": {
     "implementation": "base-compute",
@@ -31,13 +31,25 @@
     "activation": "COMPUTE_STACKS",
     "idempotent": true
   },
+  "managed_services": [
+    {
+      "name": "appport-services",
+      "executable": "node_modules/.bin/appport-services",
+      "arguments": ["serve", "--host", "127.0.0.1", "--port", "4100"],
+      "endpoint": "http://127.0.0.1:4100",
+      "readiness_path": "/v1/ui",
+      "capabilities": ["AppPort/ui/1"],
+      "provider": "this-machine",
+      "description": "AppPort Services management UI; owns its own state, authentication and management router"
+    }
+  ],
   "migrations": [],
   "packages": {
     "@appport/core": "1.0.3",
     "@appport/github": "1.0.2",
     "@appport/runtime": "0.4.6",
     "@appport/server": "1.0.2",
-    "@appport/services": "0.4.6",
+    "@appport/services": "0.4.10",
     "@appport/transport-http": "1.0.2",
     "@appport/transport-inprocess": "1.0.2",
     "@appport/transport-websocket": "1.0.2",
@@ -56,8 +68,12 @@
       "reason": "@authboundry/core 1.15.3 embeds 0.11.5 and its @appport/services 0.3.2 embeds 0.11.1; the stack verifies the published graph against FeltDB protocol 1"
     },
     "@appport/services": {
-      "versions": ["0.3.2", "0.4.6"],
-      "reason": "@authboundry/core 1.15.3 embeds 0.3.2; @appport/github 1.0.2 uses 0.4.6"
+      "versions": ["0.3.2", "0.4.6", "0.4.10"],
+      "reason": "@authboundry/core 1.15.3 embeds 0.3.2; @appport/github 1.0.2 pins 0.4.6; the configured stack itself resolves 0.4.10, the release whose `appport-services` executable runs the standalone management host that serves the AppPort/ui/1 discovery document at GET /v1/ui"
+    },
+    "@appport/protocol": {
+      "versions": ["1.0.2", "1.0.3"],
+      "reason": "@appport/services 0.4.10 declares @appport/protocol ^1.0.3 to build its AppPort/ui/1 contribution with the protocol's own validateUiContribution/filterUiContribution, while @appport/core 1.0.3 and the 1.0.2 @appport/server, @appport/client, @appport/schema and @appport/authorization packages pin 1.0.2"
     }
   }
 }

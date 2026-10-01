@@ -34,11 +34,60 @@ brew install compute-configured  # Base plus the pinned configured artifact
 `compute-configured` depends on `compute`; it never builds or carries another Compute
 binary. Its release asset contains the exact registry packages, lockfile, configured
 stack, verifier, and evidence produced by distribution CI. The wrapper exposes the
-installed stack through `COMPUTE_STACKS`; `compute-configured-verify` reruns the shipped
-contract without resolving packages or consulting `latest`.
+installed stack through `COMPUTE_STACKS` and the installed distribution root through
+`COMPUTE_CONFIGURED_HOME`; `compute-configured-verify` reruns the shipped contract
+without resolving packages or consulting `latest`.
 `compute-configured-setup` is an idempotent validation/activation check; activation is
 process configuration, so it does not create another state directory or mutate
 `COMPUTE_HOME`.
+
+## What `compute-configured` starts
+
+The normal flow is:
+
+```sh
+compute-configured-verify
+compute-configured-setup
+compute-configured
+```
+
+`compute-configured` starts two processes:
+
+| Process | Endpoint | Owns |
+| --- | --- | --- |
+| Compute control plane | `http://127.0.0.1:8787/` | control state, workload execution, the UI |
+| AppPort Services (`@appport/services`, pinned) | `http://127.0.0.1:4100` | its own durable state, authentication, management router and UI |
+
+You do not start or register AppPort Services yourself. Compute Configured starts it,
+waits until it really serves, and registers it under the fixed name
+`appport-services` with the `AppPort/ui/1` capability. Running `compute-configured`
+again reuses the running process and reconciles the same registration: it never
+creates `appport-services-2`.
+
+Compute then discovers the service the same way it discovers any other registered
+service — by asking it for `GET /v1/ui`, checking the document against the
+`AppPort/ui/1` contract, and presenting the management links the service contributes.
+There is no AppPort-specific code in Compute's UI, and Compute stores only the
+registration (a name, a capability and an endpoint).
+
+Two boundaries are deliberate and are not unified:
+
+- **AppPort Services is a separate process with its own HTTP port.** Compute does not
+  proxy it, embed it, or forward to it. The management link opens the AppPort Services
+  host directly.
+- **AppPort Services keeps its own authentication.** Compute passes no operator token,
+  cookie or session to it, so reaching its management pages may ask for an AppPort
+  Services identity. That is AppPort Services' own boundary, not a Compute one.
+
+`compute-configured` stops both processes, and leaves the state each one owns in place
+so the next start reuses it.
+
+### Declaring other services
+
+Which services run is data, not code: the profile lists them under `managed_services`,
+each naming an executable inside the distribution, its arguments, its endpoint, and the
+path that proves it is ready. Base Compute ships no such list and starts no extra
+process, so this is additive.
 
 ## Distribution profiles
 
@@ -88,7 +137,8 @@ important direct edges in the currently supported set are:
 │   ├── @appport/core 1.0.3
 │   ├── @appport/server 1.0.2
 │   └── @appport/transport-* 1.0.2
-├── @appport/services 0.4.6 ── @feltdb/core 0.11.9
+├── @appport/services 0.4.10 ─ @appport/protocol 1.0.3, @feltdb/core 0.11.9
+├── @appport/services 0.4.6 (nested under @appport/github, which pins it)
 ├── @feltdb/core 0.11.9
 ├── @authboundry/core 1.15.3
 │   ├── @feltdb/core 0.11.5
@@ -98,9 +148,20 @@ important direct edges in the currently supported set are:
 
 These are runtime dependencies from the published manifests, not inferred product
 relationships. FeltDB's React peer dependencies are optional. TypeScript and Node type
-packages in these releases are development-only. The three FeltDB clients are a real
-published-version skew and are therefore recorded explicitly rather than flattened or
+packages in these releases are development-only. The four FeltDB clients, the three
+`@appport/services` versions, and the two `@appport/protocol` versions are real
+published-version skews and are therefore recorded explicitly rather than flattened or
 hidden. The configured verifier fails if any unrecorded skew appears.
+
+`@appport/services` 0.4.8 is the first published release that serves an `AppPort/ui/1`
+document at `GET /v1/ui`; 0.4.7 and earlier publish only a
+`[{protocol, id, requiredCapabilities}]` descriptor that is not an `AppPort/ui/1`
+document. The configured stack pins **0.4.10**, which serves the same document and
+additionally ships a runnable standalone host: `appport-services serve --host … --port …`
+actually starts and answers `GET /v1/ui`. (0.4.8 declared that command, but its CLI
+exited silently without running, and its `--host`/`--port` flags were unusable, so no
+process could be pointed at.) Compute Configured therefore starts 0.4.10, discovers it
+through `/v1/ui`, and registers it. See [service-ui.md](service-ui.md).
 
 Compute's model compiler uses exactly `@feltdb/core 0.11.9` to compile
 `compute.flow`. The Rust controller speaks FeltDB Protocol 1 through

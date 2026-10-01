@@ -2,7 +2,7 @@
   "protocol": "AppPort/ui/1",
   "product": {
     "id": "appport-services",
-    "version": "0.4.6"
+    "version": "0.4.10"
   },
   "surfaces": [
     {

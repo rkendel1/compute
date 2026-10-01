@@ -247,6 +247,11 @@ fn every_execution_site_is_classified() {
                 why: "`compute up`: the target (`compute serve`), the daemon, the browser, `compute down`",
             },
             Allowed {
+                file: "crates/compute-cli/src/managed.rs",
+                count: 1,
+                why: "`compute up`/`compute down` for a configured installation: the managed services the distribution profile declares (its own installed executables, e.g. `appport-services serve`)",
+            },
+            Allowed {
                 file: "crates/compute-cli/src/session_cmd.rs",
                 count: 1,
                 why: "a SessionCommand for a target session (no local process)",

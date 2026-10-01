@@ -108,7 +108,7 @@ fn wait_for(address: &str, what: &str, log: &std::path::Path) -> compute_core::R
     Ok(())
 }
 
-fn detached(
+pub(crate) fn detached(
     command: &mut std::process::Command,
     log: &std::path::Path,
 ) -> compute_core::Result<u32> {
@@ -123,6 +123,26 @@ fn detached(
         command.process_group(0);
     }
     Ok(command.spawn()?.id())
+}
+
+/// Wait until a managed service actually answers its readiness path.
+///
+/// A listening socket is not readiness and a spawned process is not health: the
+/// service itself has to answer, over HTTP, on the path its distribution
+/// profile declares. `endpoint` is the service's own origin.
+pub async fn wait_ready(endpoint: &str, path: &str, what: &str, log: &std::path::Path) -> bool {
+    let Ok(client) = compute_environment::client::DaemonClient::new(endpoint) else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if client.get::<serde_json::Value>(path).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let _ = (what, log);
+    false
 }
 
 /// Ensure this control plane has a local computer host and return the pool
@@ -257,6 +277,30 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
     println!("  control state: {}", durability_note(&command.state));
     println!("  state: {}", home.display());
     println!("  stop it with `compute down`");
+
+    // Services this configured distribution ships run alongside Compute. They
+    // are started only once the control plane answers, because registering one
+    // needs the control plane; each is registered under a fixed name, so a
+    // second run reconciles rather than registering again. A service that does
+    // not become ready fails this command rather than letting Compute report a
+    // configured environment that is only half up.
+    if let Some(distribution) = crate::managed::distribution_home() {
+        for entry in
+            crate::managed::ensure_running(&distribution, &home, &url, "COMPUTE_DAEMON_TOKEN")
+                .await?
+        {
+            println!(
+                "  {} ({}) is managed by this configured installation on {} [{}]",
+                entry.service.name,
+                entry
+                    .pid
+                    .map_or_else(|| "-".to_owned(), |pid| format!("pid {pid}")),
+                entry.service.endpoint,
+                entry.outcome
+            );
+        }
+    }
+
     if let Some(selection) = command.stack.clone() {
         println!();
         let location = crate::pool::PoolLocation {
@@ -358,6 +402,16 @@ fn durability_note(state: &crate::control_state::StateOptions) -> String {
 pub async fn down(command: DownCommand) -> compute_core::Result<()> {
     let listen = setting(command.listen, "COMPUTE_LISTEN", "127.0.0.1:8787");
     let home = home()?;
+    // Managed services stop with the control plane. Their durable state is
+    // left in place, so the next start reuses it rather than starting empty.
+    if let Some(distribution) = crate::managed::distribution_home() {
+        for name in crate::managed::stop_all(&distribution, &home)? {
+            println!(
+                "{name} is stopped. Its state is kept in {}.",
+                home.display()
+            );
+        }
+    }
     if answers(&listen) {
         let _ = std::process::Command::new(std::env::current_exe()?)
             .arg("stop")
