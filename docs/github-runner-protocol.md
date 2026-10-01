@@ -3,6 +3,10 @@
 **Status:** map for design purposes. Nothing here is implemented.
 Companion to [factory-control-plane.md](factory-control-plane.md).
 
+> This page maps *serving* the runner protocol, which is not implemented. The
+> separate, implemented direction (Compute *running* a GitHub-hosted ephemeral
+> runner as a worker) is [github-actions-runner.md](github-actions-runner.md).
+
 ## Evidence quality
 
 This map has three tiers of evidence. Do not read them as equal.

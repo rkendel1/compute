@@ -341,6 +341,18 @@ impl Compute {
         self.run_identified(workload, workload_id, None, None).await
     }
 
+    /// Run a workload under host-side control: `control.cancel()` ends its
+    /// process group and the staged workspace is removed on every outcome.
+    pub async fn run_controlled(
+        &self,
+        workload: Workload,
+        control: &compute_core::ExecutionControl,
+    ) -> Result<compute_core::ExecutionResult> {
+        let workload_id = request_workload_identity(&workload)?;
+        self.run_identified(workload, workload_id, None, Some(control))
+            .await
+    }
+
     async fn run_identified(
         &self,
         workload: Workload,
