@@ -1,7 +1,16 @@
-//! Host files enter an execution by **copy** into its private workspace
-//! (`compute_core::stage_workload`). A guest therefore cannot write to the
-//! host: host → guest is read-only by construction, and the only way results
-//! leave is a declared output. A writable host mount is not offered.
+//! `Workload::mounts` (CLI `--mount HOST:PATH`) is **copy-in**, not a host
+//! mount: `compute_core::stage_workload` copies the host path into the
+//! execution's private workspace (`copy_path`), and the workload only ever
+//! sees the copy. There is no bind, no shared inode, and nothing is copied
+//! back. Results leave an execution only as declared outputs, which a receipt
+//! digests. These tests pin that: the host's copy is never the one the
+//! workload changes, staging refuses escapes and symlinks, and the copy goes
+//! away with the workspace.
+//!
+//! What copy-in does **not** do is confine the workload: under the `process`
+//! isolation profile a workload can still write wherever its user can
+//! (`process_isolation_does_not_confine_the_workload` records that, so no
+//! one reads these tests as a sandbox guarantee).
 
 mod support;
 
@@ -29,7 +38,7 @@ fn host_tree(root: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[tokio::test]
-async fn a_mount_is_readable_and_the_guest_cannot_change_the_host() {
+async fn the_workload_changes_only_its_copy_of_a_copied_in_path() {
     let root = tempfile::tempdir().unwrap();
     let host = host_tree(root.path());
     let request = with_output(
@@ -59,7 +68,7 @@ async fn a_mount_is_readable_and_the_guest_cannot_change_the_host() {
 }
 
 #[tokio::test]
-async fn a_mount_is_removed_with_the_workspace() {
+async fn a_copied_in_path_is_removed_with_the_workspace() {
     let root = tempfile::tempdir().unwrap();
     let host = host_tree(root.path());
     let probe = root.path().join("where");
@@ -78,7 +87,7 @@ async fn a_mount_is_removed_with_the_workspace() {
 }
 
 #[tokio::test]
-async fn concurrent_executions_do_not_share_a_mounted_copy() {
+async fn concurrent_executions_do_not_share_a_copied_in_path() {
     let root = tempfile::tempdir().unwrap();
     let host = host_tree(root.path());
     let mut handles = vec![];
@@ -133,7 +142,7 @@ async fn a_guest_path_that_escapes_the_workspace_is_refused() {
 }
 
 #[tokio::test]
-async fn a_symlink_cannot_be_mounted() {
+async fn a_symlink_cannot_be_copied_in() {
     let root = tempfile::tempdir().unwrap();
     let host = host_tree(root.path());
     std::os::unix::fs::symlink("/etc/passwd", host.join("link")).unwrap();
@@ -158,4 +167,28 @@ async fn a_missing_host_path_is_refused() {
     );
     let message = refusal(&Compute::new().run(request).await.unwrap());
     assert!(message.to_lowercase().contains("no such file"), "{message}");
+}
+
+#[tokio::test]
+async fn process_isolation_does_not_confine_the_workload() {
+    // Copy-in protects the *original input* from the staged copy being edited.
+    // It is not a filesystem boundary: with the default `process` profile the
+    // workload runs as the caller and the receipt says the boundary is absent.
+    let root = tempfile::tempdir().unwrap();
+    let outside = root.path().join("outside.txt");
+    let request = shell(
+        root.path(),
+        &format!("echo reached > {}\n", outside.display()),
+    );
+    let result = Compute::new().run(request).await.unwrap();
+    assert_eq!(result.status, ExecutionStatus::Completed);
+    assert!(
+        outside.exists(),
+        "a process-profile workload can write anywhere its user can"
+    );
+    let isolation = result.receipt.as_ref().unwrap().isolation.clone();
+    assert_eq!(
+        isolation.filesystem,
+        compute_core::BoundaryStatus::Unavailable
+    );
 }

@@ -1,8 +1,8 @@
 #!/bin/sh
 # Compute's GitHub Actions ephemeral runner worker script.
 #
-# Download the runner, verify it, register it as an ephemeral runner, let it
-# take exactly one job, and record what happened. Everything lives under the
+# Fetch the runner (HTTPS only, or a local archive), verify it, register it as
+# an ephemeral runner, let it take exactly one job, and record what happened. Everything lives under the
 # staged workspace Compute gives this execution and removed when it ends: no
 # fixed paths, no background process (the runner runs in the foreground, in
 # Compute's process group).
@@ -31,13 +31,18 @@ record() {
   finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   job_name=""
   job_result=""
-  if [ -d "$runner_dir/_diag" ]; then
-    job_name=$(grep -h "Running job:" "$runner_dir"/_diag/Runner_*.log 2>/dev/null | tail -n 1 | sed 's/.*Running job: *//' | tr -cd 'A-Za-z0-9 ._:/-' || true)
-    job_result=$(grep -h "completed with result:" "$runner_dir"/_diag/Runner_*.log 2>/dev/null | tail -n 1 | sed 's/.*completed with result: *//' | tr -cd 'A-Za-z0-9 ._:/-' || true)
+  # The listener prints these two lines to its terminal (actions/runner,
+  # JobDispatcher.cs: `Running job: {name}` and `Job {name} completed with
+  # result: {result}`); they are not in _diag. They are read from the copy of
+  # the runner's output taken below.
+  if [ -f "$work/runner.log" ]; then
+    job_name=$(grep -h "Running job:" "$work/runner.log" 2>/dev/null | tail -n 1 | sed 's/.*Running job: *//' | tr -cd 'A-Za-z0-9 ._:/-' || true)
+    job_result=$(grep -h "completed with result:" "$work/runner.log" 2>/dev/null | tail -n 1 | sed 's/.*completed with result: *//' | tr -cd 'A-Za-z0-9 ._:/-' || true)
   fi
   host=$(uname -sm | tr -cd 'A-Za-z0-9 ._-')
-  printf '{"started_at":"%s","finished_at":"%s","exit_code":%s,"stage":"%s","work_dir":"%s","job_name":"%s","job_result":"%s","host":"%s"}\n' \
+  printf '{"started_at":"%s","finished_at":"%s","exit_code":%s,"stage":"%s","work_dir":"%s","job_name":"%s","job_result":"%s","host":"%s","repository_url":"%s","runner_name":"%s","runner_version":"%s"}\n' \
     "$started" "$finished" "$exit_json" "$stage" "$work" "$job_name" "$job_result" "$host" \
+    "$RUNNER_REPO_URL" "$RUNNER_NAME" "$RUNNER_VERSION" \
     > "$out/runner-metadata.json"
 }
 
@@ -62,8 +67,16 @@ die() {
 archive="$work/runner.tar.gz"
 
 record download
-curl --proto '=https,file' --fail --silent --show-error --location \
-  --output "$archive" "$RUNNER_DOWNLOAD_URL" || die "could not download the runner archive" 70
+if [ -n "${RUNNER_ARCHIVE_FILE:-}" ]; then
+  # An archive the caller already has (air-gapped hosts). It is verified below
+  # exactly like a download.
+  cp "$RUNNER_ARCHIVE_FILE" "$archive" || die "could not read the runner archive file" 70
+else
+  # HTTPS only, including redirects; the checksum below decides what runs.
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent \
+    --show-error --location --output "$archive" "$RUNNER_DOWNLOAD_URL" \
+    || die "could not download the runner archive" 70
+fi
 
 record verify
 if command -v sha256sum >/dev/null 2>&1; then
@@ -97,7 +110,11 @@ fi
 unset ACTIONS_RUNNER_INPUT_TOKEN
 
 record run
-./run.sh
+# The runner's output goes to a file, which is printed when it ends and read
+# for the job's name and result. (A pipe would keep this script waiting on any
+# descendant that holds it open; a file cannot.)
+./run.sh > "$work/runner.log" 2>&1
 rc=$?
+cat "$work/runner.log"
 stage=done
 exit "$rc"

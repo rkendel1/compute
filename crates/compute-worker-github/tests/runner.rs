@@ -133,8 +133,8 @@ impl FakeRunner {
     fn succeeding() -> Self {
         Self::new(
             "",
-            "echo \"[x INFO Runner] Running job: build\" >> _diag/Runner_1.log\n\
-             echo \"[x INFO Runner] Job build completed with result: Succeeded\" >> _diag/Runner_1.log\n\
+            "echo \"2026-10-01 00:00:00Z: Running job: build\"\n\
+             echo \"2026-10-01 00:00:05Z: Job build completed with result: Succeeded\"\n\
              exit 0",
         )
     }
@@ -146,7 +146,7 @@ impl FakeRunner {
             self.sha256.clone(),
         )
         .unwrap();
-        spec.download_url = Some(format!("file://{}", self.archive.display()));
+        spec.archive_file = Some(self.archive.clone());
         spec.labels = vec!["compute".into(), "ephemeral".into()];
         spec.name = Some("compute-test".into());
         spec.timeout = Duration::from_secs(60);
@@ -262,6 +262,22 @@ async fn registers_an_ephemeral_runner_runs_one_job_and_cleans_up() {
             .iter()
             .any(|output| output.path == Path::new("runner-metadata.json"))
     );
+    // The sealed output binds the repository, runner name and version.
+    let metadata = run
+        .result
+        .outputs
+        .iter()
+        .find(|output| output.path == Path::new("runner-metadata.json"))
+        .map(|output| String::from_utf8_lossy(&output.data).into_owned())
+        .unwrap();
+    for expected in [
+        "\"repository_url\":\"https://github.com/rkendel1/compute\"",
+        "\"runner_name\":\"compute-test\"",
+        "\"runner_version\":\"2.331.0\"",
+        "\"job_result\":\"Succeeded\"",
+    ] {
+        assert!(metadata.contains(expected), "{expected} not in {metadata}");
+    }
     let receipt_json = serde_json::to_string(receipt).unwrap();
     assert!(
         receipt_json.contains("ACTIONS_RUNNER_INPUT_TOKEN"),
@@ -437,6 +453,10 @@ async fn an_invalid_specification_is_refused_before_github_is_contacted() {
         |spec: &mut RunnerSpec| spec.runner_version = "latest".into(),
         |spec: &mut RunnerSpec| spec.server_url = "http://github.example".into(),
         |spec: &mut RunnerSpec| spec.download_url = Some("ftp://x".into()),
+        |spec: &mut RunnerSpec| spec.download_url = Some("http://example.com/r.tar.gz".into()),
+        |spec: &mut RunnerSpec| spec.download_url = Some("file:///etc/passwd".into()),
+        |spec: &mut RunnerSpec| spec.download_url = Some("https://example.com/r.tar.gz".into()),
+        |spec: &mut RunnerSpec| spec.archive_file = Some("relative.tar.gz".into()),
         |spec: &mut RunnerSpec| spec.timeout = Duration::ZERO,
     ] {
         let mut spec = runner.spec();

@@ -514,6 +514,18 @@ impl Daemon {
             .collect())
     }
 
+    /// The UI the registered service contributes, discovered now from its
+    /// current registration. Nothing is stored or cached.
+    pub async fn service_ui(
+        &self,
+        name: &str,
+    ) -> Result<crate::service_ui::ServiceUi, EnvironmentError> {
+        let record = self
+            .get_required::<ServiceRecord>(&ids::service(name))
+            .await?;
+        Ok(crate::service_ui::discover(&record.value).await)
+    }
+
     pub async fn providers(&self) -> Result<Vec<compute_state::ProviderRecord>, EnvironmentError> {
         Ok(self
             .control()

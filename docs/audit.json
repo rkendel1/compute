@@ -4858,6 +4858,15 @@
   },
   {
    "method": "GET",
+   "path": "/services/{service}/ui",
+   "scope": "Read",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
    "path": "/applications",
    "scope": "Read",
    "ui": false,

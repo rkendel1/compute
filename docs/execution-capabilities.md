@@ -52,23 +52,38 @@ interactively and in CI.
 | Run in a session without waiting | `compute session exec --detach SESSION -- cmd` |
 | An interactive terminal | not offered ([below](#not-offered)) |
 
-## Mounts
+## Copy-in (`--mount`): input materialization, not a host mount
 
-A host path enters an execution by **copy** into its private workspace.
-Consequently host → guest is read-only by construction: nothing the guest does
-can change the host. Results leave only as declared outputs.
+`compute run --mount HOST:PATH` (and `Workload::mounts`) is **copy-in**: before
+the workload starts, `compute_core::stage_workload` copies the host path into
+the execution's private workspace (`copy_path`), and the workload sees only the
+copy. Nothing is bound, shared, or copied back. The flag and type keep the name
+`mount` for history; the behaviour is input materialization, like `--input`
+(`ExecutionRequest.inputs`).
 
-```sh
-compute run build.sh --mount ./src:work/src --output dist.tar
+```text
+inputs (copied in)  →  isolated execution  →  declared outputs  →  receipt
 ```
 
-* The guest path is relative to the execution root (`work/…` is the working
-  directory). `..` and drive/prefix components are refused
-  (`invalid_mount_path`); symbolic links in a mounted tree are refused; a
-  missing host path is an error.
-* Each execution has its own copy; concurrent executions never see each other's
-  changes. The copy is removed with the workspace.
-* Tests: `crates/compute-runtime/tests/mounts.rs`.
+This is the model's invariant, not an accident: the only things that cross the
+boundary are declared inputs (in) and declared outputs (out, digested by the
+receipt). A writable host mount would let an execution change the host outside
+that path with no output and no receipt digest, so it is not offered.
+
+What copy-in guarantees, and what it does not:
+
+* The original input is never the file the workload edits: changes to the copy
+  do not reach the host path, and concurrent executions get separate copies
+  (`crates/compute-runtime/tests/copy_in.rs`).
+* The destination must stay inside the workspace (`..` and prefix components
+  are refused), a symbolic link anywhere in the copied tree is refused, and a
+  missing host path is an error. Each refusal is a failed execution in
+  `preparation` with `started: false` and a receipt.
+* It is **not** a sandbox. Under the default `process` isolation profile the
+  workload runs as the caller and can write anywhere its user can; the receipt
+  records `filesystem: unavailable`. Confinement is a property of the isolation
+  profile (`--isolation sandboxed|strict`, see `compute isolation`), not of
+  copy-in.
 
 ## Network requirements
 
@@ -131,7 +146,7 @@ An ephemeral runner worker is available as an external adapter:
 
 | Capability | Why not |
 | --- | --- |
-| Writable host mounts | They would bypass the staged-copy and declared-output model that makes an execution reproducible and its receipt verifiable |
+| Writable host mounts (a host path the workload can modify in place) | They would bypass the copy-in / declared-output model: changes to the host would happen outside any declared output and outside the receipt |
 | Restricted (allow-list) network | No runtime or target enforces a domain/CIDR allow-list, and Compute's network layer is ingress, not egress |
 | Browser (Chromium/CDP) and desktop (display, keyboard, mouse, clipboard) | No target can advertise them, and capabilities are a closed, wire-versioned set; nothing is implemented |
 | Interactive terminal (PTY) | The `terminal` capability is defined and `false` on every provider |

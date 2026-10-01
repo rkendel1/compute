@@ -1951,16 +1951,57 @@ async function projectDetailView(name) {
   ];
 }
 
+// A service that declares the AppPort UI capability contributes its own
+// management pages. Compute asks the daemon to discover them (the daemon
+// validates the service's answer) and shows plain-text links to the service's
+// own pages. Nothing the service sends is interpreted as markup or script, and
+// no Compute credential is sent to it: the service authenticates its own users.
+const SERVICE_UI_CAPABILITY = 'AppPort/ui/1';
+
+// An absolute http(s) URL, or null. The daemon builds these; this is the
+// second check before one becomes a link.
+function safeHttpUrl(value) {
+  try {
+    const url = new URL(String(value));
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function serviceUiCell(service) {
+  const cell = h('td', {});
+  if (!service.capabilities.includes(SERVICE_UI_CAPABILITY)) return cell;
+  cell.append(h('span', { class: 'subtitle' }, 'Looking for its pages…'));
+  api('GET', `/services/${enc(service.name)}/ui`).then((ui) => {
+    cell.replaceChildren();
+    const links = (ui.links || []).map((link) => ({ link, url: safeHttpUrl(link.url) })).filter((entry) => entry.url);
+    if (ui.status === 'available' && links.length) {
+      cell.append(...links.map(({ link, url }) => h('div', {},
+        h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, link.label),
+        h('span', { class: 'subtitle' }, ` ${link.group}`))));
+      cell.append(h('div', { class: 'subtitle' }, "Opens the service's own page; sign in there."));
+    } else {
+      cell.append(h('span', { class: 'chip' }, String(ui.status || 'unknown').replace(/_/g, ' ')));
+      if (ui.message) cell.append(h('div', { class: 'subtitle' }, ui.message));
+    }
+  }).catch((error) => {
+    cell.replaceChildren(h('span', { class: 'subtitle' }, `Could not look: ${error.message}`));
+  });
+  return cell;
+}
+
 async function servicesView() {
   const [services, providers] = await Promise.all([api('GET', '/services'), api('GET', '/providers')]);
   return [
     h('div', { class: 'title' }, h('h1', {}, 'Services')),
     h('div', { class: 'subtitle' }, 'Shared services projects consume, and the providers Compute runs on.'),
-    table(['Service', 'Capabilities', 'Provider', 'Endpoint', ''], services.map((service) => h('tr', {},
+    table(['Service', 'Capabilities', 'Provider', 'Endpoint', 'Management', ''], services.map((service) => h('tr', {},
       h('td', {}, h('strong', {}, service.name), service.description ? h('div', { class: 'subtitle' }, service.description) : null),
       h('td', {}, service.capabilities.map((capability) => h('span', { class: 'chip' }, capability))),
       h('td', {}, service.provider),
       h('td', { class: 'mono' }, service.endpoint || '—'),
+      serviceUiCell(service),
       h('td', {}, h('button', { class: 'small danger', onclick: async () => {
         if (await confirmImpact(`Remove ${service.name}?`, [`The ${service.name} registration`], ['Every workload', 'Compute daemon'], 'danger')) {
           await act(`${service.name} removed`, () => api('DELETE', `/services/${enc(service.name)}`));

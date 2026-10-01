@@ -1,0 +1,28 @@
+{
+  "protocol": "AppPort/ui/1",
+  "product": {
+    "id": "appport-services",
+    "version": "0.4.6"
+  },
+  "surfaces": [
+    {
+      "id": "overview",
+      "title": "AppPort Services",
+      "route": "/services",
+      "capabilities": []
+    }
+  ],
+  "navigation": [
+    {
+      "id": "appport-services.overview",
+      "label": "AppPort Services",
+      "group": "AppPort Services",
+      "order": 0,
+      "surface": "overview"
+    }
+  ],
+  "composition": {
+    "requires": []
+  },
+  "capabilities": []
+}

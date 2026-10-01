@@ -203,6 +203,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/events/stream"),
     ("GET", "/providers"),
     ("GET", "/services"),
+    ("GET", "/services/{service}/ui"),
     ("GET", "/applications"),
     ("GET", "/applications/{application}"),
     ("GET", "/applications/{application}/deployments"),
@@ -1492,6 +1493,9 @@ async fn route(
         // Pool and shared services.
         ("GET", ["providers"]) => ok(to_value(Box::pin(daemon.providers()).await?)?),
         ("GET", ["services"]) => ok(to_value(Box::pin(daemon.services()).await?)?),
+        ("GET", ["services", name, "ui"]) => {
+            ok(to_value(Box::pin(daemon.service_ui(name)).await?)?)
+        }
         ("POST", ["services"]) => created(to_value(
             Box::pin(daemon.register_service(parse(body)?)).await?,
         )?),
