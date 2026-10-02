@@ -29,6 +29,7 @@ const MAX_BODY_BYTES: usize = 512 * 1024 * 1024;
 /// written `{name}`. The UI/API parity test holds the UI to this list.
 pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/health"),
+    ("GET", "/ready"),
     ("GET", "/info"),
     ("GET", "/status"),
     ("GET", "/auth/whoami"),
@@ -565,7 +566,23 @@ async fn dispatch(
     let method = request.method.clone();
     // The UI's static assets and liveness carry no state.
     match (method.as_str(), segments.as_slice()) {
+        // Headless: the UI is not served at all. Every platform operation it
+        // offers is an API route below, so nothing else changes -- startup,
+        // readiness, execution, deployment and AppPort integration are all
+        // unaffected by this one branch.
+        ("GET", []) if !daemon.ui_enabled() => {
+            return Err(EnvironmentError::NotFound(format!(
+                "{}/ is not served: this controller is headless; the API is",
+                request.path
+            )));
+        }
         ("GET", []) => return Ok(Response::Redirect("/ui/")),
+        ("GET", ["ui"]) | ("GET", ["ui", ..]) if !daemon.ui_enabled() => {
+            return Err(EnvironmentError::NotFound(format!(
+                "{} is not served: this controller is headless",
+                request.path
+            )));
+        }
         ("GET", ["ui"]) => return Ok(Response::Static("text/html; charset=utf-8", UI_HTML)),
         ("GET", ["ui", "app.js"]) => {
             return Ok(Response::Static(
@@ -577,6 +594,7 @@ async fn dispatch(
             return Ok(Response::Static("text/css; charset=utf-8", UI_STYLE));
         }
         ("GET", ["health"]) => return Ok(Response::Json(200, Box::pin(daemon.health()).await)),
+        ("GET", ["ready"]) => return Ok(Response::Json(200, Box::pin(daemon.ready()).await)),
         _ if daemon.is_stopping() => {
             return Err(EnvironmentError::ControllerUnavailable(
                 "the controller is stopping".into(),

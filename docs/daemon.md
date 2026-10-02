@@ -37,6 +37,7 @@ compute stop
 | `--production` | off | Production mode: TLS required, and every request needs an operator credential |
 | `--tls-cert`, `--tls-key` | `[api] tls_cert`, `tls_key` | The API's certificate and key (PEM). Reloaded within a second of changing, without a restart |
 | `--insecure` | off | Development mode on any listener: plaintext, and requests without a credential are admitted |
+| `--headless` | `[api] ui` (on) | Do not serve the operator UI. The API, execution, deployment, DNS and AppPort integration are unchanged; see [headless.md](headless.md) |
 | `--require-token-env NAME` | none | Development only: require `Authorization: Bearer $NAME` (a single shared token). Refused in production |
 | `--data-plane` | `supervisor` | `supervisor`: workloads run on the node's supervisor and outlive the controller. `in-process`: they run inside the controller (development) |
 | `--require-state-at-start` | off | Refuse to start while control state is unreachable, instead of starting in `degraded_control_plane` |

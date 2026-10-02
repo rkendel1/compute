@@ -105,6 +105,11 @@ pub struct StartCommand {
     /// credential are admitted as the `development` operator.
     #[arg(long, conflicts_with = "production")]
     pub insecure: bool,
+    /// Headless: do not serve the operator UI at all. The API, execution,
+    /// deployment, DNS and AppPort integration are unchanged, and nothing
+    /// waits on UI initialization. Defaults to `[api] ui`, which is true.
+    #[arg(long)]
+    pub headless: bool,
     /// Production mode: TLS and an operator credential on every request,
     /// reads included. Implied by --tls-cert. Defaults to `[api] mode`.
     #[arg(long)]
@@ -547,6 +552,10 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
             .transpose()?,
     };
     config.api_tls = tls.clone();
+    // Headless is one switch, and it only affects the UI: the API and
+    // everything it drives are served either way. `--headless` wins over
+    // `[api] ui`, matching how `--production` wins over `[api] mode`.
+    config.ui = !(command.headless || api.ui == Some(false));
     config.require_state_at_start = command.require_state_at_start;
     config.public_url = Some(command.public_url.clone().unwrap_or_else(|| {
         format!(
@@ -734,6 +743,13 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
     }
     if command.insecure {
         child.arg("--insecure");
+    }
+    // Detach re-spawns `start` with an argument list it rebuilds by hand, so
+    // every flag has to be forwarded here. A flag that is not is silently
+    // dropped, which is how --headless reached a daemon that still served the
+    // UI.
+    if command.headless {
+        child.arg("--headless");
     }
     child.arg("--data-plane").arg(&command.data_plane);
     if command.require_state_at_start {

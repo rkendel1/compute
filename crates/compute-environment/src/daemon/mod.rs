@@ -120,6 +120,15 @@ pub struct DaemonConfig {
     pub reconcile_interval: Duration,
     /// How the API authenticates operators.
     pub security: crate::auth::SecurityConfig,
+    /// Whether this daemon serves the operator UI at `/ui/`.
+    ///
+    /// The UI is an optional operator and development surface, never a
+    /// lifecycle dependency: every platform operation it can perform is also
+    /// an API route (`api::ROUTES`), so a headless daemon serves the API,
+    /// execution, deployment and AppPort integration unchanged. `false`
+    /// stops `/ui/` and the `/` redirect from being served at all; the
+    /// assets stay compiled in, so nothing else changes.
+    pub ui: bool,
     /// The API's TLS, when it terminates TLS.
     pub api_tls: Option<Arc<crate::tls::ApiTls>>,
     /// Where services run and endpoints listen. `None` runs them in this
@@ -178,6 +187,7 @@ impl DaemonConfig {
             reconcile_interval: Duration::from_secs(5),
             security: crate::auth::SecurityConfig::default(),
             api_tls: None,
+            ui: true,
             data_plane: None,
             read_cache: Duration::from_millis(1000),
             require_state_at_start: false,
@@ -1399,6 +1409,15 @@ impl Daemon {
         self.config.api_tls.clone()
     }
 
+    /// Whether this daemon serves the operator UI at `/ui/`.
+    ///
+    /// `false` is headless mode: the API, execution, deployment and AppPort
+    /// integration are all still served, and nothing that serves them reads
+    /// this. It is the one switch the UI depends on.
+    pub fn ui_enabled(&self) -> bool {
+        self.config.ui
+    }
+
     /// Liveness without authentication: whether this controller answers,
     /// and whether its control plane is degraded. Nothing else.
     pub async fn health(&self) -> Value {
@@ -1413,6 +1432,28 @@ impl Daemon {
             },
             "instance_id": self.instance_id,
             "pid": std::process::id(),
+        })
+    }
+
+    /// Readiness without authentication: can this controller accept work?
+    ///
+    /// Distinct from [`Self::health`], which only says the process answers.
+    /// A controller is ready when it is not stopping or draining and durable
+    /// control state is readable, because that is what a request needs before
+    /// it can be served correctly. Deliberately independent of the UI: a
+    /// headless controller reports readiness the same way, and startup never
+    /// waits on UI initialization.
+    pub async fn ready(&self) -> Value {
+        let inner = self.inner.lock().await;
+        let state = inner.state_error.is_none();
+        let accepting = state && !self.is_shutting_down();
+        serde_json::json!({
+            "status": if !accepting { "not_ready" } else { "ready" },
+            "accepting_work": accepting,
+            "state_available": state,
+            "ui": self.config.ui,
+            "api": crate::api::API_VERSION,
+            "instance_id": self.instance_id,
         })
     }
 

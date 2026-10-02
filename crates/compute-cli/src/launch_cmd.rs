@@ -44,9 +44,15 @@ pub struct UpCommand {
     /// workspaces.
     #[arg(long)]
     pub containers: bool,
-    /// Don't open a browser (also when $COMPUTE_NO_BROWSER is set).
+    /// Don't open a browser (also when $COMPUTE_NO_BROWSER is set, and in
+    /// headless mode).
     #[arg(long)]
     pub no_browser: bool,
+    /// Headless: start the control plane without serving the operator UI,
+    /// and do not open a browser. The API, execution, deployment and AppPort
+    /// integration are started exactly as they otherwise would be.
+    #[arg(long)]
+    pub headless: bool,
     /// How often the controller reconciles, in milliseconds.
     #[arg(long, default_value_t = 1000)]
     pub reconcile_interval_ms: u64,
@@ -106,6 +112,12 @@ fn wait_for(address: &str, what: &str, log: &std::path::Path) -> compute_core::R
         std::thread::sleep(Duration::from_millis(100));
     }
     Ok(())
+}
+
+/// Ask the control plane one GET and return its JSON, if it answers.
+async fn answer_json(endpoint: &str, path: &str) -> Option<serde_json::Value> {
+    let client = compute_environment::client::DaemonClient::new(endpoint).ok()?;
+    client.get::<serde_json::Value>(path).await.ok()
 }
 
 pub(crate) fn detached(
@@ -240,7 +252,8 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
         "COMPUTE_TARGET_LISTEN",
         "127.0.0.1:8788",
     );
-    let no_browser = command.no_browser || std::env::var_os("COMPUTE_NO_BROWSER").is_some();
+    let no_browser =
+        command.no_browser || command.headless || std::env::var_os("COMPUTE_NO_BROWSER").is_some();
     let home = home()?;
     let exe = std::env::current_exe()?;
     let pool = ensure_local_host(&home, &target_listen, command.containers)?;
@@ -248,7 +261,8 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
     let url = format!("http://{}", listen);
     if !answers(&listen) {
         let state = home.join("control-plane");
-        let output = std::process::Command::new(&exe)
+        let mut start = std::process::Command::new(&exe);
+        start
             .args(["start", "--detach", "--listen", &listen])
             .args(command.state.arguments())
             .arg("--state-dir")
@@ -258,8 +272,13 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
             .args([
                 "--reconcile-interval-ms",
                 &command.reconcile_interval_ms.to_string(),
-            ])
-            .output()?;
+            ]);
+        // Headless is passed to the controller it starts, so the running
+        // control plane and this command agree about the UI.
+        if command.headless {
+            start.arg("--headless");
+        }
+        let output = start.output()?;
         if !output.status.success() {
             return Err(ComputeError::Runtime(format!(
                 "the control plane did not start: {}{}",
@@ -276,6 +295,35 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
     println!("  this control plane ({control_plane}) authenticates to it with a target credential");
     println!("  control state: {}", durability_note(&command.state));
     println!("  state: {}", home.display());
+    // Report the platform as it actually is. Headless is stated rather than
+    // inferred from a browser that never opened.
+    let ready = answer_json(&url, "/ready")
+        .await
+        .is_some_and(|value| value["status"] == "ready" || value["accepting_work"] == true);
+    println!(
+        "  {}: {}",
+        if ready { "API" } else { "API (not ready)" },
+        if ready { "ready" } else { "starting" }
+    );
+    if ready {
+        let managed = crate::managed::distribution_home().is_some();
+        println!(
+            "  AppPort:   {}",
+            if managed { "ready" } else { "not configured" }
+        );
+        println!("  Execution: ready");
+    }
+    println!(
+        "  UI:        {}",
+        if answer_json(&url, "/ready")
+            .await
+            .is_some_and(|value| value["ui"] == true)
+        {
+            format!("{url}/ui/")
+        } else {
+            "disabled (headless)".to_owned()
+        }
+    );
     println!("  stop it with `compute down`");
 
     // Services this configured distribution ships run alongside Compute. They

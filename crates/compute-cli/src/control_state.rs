@@ -85,6 +85,10 @@ pub struct ApiSection {
     pub tls_cert: Option<PathBuf>,
     #[serde(default)]
     pub tls_key: Option<PathBuf>,
+    /// Whether to serve the operator UI at `/ui/`. `false` is headless: the
+    /// API and everything it drives are served unchanged.
+    #[serde(default)]
+    pub ui: Option<bool>,
 }
 
 /// `[network]`: endpoints, ingress, DNS providers, and certificates.
