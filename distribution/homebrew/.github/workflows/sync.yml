@@ -26,6 +26,7 @@ jobs:
           tag=$(jq -r .tag_name "$RUNNER_TEMP/release.json")
           [[ "$tag" == v* ]]
           version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           asset="compute-$version-linux-x86_64.tar.gz"
           configured_asset="compute-configured-$version-linux-x86_64.tar.gz"
           macos_asset="compute-$version-macos-aarch64.tar.gz"
@@ -64,6 +65,27 @@ jobs:
           echo "configured_url=$configured_url" >> "$GITHUB_OUTPUT"
           echo "macos_url=$macos_url" >> "$GITHUB_OUTPUT"
           echo "macos_configured_url=$macos_configured_url" >> "$GITHUB_OUTPUT"
+      - name: Take the formula templates from the release tag
+        if: steps.release.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # The template is the shipped contract, so it comes from the tag whose
+          # assets these formulas install. Re-rendering from this repository's own
+          # copy silently ships a stale wrapper: that is how a release lost
+          # COMPUTE_CONFIGURED_HOME and stopped starting AppPort Services.
+          for path in \
+            distribution/homebrew/Formula/compute.rb.in \
+            distribution/homebrew/Formula/compute-configured.rb.in \
+            distribution/homebrew/scripts/update-formula.sh; do
+            mkdir -p "$(dirname "$path")"
+            gh api "repos/rkendel1/compute/contents/$path?ref=${{ steps.release.outputs.tag }}" \
+              --jq .content | base64 -d > "$path"
+          done
+          chmod +x scripts/update-formula.sh
+          # Fail before publishing if the release's wrapper cannot manage services.
+          grep -F 'export COMPUTE_CONFIGURED_HOME=' distribution/homebrew/Formula/compute-configured.rb.in
       - name: Render formula from release checksum
         if: steps.release.outputs.available == 'true'
         run: scripts/update-formula.sh '${{ steps.release.outputs.version }}' '${{ steps.release.outputs.checksum }}' '${{ steps.release.outputs.configured_checksum }}' '${{ steps.release.outputs.macos_checksum }}' '${{ steps.release.outputs.macos_configured_checksum }}'

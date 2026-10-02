@@ -49,6 +49,12 @@ grep -q 'compute-configured-setup' "$configured_formula"
 grep -q 'COMPUTE_INSTALLED_VERSION' "$configured_formula"
 grep -q 'compute-configured recipe starters --json' "$configured_formula"
 grep -q 'recipes/starters/dev.json' "$configured_formula"
+# The configured wrapper is the only thing that tells the shared Compute binary
+# where the installed distribution lives. Without COMPUTE_CONFIGURED_HOME,
+# `managed::distribution_home()` finds no profile, `compute up` starts no
+# managed service, nothing is registered, and the Services page never discovers
+# `GET /v1/ui`: a silently absent feature, not a visible failure.
+grep -q 'export COMPUTE_CONFIGURED_HOME=' "$configured_formula"
 test -f "$work/tap/.github/workflows/tests.yml"
 test -f "$work/tap/.github/workflows/sync.yml"
 test -x "$work/tap/scripts/update-formula.sh"

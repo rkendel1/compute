@@ -156,6 +156,29 @@ jobs:
           compute-configured-verify | grep -F '"status": "preview"'
           compute-configured-setup | grep -F 'preview and active'
           brew test rkendel1/compute/compute-configured
+      - name: The configured wrapper manages AppPort Services end to end
+        env:
+          COMPUTE_HOME: ${{ runner.temp }}/compute-state
+          COMPUTE_NO_BROWSER: 1
+        run: |
+          # The wrapper must export COMPUTE_CONFIGURED_HOME, or `compute up` finds
+          # no distribution profile, starts no managed service, and the Services
+          # page silently shows nothing. Assert the whole path: process running,
+          # registered with AppPort/ui/1, and its /v1/ui contribution discovered.
+          grep -F 'export COMPUTE_CONFIGURED_HOME=' "$(brew --prefix compute-configured)/bin/compute-configured"
+          port=4100
+          compute-configured up --listen 127.0.0.1:8787 > "$RUNNER_TEMP/up.log"
+          for _ in $(seq 1 60); do
+            curl -fsS "http://127.0.0.1:$port/v1/ui" > "$RUNNER_TEMP/ui.json" && break
+            sleep 1
+          done
+          grep -F 'AppPort/ui/1' "$RUNNER_TEMP/ui.json"
+          grep -F "appport-services is managed by this configured installation" "$RUNNER_TEMP/up.log"
+          curl -fsS http://127.0.0.1:8787/services | grep -F 'AppPort/ui/1'
+          status=$(curl -fsS http://127.0.0.1:8787/services/appport-services/ui \
+            | ruby -rjson -e 'print JSON.parse($stdin.read)["status"]')
+          test "$status" = available
+          compute-configured down
       - name: Remove Configured without deleting Base state
         env:
           COMPUTE_HOME: ${{ runner.temp }}/compute-state
