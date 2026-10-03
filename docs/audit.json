@@ -3832,6 +3832,15 @@
   },
   {
    "method": "GET",
+   "path": "/ready",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
    "path": "/info",
    "scope": "Read",
    "ui": false,

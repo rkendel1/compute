@@ -259,7 +259,10 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
     let pool = ensure_local_host(&home, &target_listen, command.containers)?;
     let control_plane = control_plane_identity(&home)?;
     let url = format!("http://{}", listen);
-    if !answers(&listen) {
+    // Whether this invocation found a controller already listening, and therefore
+    // did not start the one it reports on.
+    let reused = answers(&listen);
+    if !reused {
         let state = home.join("control-plane");
         let mut start = std::process::Command::new(&exe);
         start
@@ -287,6 +290,28 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
             )));
         }
     }
+    // What the running controller actually is. This is read from the API
+    // rather than inferred from the flag, because `up` may have reused a
+    // daemon it did not start: requested mode is not actual mode.
+    let observed = answer_json(&url, "/ready").await;
+    let ui_enabled = observed.as_ref().and_then(|value| value["ui"].as_bool());
+    let ready = observed
+        .as_ref()
+        .is_some_and(|value| value["status"] == "ready" || value["accepting_work"] == true);
+
+    // Case 3: a UI-enabled controller is already serving this address and the
+    // caller asked for headless. Do not restart it to find out: that controller
+    // may be running workloads this command was never told about, and stopping
+    // it is not this command's decision to make. Fail, and say how to resolve
+    // it. Silently reusing it would make `--headless` a lie.
+    if reused && command.headless && ui_enabled == Some(true) {
+        return Err(ComputeError::Runtime(format!(
+            "{url} is already served by a UI-enabled control plane, which conflicts with \
+             --headless. This command will not stop a controller it did not start. \
+             Stop it first (`compute down`), then run `compute up --headless`, or drop \
+             --headless to use the running controller."
+        )));
+    }
     println!("Compute is running: {url}/");
     println!(
         "  computers run on this machine's computer host ({})",
@@ -295,11 +320,9 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
     println!("  this control plane ({control_plane}) authenticates to it with a target credential");
     println!("  control state: {}", durability_note(&command.state));
     println!("  state: {}", home.display());
-    // Report the platform as it actually is. Headless is stated rather than
-    // inferred from a browser that never opened.
-    let ready = answer_json(&url, "/ready")
-        .await
-        .is_some_and(|value| value["status"] == "ready" || value["accepting_work"] == true);
+    // Report the platform as it actually is, read from the controller that is
+    // actually serving. Headless is never inferred from a browser that did not
+    // open, and never from the flag this command was given.
     println!(
         "  {}: {}",
         if ready { "API" } else { "API (not ready)" },
@@ -313,15 +336,14 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
         );
         println!("  Execution: ready");
     }
+    // `ui_enabled` is `None` only when the controller did not answer `/ready`,
+    // which means nothing is known yet. Say so rather than guess a mode.
     println!(
         "  UI:        {}",
-        if answer_json(&url, "/ready")
-            .await
-            .is_some_and(|value| value["ui"] == true)
-        {
-            format!("{url}/ui/")
-        } else {
-            "disabled (headless)".to_owned()
+        match ui_enabled {
+            Some(true) => format!("{url}/ui/"),
+            Some(false) => "disabled (headless)".to_owned(),
+            None => "unknown (the controller has not reported yet)".to_owned(),
         }
     );
     println!("  stop it with `compute down`");
