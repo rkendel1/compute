@@ -60,6 +60,13 @@ test -f "$work/tap/.github/workflows/sync.yml"
 test -x "$work/tap/scripts/update-formula.sh"
 test -f "$work/tap/README.md"
 
+# The runtime payload postinstall must stage and verify before it replaces the
+# live runtime tree. `runtime-payload-staging.sh` renders the real formula and
+# runs its payload step, so it fails both if the postinstall reverts to deleting
+# `libexec/runtimes` before extracting and if that step stops verifying. It is a
+# behavioural test, not a source check.
+"$repository/distribution/tests/runtime-payload-staging.sh"
+
 if "$repository/distribution/render-homebrew-tap.sh" "$work/bad" "$version" bad "$configured_checksum" "$macos_checksum" "$macos_configured_checksum" 2>/dev/null; then
   echo "invalid checksum was accepted" >&2
   exit 1

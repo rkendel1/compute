@@ -28,10 +28,56 @@ class Compute < Formula
   end
 
   post_install_steps do
-    # Homebrew's linkage pass rewrites Mach-O payloads after `install`. Restore
-    # the certified runtime tree afterwards so its manifest hashes stay exact.
-    remove "runtimes", base: :libexec, recursive: true
-    run "tar", args: ["-xf", "{{prefix}}/runtime-payload.tar", "-C", "{{libexec}}"]
+    # Homebrew's linkage pass rewrites Mach-O payloads after `install`, so the
+    # certified runtime tree is restored afterwards to keep its manifest hashes
+    # exact.
+    #
+    # Restore it by *staging* the payload first. Deleting `libexec/runtimes`
+    # and extracting straight back leaves a window where that directory does not
+    # exist, and Homebrew's own relocation pass walks the keg during that
+    # window and reports the missing Mach-O payloads as an installation failure
+    # even though the finished installation is valid. Staging keeps the existing
+    # tree in place until the replacement is fully extracted and verified, so a
+    # failure at any point leaves the previously valid runtimes untouched.
+    mkdir_p ".runtime-staging", base: :libexec
+    run "tar", args: ["-xf", "{{prefix}}/runtime-payload.tar",
+                      "-C", "{{libexec}}/.runtime-staging"]
+    # The payload tar holds `runtimes/`, so the staged tree is one level in.
+    # `distribution verify` is the only checksum authority for these payloads:
+    # it is run against a temporary root that pairs the staged runtimes with the
+    # rest of the already-installed distribution, so a staged payload is proved
+    # with the same metadata the shipped distribution is proved with.
+    # `sh -c` takes the first operand after the script as $0, so an explicit
+    # placeholder is passed before the two real arguments; without it root would
+    # land in $0 and both variables would be empty.
+    #
+    # The array stays on one line on purpose: Ruby starts a heredoc body on the
+    # line after the `<<~SH`, so a continuation line here would be swallowed into
+    # the shell script and leave the array unclosed.
+    run "sh", args: ["-c", <<~SH, "sh", "{{libexec}}", "{{libexec}}/.runtime-staging/runtimes"]
+      set -e
+      root="$1"
+      stage="$2"
+      work="$root/.runtime-verify"
+      rm -rf "$work"
+      mkdir -p "$work"
+      for entry in "$root"/*; do
+        name=$(basename "$entry")
+        [ "$name" = "runtimes" ] && continue
+        [ "$name" = ".runtime-staging" ] && continue
+        [ "$name" = ".runtime-verify" ] && continue
+        ln -s "$entry" "$work/$name"
+      done
+      ln -s "$stage" "$work/runtimes"
+      "$root/bin/compute" distribution verify "$work"
+      rm -rf "$work"
+    SH
+    # Verified. Swap by rename: both trees are on the same filesystem, so the
+    # replacement is a rename and the previous tree is only unlinked afterwards.
+    run "mv", args: ["{{libexec}}/runtimes", "{{libexec}}/.runtime-retired"]
+    run "mv", args: ["{{libexec}}/.runtime-staging/runtimes", "{{libexec}}/runtimes"]
+    remove ".runtime-staging", base: :libexec, recursive: true
+    remove ".runtime-retired", base: :libexec, recursive: true
     remove "runtime-payload.tar", base: :prefix
   end
 
