@@ -665,6 +665,16 @@ pub trait ComputeProvider: Send + Sync {
     fn identity(&self) -> ProviderIdentity;
     async fn inspect(&self, request: ProviderRequest) -> Result<InspectResponse, ProviderError>;
     async fn execute(&self, request: ProviderRequest) -> Result<ExecuteResponse, ProviderError>;
+    async fn execute_agent(
+        &self,
+        request: compute_core::AgentExecutionRequest,
+    ) -> Result<compute_core::AgentExecutionResult, ProviderError> {
+        let _ = request;
+        Err(ProviderError::new(
+            ProviderErrorKind::OperationUnsupported,
+            "this provider does not support agent execution",
+        ))
+    }
     async fn capabilities(&self) -> Result<ProviderCapabilities, ProviderError>;
     async fn health(&self) -> Result<ProviderHealth, ProviderError>;
 
@@ -1996,6 +2006,13 @@ impl ComputeProvider for RemoteProvider {
     async fn execute(&self, request: ProviderRequest) -> Result<ExecuteResponse, ProviderError> {
         self.request("POST", "/compute/execute", &request).await
     }
+    async fn execute_agent(
+        &self,
+        request: compute_core::AgentExecutionRequest,
+    ) -> Result<compute_core::AgentExecutionResult, ProviderError> {
+        self.send("POST", "/compute/execute-agent", Some(&request), None)
+            .await
+    }
     async fn capabilities(&self) -> Result<ProviderCapabilities, ProviderError> {
         self.get("/compute/capabilities").await
     }
@@ -2087,6 +2104,8 @@ pub enum ProviderOperation {
     /// Admission without execution; authorized like inspection.
     Admission,
     Execute,
+    /// Execute an agent through a configured agent runtime.
+    AgentExecute,
     Capabilities,
     Capacity,
     Health,
@@ -2524,6 +2543,10 @@ impl RemoteService {
                 Ok(value) => encode_result(self.state.config.provider.execute(value).await),
                 Err(error) => Err(error),
             },
+            ProviderOperation::AgentExecute => match decode::<compute_core::AgentExecutionRequest>(body) {
+                Ok(value) => encode_result(self.state.config.provider.execute_agent(value).await),
+                Err(error) => Err(error),
+            },
             ProviderOperation::Submit => match decode_provider_request(body) {
                 Ok(value) => {
                     let key = header_value(headers, "idempotency-key");
@@ -2667,6 +2690,7 @@ fn parse_route(method: &str, path: &str) -> Result<Option<Route>, ProviderError>
         ("GET", "/compute/capacity") => Some(ProviderOperation::Capacity),
         ("GET", "/compute/inspect") => Some(ProviderOperation::Inspect),
         ("POST", "/compute/execute") => Some(ProviderOperation::Execute),
+        ("POST", "/compute/execute-agent") => Some(ProviderOperation::AgentExecute),
         ("POST", "/compute/admission") => Some(ProviderOperation::Admission),
         ("POST", "/compute/runtimes/resolve") => Some(ProviderOperation::RuntimeResolve),
         ("POST", "/compute/runtimes/prepare") => Some(ProviderOperation::RuntimePrepare),
