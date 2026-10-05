@@ -56,6 +56,8 @@ jobs:
           gzip -dc "$asset" | cmp - compute-distribution.tar
           sha256sum "$asset" > "$asset.sha256"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      - name: Sync published-stack version with current release
+        run: distribution/scripts/update-stack-version.sh
       - name: Assemble the configured product from published packages
         id: configured
         shell: bash
