@@ -98,3 +98,18 @@ release using its repository-scoped GitHub Actions token. The renderer in
 asset's SHA-256 into the formula; the formula never builds Compute or downloads
 runtimes independently. No cross-repository write credential is stored in this
 repository.
+
+Repository tests prove the templates; they cannot prove the tap. The tap is
+proved by `distribution/tests/live-tap-release.sh [VERSION]`. It fetches the
+live tap's formulas over the network and requires them to be byte-identical to
+the release tag's own templates rendered with the release's own checksums, each
+cross-checked against GitHub's digest of the published artifact. It also checks
+version, artifact URLs, checksums, Ruby validity, the configured
+`compute-configured-chip` payload and a Chip-free base formula, and labels each
+failure with the invariant that broke. Where both formulas are installed from
+the tap, it verifies the installed consumer too: versions, a Chip-free base
+keg, and an actual Chip execution through the configured launcher. Set
+`COMPUTE_LIVE_TAP_CONSUMER=require` to fail when that is not possible. The
+`live-tap` workflow runs it daily, and `live-tap-release-failures.sh` proves
+that each failure class is detected. Reference evidence:
+[docs/homebrew-0.1.17-consumer-validation.md](../docs/homebrew-0.1.17-consumer-validation.md).
