@@ -82,6 +82,19 @@ jobs:
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - "$root" | gzip -n -9 > "$asset"
           sha256sum "$asset" > "$asset.sha256"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      # The Chip launcher is proved against the tree this job just assembled and
+      # is about to publish, not against the source checkout. COMPUTE_TEST_NODE
+      # is the runner's Node: the formula resolves the Node the installed
+      # distribution bundles, and on a build runner that role is played by the
+      # runner's own -- the same major the profile requires. The launcher is
+      # required, not optional, so a regression here fails certification instead
+      # of degrading to a skip.
+      - name: Prove the configured Chip launcher against the assembled distribution
+        run: |
+          COMPUTE_TEST_MODULES="compute-configured/node_modules" \
+          COMPUTE_TEST_NODE="$(command -v node)" \
+          COMPUTE_TEST_REQUIRE_RUNTIME=1 \
+            distribution/tests/configured-chip.sh
       - uses: actions/upload-artifact@v4
         with:
           name: certified-compute-linux-x86_64

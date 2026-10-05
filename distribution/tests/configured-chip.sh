@@ -52,28 +52,48 @@ grep -q '"@appport/chip"' "$stack/package-lock.json"
 
 # ---- The launcher runs the real Chip runtime -------------------------------
 #
-# Running the launcher needs an installed runtime: a bundled Node, and a
-# `node_modules` the profile has actually resolved. CI validates the
-# distribution without running `npm ci`, so there the formula-level assertions
-# above stand alone and this half reports a skip rather than a false pass.
+# Running the launcher needs an installed runtime: a Node, and a `node_modules`
+# the profile has actually resolved. Release certification points this at the
+# *assembled* configured distribution it has just built, so the launcher is
+# proved against the bytes that ship rather than against the source tree.
 
 node=${COMPUTE_TEST_NODE:-/opt/homebrew/opt/compute/libexec/runtimes/node/bin/node}
-if [ ! -d "$stack/node_modules/@appport/chip" ] || [ ! -x "$node" ]; then
-  echo "skip: launcher not exercised (needs a bundled Node and an installed node_modules)" >&2
-  printf 'chip integration contract passed (formulas only)\n'
+modules=${COMPUTE_TEST_MODULES:-$stack/node_modules}
+# The mirror below links each package by absolute path, because a package's own
+# resolution is relative to the package, not to whatever directory the caller
+# happened to be in. A relative COMPUTE_TEST_MODULES would therefore be linked
+# from the wrong root and look like a missing runtime.
+case $modules in
+  /*) ;;
+  *) modules="$PWD/$modules" ;;
+esac
+case $node in
+  /*) ;;
+  *) node="$PWD/$node" ;;
+esac
+if [ ! -d "$modules/@appport/chip" ] || [ ! -x "$node" ]; then
+  # The launcher was not exercised. A partial check must never read as the whole
+  # contract, so this says so plainly, and a caller that requires the runtime
+  # (release certification) turns the skip into a failure.
+  echo "chip launcher NOT verified: no installed Chip runtime at $modules (node: $node)" >&2
+  if [ -n "${COMPUTE_TEST_REQUIRE_RUNTIME:-}" ]; then
+    echo "COMPUTE_TEST_REQUIRE_RUNTIME is set: the launcher must be exercised" >&2
+    exit 1
+  fi
+  printf 'chip integration contract: formulas only, launcher NOT verified\n'
   exit 0
 fi
 
 # A mirror of the installed tree the test owns: every package and bin is a
-# symlink into the real node_modules, so the packages run exactly as they ship,
-# but `.bin/chip` can be removed to exercise the failure path without touching
-# a developer's checkout.
+# symlink into the real tree, so the packages run exactly as they ship, but
+# `.bin/chip` can be removed to exercise the failure path without touching the
+# source checkout or the assembled distribution.
 mkdir -p "$work/modules/.bin"
-(cd "$stack/node_modules" && find . -maxdepth 1 -mindepth 1 ! -name .bin \
+(cd "$modules" && find . -maxdepth 1 -mindepth 1 ! -name .bin \
   -exec ln -s "$PWD/{}" "$work/modules/{}" \;)
-(cd "$stack/node_modules/.bin" && find . -maxdepth 1 -mindepth 1 ! -name chip \
+(cd "$modules/.bin" && find . -maxdepth 1 -mindepth 1 ! -name chip \
   -exec ln -s "$PWD/{}" "$work/modules/.bin/{}" \;)
-ln -s "$stack/node_modules/.bin/chip" "$work/modules/.bin/chip"
+ln -s "$modules/.bin/chip" "$work/modules/.bin/chip"
 
 # The distribution root the launcher resolves, shaped like an installed keg.
 root="$work/keg/libexec"
@@ -92,7 +112,7 @@ sed -n -E '/bin\/"compute-configured-chip"\)\.write/,/^    SH$/p' "$configured_f
 chmod +x "$work/keg/bin/compute-configured-chip"
 launcher="$work/keg/bin/compute-configured-chip"
 
-expected=$("$node" "$stack/node_modules/.bin/chip" --version)
+expected=$("$node" "$modules/.bin/chip" --version)
 actual=$("$launcher" --version)
 test "$actual" = "$expected" || {
   echo "launcher reported '$actual', the runtime reports '$expected'" >&2
