@@ -25,10 +25,21 @@ case "$macos_configured_checksum" in *[!0-9A-Fa-f]*|'') echo "invalid configured
 source_dir=$(CDPATH='' cd -- "$(dirname "$0")/homebrew" && pwd)
 mkdir -p "$tap/Formula" "$tap/.github/workflows"
 mkdir -p "$tap/scripts"
-cp "$source_dir/Formula/compute.rb.in" "$tap/Formula/compute.rb.in"
-cp "$source_dir/Formula/compute-configured.rb.in" "$tap/Formula/compute-configured.rb.in"
-cp "$source_dir/scripts/update-formula.sh" "$tap/scripts/update-formula.sh"
-chmod +x "$tap/scripts/update-formula.sh"
+# Every template and every guard, derived from the directory rather than listed, so
+# a tap seeded from this release can render and can check what it renders. The tap
+# runs these same scripts when it synchronizes a later release.
+for path in $(find "$source_dir/Formula" -type f -name '*.rb.in' | LC_ALL=C sort) \
+            $(find "$source_dir/scripts" -type f -name '*.sh' | LC_ALL=C sort); do
+  cp "$path" "$tap/${path#"$source_dir"/}"
+done
+chmod +x "$tap"/scripts/*.sh
+# A seeded tap that cannot install and check its own render is not seeded.
+for required in Formula/compute.rb.in Formula/compute-configured.rb.in \
+                scripts/update-formula.sh \
+                scripts/check-runtime-payload-invariant.sh \
+                scripts/check-configured-launchers.sh; do
+  [ -s "$tap/$required" ] || { echo "seeded tap is missing $required" >&2; exit 1; }
+done
 "$tap/scripts/update-formula.sh" "$version" "$checksum" "$configured_checksum" "$macos_checksum" "$macos_configured_checksum"
 cp "$source_dir/README.md" "$tap/README.md"
 cp "$source_dir/.github/workflows/tests.yml" "$tap/.github/workflows/tests.yml"
