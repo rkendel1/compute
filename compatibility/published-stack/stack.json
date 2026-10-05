@@ -18,6 +18,27 @@
     "shared_cli": true,
     "shared_ui": true
   },
+  "agent": {
+    "default": "chip",
+    "runtimes": [
+      {
+        "name": "chip",
+        "package": "@appport/chip",
+        "version": "0.54.3",
+        "executable": "node_modules/.bin/chip",
+        "node": "runtimes/node/bin/node",
+        "default": true,
+        "capabilities": ["Agent/loop@1"],
+        "lifecycle": "execution",
+        "health": {
+          "kind": "invocation",
+          "command": ["--version"],
+          "expect": "0.54.3"
+        },
+        "environment": "compute.execution"
+      }
+    ]
+  },
   "state": {
     "owner": "compute",
     "root": "COMPUTE_HOME",
@@ -45,6 +66,7 @@
   ],
   "migrations": [],
   "packages": {
+    "@appport/chip": "0.54.3",
     "@appport/core": "1.0.3",
     "@appport/github": "1.0.2",
     "@appport/runtime": "0.4.6",

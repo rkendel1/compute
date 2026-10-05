@@ -89,6 +89,18 @@ pub struct ControllerInfo {
     /// The upgrade this node last ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upgrade: Option<crate::upgrade::UpgradeRecord>,
+    /// Agent runtimes this installation supplies, for a control plane that
+    /// orchestrates agent work.
+    ///
+    /// Additive and optional, and empty on base Compute: the agent runtime
+    /// belongs to the configured distribution's profile, not to Compute, so
+    /// base neither requires nor advertises one. A control plane discovers the
+    /// default from here and never hardcodes a package version.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agents::AgentCapabilities::is_empty"
+    )]
+    pub agents: crate::agents::AgentCapabilities,
 }
 
 /// Counts for `compute doctor`: what runs here and what is not well.

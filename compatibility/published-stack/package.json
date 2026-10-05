@@ -10,6 +10,7 @@
     "verify": "node verify.mjs"
   },
   "dependencies": {
+    "@appport/chip": "0.54.3",
     "@appport/core": "1.0.3",
     "@appport/github": "1.0.2",
     "@appport/runtime": "0.4.6",

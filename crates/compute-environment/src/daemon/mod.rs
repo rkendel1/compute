@@ -1547,6 +1547,10 @@ impl Daemon {
             isolation: Some(compute_core::host::host_isolation_report()),
             workloads,
             upgrade: self.upgrade_record(),
+            // Read from the configured distribution's own profile, if this is a
+            // configured installation. Base Compute has no profile and
+            // advertises no agent runtime.
+            agents: crate::agents::configured(),
         }
     }
 

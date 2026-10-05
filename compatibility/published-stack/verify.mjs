@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 
 import { fingerprintManifest } from '@appport/core';
@@ -48,6 +49,50 @@ for (const [path, entry] of Object.entries(lock.packages)) {
   assert.ok(entry.integrity, `${path} has no registry integrity`);
 }
 pass('package_compatibility', `${Object.keys(stack.packages).length} exact top-level registry packages resolved with integrity`);
+
+// ---- The configured default agent runtime --------------------------------
+//
+// Chip is installed here, not resolved later: the artifact ships the package,
+// its dependency closure, and the Node it needs. Every check below reads the
+// installed tree, so a missing or wrong agent runtime fails certification
+// rather than degrading silently to "no agent".
+
+const agent = stack.agent;
+assert.ok(agent, 'the configured profile declares no agent runtime');
+assert.ok(agent.default, 'the configured profile names no default agent runtime');
+const defaultRuntime = agent.runtimes.find(({ name }) => name === agent.default);
+assert.ok(defaultRuntime, `the default agent runtime ${agent.default} is not declared`);
+
+// Package identity is the contract. Chip's published bin target is an internal
+// filename (`bin/eve.js`) and its pre-rename package name was `eve`; neither is
+// a dependency this artifact may acquire.
+assert.equal(defaultRuntime.package, '@appport/chip');
+const forbidden = Object.keys(lock.packages).filter((path) => {
+  const name = path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length);
+  return name === 'eve' || name === 'chip-framework';
+});
+assert.deepEqual(forbidden, [], 'the configured artifact must not depend on eve or chip-framework');
+
+const chipRoot = new URL('node_modules/@appport/chip/', here);
+const chipManifest = JSON.parse(await readFile(new URL('package.json', chipRoot), 'utf8'));
+assert.equal(chipManifest.version, defaultRuntime.version, 'the installed Chip is not the certified version');
+assert.equal(chipManifest.name, '@appport/chip');
+// Chip requires Node >= 24; this profile pins Node >= 22 for the rest of the
+// stack, so the agent runtime's own floor is asserted rather than assumed.
+assert.match(chipManifest.engines?.node ?? '', />=\s*24/, 'Chip requires Node >= 24');
+
+// The executable must exist and run on the Node this distribution ships.
+const executable = new URL(defaultRuntime.executable, here);
+assert.ok(await stat(executable).then((s) => s.isFile()).catch(() => false),
+  `${defaultRuntime.executable} is not in the configured artifact`);
+const { execFileSync } = await import('node:child_process');
+const reported = execFileSync(process.execPath, [fileURLToPath(executable), ...defaultRuntime.health.command], {
+  encoding: 'utf8', timeout: 120_000,
+}).trim();
+assert.equal(reported, defaultRuntime.health.expect, 'the configured agent runtime did not report its certified version');
+assert.equal(defaultRuntime.lifecycle, 'execution', 'an agent runtime is invoked inside an execution');
+assert.ok(defaultRuntime.node, 'the agent runtime does not name the Node it runs on');
+pass('agent_runtime', `${defaultRuntime.name}@${defaultRuntime.version} (${defaultRuntime.package}) is the installed default, reports ${reported}, and runs inside an execution`);
 
 const versions = new Map();
 for (const [path, entry] of Object.entries(lock.packages)) {
