@@ -23,7 +23,10 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+
+// Re-export types from compute-core
+pub use compute_core::{AgentCapabilities, AgentHealth, AgentRuntime};
 
 /// Where a configured distribution declares that it is installed. The Homebrew
 /// formula sets this to its `libexec`, which is where `stack.json`, the pinned
@@ -32,87 +35,13 @@ pub const PROFILE_HOME_ENV: &str = "COMPUTE_CONFIGURED_HOME";
 
 /// The distribution profile's agent section, exactly as a configured
 /// distribution declares it. Absent on base Compute.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AgentProfile {
     /// Name of the runtime an execution uses when nothing else is asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     #[serde(default)]
     pub runtimes: Vec<AgentRuntime>,
-}
-
-/// One agent runtime the configured distribution ships.
-///
-/// This is a *capability contract*, not a handle: it names what is available
-/// and how to prove it, and it is read from an immutable artifact rather than
-/// probed or resolved at run time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentRuntime {
-    /// Short, stable identifier an execution refers to (`chip`).
-    pub name: String,
-    /// The public npm identity. This is what must be pinned: the package's
-    /// historical internal entry file name is an implementation detail and is
-    /// deliberately not part of this contract.
-    pub package: String,
-    pub version: String,
-    /// Executable path relative to the installed distribution root.
-    pub executable: String,
-    /// The runtime that executes it, relative to the distribution root. Chip
-    /// requires Node >= 24, so this is the bundled Node and never the host's:
-    /// a configured distribution ships the runtime its pinned packages declare.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node: Option<String>,
-    /// Whether this is the distribution's default agent runtime.
-    #[serde(default)]
-    pub default: bool,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    /// `execution`: the runtime is invoked inside a Compute execution and does
-    /// not outlive it. Compute owns the execution lifecycle; the runtime owns
-    /// only the agent loop within it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lifecycle: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub health: Option<AgentHealth>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment: Option<String>,
-}
-
-/// How to prove a declared runtime is really present and working.
-///
-/// `invocation` runs the executable and compares its output. This is the right
-/// check for a runtime with no listening socket: readiness is "it answers",
-/// not "something accepts a connection".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentHealth {
-    pub kind: String,
-    pub command: Vec<String>,
-    pub expect: String,
-}
-
-/// What a controller advertises about agent runtimes.
-///
-/// `default` is `None` when the installation declares none, which is the base
-/// Compute case and is reported as an absent capability rather than an error.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentCapabilities {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<String>,
-    #[serde(default)]
-    pub runtimes: Vec<AgentRuntime>,
-}
-
-impl AgentCapabilities {
-    /// The runtime an execution uses by default, if this installation has one.
-    pub fn default_runtime(&self) -> Option<&AgentRuntime> {
-        let name = self.default.as_deref()?;
-        self.runtimes.iter().find(|runtime| runtime.name == name)
-    }
-
-    /// Whether any agent runtime is available at all. Base Compute: `false`.
-    pub fn is_empty(&self) -> bool {
-        self.runtimes.is_empty()
-    }
 }
 
 /// The installed distribution's root, if this is a configured installation.

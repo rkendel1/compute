@@ -55,6 +55,25 @@ use runtime::RuntimeManager;
 pub const REMOTE_PROTOCOL: &str = "compute.remote@1";
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 
+/// Runtime-neutral executor for agent workloads.
+///
+/// Agent execution is a Compute capability, not a specific runtime implementation.
+/// An AgentExecutor bridges the provider interface to the actual configured agent
+/// runtime (e.g., Chip), without exposing runtime-specific details to the provider.
+#[async_trait]
+pub trait AgentExecutor: Send + Sync {
+    /// Execute an agent request and return the result.
+    ///
+    /// The executor may be unavailable (base Compute), or available but unable to
+    /// execute a specific request (invalid agent name, runtime failure, etc.).
+    /// Return the appropriate error in both cases so the provider can distinguish
+    /// them and report them to the caller.
+    async fn execute_agent(
+        &self,
+        request: compute_core::AgentExecutionRequest,
+    ) -> Result<compute_core::AgentExecutionResult, ProviderError>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderErrorKind {
@@ -665,6 +684,16 @@ pub trait ComputeProvider: Send + Sync {
     fn identity(&self) -> ProviderIdentity;
     async fn inspect(&self, request: ProviderRequest) -> Result<InspectResponse, ProviderError>;
     async fn execute(&self, request: ProviderRequest) -> Result<ExecuteResponse, ProviderError>;
+    async fn execute_agent(
+        &self,
+        request: compute_core::AgentExecutionRequest,
+    ) -> Result<compute_core::AgentExecutionResult, ProviderError> {
+        let _ = request;
+        Err(ProviderError::new(
+            ProviderErrorKind::OperationUnsupported,
+            "this provider does not support agent execution",
+        ))
+    }
     async fn capabilities(&self) -> Result<ProviderCapabilities, ProviderError>;
     async fn health(&self) -> Result<ProviderHealth, ProviderError>;
 
@@ -746,6 +775,10 @@ pub struct LocalProvider {
     policy: ProviderPolicy,
     execution_policy: RwLock<Option<Policy>>,
     executions_started: AtomicU64,
+    /// Optional agent executor for runtime-neutral agent execution.
+    /// When present, enables the AgentExecute operation.
+    /// When absent, agent execution returns OperationUnsupported.
+    agent_executor: Option<Arc<dyn AgentExecutor>>,
 }
 
 fn provider_compute(runtimes: &RuntimeManager) -> Compute {
@@ -808,6 +841,7 @@ impl LocalProvider {
             policy: self.policy.clone(),
             execution_policy: RwLock::new(self.execution_policy()),
             executions_started: AtomicU64::new(0),
+            agent_executor: self.agent_executor.clone(),
         }
     }
 
@@ -828,6 +862,7 @@ impl LocalProvider {
             policy: ProviderPolicy::default(),
             execution_policy: RwLock::new(None),
             executions_started: AtomicU64::new(0),
+            agent_executor: None,
         }
     }
 
@@ -840,6 +875,14 @@ impl LocalProvider {
 
     pub fn with_policy(mut self, policy: ProviderPolicy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Provide an agent executor for agent execution requests.
+    /// When set, enables the AgentExecute operation.
+    /// When absent, AgentExecute returns OperationUnsupported.
+    pub fn with_agent_executor(mut self, executor: Option<Arc<dyn AgentExecutor>>) -> Self {
+        self.agent_executor = executor;
         self
     }
 
@@ -1378,6 +1421,19 @@ impl ComputeProvider for LocalProvider {
     async fn execute(&self, request: ProviderRequest) -> Result<ExecuteResponse, ProviderError> {
         let admission = self.admit(request.clone()).await?;
         self.execute_admitted(request, admission).await
+    }
+
+    async fn execute_agent(
+        &self,
+        request: compute_core::AgentExecutionRequest,
+    ) -> Result<compute_core::AgentExecutionResult, ProviderError> {
+        let executor = self.agent_executor.as_ref().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::OperationUnsupported,
+                "agent execution is not available on this provider",
+            )
+        })?;
+        executor.execute_agent(request).await
     }
 
     async fn admit(&self, request: ProviderRequest) -> Result<Admission, ProviderError> {
@@ -1996,6 +2052,13 @@ impl ComputeProvider for RemoteProvider {
     async fn execute(&self, request: ProviderRequest) -> Result<ExecuteResponse, ProviderError> {
         self.request("POST", "/compute/execute", &request).await
     }
+    async fn execute_agent(
+        &self,
+        request: compute_core::AgentExecutionRequest,
+    ) -> Result<compute_core::AgentExecutionResult, ProviderError> {
+        self.send("POST", "/compute/execute-agent", Some(&request), None)
+            .await
+    }
     async fn capabilities(&self) -> Result<ProviderCapabilities, ProviderError> {
         self.get("/compute/capabilities").await
     }
@@ -2087,6 +2150,8 @@ pub enum ProviderOperation {
     /// Admission without execution; authorized like inspection.
     Admission,
     Execute,
+    /// Execute an agent through a configured agent runtime.
+    AgentExecute,
     Capabilities,
     Capacity,
     Health,
@@ -2524,6 +2589,10 @@ impl RemoteService {
                 Ok(value) => encode_result(self.state.config.provider.execute(value).await),
                 Err(error) => Err(error),
             },
+            ProviderOperation::AgentExecute => match decode::<compute_core::AgentExecutionRequest>(body) {
+                Ok(value) => encode_result(self.state.config.provider.execute_agent(value).await),
+                Err(error) => Err(error),
+            },
             ProviderOperation::Submit => match decode_provider_request(body) {
                 Ok(value) => {
                     let key = header_value(headers, "idempotency-key");
@@ -2667,6 +2736,7 @@ fn parse_route(method: &str, path: &str) -> Result<Option<Route>, ProviderError>
         ("GET", "/compute/capacity") => Some(ProviderOperation::Capacity),
         ("GET", "/compute/inspect") => Some(ProviderOperation::Inspect),
         ("POST", "/compute/execute") => Some(ProviderOperation::Execute),
+        ("POST", "/compute/execute-agent") => Some(ProviderOperation::AgentExecute),
         ("POST", "/compute/admission") => Some(ProviderOperation::Admission),
         ("POST", "/compute/runtimes/resolve") => Some(ProviderOperation::RuntimeResolve),
         ("POST", "/compute/runtimes/prepare") => Some(ProviderOperation::RuntimePrepare),
