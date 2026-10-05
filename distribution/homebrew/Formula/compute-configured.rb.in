@@ -44,6 +44,29 @@ class ComputeConfigured < Formula
       status=$("#{formula_opt_libexec("compute")}/runtimes/node/bin/node" -p "require('#{libexec}/stack.json').distribution.certification_status") || exit
       printf '%s\n' "Configured Compute is $status and active through COMPUTE_STACKS."
     SH
+    # The agent runtime the configured profile declares. Chip is a configured
+    # component, so this wrapper lives here and nowhere else: base Compute has no
+    # chip launcher and never grows one. Everything it needs -- the pinned
+    # node_modules, the bundled Node -- is inside the two formulas this one
+    # already depends on, so the launcher resolves them from the installed
+    # distribution rather than from a developer checkout or the host's PATH.
+    (bin/"compute-configured-chip").write <<~SH
+      #!/bin/sh
+      root="#{libexec}"
+      node="#{formula_opt_libexec("compute")}/runtimes/node/bin/node"
+      chip="$root/node_modules/.bin/chip"
+      if [ ! -x "$node" ]; then
+        echo "compute-configured-chip: the configured Node runtime is missing at $node" >&2
+        exit 1
+      fi
+      if [ ! -x "$chip" ]; then
+        echo "compute-configured-chip: the Chip runtime is missing at $chip" >&2
+        exit 1
+      fi
+      export COMPUTE_STACKS="$root/stacks${COMPUTE_STACKS:+:$COMPUTE_STACKS}"
+      export COMPUTE_CONFIGURED_HOME="$root"
+      exec "$node" "$chip" "$@"
+    SH
   end
 
   test do
@@ -56,5 +79,16 @@ class ComputeConfigured < Formula
     assert_predicate libexec/"node_modules/@appport/github/package.json", :file?
     assert_predicate libexec/"recipes/starters/dev.json", :file?
     assert_predicate libexec/"stacks/configured/stack.toml", :file?
+    # Chip is a configured component. It is proved here by running it, not by
+    # asserting that a file exists, and the proof lives only in this formula:
+    # base Compute ships no Chip launcher. The expected version is read from the
+    # installed profile rather than repeated here, so the profile stays the only
+    # place that pins it.
+    assert_predicate libexec/"node_modules/@appport/chip/package.json", :file?
+    chip = JSON.parse((libexec/"stack.json").read)
+                .fetch("agent").fetch("runtimes").find { |runtime| runtime["name"] == "chip" }
+    refute_nil chip, "the configured profile declares no chip runtime"
+    assert_equal chip.fetch("version"),
+                 shell_output("#{bin}/compute-configured-chip --version").strip
   end
 end

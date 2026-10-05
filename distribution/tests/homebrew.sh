@@ -55,6 +55,12 @@ grep -q 'recipes/starters/dev.json' "$configured_formula"
 # managed service, nothing is registered, and the Services page never discovers
 # `GET /v1/ui`: a silently absent feature, not a visible failure.
 grep -q 'export COMPUTE_CONFIGURED_HOME=' "$configured_formula"
+
+# Chip belongs to the configured distribution and nowhere else. Its launcher,
+# the real runtime it starts, and the failure it gives when that runtime is
+# missing are proved in their own contract, which renders these same formulas.
+"$repository/distribution/tests/configured-chip.sh"
+
 test -f "$work/tap/.github/workflows/tests.yml"
 test -f "$work/tap/.github/workflows/sync.yml"
 test -x "$work/tap/scripts/update-formula.sh"
