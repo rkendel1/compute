@@ -1,0 +1,43 @@
+name: live-tap
+
+# The live Homebrew tap must be exactly what the latest release renders:
+# distribution/tests/live-tap-release.sh fetches the published formulas over
+# the network and compares them byte-for-byte with the release tag's own
+# templates rendered for the release's own checksums. This is formula
+# verification only: no runner here installs from the tap, so the script
+# reports the live consumer as NOT VERIFIED rather than claiming it.
+#
+# It runs on a schedule rather than on pull requests because the tap is
+# synchronised from its own repository after a release is published; a pull
+# request cannot change it, and a just-tagged release is briefly ahead of it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release to verify (for example 0.1.17); empty for the latest
+        required: false
+  schedule:
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  live-tap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Live tap matches the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPUTE_LIVE_TAP_CONSUMER: auto
+          VERSION: ${{ inputs.version }}
+        run: distribution/tests/live-tap-release.sh ${VERSION:+"$VERSION"}
+      - name: Live tap failures are detected and labelled
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: distribution/tests/live-tap-release-failures.sh ${VERSION:+"$VERSION"}
