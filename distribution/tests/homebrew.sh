@@ -67,6 +67,13 @@ test -f "$work/tap/README.md"
 # behavioural test, not a source check.
 "$repository/distribution/tests/runtime-payload-staging.sh"
 
+# The rendered formula is what the sync workflow publishes, and v0.1.15 shipped a
+# formula carrying correct checksums and the delete-before-extract install logic.
+# The invariant check therefore runs against Formula/compute.rb as rendered here,
+# not against the template.
+"$repository/distribution/homebrew/scripts/check-runtime-payload-invariant.sh" \
+  "$formula" "the rendered compute formula"
+
 if "$repository/distribution/render-homebrew-tap.sh" "$work/bad" "$version" bad "$configured_checksum" "$macos_checksum" "$macos_configured_checksum" 2>/dev/null; then
   echo "invalid checksum was accepted" >&2
   exit 1

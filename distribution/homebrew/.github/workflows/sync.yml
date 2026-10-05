@@ -78,12 +78,13 @@ jobs:
           for path in \
             distribution/homebrew/Formula/compute.rb.in \
             distribution/homebrew/Formula/compute-configured.rb.in \
-            distribution/homebrew/scripts/update-formula.sh; do
+            distribution/homebrew/scripts/update-formula.sh \
+            distribution/homebrew/scripts/check-runtime-payload-invariant.sh; do
             mkdir -p "$(dirname "$path")"
             gh api "repos/rkendel1/compute/contents/$path?ref=${{ steps.release.outputs.tag }}" \
               --jq .content | base64 -d > "$path"
           done
-          chmod +x scripts/update-formula.sh
+          chmod +x scripts/update-formula.sh scripts/check-runtime-payload-invariant.sh
           # Fail before publishing if the release's wrapper cannot manage services.
           grep -F 'export COMPUTE_CONFIGURED_HOME=' distribution/homebrew/Formula/compute-configured.rb.in
       - name: Render formula from release checksum
@@ -103,6 +104,11 @@ jobs:
           grep -F '"${{ steps.release.outputs.macos_configured_checksum }}"' Formula/compute-configured.rb
           ruby -c Formula/compute.rb
           ruby -c Formula/compute-configured.rb
+          # The rendered formula is what ships. v0.1.15 published a formula with
+          # correct checksums and installation logic that deleted the live runtime
+          # tree before replacing it, so the install logic is checked here on the
+          # rendered output, after the render and before the commit below.
+          scripts/check-runtime-payload-invariant.sh Formula/compute.rb "Formula/compute.rb"
       - name: Publish formula
         if: steps.release.outputs.available == 'true'
         shell: bash
