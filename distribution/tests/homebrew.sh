@@ -65,6 +65,12 @@ test -f "$work/tap/.github/workflows/tests.yml"
 test -f "$work/tap/.github/workflows/sync.yml"
 test -x "$work/tap/scripts/update-formula.sh"
 test -f "$work/tap/README.md"
+# A seeded tap must carry the guards it needs to check what it renders. v0.1.16
+# shipped without them, so nothing in the tap could notice that its rendered
+# formula had lost the Chip launcher.
+test -x "$work/tap/scripts/check-runtime-payload-invariant.sh"
+test -x "$work/tap/scripts/check-configured-launchers.sh"
+test -x "$work/tap/scripts/install-release-templates.sh"
 
 # The runtime payload postinstall must stage and verify before it replaces the
 # live runtime tree. `runtime-payload-staging.sh` renders the real formula and
@@ -73,12 +79,25 @@ test -f "$work/tap/README.md"
 # behavioural test, not a source check.
 "$repository/distribution/tests/runtime-payload-staging.sh"
 
+# The release templates must actually reach the renderer. v0.1.16 fetched them,
+# rendered from the tap's stale copies, and published a configured formula with no
+# Chip launcher. This reproduces that: a stale tap template, the release
+# templates installed into the renderer's own input path, and the rendered formula
+# required to carry the launcher.
+"$repository/distribution/tests/tap-sync-launchers.sh"
+
 # The rendered formula is what the sync workflow publishes, and v0.1.15 shipped a
 # formula carrying correct checksums and the delete-before-extract install logic.
 # The invariant check therefore runs against Formula/compute.rb as rendered here,
 # not against the template.
 "$repository/distribution/homebrew/scripts/check-runtime-payload-invariant.sh" \
   "$formula" "the rendered compute formula"
+
+# The launcher set is checked on the rendered formulas too, because the rendered
+# file is what ships.
+"$repository/distribution/homebrew/scripts/check-configured-launchers.sh" \
+  "$configured_formula" "$formula" \
+  "$work/tap/Formula/compute-configured.rb.in" "$work/tap/Formula/compute.rb.in"
 
 if "$repository/distribution/render-homebrew-tap.sh" "$work/bad" "$version" bad "$configured_checksum" "$macos_checksum" "$macos_configured_checksum" 2>/dev/null; then
   echo "invalid checksum was accepted" >&2

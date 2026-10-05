@@ -65,7 +65,7 @@ jobs:
           echo "configured_url=$configured_url" >> "$GITHUB_OUTPUT"
           echo "macos_url=$macos_url" >> "$GITHUB_OUTPUT"
           echo "macos_configured_url=$macos_configured_url" >> "$GITHUB_OUTPUT"
-      - name: Take the formula templates from the release tag
+      - name: Fetch the formula templates and guards from the release tag
         if: steps.release.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -75,18 +75,56 @@ jobs:
           # assets these formulas install. Re-rendering from this repository's own
           # copy silently ships a stale wrapper: that is how a release lost
           # COMPUTE_CONFIGURED_HOME and stopped starting AppPort Services.
+          #
+          # v0.1.16 fetched the correct templates into `distribution/homebrew/`
+          # and then rendered from this tap's older copies, because the renderer
+          # reads Formula/*.rb.in. The right template was fetched, never used, and
+          # the configured formula silently lost the Chip launcher.
+          #
+          # There is deliberately no fallback: a failed fetch fails the job rather
+          # than rendering from whatever this tap happens to still carry.
+          tag='${{ steps.release.outputs.tag }}'
+          case "$tag" in
+            v*) ;;
+            *) echo "refusing to sync: '$tag' is not a release tag" >&2; exit 1 ;;
+          esac
           for path in \
             distribution/homebrew/Formula/compute.rb.in \
             distribution/homebrew/Formula/compute-configured.rb.in \
             distribution/homebrew/scripts/update-formula.sh \
-            distribution/homebrew/scripts/check-runtime-payload-invariant.sh; do
+            distribution/homebrew/scripts/install-release-templates.sh \
+            distribution/homebrew/scripts/check-runtime-payload-invariant.sh \
+            distribution/homebrew/scripts/check-configured-launchers.sh; do
             mkdir -p "$(dirname "$path")"
-            gh api "repos/rkendel1/compute/contents/$path?ref=${{ steps.release.outputs.tag }}" \
-              --jq .content | base64 -d > "$path"
+            encoded="$path.b64"
+            # The API call is checked on its own: in a pipeline its failure would be
+            # masked by the exit status of `base64 -d`, writing an empty file and
+            # rendering a formula from nothing.
+            if ! gh api "repos/rkendel1/compute/contents/$path?ref=$tag" \
+              --jq .content > "$encoded"; then
+              echo "could not fetch $path from $tag" >&2
+              exit 1
+            fi
+            if [ ! -s "$encoded" ]; then
+              echo "empty response for $path at $tag" >&2
+              exit 1
+            fi
+            base64 -d < "$encoded" > "$path"
+            rm -f "$encoded"
+            [ -s "$path" ] || { echo "$path decoded to nothing" >&2; exit 1; }
           done
-          chmod +x scripts/update-formula.sh scripts/check-runtime-payload-invariant.sh
+      - name: Install the release templates where the renderer reads them
+        if: steps.release.outputs.available == 'true'
+        shell: bash
+        run: |
+          # `scripts/update-formula.sh` resolves its inputs as
+          # `$(dirname $0)/../Formula`, so the only inputs that count are the ones
+          # this tap carries. Installing them here is what stops the tap's committed
+          # templates from winning.
+          distribution/homebrew/scripts/install-release-templates.sh \
+            distribution/homebrew .
           # Fail before publishing if the release's wrapper cannot manage services.
-          grep -F 'export COMPUTE_CONFIGURED_HOME=' distribution/homebrew/Formula/compute-configured.rb.in
+          grep -F 'export COMPUTE_CONFIGURED_HOME=' Formula/compute-configured.rb.in
       - name: Render formula from release checksum
         if: steps.release.outputs.available == 'true'
         run: scripts/update-formula.sh '${{ steps.release.outputs.version }}' '${{ steps.release.outputs.checksum }}' '${{ steps.release.outputs.configured_checksum }}' '${{ steps.release.outputs.macos_checksum }}' '${{ steps.release.outputs.macos_configured_checksum }}'
@@ -104,18 +142,29 @@ jobs:
           grep -F '"${{ steps.release.outputs.macos_configured_checksum }}"' Formula/compute-configured.rb
           ruby -c Formula/compute.rb
           ruby -c Formula/compute-configured.rb
-          # The rendered formula is what ships. v0.1.15 published a formula with
-          # correct checksums and installation logic that deleted the live runtime
-          # tree before replacing it, so the install logic is checked here on the
-          # rendered output, after the render and before the commit below.
+          # Both guards run on the RENDERED formulas, after the render and before
+          # the commit below, because the rendered file is what ships. Checking the
+          # template instead would pass on a formula that no longer installs what
+          # the release promised.
+          #
+          # v0.1.15 published a formula with correct checksums and installation
+          # logic that deleted the live runtime tree before replacing it.
           scripts/check-runtime-payload-invariant.sh Formula/compute.rb "Formula/compute.rb"
+          # v0.1.16 published a formula with correct checksums and no Chip
+          # launcher, because the render came from a stale template. A release that
+          # ships the launcher must produce a formula that ships it.
+          scripts/check-configured-launchers.sh \
+            Formula/compute-configured.rb Formula/compute.rb \
+            Formula/compute-configured.rb.in Formula/compute.rb.in
       - name: Publish formula
         if: steps.release.outputs.available == 'true'
         shell: bash
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add Formula/compute.rb Formula/compute-configured.rb
+          # The templates and guards are committed with the formulas, so this tap's
+          # own copies can never drift into being the ones a later render reads.
+          git add Formula scripts
           if git diff --cached --quiet; then
             exit 0
           fi
