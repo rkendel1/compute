@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - compatibility/published-stack/**
+      - distribution/scripts/build-configured-agent.sh
       - .github/workflows/configured-compatibility.yml
       - docs/compatibility.md
   push:
@@ -33,6 +34,8 @@ jobs:
       - name: Install only the locked published artifacts
         working-directory: compatibility/published-stack
         run: npm ci --ignore-scripts
+      - name: Build the configured agent with the pinned Chip
+        run: distribution/scripts/build-configured-agent.sh compatibility/published-stack "$(command -v node)"
       - name: Verify package, contract, and runtime compatibility
         working-directory: compatibility/published-stack
         env:

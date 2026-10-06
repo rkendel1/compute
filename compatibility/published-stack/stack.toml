@@ -7,7 +7,7 @@ description = "The exact published capability set certified with this Compute re
 
 [requirements]
 runtime = "node"
-version = ">=22"
+version = ">=24"
 
 [[component]]
 name = "feltdb"
@@ -19,11 +19,17 @@ version = "0.11.9"
 name = "chip"
 kind = "agent-runtime"
 source = "npm:@appport/chip"
-version = "0.54.3"
+version = "0.54.4"
 default = true
 executable = "chip"
 lifecycle = "execution"
 health_command = "--version"
+
+[[component]]
+name = "fx"
+kind = "model-provider"
+source = "npm:@appport/fx"
+version = "0.1.0"
 
 [[component]]
 name = "appport-core"

@@ -63,6 +63,7 @@ jobs:
         shell: bash
         run: |
           npm ci --ignore-scripts --prefix compatibility/published-stack
+          distribution/scripts/build-configured-agent.sh compatibility/published-stack "$(command -v node)"
           SOURCE_DATE_EPOCH=0 COMPUTE_COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/configured-evidence.json" \
             npm run verify --prefix compatibility/published-stack
           test "$(jq -r .status "$RUNNER_TEMP/configured-evidence.json")" = certified
@@ -79,6 +80,8 @@ jobs:
           cp "$RUNNER_TEMP/configured-evidence.json" "$root/evidence.json"
           cp -a compute-distribution/recipes "$root/recipes"
           cp -a compatibility/published-stack/node_modules "$root/node_modules"
+          cp -R compatibility/published-stack/agent "$root/agent"
+          cp -R compatibility/published-stack/.output "$root/.output"
           test "$(find "$root/recipes/starters" -name '*.json' -type f | wc -l | tr -d '[:space:]')" = 7
           asset="compute-configured-$version-linux-x86_64.tar.gz"
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - "$root" | gzip -n -9 > "$asset"
@@ -97,6 +100,17 @@ jobs:
           COMPUTE_TEST_NODE="$(command -v node)" \
           COMPUTE_TEST_REQUIRE_RUNTIME=1 \
             distribution/tests/configured-chip.sh
+      # The configured runtime path, on the same assembled bytes: the rendered
+      # launcher starts the real Chip, which serves the configured agent through
+      # FX to a local OpenAI-compatible fixture, and records operationId behavior.
+      - name: Prove Chip -> FX -> provider against the assembled distribution
+        run: |
+          COMPUTE_TEST_CONFIGURED_ROOT="compute-configured" \
+          COMPUTE_TEST_NODE="$(command -v node)" \
+          COMPUTE_TEST_EVIDENCE="$RUNNER_TEMP/configured-chip-fx.json" \
+            distribution/tests/configured-chip-fx.sh
+      - name: The configured asset names no machine-specific path
+        run: distribution/scripts/check-configured-paths.sh compute-configured
       - uses: actions/upload-artifact@v4
         with:
           name: certified-compute-linux-x86_64
@@ -161,6 +175,7 @@ jobs:
             configured-stack/stack.json > "$RUNNER_TEMP/stack.json"
           mv "$RUNNER_TEMP/stack.json" configured-stack/stack.json
           npm ci --ignore-scripts --prefix configured-stack
+          distribution/scripts/build-configured-agent.sh configured-stack "$(command -v node)"
           SOURCE_DATE_EPOCH=0 COMPUTE_COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/configured-evidence.json" \
             npm run verify --prefix configured-stack
           test "$(jq -r .status "$RUNNER_TEMP/configured-evidence.json")" = preview
@@ -175,12 +190,25 @@ jobs:
           cp "$RUNNER_TEMP/configured-evidence.json" "$root/evidence.json"
           cp -a compute-distribution/recipes "$root/recipes"
           cp -a configured-stack/node_modules "$root/node_modules"
+          cp -R configured-stack/agent "$root/agent"
+          cp -R configured-stack/.output "$root/.output"
           test "$(find "$root/recipes/starters" -name '*.json' -type f | wc -l | tr -d '[:space:]')" = 7
           asset="compute-configured-$version-macos-aarch64.tar.gz"
           brew install gnu-tar
           gtar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - "$root" | gzip -n -9 > "$asset"
           shasum -a 256 "$asset" > "$asset.sha256"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      - name: Prove the configured Chip launcher and Chip -> FX -> provider on the preview
+        run: |
+          COMPUTE_TEST_MODULES="compute-configured/node_modules" \
+          COMPUTE_TEST_NODE="$(command -v node)" \
+          COMPUTE_TEST_REQUIRE_RUNTIME=1 \
+            distribution/tests/configured-chip.sh
+          COMPUTE_TEST_CONFIGURED_ROOT="compute-configured" \
+          COMPUTE_TEST_NODE="$(command -v node)" \
+          COMPUTE_TEST_EVIDENCE="$RUNNER_TEMP/configured-chip-fx.json" \
+            distribution/tests/configured-chip-fx.sh
+          distribution/scripts/check-configured-paths.sh compute-configured
       - uses: actions/upload-artifact@v4
         with:
           name: preview-compute-macos-aarch64

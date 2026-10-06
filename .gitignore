@@ -6,3 +6,5 @@
 /compatibility/published-stack/node_modules
 /compatibility/published-stack/evidence.json
 .env.local
+/compatibility/published-stack/.output
+/compatibility/published-stack/.eve

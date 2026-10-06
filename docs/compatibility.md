@@ -89,6 +89,96 @@ each naming an executable inside the distribution, its arguments, its endpoint, 
 path that proves it is ready. Base Compute ships no such list and starts no extra
 process, so this is additive.
 
+## The configured agent runtime: Chip and FX
+
+The configured stack ships an agent runtime and the model provider layer it uses. They
+are configured components, not part of Compute:
+
+```text
+compute-configured
+├── Compute            execution: environments, computers, jobs, receipts, Reality
+├── Chip 0.54.4        agent: sessions, turns, tools, the reasoning loop   (@appport/chip)
+└── FX 0.1.0           model/provider execution: provider, model, transport (@appport/fx)
+```
+
+```text
+caller (for example Attn) ──POST /eve/v1/session──▶ Chip ──fx()──▶ FX ──▶ model provider
+                                                     │
+                                                     └── executes work on ──▶ Compute
+```
+
+| Component | Owns | Does not own |
+| --- | --- | --- |
+| Compute | execution, environments, computers, jobs, receipts | agents, models, providers, sessions of an agent |
+| Chip | agent sessions, turns, tools, the agent loop, its HTTP API | model transport or provider credentials |
+| FX | the model call: endpoint, model id, credential lookup, streaming, cancellation | agent loop, tools, sessions |
+
+Compute never imports Chip or FX. It reads only the profile's `agent` section, so a
+controller can advertise Chip on `GET /info`. The profile's FX fields are configured
+metadata that Compute ignores. Chip never imports FX either: the configured agent
+(`agent/agent.ts` in the configured asset) joins them through their public APIs,
+`fx(await createFxModel(...))` from `@appport/chip/models/fx` and `@appport/fx`. It
+creates the model when a model step starts, so Chip starts and accepts sessions before a
+provider is configured.
+
+### Running the agent
+
+`compute-configured-chip` is the only entry point. It runs the pinned Chip on the bundled
+Node 24 against the configured agent, in a per-user working directory at
+`$COMPUTE_HOME/configured/chip`. Chip's durable sessions live there, so they survive
+`brew upgrade`. The working directory links to the immutable installation.
+
+```sh
+export COMPUTE_CONFIGURED_CHIP_TOKEN=…            # who may call the HTTP API (required)
+export FX_BASE_URL=http://localhost:11434/v1      # an OpenAI-compatible API prefix
+export FX_MODEL=qwen3-coder
+compute-configured-chip start --host 127.0.0.1 --port 3000
+```
+
+| Variable | Meaning |
+| --- | --- |
+| `FX_BASE_URL` | OpenAI-compatible API prefix. Plain HTTP is accepted only on loopback. |
+| `FX_MODEL` | Model id sent with each request. |
+| `FX_API_KEY_ENV` | Optional. The *name* of the variable that holds a bearer token. FX reads the token natively on each call, so the key never passes through JavaScript or any file. Without it, no `Authorization` header is sent. |
+| `FX_CONTEXT_WINDOW_TOKENS` | The model's context window (default 32000). |
+| `COMPUTE_CONFIGURED_CHIP_TOKEN` | Bearer token the HTTP API requires. With no token, `chip start` refuses every request. |
+
+Nothing in the formula, the release asset or the repository names an endpoint, model or
+credential. No Vercel account, AI Gateway key or OIDC token is involved. If a turn runs
+without `FX_BASE_URL` and `FX_MODEL`, it fails with a message that names them; there is
+no fallback provider.
+
+The HTTP API is Chip's own, unchanged: `POST /eve/v1/session` (202, `sessionId`,
+`operationId` create-once per authenticated principal) and
+`GET /eve/v1/session/:sessionId/stream` (NDJSON), plus Chip's follow-up, cancel and info
+routes. `compute-configured-chip invoke "<prompt>"` runs one turn without a server;
+Compute's `ChipAgentExecutor` uses that contract.
+
+### What verification proves
+
+`compute-configured-verify` checks, against the installed tree:
+
+- `@appport/chip` and `@appport/fx` are the pinned versions from their registry tarballs,
+  and Vercel's unrelated `libfx` is absent;
+- Chip's `fx()` adapter over FX's native `createFxModel()` streams a reply from a local
+  OpenAI-compatible fixture and surfaces a provider error as an error;
+- `chip start` serves the configured agent and refuses an anonymous caller.
+  `POST /eve/v1/session` returns 202, and the session stream carries the FX reply to
+  `session.waiting`, with every Gateway and Vercel variable removed.
+
+`distribution/tests/configured-chip-fx.sh` is the runtime smoke test. It drives
+`compute-configured-chip start` through the same path and records how the pinned Chip
+treats `operationId`. Release CI runs it on the assembled asset on both platforms, and
+it runs against an installation with `COMPUTE_TEST_LAUNCHER`. See
+[configured-chip-fx-0.54.4-evidence.md](configured-chip-fx-0.54.4-evidence.md).
+
+The agent is built at release time by `distribution/scripts/build-configured-agent.sh`
+with the pinned Chip, at a fixed build root (`/tmp/compute-configured-agent`) so the
+release names no build machine. Chip records that root as build provenance and serves the
+relocated build from its working directory. `distribution/scripts/check-configured-paths.sh`
+fails the release if the assembled asset names a checkout, home directory, runner
+workspace, `file:` dependency or local tarball.
+
 ## Distribution profiles
 
 `compatibility/base-compute.json` and
@@ -132,6 +222,8 @@ The exact graph is captured by `compatibility/published-stack/package-lock.json`
 important direct edges in the currently supported set are:
 
 ```text
+@appport/chip 0.54.4 ─ nitro, undici; peer ai 7 (agent runtime)
+@appport/fx 0.1.0 (no dependencies; native addons for darwin/linux, arm64/x64)
 @appport/github 1.0.2
 ├── @appport/sdk 1.1.22
 │   ├── @appport/core 1.0.3
@@ -185,13 +277,18 @@ The configured fixture uses only npm registry URLs and integrity hashes. It reje
 - AppPort and packaged FlowSpec contracts;
 - the actual nested FeltDB 0.11.1 → 0.11.5 → 0.11.9 clients writing,
   closing, reopening, reading, and updating the same durable state;
-- the published GitHub package producing a provider-neutral immutable Git source.
+- the published GitHub package producing a provider-neutral immutable Git source;
+- the agent runtime and its model provider: Chip and FX at their pinned versions, a
+  model call across Chip's `fx()` adapter and FX's native provider, and a real
+  `chip start` session through FX (see
+  [The configured agent runtime](#the-configured-agent-runtime-chip-and-fx)).
 
 Run it with:
 
 ```bash
 cd compatibility/published-stack
 npm ci --ignore-scripts
+../../distribution/scripts/build-configured-agent.sh . "$(command -v node)"
 COMPUTE_COMPATIBILITY_EVIDENCE=evidence.json npm run verify
 ```
 
