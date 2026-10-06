@@ -222,6 +222,11 @@ fn every_execution_site_is_classified() {
                 why: "host capability probe",
             },
             Allowed {
+                file: "crates/compute-environment/src/agent_executor.rs",
+                count: 1,
+                why: "one synchronous agent invocation through the installed `compute-configured-chip` launcher: an ephemeral process, no record, endpoint, or recovery",
+            },
+            Allowed {
                 file: "crates/compute-core/src/application_artifact.rs",
                 count: 1,
                 why: "fetching an application artifact by URL (curl)",

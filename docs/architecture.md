@@ -269,6 +269,9 @@ legacy deployment model:
               ──▶  an ephemeral process      no record, no endpoint, no recovery
               ──▶  a local, non-deployment receipt (only when asked)
 
+ agent invocation (ChipAgentExecutor) ──▶ one synchronous `compute-configured-chip invoke`
+               an ephemeral process: no record, no endpoint, no recovery
+
  node environments (G-ARCH-5, blocked) ──▶ the daemon host's supervisor
 
  compute-configured (a configured installation) ──▶ the services its profile declares
