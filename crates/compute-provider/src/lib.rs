@@ -2589,10 +2589,14 @@ impl RemoteService {
                 Ok(value) => encode_result(self.state.config.provider.execute(value).await),
                 Err(error) => Err(error),
             },
-            ProviderOperation::AgentExecute => match decode::<compute_core::AgentExecutionRequest>(body) {
-                Ok(value) => encode_result(self.state.config.provider.execute_agent(value).await),
-                Err(error) => Err(error),
-            },
+            ProviderOperation::AgentExecute => {
+                match decode::<compute_core::AgentExecutionRequest>(body) {
+                    Ok(value) => {
+                        encode_result(self.state.config.provider.execute_agent(value).await)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             ProviderOperation::Submit => match decode_provider_request(body) {
                 Ok(value) => {
                     let key = header_value(headers, "idempotency-key");

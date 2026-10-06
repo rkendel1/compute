@@ -10,11 +10,11 @@
 //! in other installations) sets up the environment and invokes the real Chip runtime.
 //! ChipAgentExecutor reuses that launcher rather than reimplementing environment setup.
 
-use std::process::Command;
+use crate::agents;
 use async_trait::async_trait;
 use compute_core::{AgentExecutionRequest, AgentExecutionResult};
 use compute_provider::{AgentExecutor, ProviderError, ProviderErrorKind};
-use crate::agents;
+use std::process::Command;
 
 /// Chip-backed executor for agent workloads.
 ///
@@ -40,9 +40,7 @@ impl ChipAgentExecutor {
 
     /// Create a Chip executor from the environment variable if set.
     pub fn from_environment() -> Option<Self> {
-        agents::distribution_home().and_then(|home| {
-            Self::new(home).ok()
-        })
+        agents::distribution_home().and_then(|home| Self::new(home).ok())
     }
 
     /// Verify that Chip is available and working.
@@ -62,11 +60,7 @@ impl ChipAgentExecutor {
     ///
     /// The launcher script handles environment setup (COMPUTE_CONFIGURED_HOME,
     /// COMPUTE_STACKS, Node runtime resolution).
-    fn invoke_chip(
-        &self,
-        prompt: &str,
-        agent: Option<&str>,
-    ) -> Result<String, ProviderError> {
+    fn invoke_chip(&self, prompt: &str, agent: Option<&str>) -> Result<String, ProviderError> {
         let mut cmd = Command::new("compute-configured-chip");
         cmd.arg("invoke").arg(prompt);
 
@@ -78,14 +72,12 @@ impl ChipAgentExecutor {
         // Set working directory to the distribution root so Chip can find its project
         cmd.current_dir(&self.distribution_home);
 
-        let output = cmd
-            .output()
-            .map_err(|e| {
-                ProviderError::new(
-                    ProviderErrorKind::RemoteExecutionFailure,
-                    format!("failed to invoke compute-configured-chip: {e}"),
-                )
-            })?;
+        let output = cmd.output().map_err(|e| {
+            ProviderError::new(
+                ProviderErrorKind::RemoteExecutionFailure,
+                format!("failed to invoke compute-configured-chip: {e}"),
+            )
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();

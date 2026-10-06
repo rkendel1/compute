@@ -16,8 +16,8 @@
 //! its parent or siblings, and the daemon outlives every lifecycle
 //! operation.
 
-pub mod agents;
 pub mod agent_executor;
+pub mod agents;
 pub mod api;
 pub mod auth;
 pub mod checkpoint;

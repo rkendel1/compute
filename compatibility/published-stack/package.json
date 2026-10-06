@@ -16,7 +16,7 @@
     "@appport/github": "1.0.2",
     "@appport/runtime": "0.4.6",
     "@appport/server": "1.0.2",
-    "@appport/services": "0.4.10",
+    "@appport/services": "0.4.11",
     "@appport/transport-http": "1.0.2",
     "@appport/transport-inprocess": "1.0.2",
     "@appport/transport-websocket": "1.0.2",

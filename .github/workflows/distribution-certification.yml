@@ -243,3 +243,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+      # The tap's own schedule would pick the release up within the hour; this
+      # makes publication and the formula update one event. The tap re-resolves
+      # the latest complete release itself, so a failed dispatch costs only the
+      # wait for its next scheduled run. The token is a fine-grained PAT with
+      # Actions: write on rkendel1/homebrew-compute only; GITHUB_TOKEN cannot
+      # dispatch workflows in another repository.
+      - name: Trigger the Homebrew tap sync
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is not set; the tap will update only on its hourly schedule"
+            exit 1
+          fi
+          gh workflow run sync.yml --repo rkendel1/homebrew-compute --ref main
