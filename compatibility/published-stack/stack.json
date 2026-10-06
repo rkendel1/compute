@@ -91,7 +91,7 @@
     "@appport/github": "1.0.2",
     "@appport/runtime": "0.4.6",
     "@appport/server": "1.0.2",
-    "@appport/services": "0.4.10",
+    "@appport/services": "0.4.11",
     "@appport/transport-http": "1.0.2",
     "@appport/transport-inprocess": "1.0.2",
     "@appport/transport-websocket": "1.0.2",
@@ -110,12 +110,12 @@
       "reason": "@authboundry/core 1.15.3 embeds 0.11.5 and its @appport/services 0.3.2 embeds 0.11.1; the stack verifies the published graph against FeltDB protocol 1"
     },
     "@appport/services": {
-      "versions": ["0.3.2", "0.4.6", "0.4.10"],
-      "reason": "@authboundry/core 1.15.3 embeds 0.3.2; @appport/github 1.0.2 pins 0.4.6; the configured stack itself resolves 0.4.10, the release whose `appport-services` executable runs the standalone management host that serves the AppPort/ui/1 discovery document at GET /v1/ui"
+      "versions": ["0.3.2", "0.4.6", "0.4.11"],
+      "reason": "@authboundry/core 1.15.3 embeds 0.3.2; @appport/github 1.0.2 pins 0.4.6; the configured stack itself resolves 0.4.11, the release whose `appport-services` executable runs the standalone management host that serves the AppPort/ui/1 discovery document at GET /v1/ui"
     },
     "@appport/protocol": {
       "versions": ["1.0.2", "1.0.3"],
-      "reason": "@appport/services 0.4.10 declares @appport/protocol ^1.0.3 to build its AppPort/ui/1 contribution with the protocol's own validateUiContribution/filterUiContribution, while @appport/core 1.0.3 and the 1.0.2 @appport/server, @appport/client, @appport/schema and @appport/authorization packages pin 1.0.2"
+      "reason": "@appport/services 0.4.11 declares @appport/protocol ^1.0.3 to build its AppPort/ui/1 contribution with the protocol's own validateUiContribution/filterUiContribution, while @appport/core 1.0.3 and the 1.0.2 @appport/server, @appport/client, @appport/schema and @appport/authorization packages pin 1.0.2"
     }
   }
 }
