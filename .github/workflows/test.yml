@@ -34,6 +34,10 @@ jobs:
           components: rustfmt
       - name: Format
         run: cargo fmt --all -- --check
+      # managed.rs checks the configured distribution's declared executables
+      # against the installed published stack.
+      - name: Install the published stack
+        run: npm ci --ignore-scripts --prefix compatibility/published-stack
       - name: Workspace tests
         run: cargo test --workspace --locked
       - name: Installer contract
