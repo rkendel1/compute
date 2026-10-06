@@ -327,6 +327,27 @@ actual_chip=$("$chip_launcher" $chip_health 2>"$work/chip.err") \
   || fail "CONFIGURED VERIFY FAILED: compute-configured-verify exited non-zero"
 [ "$(json "$work/verify.json" 'd["result"]')" = pass ] \
   || fail "CONFIGURED VERIFY FAILED: compute-configured-verify did not report result pass"
+# A profile that declares Chip's model provider (FX, from 0.1.19) must install
+# exactly that package, keep it out of base Compute, and have proved the
+# Chip -> FX -> provider path and a served session in its verify run.
+fx_package=$(chip "(r.get('model_provider') or {}).get('package', '')")
+if [ -n "$fx_package" ]; then
+  fx_version=$(chip "r['model_provider']['version']")
+  fx_manifest="$configured_keg/libexec/node_modules/$fx_package/package.json"
+  [ -f "$fx_manifest" ] \
+    || fail "CONFIGURED CHIP RUNTIME FAILED: the installed configured keg has no $fx_package"
+  resolved_fx=$(json "$fx_manifest" 'd["name"] + "@" + d["version"]')
+  [ "$resolved_fx" = "$fx_package@$fx_version" ] \
+    || fail "CONFIGURED CHIP RUNTIME FAILED: the installed keg resolves $resolved_fx, the $tag profile declares $fx_package@$fx_version"
+  fx_refs=$(grep -rIlF -e "$fx_package" "$base_keg" | head -n 5 || true)
+  [ -z "$fx_refs" ] \
+    || fail "BASE COMPUTE CONTAINS CHIP PAYLOAD: the installed base keg references $fx_package in $fx_refs"
+  for check in model_provider agent_session; do
+    [ "$(json "$work/verify.json" "next((c['result'] for c in d['checks'] if c['name'] == '$check'), 'missing')")" = pass ] \
+      || fail "CONFIGURED VERIFY FAILED: compute-configured-verify did not pass $check"
+  done
+  actual_chip="$actual_chip with $resolved_fx"
+fi
 
 printf 'live consumer validation: PASS -- %s and compute-configured %s installed from %s; compute-configured-chip executes %s@%s; configured verify passes; base keg is Chip-free\n' \
   "$installed" "$version" "$tap_name" "$chip_package" "$actual_chip"

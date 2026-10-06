@@ -24,7 +24,7 @@
       {
         "name": "chip",
         "package": "@appport/chip",
-        "version": "0.54.3",
+        "version": "0.54.4",
         "executable": "node_modules/.bin/chip",
         "node": "runtimes/node/bin/node",
         "default": true,
@@ -33,9 +33,28 @@
         "health": {
           "kind": "invocation",
           "command": ["--version"],
-          "expect": "0.54.3"
+          "expect": "0.54.4"
         },
-        "environment": "compute.execution"
+        "environment": "compute.execution",
+        "project": "agent",
+        "model_provider": {
+          "package": "@appport/fx",
+          "version": "0.1.0",
+          "adapter": "@appport/chip/models/fx",
+          "protocol": "openai-compatible",
+          "configuration": {
+            "base_url": "FX_BASE_URL",
+            "model": "FX_MODEL",
+            "api_key_env": "FX_API_KEY_ENV",
+            "context_window_tokens": "FX_CONTEXT_WINDOW_TOKENS"
+          },
+          "credentials": "runtime-environment"
+        },
+        "http": {
+          "command": ["start"],
+          "routes": ["POST /eve/v1/session", "GET /eve/v1/session/:sessionId/stream"],
+          "auth": "COMPUTE_CONFIGURED_CHIP_TOKEN"
+        }
       }
     ]
   },
@@ -66,8 +85,9 @@
   ],
   "migrations": [],
   "packages": {
-    "@appport/chip": "0.54.3",
+    "@appport/chip": "0.54.4",
     "@appport/core": "1.0.3",
+    "@appport/fx": "0.1.0",
     "@appport/github": "1.0.2",
     "@appport/runtime": "0.4.6",
     "@appport/server": "1.0.2",

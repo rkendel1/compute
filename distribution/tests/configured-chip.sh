@@ -100,6 +100,15 @@ root="$work/keg/libexec"
 mkdir -p "$root/stacks" "$root/runtimes/node/bin" "$work/keg/bin"
 ln -s "$work/modules" "$root/node_modules"
 ln -s "$node" "$root/runtimes/node/bin/node"
+# The configured agent the launcher serves ships beside the modules it uses.
+configured=$(dirname "$modules")
+for entry in agent package.json .output; do
+  if [ ! -e "$configured/$entry" ]; then
+    echo "the configured tree at $configured has no $entry (build it with distribution/scripts/build-configured-agent.sh)" >&2
+    exit 1
+  fi
+  ln -s "$configured/$entry" "$root/$entry"
+done
 
 # The launcher body, extracted from the rendered formula and stripped of the
 # six-space heredoc indent, with the two formula-provided paths substituted the
