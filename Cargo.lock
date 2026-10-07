@@ -587,6 +587,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "compute-agent"
+version = "0.1.19"
+dependencies = [
+ "compute-core",
+ "compute-provider",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "compute-cli"
 version = "0.1.19"
 dependencies = [
@@ -822,6 +833,7 @@ dependencies = [
  "chip-core",
  "chip-pax",
  "chip-remote-env",
+ "compute-agent",
  "compute-core",
  "compute-provider",
  "fx-core",

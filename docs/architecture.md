@@ -1,7 +1,9 @@
 # Compute architecture
 
 > Rust Chip (the `chip-rs` agent runtime) can run as a workload on a session, beside the configured
-> distribution's npm Chip/Eve agent: [rust-chip.md](rust-chip.md).
+> distribution's npm Chip/Eve agent: [rust-chip.md](rust-chip.md). Compute is an agent-neutral
+> execution environment (*Compute provides the computer; agents provide the agency*):
+> [agents.md](agents.md).
 
 This is the architecture as the code has it at `69b70d9` (audited
 2026-09-27; the evidence is [audit.md](audit.md) and
@@ -67,6 +69,7 @@ There are three kinds of process:
 `compute run` is a fourth path with no process at all: the CLI runs a
 workload in-process with the local provider (or submits it to a pool with
 `compute pool run`).
+| 34 | Compute is agent-neutral: it provides the computer and never interprets what an agent did. `compute-agent` depends on no agent runtime; a launch returns what happened (exit code, output, receipt), never a verdict on a goal; one work gets one session; acquisition fails closed; cleanup failure is recorded, not raised. | `compute-agent/tests/agents.rs` (launch, collision, isolation, failure isolation, fail-closed acquisition, cleanup), `compute-agent/tests/dependencies.rs`, `compute-rust-chip/tests/agent_contract.rs`, `distribution/tests/configured-rust-chip.sh` |
 
 ## Modules
 
@@ -84,6 +87,8 @@ workload in-process with the local provider (or submits it to a pool with
 | `compute-state-memory` / `-file` / `-feltdb` | 0.1k / 0.3k / 1.9k | Backends: tests, the default local file, FeltDB |
 | `compute-network` | 1.7k | DNS providers, ACME, TLS, ingress for node environments |
 | `compute-environment` | 23.0k | The daemon: API (`api.rs`, `ROUTES`), auth, controllers (`daemon/computers.rs`, `software.rs`, `work.rs`, `release.rs`, `reconcile.rs`, …), the supervisor data plane, the UI (`ui/app.js`, 2.3k lines) |
+| `compute-agent` | 0.4k | The agent boundary: launch any executable (`AgentSpec`) in one isolated session per work (`AgentHost`, `AgentSession`); knows no agent ([agents.md](agents.md)) |
+| `compute-rust-chip` | 0.3k | The adapter and executable that let Rust Chip's published environment contract run on `compute-agent` ([rust-chip.md](rust-chip.md)) |
 | `compute-cli` | 17.6k | The `compute` binary: launcher, 182 commands |
 | `packages/compute-appport` | TS | The agent/automation client: every UI operation |
 | `packages/compute-state-model` | TS | `compute.flow`, the generated FeltDB manifest |

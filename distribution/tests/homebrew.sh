@@ -60,6 +60,7 @@ grep -q 'export COMPUTE_CONFIGURED_HOME=' "$configured_formula"
 # the real runtime it starts, and the failure it gives when that runtime is
 # missing are proved in their own contract, which renders these same formulas.
 "$repository/distribution/tests/configured-chip.sh"
+"$repository/distribution/tests/configured-rust-chip.sh"
 
 test -f "$work/tap/.github/workflows/tests.yml"
 test -f "$work/tap/.github/workflows/sync.yml"

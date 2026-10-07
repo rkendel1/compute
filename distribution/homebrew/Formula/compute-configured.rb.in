@@ -108,6 +108,26 @@ class ComputeConfigured < Formula
       export COMPUTE_RUST_CHIP_WORKER="${COMPUTE_RUST_CHIP_WORKER:-$rust_chip}"
       exec "$rust_chip" "$@"
     SH
+    # The agent workload entry: `compute-configured-agent [--agent NAME] ARGS...` runs the named
+    # agent's launcher. Compute is agent-neutral; this only maps a name to an executable it
+    # launches. `chip` (the default) is Rust Chip. The npm Chip/Eve agent keeps its own launcher
+    # above and is not reachable from here, and there is no fallback between them: an unknown name
+    # is an error. A future agent is one more line in this `case`.
+    (bin/"compute-configured-agent").write <<~SH
+      #!/bin/sh
+      agent=chip
+      case "${1:-}" in
+        --agent) [ "$#" -ge 2 ] || { echo "compute-configured-agent: --agent needs a name" >&2; exit 2; }
+                 agent=$2; shift 2 ;;
+        --agent=*) agent=${1#--agent=}; shift ;;
+      esac
+      case "$agent" in
+        chip) exec "#{bin}/compute-configured-rust-chip" "$@" ;;
+        *)
+          echo "compute-configured-agent: unknown agent '$agent' (available: chip)" >&2
+          exit 2 ;;
+      esac
+    SH
   end
 
   test do
@@ -139,5 +159,12 @@ class ComputeConfigured < Formula
     assert_equal fx.fetch("version"),
                  JSON.parse((libexec/"node_modules/@appport/fx/package.json").read).fetch("version")
     assert_predicate libexec/".output/server/index.mjs", :file?
+    # Rust Chip is a separate agent workload: its own executable, shipped beside (never inside)
+    # the npm agent. The release is not installable without it. Run it, do not just look for it:
+    # with no subcommand it prints its usage and exits 2.
+    assert_predicate libexec/"rust-chip/bin/compute-rust-chip", :executable?
+    assert_match "usage: compute-rust-chip",
+                 shell_output("#{bin}/compute-configured-rust-chip 2>&1", 2)
+    assert_match "unknown agent", shell_output("#{bin}/compute-configured-agent --agent nope 2>&1", 2)
   end
 end
