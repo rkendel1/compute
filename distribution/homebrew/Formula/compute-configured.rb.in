@@ -92,6 +92,22 @@ class ComputeConfigured < Formula
       export COMPUTE_CONFIGURED_HOME="$root"
       exec "$node" "$chip" "$@"
     SH
+    # Rust Chip (chip-rs) is a different agent from the npm Chip above: its own executable
+    # (compute-rust-chip), its own launcher, and the Rust FX as its model provider. This
+    # launcher never starts the npm Chip or the npm FX, and the launcher above never starts this
+    # one. The executable is an optional part of the distribution (libexec/rust-chip); when a
+    # build does not include it the launcher says so and stops. It does not fall back to the npm
+    # agent. See docs/rust-chip.md.
+    (bin/"compute-configured-rust-chip").write <<~SH
+      #!/bin/sh
+      rust_chip="#{libexec}/rust-chip/bin/compute-rust-chip"
+      if [ ! -x "$rust_chip" ]; then
+        echo "compute-configured-rust-chip: Rust Chip is not part of this distribution build ($rust_chip is missing)" >&2
+        exit 1
+      fi
+      export COMPUTE_RUST_CHIP_WORKER="${COMPUTE_RUST_CHIP_WORKER:-$rust_chip}"
+      exec "$rust_chip" "$@"
+    SH
   end
 
   test do
