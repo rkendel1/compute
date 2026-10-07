@@ -1,0 +1,28 @@
+[package]
+name = "compute-rust-chip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Run Rust Chip (chip-rs) as a Compute workload: one isolated Compute session per Chip work"
+
+# Rust Chip is a standalone agent runtime. This crate is the Compute side of the generic
+# environment contract it publishes (`chip-core`'s `EnvironmentProvider`); Rust Chip depends on
+# nothing here. It is unrelated to the npm Chip/Eve agent the configured distribution also ships.
+[dependencies]
+async-trait.workspace = true
+chip-cli = { git = "https://github.com/rkendel1/chip-rs", branch = "claude/vigilant-noether-j1ddif" }
+chip-core = { git = "https://github.com/rkendel1/chip-rs", branch = "claude/vigilant-noether-j1ddif" }
+chip-remote-env = { git = "https://github.com/rkendel1/chip-rs", branch = "claude/vigilant-noether-j1ddif" }
+compute-core = { path = "../compute-core" }
+compute-provider = { path = "../compute-provider" }
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+fx-core = { git = "https://github.com/rkendel1/chip-rs", branch = "claude/vigilant-noether-j1ddif" }
+chip-pax = { git = "https://github.com/rkendel1/chip-rs", branch = "claude/vigilant-noether-j1ddif" }
+serde_json.workspace = true
+async-trait.workspace = true
+tempfile.workspace = true

@@ -1,5 +1,8 @@
 # Compute architecture
 
+> Rust Chip (the `chip-rs` agent runtime) can run as a workload on a session, beside the configured
+> distribution's npm Chip/Eve agent: [rust-chip.md](rust-chip.md).
+
 This is the architecture as the code has it at `69b70d9` (audited
 2026-09-27; the evidence is [audit.md](audit.md) and
 [audit.json](audit.json)). Where the code and the intended design differ,
