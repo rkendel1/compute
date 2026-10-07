@@ -54,7 +54,7 @@ workload an isolated computer plus `exec`: an ephemeral **session**.
 **Who decides what.** Rust Chip validates every capability request and owns its meaning
 (`project.write`, `project.git.*`, `pax.test`, the shape of each observation, how PAX's
 `pax.execution-result.v1` is read, goal evaluation). To perform one, Rust Chip asks the environment
-to run **its own executor**: `compute-rust-chip capability-exec --root project`, with the request in an
+to run **its own executor**: `compute-rust-chip capability-exec --root project` (the same worker as `chip capability-exec`), with the request in an
 environment variable. Compute runs that command in the session and returns what it printed. Compute
 does not know it is a `project.write`; Rust Chip does not reimplement anything in Compute.
 
@@ -100,6 +100,14 @@ does not fall back to the npm agent. `distribution/tests/configured-rust-chip.sh
 launchers are distinct and do not refer to each other. **The release pipeline does not yet build and
 ship the `compute-rust-chip` binary**, and the distribution profile (`stack.json`) does not declare
 Rust Chip; both are follow-ups.
+
+## Pinned version
+
+This workload consumes one exact Rust Chip, never a moving branch: `crates/compute-rust-chip/Cargo.toml`
+pins a `rev`, `Cargo.lock` locks it, and [`distribution/rust-chip-pin.json`](../distribution/rust-chip-pin.json)
+records the commit, the release tag, and the exact Rust Chip and Rust FX crate versions. Rust Chip,
+Rust FX and Compute keep their own version numbers. Move the pin deliberately, and only after
+`cargo test -p compute-rust-chip --locked` passes against the new one.
 
 ## Limits
 

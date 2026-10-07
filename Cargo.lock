@@ -77,7 +77,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -88,7 +88,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -364,7 +364,7 @@ dependencies = [
 [[package]]
 name = "chip-cli"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "async-trait",
  "chip-compute",
@@ -389,7 +389,7 @@ dependencies = [
 [[package]]
 name = "chip-compute"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -400,7 +400,7 @@ dependencies = [
 [[package]]
 name = "chip-core"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "async-trait",
  "fx-core",
@@ -410,7 +410,7 @@ dependencies = [
 [[package]]
 name = "chip-decision-corpus"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "chip-core",
  "sha2",
@@ -419,7 +419,7 @@ dependencies = [
 [[package]]
 name = "chip-graph"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "proc-macro2",
  "serde",
@@ -432,7 +432,7 @@ dependencies = [
 [[package]]
 name = "chip-local-decision"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "chip-core",
  "chip-wasm-decision",
@@ -441,7 +441,7 @@ dependencies = [
 [[package]]
 name = "chip-pax"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -453,7 +453,7 @@ dependencies = [
 [[package]]
 name = "chip-project"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -465,7 +465,7 @@ dependencies = [
 [[package]]
 name = "chip-reasoning-corpus"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "chip-core",
 ]
@@ -473,7 +473,7 @@ dependencies = [
 [[package]]
 name = "chip-remote-env"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -485,12 +485,12 @@ dependencies = [
 [[package]]
 name = "chip-wasm-decision"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 
 [[package]]
 name = "chip-wasm-decision-host"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "chip-core",
  "chip-wasm-decision",
@@ -500,7 +500,7 @@ dependencies = [
 [[package]]
 name = "chip-wasm-reasoner"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "chip-core",
  "wasmi",
@@ -1258,7 +1258,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1405,7 +1405,7 @@ dependencies = [
 [[package]]
 name = "fx-core"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "async-trait",
 ]
@@ -1413,7 +1413,7 @@ dependencies = [
 [[package]]
 name = "fx-provider-http"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=173d70bbc497e3044ed85bbb59043cc94779a61d#173d70bbc497e3044ed85bbb59043cc94779a61d"
 dependencies = [
  "async-trait",
  "fx-core",
@@ -2358,7 +2358,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2625,7 +2625,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2693,7 +2693,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2911,7 +2911,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3044,7 +3044,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4042,7 +4042,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

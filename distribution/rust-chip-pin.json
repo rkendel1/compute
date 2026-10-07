@@ -1,0 +1,24 @@
+{
+  "format": "compute.rust-chip-pin@1",
+  "comment": "The exact Rust Chip (chip-rs) that this repository's Rust Chip workload was tested against. Rust Chip and Rust FX are versioned independently of Compute and of each other; they are recorded, not synchronised. Not the npm Chip/Eve agent or the npm FX/Zig.",
+  "source": "https://github.com/rkendel1/chip-rs",
+  "commit": "173d70bbc497e3044ed85bbb59043cc94779a61d",
+  "change": "rkendel1/chip-rs#5 (merge commit)",
+  "release_tag": "chip-v0.1.0",
+  "release_tag_status": "not yet created: the build session was refused tag pushes (HTTP 403). The workflow .github/workflows/release.yml in chip-rs publishes the artifact when that tag is pushed; until then this pin is by commit, which is equally exact.",
+  "release_artifact": { "sha256": null, "status": "not yet published" },
+  "rust_chip": {
+    "chip-cli": "0.1.0",
+    "chip-core": "0.1.0",
+    "chip-remote-env": "0.1.0",
+    "chip-project": "0.1.0",
+    "chip-pax": "0.1.0"
+  },
+  "rust_fx": {
+    "fx-core": "0.1.0",
+    "fx-provider-http": "0.1.0"
+  },
+  "pax": "0.3.0",
+  "tested_by": "cargo test -p compute-rust-chip --locked (10 tests: provider contract, concurrent conflicting edits in two Compute sessions, git isolation, failure and cleanup-failure isolation, local-vs-Compute equivalence), against a real Compute target, real Git, real PAX and real Cargo; the model is a scripted stand-in",
+  "consumed_by": "crates/compute-rust-chip (Cargo.toml `rev`, Cargo.lock)"
+}

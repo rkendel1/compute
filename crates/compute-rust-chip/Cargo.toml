@@ -9,11 +9,13 @@ description = "Run Rust Chip (chip-rs) as a Compute workload: one isolated Compu
 # Rust Chip is a standalone agent runtime. This crate is the Compute side of the generic
 # environment contract it publishes (`chip-core`'s `EnvironmentProvider`); Rust Chip depends on
 # nothing here. It is unrelated to the npm Chip/Eve agent the configured distribution also ships.
+# Rust Chip is consumed at one exact, released commit (the merge of chip-rs#5, release chip-v0.1.0), never a
+# moving branch. Move it deliberately, after the Rust Chip tests below pass against the new one.
 [dependencies]
 async-trait.workspace = true
-chip-cli = { git = "https://github.com/rkendel1/chip-rs", branch = "claude/vigilant-noether-j1ddif" }
-chip-core = { git = "https://github.com/rkendel1/chip-rs", branch = "claude/vigilant-noether-j1ddif" }
-chip-remote-env = { git = "https://github.com/rkendel1/chip-rs", branch = "claude/vigilant-noether-j1ddif" }
+chip-cli = { git = "https://github.com/rkendel1/chip-rs", rev = "173d70bbc497e3044ed85bbb59043cc94779a61d" }
+chip-core = { git = "https://github.com/rkendel1/chip-rs", rev = "173d70bbc497e3044ed85bbb59043cc94779a61d" }
+chip-remote-env = { git = "https://github.com/rkendel1/chip-rs", rev = "173d70bbc497e3044ed85bbb59043cc94779a61d" }
 compute-core = { path = "../compute-core" }
 compute-provider = { path = "../compute-provider" }
 serde_json.workspace = true
@@ -21,8 +23,8 @@ sha2.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-fx-core = { git = "https://github.com/rkendel1/chip-rs", branch = "claude/vigilant-noether-j1ddif" }
-chip-pax = { git = "https://github.com/rkendel1/chip-rs", branch = "claude/vigilant-noether-j1ddif" }
+fx-core = { git = "https://github.com/rkendel1/chip-rs", rev = "173d70bbc497e3044ed85bbb59043cc94779a61d" }
+chip-pax = { git = "https://github.com/rkendel1/chip-rs", rev = "173d70bbc497e3044ed85bbb59043cc94779a61d" }
 serde_json.workspace = true
 async-trait.workspace = true
 tempfile.workspace = true
