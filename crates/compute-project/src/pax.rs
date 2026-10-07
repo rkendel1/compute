@@ -82,12 +82,21 @@ impl PaxExecutable {
                     format!("pax {command}: {}", first_line(stderr)),
                 ));
             }
-            _ => {
+            Some(_) | None => {
                 return Err(ProjectError::new(
                     FailureKind::PaxMetadataInvalid,
-                    format!("pax {command} failed: {}", first_line(stderr)),
+                    format!(
+                        "pax {command} failed: {}",
+                        first_line(stderr).trim_matches(|c: char| c.is_control())
+                    ),
                 ));
             }
+        }
+        if output.stdout.trim().is_empty() {
+            return Err(ProjectError::new(
+                FailureKind::PaxMetadataInvalid,
+                format!("pax {command} produced no JSON output"),
+            ));
         }
         serde_json::from_slice(&output.stdout).map_err(|error| {
             ProjectError::new(
