@@ -72,6 +72,7 @@ impl PaxExecutable {
             })?;
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();
+        let stdout = String::from_utf8_lossy(&output.stdout);
         match output.status.code() {
             Some(0) => {}
             // PAX reserves exit code 2 for invalid input, such as a
@@ -92,7 +93,7 @@ impl PaxExecutable {
                 ));
             }
         }
-        if output.stdout.trim().is_empty() {
+        if stdout.trim().is_empty() {
             return Err(ProjectError::new(
                 FailureKind::PaxMetadataInvalid,
                 format!("pax {command} produced no JSON output"),
