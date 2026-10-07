@@ -13,6 +13,9 @@ only about Rust Chip. Nothing here replaces, wraps, renames or shares an executa
 | Executable | `node_modules/.bin/chip` | `compute-rust-chip` |
 | Declared in the distribution profile | yes (`agent`) | no (an optional workload, below) |
 
+Rust Chip is the first agent on Compute's agent-neutral boundary ([agents.md](agents.md)):
+`compute-configured-agent --agent chip` (the default agent) runs it.
+
 Compute-configured already ships an npm/Eve agent. This integration additionally makes Rust Chip a
 first-class Compute workload.
 
@@ -94,12 +97,15 @@ calls the npm Chip, the npm FX or the distribution's `agent` runtime.
 ## Packaging
 
 The configured formula installs `compute-configured-rust-chip`, a launcher that runs
-`libexec/rust-chip/bin/compute-rust-chip` and nothing else. The executable is an optional part of a
-distribution build; when a build does not include it the launcher says so and exits non-zero. It
-does not fall back to the npm agent. `distribution/tests/configured-rust-chip.sh` proves the two
-launchers are distinct and do not refer to each other. **The release pipeline does not yet build and
-ship the `compute-rust-chip` binary**, and the distribution profile (`stack.json`) does not declare
-Rust Chip; both are follow-ups.
+`libexec/rust-chip/bin/compute-rust-chip` and nothing else, and `compute-configured-agent`, which
+maps `--agent chip` (the default) to it. The release pipeline builds `compute-rust-chip` with the
+workspace and ships it in the configured asset as `rust-chip/bin/compute-rust-chip`, beside the
+npm agent's files and never inside them. When an installation lacks the executable the launcher
+says so and exits non-zero; it does not fall back to the npm agent, and the agent entry has no
+other agent to fall back to. `distribution/tests/configured-rust-chip.sh` proves the launchers are
+distinct and do not refer to each other, and, given an assembled asset, that the asset contains
+the executable. The distribution profile (`stack.json`) still declares only the npm agent; that is
+deliberate and unchanged.
 
 ## Limits
 

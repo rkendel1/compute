@@ -6,6 +6,12 @@
 //! (`compute-configured-rust-chip`) and its own executable (`compute-rust-chip`). Nothing here
 //! calls, replaces or shares a name with the npm agent.
 //!
+//! **Rust Chip is an agent; Compute hosts agents.** The agent-neutral half (a session per work,
+//! project loading, `exec(argv, env)`, receipts, teardown, failure isolation) is the
+//! `compute-agent` crate, which knows no agent. This crate is the thin adapter that lets *Rust
+//! Chip's* environment contract be served by it, and the `chip` launcher entry (`main.rs`). The
+//! adapter carries no Compute logic and no Chip logic: Chip's semantics stay in Chip.
+//!
 //! **The seam.** Rust Chip publishes a generic environment contract (`chip-core`:
 //! `EnvironmentProvider` / `WorkEnvironment`). [`ComputeSessionEnvironments`] implements it with
 //! the Compute primitive that already gives one workload an isolated computer: a *session*
@@ -37,22 +43,18 @@
 //! one ephemeral session).
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chip_core::{EnvironmentError, EnvironmentId, EnvironmentProvider, WorkEnvironment, WorkId};
 use chip_remote_env::{
     CommandOutput, CommandRunner, RemoteEnvironment, RunnerError, WorkerCommand,
 };
-use compute_core::{
-    JobStatus, NetworkPolicy, SessionCommand, SessionResources, SessionSpec, SessionStatus,
-};
-use compute_provider::{RemoteProvider, SessionCreateRequest, SessionEnvironmentSpec};
-use sha2::{Digest, Sha256};
+use compute_agent::{AgentHost, AgentSession, HostConfig};
+use compute_core::{NetworkPolicy, SessionResources};
+use compute_provider::RemoteProvider;
 
-/// Where the project lives inside a session, relative to its workspace.
-pub const PROJECT_DIRECTORY: &str = "project";
+pub use compute_agent::PROJECT_DIRECTORY;
 
 /// Operator configuration for the Compute-backed environments. None of it comes from a client or a
 /// model.
@@ -86,6 +88,7 @@ impl ComputeSessionConfig {
         project_source: impl Into<String>,
         worker_program: impl Into<String>,
     ) -> Self {
+        let defaults = HostConfig::new("");
         Self {
             endpoint: endpoint.into(),
             token: None,
@@ -93,59 +96,36 @@ impl ComputeSessionConfig {
             worker_program: worker_program.into(),
             command_environment: BTreeMap::new(),
             max_environments: 2,
-            session_ttl: Duration::from_secs(30 * 60),
-            resources: SessionResources {
-                cpu_count: Some(1),
-                memory_bytes: Some(1 << 30),
-                disk_bytes: None,
-            },
-            network: NetworkPolicy::Network,
-            command_timeout: Duration::from_secs(600),
-            ready_timeout: Duration::from_secs(60),
+            session_ttl: defaults.session_ttl,
+            resources: defaults.resources,
+            network: defaults.network,
+            command_timeout: defaults.command_timeout,
+            ready_timeout: defaults.ready_timeout,
         }
+    }
+
+    fn host(&self) -> HostConfig {
+        let mut host = HostConfig::new(self.endpoint.clone());
+        host.token = self.token.clone();
+        host.project_source = Some(self.project_source.clone());
+        host.command_environment = self.command_environment.clone();
+        host.session_ttl = self.session_ttl;
+        host.resources = self.resources.clone();
+        host.network = self.network.clone();
+        host.command_timeout = self.command_timeout;
+        host.ready_timeout = self.ready_timeout;
+        host
     }
 }
 
-/// What the provider has measured about acquiring and releasing sessions. Counts and times, nothing
-/// derived.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct EnvironmentStats {
-    pub acquired: u64,
-    pub acquire_failed: u64,
-    pub acquire_ms_total: f64,
-    pub released: u64,
-    pub cleanup_failed: u64,
-    /// Compute jobs (commands) run in sessions.
-    pub commands_run: u64,
-}
-
-#[derive(Default)]
-struct Counters {
-    acquired: AtomicU64,
-    acquire_failed: AtomicU64,
-    acquire_micros: AtomicU64,
-    released: AtomicU64,
-    cleanup_failed: AtomicU64,
-    commands: AtomicU64,
-}
+pub use compute_agent::HostStats as EnvironmentStats;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn opaque(session_id: &str) -> EnvironmentId {
-    let digest = Sha256::digest(session_id.as_bytes());
-    let hex: String = digest[..6].iter().map(|b| format!("{b:02x}")).collect();
-    EnvironmentId::new(format!("env_{hex}"))
-}
-
-/// `exec(argv, env)` in one Compute session.
-struct SessionRunner {
-    remote: Arc<RemoteProvider>,
-    config: Arc<ComputeSessionConfig>,
-    session_id: String,
-    counters: Arc<Counters>,
-}
+/// Rust Chip's `exec(argv, env)`, served by one Compute session.
+struct SessionRunner(AgentSession);
 
 #[async_trait::async_trait]
 impl CommandRunner for SessionRunner {
@@ -154,203 +134,48 @@ impl CommandRunner for SessionRunner {
         argv: Vec<String>,
         env: BTreeMap<String, String>,
     ) -> Result<CommandOutput, RunnerError> {
-        let fail = |what: &str, e: &dyn std::fmt::Display| RunnerError(format!("{what}: {e}"));
-        let mut command = SessionCommand::new(argv);
-        command.env = self.config.command_environment.clone();
-        command.env.extend(env);
-        command.timeout = Some(self.config.command_timeout);
-        let submitted = self
-            .remote
-            .session_exec(&self.session_id, &command)
-            .await
-            .map_err(|e| fail("compute refused the command", &e.message))?;
-        self.counters.commands.fetch_add(1, Ordering::SeqCst);
-        let job_id = submitted.job_id.to_string();
-        let deadline = Instant::now() + self.config.command_timeout + Duration::from_secs(30);
-        loop {
-            let job = self
-                .remote
-                .job_status(&job_id)
-                .await
-                .map_err(|e| fail("compute could not report the command", &e.message))?;
-            match job.status {
-                JobStatus::Succeeded | JobStatus::Failed => break,
-                JobStatus::Cancelled | JobStatus::TimedOut | JobStatus::Rejected => {
-                    return Err(RunnerError(format!(
-                        "compute ended the command as {:?}",
-                        job.status
-                    )));
-                }
-                _ if Instant::now() > deadline => {
-                    return Err(RunnerError("the command did not finish in time".into()));
-                }
-                _ => tokio::time::sleep(Duration::from_millis(20)).await,
-            }
-        }
-        let result = self
-            .remote
-            .job_result(&job_id)
-            .await
-            .map_err(|e| fail("compute could not return the result", &e.message))?
-            .result;
-        // A captured output Compute truncated is not the worker's answer: refuse it.
-        if result.stdout.truncated {
-            return Err(RunnerError(
-                "the command's output exceeded what compute captures".into(),
-            ));
-        }
+        let outcome = self.0.exec(argv, env).await.map_err(|e| RunnerError(e.0))?;
         Ok(CommandOutput {
-            exit_code: result.exit_code,
-            stdout: result.stdout.text,
-            stderr: result.stderr.text,
+            exit_code: outcome.exit_code,
+            stdout: outcome.stdout,
+            stderr: outcome.stderr,
         })
     }
 }
 
 /// An environment provider that gives each Rust Chip work its own Compute session.
 pub struct ComputeSessionEnvironments {
-    remote: Arc<RemoteProvider>,
-    config: Arc<ComputeSessionConfig>,
-    live: Mutex<HashMap<EnvironmentId, String>>,
-    counters: Arc<Counters>,
+    host: AgentHost,
+    config: ComputeSessionConfig,
+    live: Mutex<HashMap<EnvironmentId, AgentSession>>,
     runtime: tokio::runtime::Handle,
 }
 
 impl ComputeSessionEnvironments {
     /// Must be called inside a Tokio runtime: releases run on it.
     pub fn new(config: ComputeSessionConfig) -> Self {
-        let mut remote = RemoteProvider::new(config.endpoint.clone())
-            .with_request_timeout(Duration::from_secs(30));
-        if let Some(token) = &config.token {
-            remote = remote.with_bearer_token(token.clone());
-        }
         Self {
-            remote: Arc::new(remote),
-            config: Arc::new(config),
+            host: AgentHost::new(config.host()),
+            config,
             live: Mutex::new(HashMap::new()),
-            counters: Arc::default(),
             runtime: tokio::runtime::Handle::current(),
         }
     }
 
     pub fn stats(&self) -> EnvironmentStats {
-        let c = &self.counters;
-        EnvironmentStats {
-            acquired: c.acquired.load(Ordering::SeqCst),
-            acquire_failed: c.acquire_failed.load(Ordering::SeqCst),
-            acquire_ms_total: c.acquire_micros.load(Ordering::SeqCst) as f64 / 1000.0,
-            released: c.released.load(Ordering::SeqCst),
-            cleanup_failed: c.cleanup_failed.load(Ordering::SeqCst),
-            commands_run: c.commands.load(Ordering::SeqCst),
-        }
+        self.host.stats()
     }
 
     /// The Compute session behind an environment, for operators and tests. Never given to Chip's
     /// model, and not part of Chip's contract.
     pub fn session_of(&self, environment: &EnvironmentId) -> Option<String> {
-        lock(&self.live).get(environment).cloned()
-    }
-
-    /// Runs a command in the environment's session, as the environment's own commands run.
-    pub fn runner_for(&self, session_id: &str) -> Arc<dyn CommandRunner> {
-        Arc::new(SessionRunner {
-            remote: self.remote.clone(),
-            config: self.config.clone(),
-            session_id: session_id.to_string(),
-            counters: self.counters.clone(),
-        })
+        lock(&self.live)
+            .get(environment)
+            .map(|s| s.session_id().to_string())
     }
 
     pub fn remote(&self) -> &RemoteProvider {
-        &self.remote
-    }
-
-    async fn create_session(&self) -> Result<String, String> {
-        let environment = SessionEnvironmentSpec {
-            resources: self.config.resources.clone(),
-            network: self.config.network.clone(),
-            ..SessionEnvironmentSpec::default()
-        };
-        let spec = SessionSpec {
-            ttl_seconds: Some(self.config.session_ttl.as_secs().max(1)),
-            ..SessionSpec::default()
-        };
-        let create = SessionCreateRequest::new(&environment, spec).map_err(|e| e.message)?;
-        let session = self
-            .remote
-            .create_session(&create)
-            .await
-            .map_err(|e| format!("compute could not create a session: {}", e.message))?;
-        let id = session.session_id.to_string();
-        let deadline = Instant::now() + self.config.ready_timeout;
-        loop {
-            let current = self
-                .remote
-                .session(&id)
-                .await
-                .map_err(|e| format!("compute could not report the session: {}", e.message))?;
-            match current.status {
-                SessionStatus::Ready | SessionStatus::Running => return Ok(id),
-                status if status.is_terminal() => {
-                    return Err(format!(
-                        "the session ended before it was ready ({status:?})"
-                    ));
-                }
-                _ if Instant::now() > deadline => {
-                    self.destroy(&id).await;
-                    return Err("the session was not ready in time".into());
-                }
-                _ => tokio::time::sleep(Duration::from_millis(25)).await,
-            }
-        }
-    }
-
-    /// Destroys a session. A failure is recorded, never raised: the work's result is not rewritten
-    /// by cleanup, and the slot is free either way. The session's TTL bounds what a failed
-    /// destroy leaves behind.
-    async fn destroy(&self, session_id: &str) {
-        destroy(&self.remote, &self.counters, session_id).await;
-    }
-
-    async fn provision(&self) -> Result<(String, Arc<dyn CommandRunner>), String> {
-        let session_id = self.create_session().await?;
-        let runner = self.runner_for(&session_id);
-        let load = vec![
-            "git".to_string(),
-            "clone".into(),
-            "--quiet".into(),
-            "--".into(),
-            self.config.project_source.clone(),
-            PROJECT_DIRECTORY.into(),
-        ];
-        let loaded = runner.run(load, BTreeMap::new()).await;
-        match loaded {
-            Ok(output) if output.exit_code == Some(0) => Ok((session_id, runner)),
-            Ok(output) => {
-                self.destroy(&session_id).await;
-                Err(format!(
-                    "the project could not be loaded into the session (exit {:?})",
-                    output.exit_code
-                ))
-            }
-            Err(e) => {
-                self.destroy(&session_id).await;
-                Err(format!(
-                    "the project could not be loaded into the session: {e}"
-                ))
-            }
-        }
-    }
-}
-
-async fn destroy(remote: &RemoteProvider, counters: &Counters, session_id: &str) {
-    match remote.destroy_session(session_id).await {
-        Ok(_) => {
-            counters.released.fetch_add(1, Ordering::SeqCst);
-        }
-        Err(_) => {
-            counters.cleanup_failed.fetch_add(1, Ordering::SeqCst);
-        }
+        self.host.remote()
     }
 }
 
@@ -361,47 +186,36 @@ impl EnvironmentProvider for ComputeSessionEnvironments {
     }
 
     async fn acquire(&self, _work: &WorkId) -> Result<Arc<dyn WorkEnvironment>, EnvironmentError> {
-        let started = Instant::now();
-        let outcome = async {
-            let (session_id, runner) = self.provision().await?;
-            let id = opaque(&session_id);
-            let worker = WorkerCommand {
-                program: self.config.worker_program.clone(),
-                root: PROJECT_DIRECTORY.to_string(),
-            };
-            match RemoteEnvironment::connect(id.clone(), runner, worker).await {
-                Ok(environment) => Ok((id, session_id, environment)),
-                Err(e) => {
-                    self.destroy(&session_id).await;
-                    Err(e.to_string())
-                }
-            }
-        }
-        .await;
-        self.counters
-            .acquire_micros
-            .fetch_add(started.elapsed().as_micros() as u64, Ordering::SeqCst);
-        match outcome {
-            Ok((id, session_id, environment)) => {
-                self.counters.acquired.fetch_add(1, Ordering::SeqCst);
-                lock(&self.live).insert(id, session_id);
+        // Never a fallback: not another session, not the host.
+        let session = self
+            .host
+            .acquire()
+            .await
+            .map_err(|e| EnvironmentError::Unavailable(e.0))?;
+        let id = EnvironmentId::new(session.opaque_id());
+        let worker = WorkerCommand {
+            program: self.config.worker_program.clone(),
+            root: PROJECT_DIRECTORY.to_string(),
+        };
+        let runner = Arc::new(SessionRunner(session.clone()));
+        match RemoteEnvironment::connect(id.clone(), runner, worker).await {
+            Ok(environment) => {
+                lock(&self.live).insert(id, session);
                 Ok(Arc::new(environment))
             }
-            Err(why) => {
-                self.counters.acquire_failed.fetch_add(1, Ordering::SeqCst);
-                // Never a fallback: not another session, not the host.
-                Err(EnvironmentError::Unavailable(why))
+            Err(e) => {
+                session.release().await;
+                Err(EnvironmentError::Unavailable(e.to_string()))
             }
         }
     }
 
     fn release(&self, _work: &WorkId, environment: &EnvironmentId) {
-        let Some(session_id) = lock(&self.live).remove(environment) else {
+        let Some(session) = lock(&self.live).remove(environment) else {
             return;
         };
-        let (remote, counters) = (self.remote.clone(), self.counters.clone());
         self.runtime.spawn(async move {
-            destroy(&remote, &counters, &session_id).await;
+            session.release().await;
         });
     }
 }

@@ -1,0 +1,19 @@
+[package]
+name = "compute-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Agent as a Compute workload: launch any executable against an isolated Compute session. Compute provides the computer; the agent provides the agency."
+
+# Deliberately agent-neutral: no agent runtime (Rust Chip, Chip/Eve, Claude, Codex, ...) appears in
+# this crate's dependencies. An agent is an executable plus arguments and environment, launched with
+# the one execution primitive Compute already has: exec(argv, env).
+[dependencies]
+compute-core = { path = "../compute-core" }
+compute-provider = { path = "../compute-provider" }
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

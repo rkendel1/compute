@@ -82,6 +82,11 @@ jobs:
           cp -a compatibility/published-stack/node_modules "$root/node_modules"
           cp -R compatibility/published-stack/agent "$root/agent"
           cp -R compatibility/published-stack/.output "$root/.output"
+          # Rust Chip: a separate agent workload, launched by compute-configured-rust-chip. It is
+          # built by the `cargo build --release --locked` above and shipped beside the npm agent,
+          # never inside it.
+          mkdir -p "$root/rust-chip/bin"
+          cp target/release/compute-rust-chip "$root/rust-chip/bin/compute-rust-chip"
           test "$(find "$root/recipes/starters" -name '*.json' -type f | wc -l | tr -d '[:space:]')" = 7
           asset="compute-configured-$version-linux-x86_64.tar.gz"
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - "$root" | gzip -n -9 > "$asset"
@@ -109,6 +114,8 @@ jobs:
           COMPUTE_TEST_NODE="$(command -v node)" \
           COMPUTE_TEST_EVIDENCE="$RUNNER_TEMP/configured-chip-fx.json" \
             distribution/tests/configured-chip-fx.sh
+      - name: Prove the assembled configured asset contains the Rust Chip agent, apart from the npm agent
+        run: COMPUTE_TEST_CONFIGURED_ROOT="compute-configured" distribution/tests/configured-rust-chip.sh
       - name: The configured asset names no machine-specific path
         run: distribution/scripts/check-configured-paths.sh compute-configured
       - uses: actions/upload-artifact@v4
@@ -192,6 +199,8 @@ jobs:
           cp -a configured-stack/node_modules "$root/node_modules"
           cp -R configured-stack/agent "$root/agent"
           cp -R configured-stack/.output "$root/.output"
+          mkdir -p "$root/rust-chip/bin"
+          cp target/release/compute-rust-chip "$root/rust-chip/bin/compute-rust-chip"
           test "$(find "$root/recipes/starters" -name '*.json' -type f | wc -l | tr -d '[:space:]')" = 7
           asset="compute-configured-$version-macos-aarch64.tar.gz"
           brew install gnu-tar
@@ -208,6 +217,7 @@ jobs:
           COMPUTE_TEST_NODE="$(command -v node)" \
           COMPUTE_TEST_EVIDENCE="$RUNNER_TEMP/configured-chip-fx.json" \
             distribution/tests/configured-chip-fx.sh
+          COMPUTE_TEST_CONFIGURED_ROOT="compute-configured" distribution/tests/configured-rust-chip.sh
           distribution/scripts/check-configured-paths.sh compute-configured
       - uses: actions/upload-artifact@v4
         with:

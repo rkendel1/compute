@@ -73,10 +73,21 @@ if launchers "$template_configured" | grep -qx 'compute-configured-chip'; then
   fi
 fi
 
+# The Rust Chip workload and the agent entry are launchers like any other: a release that ships
+# them must render them, so the agent workload cannot be dropped silently between a release and
+# the tap.
+for launcher in compute-configured-rust-chip compute-configured-agent; do
+  if launchers "$template_configured" | grep -qx "$launcher"; then
+    if ! launchers "$rendered_configured" | grep -qx "$launcher"; then
+      fail "the release ships $launcher and the rendered formula dropped it"
+    fi
+  fi
+done
+
 # Chip is a configured component. The base artifact contains no Chip runtime for
 # such a wrapper to run, so base Compute must never grow a launcher for one.
-if launchers "$rendered_base" | grep -qi 'chip'; then
-  fail "the base formula ships a Chip launcher; Chip is a configured component"
+if launchers "$rendered_base" | grep -qiE 'chip|agent'; then
+  fail "the base formula ships an agent launcher; agents are configured components"
 fi
 
 printf 'configured launcher contract held\n'

@@ -14,6 +14,7 @@ async-trait.workspace = true
 chip-cli = { git = "https://github.com/rkendel1/chip-rs", branch = "claude/vigilant-noether-j1ddif" }
 chip-core = { git = "https://github.com/rkendel1/chip-rs", branch = "claude/vigilant-noether-j1ddif" }
 chip-remote-env = { git = "https://github.com/rkendel1/chip-rs", branch = "claude/vigilant-noether-j1ddif" }
+compute-agent = { path = "../compute-agent" }
 compute-core = { path = "../compute-core" }
 compute-provider = { path = "../compute-provider" }
 serde_json.workspace = true

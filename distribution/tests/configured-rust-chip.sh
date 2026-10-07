@@ -78,4 +78,65 @@ chmod +x "$libexec/rust-chip/bin/compute-rust-chip"
 out=$("$work/launch" serve --port 0)
 [ "$out" = "rust-chip serve --port 0 worker=$libexec/rust-chip/bin/compute-rust-chip" ]
 
+# The agent entry maps a name to a launcher and nothing else. `chip` (the default) is Rust Chip;
+# the npm Chip/Eve launcher is not reachable from it, and an unknown name fails loudly.
+grep -q 'bin/"compute-configured-agent"' "$configured"
+if grep -q 'compute-configured-agent' "$base"; then
+  echo "base Compute must not ship the agent entry" >&2
+  exit 1
+fi
+agent_launcher=$(launcher compute-configured-agent)
+[ -n "$agent_launcher" ]
+for forbidden in 'node_modules' 'runtimes/node' 'compute-configured-chip' '@appport' 'chip-eve'; do
+  if printf '%s\n' "$agent_launcher" | grep -q "$forbidden"; then
+    echo "the agent entry must not touch the npm agent ($forbidden)" >&2
+    exit 1
+  fi
+done
+bindir="$work/bin"
+mkdir -p "$bindir"
+printf '%s\n' "$agent_launcher" | sed "s|#{bin}|$bindir|g" > "$bindir/compute-configured-agent"
+cat > "$bindir/compute-configured-rust-chip" <<STUB
+#!/bin/sh
+echo "rust-chip-launcher \$*"
+STUB
+cat > "$bindir/compute-configured-chip" <<STUB
+#!/bin/sh
+echo "NPM CHIP MUST NOT RUN" >&2
+exit 99
+STUB
+chmod +x "$bindir"/*
+[ "$("$bindir/compute-configured-agent" serve --port 0)" = "rust-chip-launcher serve --port 0" ]
+[ "$("$bindir/compute-configured-agent" --agent chip serve)" = "rust-chip-launcher serve" ]
+[ "$("$bindir/compute-configured-agent" --agent=chip serve)" = "rust-chip-launcher serve" ]
+for unknown in claude codex chip-eve; do
+  if "$bindir/compute-configured-agent" --agent "$unknown" serve 2>"$work/err"; then
+    echo "an unknown agent ($unknown) must not launch" >&2
+    exit 1
+  fi
+  grep -q "unknown agent '$unknown'" "$work/err"
+done
+if "$bindir/compute-configured-agent" --agent 2>"$work/err"; then
+  echo "--agent without a name must fail" >&2
+  exit 1
+fi
+
+# An assembled configured asset (COMPUTE_TEST_CONFIGURED_ROOT) must carry the Rust Chip executable
+# where the launcher looks for it, apart from the npm agent's files.
+if [ -n "${COMPUTE_TEST_CONFIGURED_ROOT:-}" ]; then
+  root=$COMPUTE_TEST_CONFIGURED_ROOT
+  test -x "$root/rust-chip/bin/compute-rust-chip" || {
+    echo "the configured asset at $root has no rust-chip/bin/compute-rust-chip" >&2
+    exit 1
+  }
+  test -d "$root/node_modules" && test -f "$root/stack.json"
+  # The executable is a separate runtime: it answers its own usage, and starts nothing of npm.
+  set +e
+  "$root/rust-chip/bin/compute-rust-chip" 2>"$work/usage"
+  status=$?
+  set -e
+  [ "$status" -eq 2 ] && grep -q 'usage: compute-rust-chip' "$work/usage"
+  echo "ok: the assembled configured asset contains the Rust Chip agent"
+fi
+
 echo "ok: Rust Chip and the npm Chip/Eve agent are launched distinctly"

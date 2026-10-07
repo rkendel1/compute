@@ -16,6 +16,7 @@ members = [
   "crates/compute-environment",
   "crates/compute-project",
   "crates/compute-worker-github",
+  "crates/compute-agent",
   "crates/compute-rust-chip",
   "crates/compute-cli",
 ]
