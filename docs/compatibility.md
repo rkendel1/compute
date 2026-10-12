@@ -229,7 +229,7 @@ important direct edges in the currently supported set are:
 │   ├── @appport/core 1.0.3
 │   ├── @appport/server 1.0.2
 │   └── @appport/transport-* 1.0.2
-├── @appport/services 0.4.10 ─ @appport/protocol 1.0.3, @feltdb/core 0.11.9
+├── @appport/services 0.4.11 ─ @appport/protocol 1.0.3, @feltdb/core 0.11.9
 ├── @appport/services 0.4.6 (nested under @appport/github, which pins it)
 ├── @feltdb/core 0.11.9
 ├── @authboundry/core 1.15.3
@@ -248,11 +248,11 @@ hidden. The configured verifier fails if any unrecorded skew appears.
 `@appport/services` 0.4.8 is the first published release that serves an `AppPort/ui/1`
 document at `GET /v1/ui`; 0.4.7 and earlier publish only a
 `[{protocol, id, requiredCapabilities}]` descriptor that is not an `AppPort/ui/1`
-document. The configured stack pins **0.4.10**, which serves the same document and
+document. The configured stack pins **0.4.11**, which serves the same document and
 additionally ships a runnable standalone host: `appport-services serve --host … --port …`
 actually starts and answers `GET /v1/ui`. (0.4.8 declared that command, but its CLI
 exited silently without running, and its `--host`/`--port` flags were unusable, so no
-process could be pointed at.) Compute Configured therefore starts 0.4.10, discovers it
+process could be pointed at.) Compute Configured therefore starts 0.4.11, discovers it
 through `/v1/ui`, and registers it. See [service-ui.md](service-ui.md).
 
 Compute's model compiler uses exactly `@feltdb/core 0.11.9` to compile
