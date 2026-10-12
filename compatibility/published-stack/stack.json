@@ -39,7 +39,7 @@
         "project": "agent",
         "model_provider": {
           "package": "@appport/fx",
-          "version": "0.1.0",
+          "version": "0.1.1",
           "adapter": "@appport/chip/models/fx",
           "protocol": "openai-compatible",
           "configuration": {
@@ -87,7 +87,7 @@
   "packages": {
     "@appport/chip": "0.54.4",
     "@appport/core": "1.0.3",
-    "@appport/fx": "0.1.0",
+    "@appport/fx": "0.1.1",
     "@appport/github": "1.0.2",
     "@appport/runtime": "0.4.6",
     "@appport/server": "1.0.2",
