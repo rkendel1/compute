@@ -131,6 +131,39 @@ surface exercised end to end is `createFxModel()` through Chip's `fx()` adapter.
 `createFxAgent` can be verified separately against the same scripted server
 (`@appport/fx` has such a test) but is not the executor in this slice.
 
+## Observed event sequences (Chip 0.54.4, FX 0.1.2, AppBoundry host `appboundry@4e50aeb`)
+
+Recorded from real runs by `compatibility/published-stack/scenarios/outcomes.test.mjs`
+(17 assertions, all passing). Step/message events elided. "Truth" is the application's state read
+independently from the host afterwards.
+
+| Scenario | Stream (consumed events) | Truth | Reading |
+|---|---|---|---|
+| Valid invocation | `turn.started`, `actions.requested`+`action.result(completed)` ×2 (`connection_search`, `appboundry__todo_create`), `turn.completed`, `session.waiting` | todo exists | `action.result.output._meta["appboundry/evidence"]` = `{applicationId, packageIdentity, artifactHash, contractFingerprint, capability, executionMode, outcome:"success", executionUnitId}` |
+| Schema-invalid arguments | `connection_search` events, then **nothing for the bad call**, `turn.completed` | none | Error goes to the model only (`Invalid input for tool …`). **No event.** |
+| Unparseable arguments (`{not json`) | `step.failed`, `turn.failed` `MODEL_CALL_FAILED` / `InvalidToolArguments` | none | FX fails the step; observable. |
+| Host scope denial (read-only host) | `turn.failed` `InvalidToolName` | none | The write tool is never offered (`tools/list` is filtered by scope); the call dies before dispatch. |
+| Wrong host token | `connection_search` result `needsAuthorization:true`; `turn.failed` `InvalidToolName` | none | Auth failure is visible only inside a `completed` discovery result. |
+| Application failure (`todo_complete` on a missing id) | `action.result` **`status:"completed"`**, `output.isError:true`, `_meta["appboundry/error"]={NOT_FOUND}`, evidence `outcome:"failure"`, then `turn.completed` | none | Chip's action status and turn status both say "completed". |
+| Model provider 500 | `step.failed`, `turn.failed` `MODEL_CALL_FAILED` | none | Observable. |
+| Cancel before execution | `actions.requested`, `turn.cancelled`, `session.waiting` (no `action.result`) | none | |
+| Cancel racing the MCP call | `action.result` (completed), then `turn.cancelled` | **todo exists** | Cancel does not stop or undo an in-flight call. |
+| Cancel with the host frozen mid-call | `actions.requested`; **no event for the whole 9 s window**; after the host resumes: `turn.cancelled`, `session.waiting` | none (this run) | A 202 ack, but cancellation is not observable while a call is blocked. Whether the effect lands is host-dependent. |
+| Cancel after completion, repeated | 202, 202; no further event | unchanged | A 202 proves nothing. |
+| Restart, same `operationId` | same `sessionId`; identical replay; **0** model calls | one todo | Idempotent and durable; a wrong bearer on the stream is 401. |
+
+Consequences encoded in Attn (`rkendel1/attn`, `appport/invocation-outcome.ts`):
+a Work succeeds only if the turn's **last application invocation** reports
+`outcome:"success"` with complete evidence and no error flag; `turn.completed` alone never
+suffices; a turn with no invocation is "unverified"; cancellation is `requested` until
+`turn.cancelled` is observed, and never claims rollback.
+
+**Contract gap needing a Chip change (not made here).** For schema-invalid tool arguments Chip emits no
+event, so the stream cannot say that a call was attempted and rejected. The smallest compatible change is
+an `actions.requested` + `action.result {status:"failed", error:{code:"ACTION_INPUT_INVALID"}}` for rejected
+input, at Chip's tool-dispatch boundary. The Chip source is not in this session's scope; until then Attn
+reports the turn as unverified (true, never success) without the reason.
+
 ## Verified empirically (see `docs/spikes/agent-to-appboundry`)
 
 * Malformed tool arguments emit **no** `actions.requested`/`action.result`; the error
