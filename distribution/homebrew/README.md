@@ -63,7 +63,7 @@ The configured stack:
 compute-configured
 ├── Compute       execution
 ├── Chip 0.54.4   agent runtime          (@appport/chip)
-└── FX 0.1.1      model/provider layer   (@appport/fx)
+└── FX 0.1.2      model/provider layer   (@appport/fx)
 ```
 
 Chip runs the agent; FX makes its model calls to the provider you configure;
