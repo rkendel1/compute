@@ -130,3 +130,14 @@ run it, so under the "use the existing EVE/Chip path" requirement the FX
 surface exercised end to end is `createFxModel()` through Chip's `fx()` adapter.
 `createFxAgent` can be verified separately against the same scripted server
 (`@appport/fx` has such a test) but is not the executor in this slice.
+
+## Verified empirically (see `docs/spikes/agent-to-appboundry`)
+
+* Malformed tool arguments emit **no** `actions.requested`/`action.result`; the error
+  is returned to the model only, and the turn ends `turn.completed`. This resolves the
+  "event shape unverified" entry above: there is no event.
+* A valid MCP tool call's `action.result.output` carries the tool's result and any
+  `_meta` the server returned (AppBoundry's `appboundry/evidence`).
+* Same `operationId` after a Chip restart returns the original `sessionId`.
+* The built-in `bash`/`write_file`/`web_fetch` tools are offered to the model by the
+  configured agent.
