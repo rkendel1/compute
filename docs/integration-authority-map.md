@@ -91,7 +91,7 @@ profile in this one.
 | FX | `@appport/fx` **0.1.2** (3fx `sdk/package.json`, npm). Attn's `FX_VERSION=0.54.4` is Chip's number, mislabelled, and is unused outside the unimplemented Tier 4. | Fix in `attn` (`integration/runtime-versions.env`). |
 | Chip | `@appport/chip` **0.54.4** (profile, lockfile, Attn `CHIP_VERSION`). Attn's fixture agent pins `eve` 0.54.3, the pre-rename name. | Align the fixture in `attn`. |
 | FeltDB | `@feltdb/core` **0.11.9** in `flow_db`, npm, the stack and `compute-state-model`. Attn pins 0.11.7. `docs/feltdb-0.11.8-consumer-certification.md` certifies 0.11.8. Nested 0.11.1/0.11.5 copies are declared skew (`allowed_version_skew`, protocol 1). | Attn skew is not changed here: it needs its own compatibility run. 0.11.8 cert doc is stale relative to the pin and says so. |
-| `@appport/services` | `package.json` and installed: 0.4.11. `stack.toml` and `docs/compatibility.md` say 0.4.10. | Real internal drift in this repo: reconcile in the next change. |
+| `@appport/services` | `package.json`, `stack.json`, lockfile, installed: 0.4.11. `stack.toml` and `docs/compatibility.md` said 0.4.10. | Fixed in this branch: `stack.toml` and `docs/compatibility.md` now say 0.4.11, matching `stack.json`, `package.json` and the lockfile. (Docs' note that 0.4.10 "ships the runnable host" holds for 0.4.11 per `stack.json`'s skew reason, which names 0.4.11 as that release.) |
 | `@authboundry/core` | 1.15.3, but repo contents differ from the tarball (`./appport` export). | Record; do not assume the repo source is what ships. |
 
 ## Verified so far
