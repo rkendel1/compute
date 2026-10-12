@@ -109,3 +109,46 @@ profile in this one.
 Level A and Level B tests, failure-case tests, Attn boundary invariants, the
 certification report, and the full Compute CI suites. Blocked on the interface
 gaps above; see the decision requested in the session.
+
+## Authority-boundary audit (Chip → AppBoundry), measured
+
+All rows are assertions in `compatibility/published-stack/scenarios/outcomes.test.mjs` (opt-in).
+
+| Boundary | Measured result |
+|---|---|
+| Unauthenticated / wrong-token MCP request | **401** `A valid bearer token is required`. |
+| Insufficient scope, call made anyway | `isError`, `appboundry/error` **FORBIDDEN**, `missingScopes:["todos.write"]`; WASM not run; state unchanged. |
+| Scope escalation via `x-appport-scopes` on MCP | Ignored (still FORBIDDEN). |
+| Model-proposed tool beyond the host's scopes | Never offered (`tools/list` is scope-filtered); the call fails at FX as `InvalidToolName` before dispatch; state unchanged. |
+| Model-proposed tool with a bad host credential | Connection reports `needsAuthorization`; no tool offered; turn fails. |
+| **Host plain-HTTP route** (`POST /todos`) | **Gap.** A self-declared `x-appport-scopes: todos.write` header is honoured and the write succeeds, bypassing the MCP token and scope limits (the MCP view then shows it). Source comment: honoured on a "trusted-network request" unless AuthBoundry authority mode is configured. Characterized, not fixed (AppBoundry owns it). |
+| AuthBoundry | **Not exercised in this slice.** The host's AuthBoundry mode is opt-in (`APPPORT_AUTHBOUNDRY_URL` …) and was not configured, so nothing here demonstrates AuthBoundry enforcement. No claim is made. |
+
+### Chip built-in tools in the configured agent
+
+`bash`, `read_file`, `write_file` and `web_fetch` are offered to the model. Measured:
+`bash`/`read_file`/`write_file` all fail with `The just-bash sandbox backend requires the just-bash package, which is not bundled`
+(no file was written); `web_fetch` rejects `http://` and rejects loopback/private targets. **No AuthBoundry or
+AppBoundry scope governs any of them.** Their present inertness is an accident of packaging, not a policy:
+installing a sandbox backend would give the model a shell, and from a shell `curl` reaches the plain-HTTP
+route above. The supported way to remove them is `agent/tools/<name>.ts` with `export default disableTool()`.
+That changes the default agent's behaviour, so it is **not made here**; it needs an owner decision.
+
+### Persistence (does FeltDB stay the authority?)
+
+| Datum | Where it actually lives | FeltDB? |
+|---|---|---|
+| Work, evidence, outcome, cancel request (Attn) | `attn_work*` in Attn's FeltDB; derived on read; identical after reopen (tested) | **Yes** |
+| Chip session, stream, operation ownership | Chip's Workflow world on disk (`.eve/.workflow-data`) | No: execution log, not authority; Attn persists the evidence it needs |
+| AppBoundry application state and `AppPort/application-invocation/1` records (host CLI) | JSON files under `APPPORT_RUNTIME_DIR` (`AppPort/application-state/1`) | **No.** FeltDB-backed `FeltDbExecutionLedger` exists only on the library path |
+
+So the chain "FeltDB remains the durable application authority" holds for Attn's operation state and is **not
+true for the AppBoundry host's own state and invocation records**. That is a blocker for any claim that the
+application's execution record is FeltDB-backed; it is AppBoundry's to resolve.
+
+### PAX
+
+Not verified; **blocked**. PAX observes projects (`pax observe`) and Cargo runs (`pax test` →
+`pax.execution-result.v1`); `compute.receipt@1` describes workloads Compute ran. None describes an AppBoundry
+invocation, and nothing in Chip's stream is a PAX input. Attn therefore reports `pax.status: "not_supported"` and
+words `verified` as "the application reported success with complete evidence; not independently verified by PAX".
