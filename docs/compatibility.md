@@ -98,7 +98,7 @@ are configured components, not part of Compute:
 compute-configured
 ├── Compute            execution: environments, computers, jobs, receipts, Reality
 ├── Chip 0.54.4        agent: sessions, turns, tools, the reasoning loop   (@appport/chip)
-└── FX 0.1.1           model/provider execution: provider, model, transport (@appport/fx)
+└── FX 0.1.2           model/provider execution: provider, model, transport (@appport/fx)
 ```
 
 ```text
@@ -223,7 +223,7 @@ important direct edges in the currently supported set are:
 
 ```text
 @appport/chip 0.54.4 ─ nitro, undici; peer ai 7 (agent runtime)
-@appport/fx 0.1.1 (no dependencies; native addons for darwin/linux, arm64/x64)
+@appport/fx 0.1.2 (no dependencies; native addons for darwin/linux, arm64/x64)
 @appport/github 1.0.2
 ├── @appport/sdk 1.1.22
 │   ├── @appport/core 1.0.3
