@@ -30,9 +30,31 @@ async function api(method, path, body) {
   if (!response.ok) {
     const error = new Error((value && value.message) || `HTTP ${response.status}`);
     error.kind = value && value.kind;
+    error.requestId = (value && value.request_id) || response.headers.get('X-Request-Id');
     throw error;
   }
+  // How fresh the daemon says this answer is (`X-Compute-State`, sent with
+  // reads served from desired state). Kept beside the value, not in it.
+  if (value && typeof value === 'object') {
+    FRESHNESS.set(value, {
+      state: response.headers.get('X-Compute-State'),
+      asOf: response.headers.get('X-Compute-State-As-Of'),
+    });
+  }
   return value;
+}
+
+/// Response freshness by response value: see `api`.
+const FRESHNESS = new WeakMap();
+
+/// The freshness of a value `api` returned, as the shared FreshnessLabel.
+function freshnessLabel(value) {
+  const seen = FRESHNESS.get(value) || {};
+  return StackUI.dom.FreshnessLabel({
+    freshness: StackUI.freshnessOf('compute.response.state', seen.state),
+    asOf: seen.asOf || undefined,
+    attrs: { 'data-freshness-of': 'environment' },
+  });
 }
 
 // ---- Rendering helpers ------------------------------------------------------
@@ -103,25 +125,39 @@ function state(value, text) {
   return h('span', { class: `state ${tone}` }, h('span', { class: 'glyph', 'aria-hidden': 'true' }, glyph), text || label);
 }
 
+/// A status in the shared design system (`ui/vendor/stack-ui`): its tone comes
+/// from the field the value belongs to, so the same word can mean different
+/// things (`ready` is a release phase in progress, and a ready process). Keeps
+/// the `state` class so existing selectors and styles still apply.
+function stackState(field, value, label) {
+  return StackUI.dom.StatusIndicator({ field, value, label, className: 'state' });
+}
+
 /// A computer process as its reality says (`reality.processes`): ready is
 /// healthy, unready is not, and restarts and the last failure are shown.
 function processState(computer, name, seen) {
   const reality = computer.reality && computer.reality.processes && computer.reality.processes[name];
-  if (!reality) return seen ? state(seen.state) : '—';
+  if (!reality) return seen ? stackState('compute.process.state', seen.state) : '—';
   const word = reality.process;
-  const tone = { ready: 'healthy', unready: 'unhealthy' }[word] || word;
-  const label = (STATES[word] && word !== 'ready') ? STATES[word][2] : word[0].toUpperCase() + word.slice(1);
-  const details = [label];
+  const details = [StackUI.humanize(word)];
   if (reality.pid) details.push(`pid ${reality.pid}`);
   if (reality.restarts) details.push(`${reality.restarts} restart${reality.restarts === 1 ? '' : 's'}`);
   const failure = reality.last_failure;
-  return h('span', { title: failure ? `${failure.message}; ${failure.decision}` : '' }, state(tone, details.join(' · ')));
+  return h('span', { title: failure ? `${failure.message}; ${failure.decision}` : '' }, stackState('compute.process.state', word, details.join(' · ')));
 }
 
 /// What Compute last established about a computer, in the API's one
 /// vocabulary (`reality.observed`): never what the environment wants of it.
 function observedOf(computer) {
   return computer.reality ? computer.reality.observed : computer.status;
+}
+
+/// The same, as a shared status: observed reality when the daemon reports it,
+/// otherwise the stored computer status, each read in its own vocabulary.
+function computerState(computer) {
+  return computer.reality
+    ? stackState('compute.computer.observed', computer.reality.observed)
+    : stackState('compute.computer.status', computer.status);
 }
 
 /// The same, for an environment summary row.
@@ -137,7 +173,7 @@ function realityPanel(name, computer) {
   const reconcile = (label) => h('button', { 'data-reality-action': 'reconcile',
     onclick: () => act(`Checking ${name}'s computer`, () => api('POST', `/environments/${enc(name)}/reconcile`)) }, label);
   return h('div', { class: `panel reality ${observed === 'unverified' ? 'warn' : 'error'}`, 'data-reality': observed, role: 'status' },
-    h('div', {}, state(observed), ' ', h('span', { class: 'meta' }, `wanted: ${reality.desired}`),
+    h('div', {}, stackState('compute.computer.observed', observed), ' ', h('span', { class: 'meta' }, `wanted: ${reality.desired}`),
       reality.since ? h('span', { class: 'meta' }, ` · since ${ago(reality.since)}`) : null),
     h('p', { 'data-reality-explanation': 'true' }, reality.explanation),
     observed === 'unreachable'
@@ -155,10 +191,15 @@ function realityPanel(name, computer) {
 /// runs, in which case its health.
 function status(item) {
   if (item.deployment && RELEASE.slice(0, -1).includes(item.deployment.status)) {
-    return state('deploying', `Releasing · ${STATES[item.deployment.status][2]}`);
+    return stackState('compute.deployment.status', item.deployment.status, `Releasing · ${StackUI.humanize(item.deployment.status)}`);
   }
-  if (item.actual_state === 'running') return state(item.health === 'unknown' ? 'running' : item.health);
-  return state(item.actual_state);
+  if (item.actual_state === 'running' && item.health !== 'unknown') return stackState('compute.health', item.health);
+  return stackState('compute.environment.actual_state', item.actual_state);
+}
+
+/// A rollout's status. `applying` keeps the word the UI has always shown.
+function rolloutState(value) {
+  return stackState('compute.rollout.status', value, value === 'applying' ? 'Deploying' : undefined);
 }
 
 function ago(timestamp) {
@@ -537,13 +578,29 @@ async function createEnvironment() {
 }
 
 async function environmentView(name) {
-  const environment = await api('GET', `/environments/${enc(name)}`);
+  const crumbs = h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Environments'), ' / ', name);
+  let environment;
+  try {
+    environment = await api('GET', `/environments/${enc(name)}`);
+  } catch (error) {
+    if (error.kind === 'not_found') throw error;
+    // Reads are safe to retry; nothing on this page is shown as current.
+    return [crumbs, StackUI.dom.ErrorPanel({
+      title: `${name} is unavailable`,
+      message: error.message,
+      code: error.kind || undefined,
+      requestId: error.requestId || undefined,
+      onRetry: () => render(),
+      attrs: { 'data-environment-error': name },
+    })];
+  }
   const computer = environment.computer;
   const header = [
-    h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Environments'), ' / ', name),
+    crumbs,
     h('div', { class: 'title', 'data-view': 'manage', 'data-environment-id': environment.environment_id },
-      h('h1', {}, name.toUpperCase()), computer ? state(observedOf(computer)) : status(environment),
-      h('span', { class: 'chip mono', title: 'Environment ID' }, environment.environment_id),
+      h('h1', {}, name.toUpperCase()), computer ? computerState(computer) : status(environment),
+      StackUI.dom.ResourceIdentity({ kind: 'ID', id: environment.environment_id, length: 64, attrs: { title: 'Environment ID' } }),
+      freshnessLabel(environment),
       h('div', { class: 'actions' },
         computer
           ? h('a', { class: 'button', href: `#/work/${enc(name)}` }, 'Work')
@@ -566,9 +623,11 @@ async function environmentView(name) {
       const current = rollouts.find((rollout) => rollout.project === project.name && rollout.status !== 'superseded');
       return h('tr', { class: 'link', 'data-project': project.name, onclick: () => { location.hash = `#/software/${enc(project.name)}`; } },
         h('td', {}, h('strong', {}, project.name)),
-        h('td', {}, current ? [current.version, ' ', state(current.status === 'applying' ? 'deploying' : current.status)] : h('span', { class: 'meta' }, 'unversioned')),
+        h('td', {}, current ? [current.version, ' ', rolloutState(current.status)] : h('span', { class: 'meta' }, 'unversioned')),
         h('td', { class: 'mono' }, revisionText(repository.revision, seen && seen.commit)),
-        h('td', {}, built ? state(built.evidence.outcome === 'succeeded' ? 'complete' : 'failed', built.evidence.outcome) : '—'));
+        // A build's outcome is its job's terminal status (`succeeded`, `failed`,
+        // `cancelled`, `timed_out`, ...), shown in the job's own words.
+        h('td', {}, built ? stackState('compute.job.status', built.evidence.outcome, built.evidence.outcome) : '—'));
     });
     const endpointOf = (process) => (computer.endpoints || []).find((endpoint) => endpoint.process === process);
     const processes = (computer.desired.processes || []).map((process) => {
@@ -597,7 +656,7 @@ async function environmentView(name) {
       h('h2', {}, 'Deployments'),
       table(['Kind', 'Project', 'Version', 'Status', 'By', 'When'], rollouts.map((rollout) => h('tr', { class: 'link', onclick: () => { location.hash = `#/operations/rollout/${enc(rollout.rollout_id)}`; } },
         h('td', {}, rollout.kind), h('td', {}, rollout.project), h('td', {}, rollout.version),
-        h('td', {}, state(rollout.status === 'applying' ? 'deploying' : rollout.status)), h('td', {}, rollout.created_by), h('td', {}, ago(rollout.created_at)))), 'Nothing deployed here yet.'),
+        h('td', {}, rolloutState(rollout.status)), h('td', {}, rollout.created_by), h('td', {}, ago(rollout.created_at)))), 'Nothing deployed here yet.'),
     ];
   }
   const rows = environment.projects.map((project) => h('tr', {
@@ -610,7 +669,7 @@ async function environmentView(name) {
   h('td', {}, status(project)),
   h('td', {}, `${project.workload_count} workloads · ${project.service_count} services`),
   h('td', {}, project.provider),
-  h('td', {}, project.deployment ? [state(project.deployment.status), ' ', h('span', { class: 'chip' }, ago(project.deployment.created_at))] : '—')));
+  h('td', {}, project.deployment ? [stackState('compute.deployment.status', project.deployment.status), ' ', h('span', { class: 'chip' }, ago(project.deployment.created_at))] : '—')));
   return [
     header,
     h('div', { class: 'subtitle' }, `${environment.project_count} projects · ${environment.workload_count} workloads · desired ${environment.desired_state} · policy ${short(environment.policy_id)}`),
@@ -723,19 +782,25 @@ function lifetimeText(computer) {
   return computer.expires_at ? `Temporary · expires ${new Date(computer.expires_at).toLocaleString()}` : 'Temporary';
 }
 
-function machineFacts(computer) {
+/// What a computer is, as label/value pairs. The environment page shows them
+/// with the shared MetadataList; Work still shows them as fact tiles.
+function machineFactItems(computer) {
   const requirements = computer.requirements || {};
   const machine = computer.machine || {};
   return [
-    fact('Status', state(observedOf(computer))),
-    fact('Resources', [requirements.cpu_count ? `${requirements.cpu_count} CPU` : null, requirements.memory_bytes ? bytes(requirements.memory_bytes) : null, requirements.architecture]
-      .filter(Boolean).join(' · ') || 'Any'),
-    fact('Target', computer.target
+    { label: 'Status', value: computerState(computer) },
+    { label: 'Resources', value: [requirements.cpu_count ? `${requirements.cpu_count} CPU` : null, requirements.memory_bytes ? bytes(requirements.memory_bytes) : null, requirements.architecture]
+      .filter(Boolean).join(' · ') || 'Any' },
+    { label: 'Target', mono: true, value: computer.target
       ? `${computer.target}${machine.provider_kind ? ` · ${machine.provider_kind}` : ''}`
-      : (computer.requested_target ? `${computer.requested_target} (requested)` : 'placing…'), true),
-    fact('Lifetime', lifetimeText(computer)),
-    fact('Machine', machine.resource || machine.session_id || '—', true),
+      : (computer.requested_target ? `${computer.requested_target} (requested)` : 'placing…') },
+    { label: 'Lifetime', value: lifetimeText(computer) },
+    { label: 'Machine', mono: true, value: machine.resource || machine.session_id || null },
   ];
+}
+
+function machineFacts(computer) {
+  return machineFactItems(computer).map((item) => fact(item.label, item.value === null ? '—' : item.value, item.mono));
 }
 
 // ---- Manage: the machine ------------------------------------------------------------
@@ -755,11 +820,28 @@ function machineSection(name, environment) {
   return [
     h('h2', {}, 'Computer'),
     realityPanel(name, computer),
-    h('div', { class: 'grid', 'data-machine': 'computer' }, machineFacts(computer),
-      fact('Placement', short(computer.placement_id), true),
-      fact('Contents', computer.converged ? state('running', `Converged · generation ${computer.desired.generation || 0}`)
-        : state('pending', `Reconciling · ${computer.observed.converged_generation || 0} of ${computer.desired.generation || 0}`))),
-    computer.failure ? h('div', { class: 'panel error' }, `${computer.failure.phase}: ${computer.failure.code} — ${computer.failure.message}`) : null,
+    StackUI.dom.MetadataList({
+      attrs: { 'data-machine': 'computer' },
+      items: [
+        ...machineFactItems(computer),
+        { label: 'Placement', mono: true, value: computer.placement_id ? short(computer.placement_id) : null },
+        // Whether the computer holds what the environment wants: a goal, so it
+        // is said in words, not inferred from the computer running.
+        { label: 'Contents', value: StackUI.dom.StatusIndicator(computer.converged
+          ? { tone: 'positive', label: `Converged · generation ${computer.desired.generation || 0}`, className: 'state', attrs: { 'data-goal': 'satisfied' } }
+          : { tone: 'progress', label: `Reconciling · ${computer.observed.converged_generation || 0} of ${computer.desired.generation || 0}`, className: 'state', attrs: { 'data-goal': 'unsatisfied' } }) },
+      ],
+    }),
+    // The last failure Compute recorded. Only a computer whose observed reality
+    // is `failed` has failed; an unreachable or lost one also carries its
+    // liveness failure, and is explained by the reality panel above.
+    computer.failure ? (observedOf(computer) === 'failed'
+      ? StackUI.dom.ErrorPanel({
+        title: `The computer failed during ${computer.failure.phase}`,
+        message: computer.failure.message,
+        code: computer.failure.code,
+      })
+      : h('div', { class: 'panel error' }, `${computer.failure.phase}: ${computer.failure.code} — ${computer.failure.message}`)) : null,
     h('div', { class: 'actions row' },
       h('a', { class: 'button primary', href: `#/work/${enc(name)}`, 'data-work': 'true' }, 'Work on this →'),
       h('button', { disabled: !live, onclick: () => replaceDialog(name, computer) }, 'Replace machine…'),
