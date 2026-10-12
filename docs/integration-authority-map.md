@@ -49,6 +49,51 @@ profile in this one.
 8. **Attn's real-runtime test (Tier 3) is outside CI** and stops at "Chip
    accepted the session". The model-and-execution tier (Tier 4) does not exist.
 
+## Added by the second audit (appboundry, authboundry, appport, appport-services, flow_db read)
+
+9. **Compute is not on the AppBoundry path.** AppBoundry runs `AppPort/application-bundle/1`
+   modules (`wasm/1` JSON ABI: `memory`, `appport_alloc`, `appport_result_len`,
+   `exported_<capability>`; no imports) in its own host via Node `WebAssembly`.
+   `crates/compute-runtime-wasm` runs WASI `_start` modules. Compute's own docs
+   (`docs/stacks.md`, `docs/platform-audit.md`) record "AppBoundry → Compute path
+   missing". Both are WASM; they are different runtimes.
+10. **Existing path from an agent to an AppBoundry app:** Chip MCP connection
+    (`defineMcpClientConnection`) → AppBoundry host `POST /apps/<selector>/mcp`
+    (off unless `APPPORT_MCP_TOKEN`; scopes from `APPPORT_MCP_SCOPES`) → packaged
+    WASM. Proven only in AppBoundry's own tests; not wired in the configured agent.
+11. **AppBoundry verification** is static (`verifyPackagedWasm`: sha256 against
+    `artifact.hash`, then ABI) plus behavioural (`appport app verify`, record
+    `AppPort/application-verification/1`). Invocation records are
+    `AppPort/application-invocation/1`. The host CLI writes them to a JSON file
+    under `APPPORT_RUNTIME_DIR`; FeltDB persistence (`FeltDbExecutionLedger`,
+    collection `AppPortState`) is the library path, not the host CLI path.
+12. **PAX has no contract for AppBoundry invocations.** `compute.receipt@1`'s
+    `project` block describes a project Compute ran. An AppBoundry invocation
+    has no Compute receipt. See "Evidence" below.
+13. **AuthBoundry is optional by design** (Base Compute has no dependency; the
+    AppBoundry host enables it via `APPPORT_AUTHBOUNDRY_URL` and companions;
+    half-configured is a 503, never a weaker mode). The repo's
+    `@authboundry/core/appport` export is absent from the published 1.15.3
+    tarball even at the same version number.
+14. **Checked-in deterministic WASM exists:** `integrations/feltdb/test/fixtures/counter-wasm.wasm`
+    in `rkendel1/appboundry` (sha256 `57afdef5…334f31`; `exported_counter_increment`,
+    `_fail`, `_spin`), and `examples/todos/appport/wasm/application.wasm`.
+15. **Chip persists in its Workflow world on disk, not FeltDB**, and has a real
+    `/cancel` endpoint. See `docs/eve-chip-operation-contract.md`.
+16. **`createFxAgent` is not on the Chip path.** Chip calls `createFxModel()` via
+    its `fx()` adapter and runs its own loop.
+
+## Version resolution (authoritative sources)
+
+| Item | Finding | Action |
+|---|---|---|
+| Compute | Workspace `Cargo.toml` and latest release are **0.1.19**. The profile's `compute: 0.1.17` is a checked-in default that `distribution/scripts/update-stack-version.sh` rewrites during `distribution-certification` ("Sync published-stack version with current release"). | No change. Not drift to patch by hand. |
+| FX | `@appport/fx` **0.1.2** (3fx `sdk/package.json`, npm). Attn's `FX_VERSION=0.54.4` is Chip's number, mislabelled, and is unused outside the unimplemented Tier 4. | Fix in `attn` (`integration/runtime-versions.env`). |
+| Chip | `@appport/chip` **0.54.4** (profile, lockfile, Attn `CHIP_VERSION`). Attn's fixture agent pins `eve` 0.54.3, the pre-rename name. | Align the fixture in `attn`. |
+| FeltDB | `@feltdb/core` **0.11.9** in `flow_db`, npm, the stack and `compute-state-model`. Attn pins 0.11.7. `docs/feltdb-0.11.8-consumer-certification.md` certifies 0.11.8. Nested 0.11.1/0.11.5 copies are declared skew (`allowed_version_skew`, protocol 1). | Attn skew is not changed here: it needs its own compatibility run. 0.11.8 cert doc is stale relative to the pin and says so. |
+| `@appport/services` | `package.json` and installed: 0.4.11. `stack.toml` and `docs/compatibility.md` say 0.4.10. | Real internal drift in this repo: reconcile in the next change. |
+| `@authboundry/core` | 1.15.3, but repo contents differ from the tarball (`./appport` export). | Record; do not assume the repo source is what ships. |
+
 ## Verified so far
 
 - `@appport/fx` 0.1.2 pinned consistently in `package.json`, lockfile,
