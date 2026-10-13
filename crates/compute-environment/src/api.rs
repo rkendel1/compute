@@ -240,8 +240,24 @@ pub const ROUTES: &[(&str, &str)] = &[
 ];
 
 const UI_HTML: &str = include_str!("../ui/index.html");
-const UI_SCRIPT: &str = include_str!("../ui/app.js");
-const UI_STYLE: &str = include_str!("../ui/app.css");
+/// The UI script: the vendored shared design system (`ui/vendor/stack-ui`), then
+/// the control plane. It starts with its own `'use strict'` prologue because
+/// `app.js`'s directive stops being one once anything precedes it.
+const UI_SCRIPT: &str = concat!(
+    "'use strict';\n",
+    include_str!("../ui/vendor/stack-ui/stack-ui-core.js"),
+    "\n",
+    include_str!("../ui/app.js"),
+);
+/// The UI styles: shared tokens and components first, so the control plane's
+/// own rules still win where they overlap.
+const UI_STYLE: &str = concat!(
+    include_str!("../ui/vendor/stack-ui/tokens.css"),
+    "\n",
+    include_str!("../ui/vendor/stack-ui/core.css"),
+    "\n",
+    include_str!("../ui/app.css"),
+);
 
 /// A connection: plaintext or TLS.
 trait Connection: AsyncRead + AsyncWrite + Unpin + Send {}

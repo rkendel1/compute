@@ -360,6 +360,24 @@ fn the_fixture_is_what_appport_services_publishes() {
 #[test]
 fn the_ui_never_parses_markup_or_runs_code_from_a_service() {
     let script = include_str!("../ui/app.js");
+    // The vendored design system is served in the same script, so it is held
+    // to the same rule.
+    let shared = include_str!("../ui/vendor/stack-ui/stack-ui-core.js");
+    for forbidden in [
+        "innerHTML",
+        "outerHTML",
+        "insertAdjacentHTML",
+        "document.write",
+        "eval(",
+        "new Function",
+        "srcdoc",
+        "createContextualFragment",
+    ] {
+        assert!(
+            !shared.contains(forbidden),
+            "the vendored stack-ui-core.js uses {forbidden}"
+        );
+    }
     for forbidden in [
         "innerHTML",
         "outerHTML",

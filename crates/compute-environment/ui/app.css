@@ -122,8 +122,8 @@ button {
   cursor: pointer;
 }
 button:hover { border-color: var(--accent); }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button.primary.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+button.primary { background: var(--stack-color-action-primary-bg); border-color: var(--stack-color-action-primary-bg); color: var(--stack-color-action-primary-fg); }
+button.primary.danger { background: var(--stack-color-action-danger-bg); border-color: var(--stack-color-action-danger-bg); color: var(--stack-color-action-danger-fg); }
 button.danger { color: var(--bad); }
 button.ghost { background: transparent; }
 button.small { padding: 3px 8px; font-size: 12.5px; }
@@ -230,13 +230,14 @@ dialog label.check input { width: auto; }
 /* Manage and Work: two modes of one control plane. */
 .modes { flex-shrink: 0; white-space: nowrap; display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-right: 8px; }
 .modes a { padding: 5px 14px; color: var(--muted); font-weight: 600; font-size: 13px; }
-.modes a.active { background: var(--accent); color: #fff; text-decoration: none; }
+/* The shared primary-action pair: white text on the dark-theme accent was 2.6:1. */
+.modes a.active { background: var(--stack-color-action-primary-bg); color: var(--stack-color-action-primary-fg); text-decoration: none; }
 body[data-mode="work"] .manage-only { display: none; }
 a.button {
   display: inline-block; font: inherit; font-size: 13.5px; padding: 6px 12px; border-radius: 7px;
   border: 1px solid var(--line); background: var(--panel); color: var(--text); text-decoration: none;
 }
-a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+a.button.primary { background: var(--stack-color-action-primary-bg); border-color: var(--stack-color-action-primary-bg); color: var(--stack-color-action-primary-fg); }
 .actions.row { margin: 12px 0 0; justify-content: flex-start; }
 .panel.note { padding: 14px 16px; color: var(--muted); }
 .work h3 { margin: 22px 0 8px; font-size: 14px; }
