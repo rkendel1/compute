@@ -1,4 +1,4 @@
-/*! @stack-ui/core 0.1.0 — classic build. Exposes window.StackUI. */
+/*! @stack-ui/core 0.2.0 — classic build. Exposes window.StackUI. */
 'use strict';
 (function (global) {
 'use strict';
@@ -207,7 +207,8 @@ function normalizeChecks(checks) {
 // produces is the same in every product.
 
 
-const node = (t, a, c, on) => ({ t, a: a || {}, c: c === undefined ? [] : [].concat(c), ...(on ? { on } : {}) });
+// `k` is an optional identity among siblings (React's key); dom.js ignores it.
+const node = (t, a, c, on, k) => ({ t, a: a || {}, c: c === undefined ? [] : [].concat(c), ...(on ? { on } : {}), ...(k === undefined || k === null ? {} : { k: String(k) }) });
 const isTree = (value) => Boolean(value && typeof value === 'object' && typeof value.t === 'string' && value.a && Array.isArray(value.c));
 
 const cx = (...names) => names.filter(Boolean).join(' ');
@@ -432,7 +433,341 @@ function Button(props) {
   ], props.onClick && !inert ? { click: props.onClick } : undefined);
 }
 
+// ---- Navigation and lists (PR3) ---------------------------------------------
+
+/// A resource path. The last item is the current page.
+function Breadcrumbs(props) {
+  const items = (props.items || []).filter((item) => item && present(item.label));
+  return node('nav', {
+    class: cx('stack-breadcrumbs', props.className),
+    'aria-label': props.label || 'Breadcrumb',
+    ...passthrough(props.attrs),
+  }, node('ol', { class: 'stack-breadcrumbs__list' }, items.map((item, index) => {
+    const last = index === items.length - 1;
+    return node('li', { class: 'stack-breadcrumbs__item' }, [
+      index > 0 ? node('span', { class: 'stack-breadcrumbs__separator', 'aria-hidden': 'true' }, '/') : null,
+      last || !present(item.href)
+        ? node('span', { class: 'stack-breadcrumbs__current', ...(last ? { 'aria-current': 'page' } : {}) }, item.label)
+        : node('a', { class: 'stack-breadcrumbs__link', href: item.href }, item.label),
+    ]);
+  })));
+}
+
+/// Moves focus between tabs with the arrow keys, Home and End (manual
+/// activation: Enter or Space selects, as on any button). Works with a native
+/// event and with React's synthetic event alike.
+function tabsKeydown(event) {
+  const keys = ['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'Home', 'End'];
+  if (!keys.includes(event.key)) return;
+  const list = event.currentTarget;
+  const tabs = Array.from(list.querySelectorAll('[role="tab"]:not([disabled])'));
+  if (!tabs.length) return;
+  const current = tabs.indexOf(list.ownerDocument.activeElement);
+  const vertical = list.getAttribute('aria-orientation') === 'vertical';
+  const forward = vertical ? 'ArrowDown' : 'ArrowRight';
+  const backward = vertical ? 'ArrowUp' : 'ArrowLeft';
+  let next;
+  if (event.key === 'Home') next = 0;
+  else if (event.key === 'End') next = tabs.length - 1;
+  else if (event.key === forward) next = current < 0 ? 0 : (current + 1) % tabs.length;
+  else if (event.key === backward) next = current < 0 ? tabs.length - 1 : (current - 1 + tabs.length) % tabs.length;
+  else return;
+  event.preventDefault();
+  // Focus moves; tabindex stays on the selected tab, so Tab into the list
+  // returns to it, and a renderer that owns the attributes (React) never sees
+  // them change underneath it.
+  tabs[next].focus();
+}
+
+const idPart = (value) => String(value).replace(/[^A-Za-z0-9_-]/g, '-');
+
+const skipToMain = (mainId) => (event) => {
+  const main = event.currentTarget.ownerDocument.getElementById(mainId);
+  if (!main) return;
+  event.preventDefault();
+  main.focus();
+  if (typeof main.scrollIntoView === 'function') main.scrollIntoView();
+};
+
+/// Sections of one resource. Selecting a tab calls `onSelect(id)`; the product
+/// decides what that means (show a panel, or change its route).
+function Tabs(props) {
+  const prefix = idPart(props.idPrefix || 'stack-tabs');
+  const tabs = props.tabs || [];
+  const active = tabs.some((tab) => tab.id === props.active && !tab.disabled) ? props.active : null;
+  return node('div', {
+    class: cx('stack-tabs', props.className),
+    role: 'tablist',
+    ...(present(props.label) ? { 'aria-label': props.label } : {}),
+    ...passthrough(props.attrs),
+  }, tabs.map((tab, index) => {
+    const selected = tab.id === active;
+    const focusable = selected || (active === null && index === 0);
+    return node('button', {
+      class: cx('stack-tabs__tab', selected ? 'stack-tabs__tab--selected' : null, tab.className),
+      type: 'button',
+      role: 'tab',
+      id: `${prefix}-tab-${idPart(tab.id)}`,
+      'aria-selected': selected ? 'true' : 'false',
+      ...(present(props.panelId) ? { 'aria-controls': props.panelId } : {}),
+      tabindex: focusable ? '0' : '-1',
+      ...(tab.disabled ? { disabled: true, ...(present(tab.reason) ? { title: tab.reason } : {}) } : {}),
+      ...passthrough(tab.attrs),
+    }, [
+      tab.label,
+      present(tab.badge) ? node('span', { class: 'stack-tabs__badge' }, tab.badge) : null,
+    ], props.onSelect && !tab.disabled ? { click: () => props.onSelect(tab.id) } : undefined);
+  }), { keydown: tabsKeydown });
+}
+
+/// The region a tablist controls.
+function TabPanel(props) {
+  const prefix = idPart(props.idPrefix || 'stack-tabs');
+  return node('div', {
+    class: cx('stack-tabpanel', props.className),
+    role: 'tabpanel',
+    id: props.id,
+    ...(present(props.active) ? { 'aria-labelledby': `${prefix}-tab-${idPart(props.active)}` } : {}),
+    tabindex: '0',
+    ...passthrough(props.attrs),
+  }, props.children || null);
+}
+
+const SORT_GLYPHS = { ascending: '▲', descending: '▼' };
+
+/// Enter or Space on a selectable row selects it, as a click does.
+const rowKeydown = (onSelect) => (event) => {
+  if (event.target !== event.currentTarget) return;
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  onSelect();
+};
+
+/// A list of resources as a table. Rows are keyed by column id, so every row
+/// has exactly one cell per header. Loading, failure, empty and no-match are
+/// part of the table, not left to each screen.
+function DataTable(props) {
+  const columns = props.columns || [];
+  const rows = props.rows || [];
+  const label = present(props.label) ? props.label : 'Table';
+  if (props.error) {
+    return ErrorPanel({
+      title: props.error.title || `${label} could not be read`,
+      message: props.error.message,
+      code: props.error.code,
+      requestId: props.error.requestId,
+      onRetry: props.error.onRetry,
+      className: cx('stack-table-state', props.className),
+      attrs: props.attrs,
+    });
+  }
+  if (props.loading && !rows.length) return Loading({ what: props.loadingWhat || label.toLowerCase(), className: cx('stack-table-state', props.className), attrs: props.attrs });
+  if (!rows.length) {
+    const noMatch = Boolean(props.noMatch);
+    return EmptyState({
+      variant: noMatch ? 'no-match' : 'empty',
+      title: noMatch ? (props.noMatchTitle || 'Nothing matches') : (props.emptyTitle || 'Nothing here yet'),
+      body: noMatch ? props.noMatchBody : props.emptyBody,
+      action: noMatch ? null : props.emptyAction,
+      headingLevel: props.emptyHeadingLevel || 3,
+      className: cx('stack-table-state', props.className),
+      attrs: props.attrs,
+    });
+  }
+  const sort = props.sort || {};
+  const head = node('thead', {}, node('tr', {}, columns.map((column) => {
+    const sorted = sort.column === column.id && SORT_GLYPHS[sort.direction] ? sort.direction : null;
+    const content = column.sortable && props.onSort
+      ? node('button', {
+        class: 'stack-table__sort',
+        type: 'button',
+      }, [
+        column.header,
+        node('span', { class: 'stack-table__sort-indicator', 'aria-hidden': 'true' }, sorted ? SORT_GLYPHS[sorted] : '↕'),
+      ], { click: () => props.onSort(column.id) })
+      : column.header;
+    return node('th', {
+      class: cx('stack-table__header', column.align === 'end' ? 'stack-table__cell--end' : null),
+      scope: 'col',
+      ...(column.sortable && props.onSort ? { 'aria-sort': sorted || 'none' } : {}),
+    }, content);
+  })));
+  const body = node('tbody', {}, rows.map((row) => {
+    const selectable = typeof row.onSelect === 'function';
+    return node('tr', {
+      class: cx('stack-table__row', selectable ? 'stack-table__row--selectable' : null, row.selected ? 'stack-table__row--selected' : null, row.className),
+      ...(selectable ? { tabindex: '0' } : {}),
+      // aria-selected needs a grid; in a table the open row is the current one.
+      ...(row.selected ? { 'aria-current': 'true' } : {}),
+      ...passthrough(row.attrs),
+    }, columns.map((column) => {
+      const value = row.cells ? row.cells[column.id] : undefined;
+      const missing = value === undefined || value === null;
+      return node('td', {
+        class: cx('stack-table__cell', column.align === 'end' ? 'stack-table__cell--end' : null),
+        ...(missing ? { 'data-missing': 'true' } : {}),
+      }, missing ? '—' : value);
+    }), selectable ? { click: row.onSelect, keydown: rowKeydown(row.onSelect) } : undefined, row.key);
+  }));
+  return node('div', {
+    class: cx('stack-table', props.className),
+    role: 'region',
+    'aria-label': label,
+    tabindex: '0',
+    ...(props.loading ? { 'aria-busy': 'true' } : {}),
+    ...passthrough(props.attrs),
+  }, node('table', { class: 'stack-table__table' }, [
+    node('caption', { class: props.captionVisible ? 'stack-table__caption' : 'stack-visually-hidden' }, label),
+    head,
+    body,
+  ]));
+}
+
+/// One labelled filter control: a text input or a select.
+function filterControl(filter, prefix, onChange) {
+  const id = `${prefix}-${idPart(filter.id)}`;
+  const value = present(filter.value) ? String(filter.value) : '';
+  const handler = onChange ? (event) => onChange(filter.id, event.target.value) : null;
+  const control = filter.type === 'select'
+    ? node('select', { class: 'stack-filter__control', id, name: filter.id },
+      (filter.options || []).map((option) => {
+        const optionValue = String(typeof option === 'object' ? option.value : option);
+        return node('option', { value: optionValue, ...(optionValue === value ? { selected: true } : {}) },
+          typeof option === 'object' ? option.label : option);
+      }), handler ? { change: handler } : undefined)
+    : node('input', {
+      class: 'stack-filter__control', id, name: filter.id, type: 'search', value,
+      ...(present(filter.placeholder) ? { placeholder: filter.placeholder } : {}),
+    }, [], handler ? { input: handler } : undefined);
+  return node('div', { class: 'stack-filter__field' }, [
+    node('label', { class: 'stack-filter__label', for: id }, filter.label),
+    control,
+  ]);
+}
+
+/// Labelled filters for a list. Applying calls `onSubmit()`; the product reads
+/// its own filter state and fetches. The result line is announced politely.
+function FilterBar(props) {
+  const prefix = idPart(props.idPrefix || 'stack-filter');
+  const applied = Number(props.applied) || 0;
+  return node('form', {
+    class: cx('stack-filter', props.className),
+    role: 'search',
+    'aria-label': props.label || 'Filters',
+    ...passthrough(props.attrs),
+  }, [
+    node('div', { class: 'stack-filter__controls' }, [
+      (props.filters || []).map((filter) => filterControl(filter, prefix, props.onChange)),
+      node('div', { class: 'stack-filter__actions' }, [
+        Button({ label: props.applyLabel || 'Apply', type: 'submit', variant: 'secondary' }),
+        applied && props.onClear ? Button({ label: props.clearLabel || 'Clear', variant: 'ghost', onClick: props.onClear }) : null,
+      ]),
+    ]),
+    node('p', { class: 'stack-filter__result', role: 'status', 'aria-live': 'polite' }, present(props.result) ? props.result : ''),
+  ], props.onSubmit ? { submit: (event) => { event.preventDefault(); props.onSubmit(); } } : undefined);
+}
+
+/// Cursor pagination: previous and next, and whatever summary the product can
+/// state truthfully. It never invents a total or a page count.
+function Pagination(props) {
+  return node('nav', {
+    class: cx('stack-pagination', props.className),
+    'aria-label': props.label || 'Pagination',
+    ...passthrough(props.attrs),
+  }, [
+    present(props.summary) ? node('p', { class: 'stack-pagination__summary' }, props.summary) : null,
+    node('div', { class: 'stack-pagination__actions' }, [
+      Button({ label: props.previousLabel || '← Previous', variant: 'ghost', disabled: !props.hasPrevious, onClick: props.onPrevious, attrs: { 'data-page': 'previous' } }),
+      Button({ label: props.nextLabel || 'Next →', variant: 'ghost', disabled: !props.hasNext, onClick: props.onNext, attrs: { 'data-page': 'next' } }),
+    ]),
+  ]);
+}
+
+// ---- The product shell (docs/product-shell.md) ----------------------------
+
+const THEME_OPTIONS = Object.freeze([
+  { value: 'system', label: 'System theme' },
+  { value: 'light', label: 'Light theme' },
+  { value: 'dark', label: 'Dark theme' },
+]);
+
+/// The page frame every Stack product renders in its own build: product mark,
+/// product context, search and account slots, theme preference, this
+/// product's navigation, links out to other Stack products, and the main
+/// landmark. It renders exactly what it is given: no data, no network, no
+/// authorization.
+function Shell(props) {
+  const product = props.product || {};
+  // A product with client-side routing takes ordinary clicks itself; a click
+  // with a modifier (new tab, new window) stays a normal link.
+  const navigate = (href) => (props.onNavigate ? {
+    click: (event) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      props.onNavigate(href);
+    },
+  } : undefined);
+  const mainId = idPart(props.mainId || 'stack-main');
+  const groups = [];
+  for (const item of props.navigation || []) {
+    const name = item.group || '';
+    let group = groups.find((entry) => entry.name === name);
+    if (!group) groups.push(group = { name, items: [] });
+    group.items.push(item);
+  }
+  for (const group of groups) group.items.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const navItem = (item) => node('li', { class: 'stack-shell__nav-entry' }, node('a', {
+    class: cx('stack-shell__nav-item', item.className),
+    href: item.href,
+    ...(item.current ? { 'aria-current': 'page' } : {}),
+    ...passthrough(item.attrs),
+  }, item.label, navigate(item.href)));
+  const theme = props.theme;
+  const themeId = `${mainId}-theme`;
+  const others = props.otherProducts || [];
+  return node('div', { class: cx('stack-shell', props.className), ...passthrough(props.attrs) }, [
+    // Focuses the main landmark itself: in a hash-routed product, following
+    // `#main` would change the route.
+    node('a', { class: 'stack-shell__skip', href: `#${mainId}` }, props.skipLabel || 'Skip to content', { click: skipToMain(mainId) }),
+    node('header', { class: 'stack-shell__bar' }, [
+      node('a', { class: 'stack-shell__product', href: product.homeHref || '#' }, [
+        present(product.mark) ? node('span', { class: 'stack-shell__mark', 'aria-hidden': 'true' }, product.mark) : null,
+        node('span', { class: 'stack-shell__product-name' }, product.name || ''),
+      ], navigate(product.homeHref || '#')),
+      props.context ? node('div', { class: 'stack-shell__context' }, props.context) : null,
+      props.search ? node('div', { class: 'stack-shell__search' }, props.search) : null,
+      node('div', { class: 'stack-shell__end' }, [
+        theme ? node('div', { class: 'stack-shell__prefs' }, [
+          node('label', { class: 'stack-visually-hidden', for: themeId }, 'Theme'),
+          node('select', { class: 'stack-shell__theme', id: themeId },
+            THEME_OPTIONS.map((option) => node('option', {
+              value: option.value, ...(option.value === (theme.preference || 'system') ? { selected: true } : {}),
+            }, option.label)), theme.onChange ? { change: (event) => theme.onChange(event.target.value) } : undefined),
+        ]) : null,
+        props.account ? node('div', { class: 'stack-shell__account' }, props.account) : null,
+      ]),
+    ]),
+    node('div', { class: 'stack-shell__body' }, [
+      node('nav', { class: 'stack-shell__nav', 'aria-label': `${product.name || 'Product'} navigation` }, [
+        groups.map((group) => node('div', { class: 'stack-shell__nav-group' }, [
+          present(group.name) ? node('p', { class: 'stack-shell__nav-heading' }, group.name) : null,
+          node('ul', { class: 'stack-shell__nav-list' }, group.items.map(navItem)),
+        ])),
+        present(props.activityHref) ? node('div', { class: 'stack-shell__nav-group stack-shell__activity' },
+          node('ul', { class: 'stack-shell__nav-list' }, navItem({ label: props.activityLabel || 'Activity', href: props.activityHref, current: props.activityCurrent }))) : null,
+        others.length ? node('div', { class: 'stack-shell__nav-group stack-shell__switcher' }, [
+          node('p', { class: 'stack-shell__nav-heading' }, 'Other Stack products'),
+          node('ul', { class: 'stack-shell__nav-list' }, others.map((other) => node('li', { class: 'stack-shell__nav-entry' },
+            node('a', { class: 'stack-shell__nav-item', href: other.href }, other.name)))),
+        ]) : null,
+      ]),
+      node('main', { class: 'stack-shell__main', id: mainId, tabindex: '-1', ...passthrough(props.mainAttrs) }, props.children || null),
+    ]),
+  ]);
+}
+
 const COMPONENTS = Object.freeze({
+  Breadcrumbs, Tabs, TabPanel, DataTable, FilterBar, Pagination, Shell,
   StatusIndicator, VerificationBadge, FreshnessLabel, Unavailable, Loading, EmptyState,
   ErrorPanel, MetadataList, ResourceIdentity, PageHeader, Button,
 });
@@ -468,11 +803,88 @@ function toDom(value, doc) {
   throw new TypeError('toDom: unsupported child');
 }
 
+/// Moves focus to the shell's main landmark after a route change, so keyboard
+/// and screen-reader users start at the new page's content.
+function focusMain(id, doc) {
+  const d = doc || document;
+  // The same normalisation Shell applies to its mainId.
+  const main = d.getElementById(String(id || 'stack-main').replace(/[^A-Za-z0-9_-]/g, '-'));
+  if (main && typeof main.focus === 'function') main.focus({ preventScroll: true });
+}
+
 /// Each component as a function returning a DOM element, e.g.
 ///   StackUI.dom.StatusIndicator({ field: 'compute.health', value: 'healthy' })
 const dom = Object.freeze(Object.fromEntries(
   Object.entries(COMPONENTS).map(([name, component]) => [name, (props, doc) => toDom(component(props || {}), doc)]),
 ));
 
-global.StackUI = Object.freeze({ version: "0.1.0", TONES, GLYPHS, OUTCOMES, OUTCOME_LABELS, VERIFICATION_STATES, FRESHNESS_STATES, CAPABILITY_STATES, humanize, fields, valuesOf, resolve, verification, verificationOf, freshnessOf, capability, isTree, formatTime, StatusIndicator, VerificationBadge, FreshnessLabel, Unavailable, Loading, EmptyState, ErrorPanel, MetadataList, ResourceIdentity, PageHeader, Button, COMPONENTS, toDom, dom });
+// ---- theme.js
+// The theme preference (docs/product-shell.md §2): `system`, `light` or `dark`,
+// stored per product origin. This is the only state the design system keeps,
+// and the only module allowed to touch storage. Every access is wrapped: a
+// private window, blocked site data or a throwing accessor leaves the page on
+// the system theme, never broken.
+
+const THEME_STORAGE_KEY = 'stack-ui.theme';
+const THEME_PREFERENCES = Object.freeze(['system', 'light', 'dark']);
+
+const storageOf = (scope) => {
+  try {
+    return scope && scope.localStorage ? scope.localStorage : null;
+  } catch {
+    return null;
+  }
+};
+
+/// The stored preference, or `system` when there is none or it cannot be read.
+function readThemePreference(scope) {
+  const storage = storageOf(scope || globalThis);
+  if (!storage) return 'system';
+  try {
+    const value = storage.getItem(THEME_STORAGE_KEY);
+    return THEME_PREFERENCES.includes(value) ? value : 'system';
+  } catch {
+    return 'system';
+  }
+}
+
+/// Remembers a preference. Returns whether it was stored.
+function storeThemePreference(preference, scope) {
+  const storage = storageOf(scope || globalThis);
+  if (!storage || !THEME_PREFERENCES.includes(preference)) return false;
+  try {
+    if (preference === 'system') storage.removeItem(THEME_STORAGE_KEY);
+    else storage.setItem(THEME_STORAGE_KEY, preference);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/// Applies a preference to the document: `light` or `dark` set
+/// `data-stack-theme`; `system` removes it and follows the operating system.
+function applyThemePreference(preference, root) {
+  const element = root || (typeof document !== 'undefined' ? document.documentElement : null);
+  if (!element) return;
+  if (preference === 'light' || preference === 'dark') element.setAttribute('data-stack-theme', preference);
+  else element.removeAttribute('data-stack-theme');
+}
+
+/// Reads, applies and returns the stored preference: call once at start-up,
+/// before the first render, so the page never flashes the other theme.
+function initThemePreference(scope, root) {
+  const preference = readThemePreference(scope);
+  applyThemePreference(preference, root);
+  return preference;
+}
+
+/// Stores and applies a preference chosen in the shell's theme control.
+function setThemePreference(preference, scope, root) {
+  const value = THEME_PREFERENCES.includes(preference) ? preference : 'system';
+  storeThemePreference(value, scope);
+  applyThemePreference(value, root);
+  return value;
+}
+
+global.StackUI = Object.freeze({ version: "0.2.0", TONES, GLYPHS, OUTCOMES, OUTCOME_LABELS, VERIFICATION_STATES, FRESHNESS_STATES, CAPABILITY_STATES, humanize, fields, valuesOf, resolve, verification, verificationOf, freshnessOf, capability, isTree, formatTime, StatusIndicator, VerificationBadge, FreshnessLabel, Unavailable, Loading, EmptyState, ErrorPanel, MetadataList, ResourceIdentity, PageHeader, Button, Breadcrumbs, tabsKeydown, Tabs, TabPanel, DataTable, FilterBar, Pagination, THEME_OPTIONS, Shell, COMPONENTS, toDom, focusMain, dom, THEME_STORAGE_KEY, THEME_PREFERENCES, readThemePreference, storeThemePreference, applyThemePreference, initThemePreference, setThemePreference });
 })(typeof window !== 'undefined' ? window : globalThis);
