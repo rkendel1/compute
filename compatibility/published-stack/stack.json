@@ -37,6 +37,7 @@
         },
         "environment": "compute.execution",
         "project": "agent",
+        "disabled_builtin_tools": ["bash", "read_file", "write_file", "web_fetch"],
         "model_provider": {
           "package": "@appport/fx",
           "version": "0.1.2",

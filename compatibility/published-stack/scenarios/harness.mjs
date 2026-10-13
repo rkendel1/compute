@@ -3,7 +3,7 @@
 import { createServer } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
 import { spawn, execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,6 +11,8 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
+/** Always the agent's own @appport/chip, so a candidate package under test is the one that runs. */
+const CHIP_BIN = 'node_modules/@appport/chip/bin/eve.js';
 export const STACK = join(here, '..');
 /** A free loopback port, chosen once per suite: the agent is BUILT against the URL that uses it. */
 export function allocatePort() {
@@ -48,14 +50,36 @@ export function prepareBundle(checkout, work) {
   };
 }
 
+/**
+ * Lays out a candidate @appport/chip tarball the way an install would: the candidate is a real directory and
+ * its dependencies are siblings in node_modules. Everything else is the pinned stack, untouched. The candidate's
+ * version is returned so a run can record exactly what it exercised.
+ */
+function overlayCandidateChip(work, agentDir, tarball) {
+  const unpack = join(work, 'chip-candidate');
+  mkdirSync(unpack, { recursive: true });
+  execFileSync('tar', ['-xzf', tarball, '-C', unpack]);
+  const modules = join(agentDir, 'node_modules');
+  mkdirSync(join(modules, '@appport'), { recursive: true });
+  for (const entry of readdirSync(join(STACK, 'node_modules'))) {
+    if (entry === '@appport' || entry === '.bin') continue;
+    symlinkSync(join(STACK, 'node_modules', entry), join(modules, entry));
+  }
+  for (const entry of readdirSync(join(STACK, 'node_modules/@appport'))) {
+    if (entry !== 'chip') symlinkSync(join(STACK, 'node_modules/@appport', entry), join(modules, '@appport', entry));
+  }
+  cpSync(join(unpack, 'package'), join(modules, '@appport/chip'), { recursive: true });
+}
+
 /** The configured agent plus ONE test connection to the AppBoundry host, built with the pinned Chip. */
-export function prepareAgent(work, mcpUrl) {
+export function prepareAgent(work, mcpUrl, extraFiles = {}) {
   if (!mcpUrl) throw new Error('the AppBoundry connection URL must be set for the build (APPBOUNDRY_MCP_URL)');
   const dir = join(work, 'agent-under-test');
   mkdirSync(join(dir, 'agent/connections'), { recursive: true });
   cpSync(join(STACK, 'agent'), join(dir, 'agent'), { recursive: true });
   cpSync(join(STACK, 'package.json'), join(dir, 'package.json'));
-  symlinkSync(join(STACK, 'node_modules'), join(dir, 'node_modules'));
+  if (process.env.CHIP_TARBALL) overlayCandidateChip(work, dir, process.env.CHIP_TARBALL);
+  else symlinkSync(join(STACK, 'node_modules'), join(dir, 'node_modules'));
   writeFileSync(join(dir, 'agent/connections/appboundry.ts'), `import { defineMcpClientConnection } from "@appport/chip/connections";
 
 export default defineMcpClientConnection({
@@ -64,8 +88,12 @@ export default defineMcpClientConnection({
   auth: { getToken: async () => ({ token: process.env.APPPORT_MCP_TOKEN! }) },
 });
 `);
+  for (const [path, content] of Object.entries(extraFiles)) {
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), content);
+  }
   try {
-    execFileSync(process.execPath, ['node_modules/.bin/chip', 'build'], { cwd: dir, env: { ...process.env, EVE_TELEMETRY_DISABLED: '1', APPBOUNDRY_MCP_URL: mcpUrl }, stdio: 'pipe' });
+    execFileSync(process.execPath, [CHIP_BIN, 'build'], { cwd: dir, env: { ...process.env, EVE_TELEMETRY_DISABLED: '1', APPBOUNDRY_MCP_URL: mcpUrl }, stdio: 'pipe' });
   } catch (error) {
     throw new Error(`chip build failed:\n${error.stdout}\n${error.stderr}`);
   }
@@ -89,6 +117,15 @@ export async function mcp(host, method, params, headers) {
   const r = await fetch(host.mcp, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(headers ?? { authorization: `Bearer ${host.token}` }) }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
   return { status: r.status, body: await r.json().catch(() => null) };
 }
+/** Whether any file in the agent's build output contains `text`. */
+export function builtOutputMentions(agentDir, text) {
+  const walk = (dir) => readdirSync(dir, { withFileTypes: true }).some((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return walk(path);
+    try { return readFileSync(path, 'utf8').includes(text); } catch { return false; }
+  });
+  return existsSync(join(agentDir, '.output')) && walk(join(agentDir, '.output'));
+}
 export const todos = async (host) => (await mcp(host, 'tools/call', { name: 'todo_list', arguments: {} })).body?.result?.structuredContent?.todos;
 
 /** A scripted OpenAI-compatible endpoint. `script(body, n)` → {text} | {tool,args,rawArgs} | {error: status}. */
@@ -96,9 +133,10 @@ export async function startModel(script) {
   const requests = []; let n = 0;
   const server = createServer((req, res) => {
     let raw = ''; req.on('data', (c) => (raw += c));
-    req.on('end', () => {
+    req.on('end', async () => {
       const body = JSON.parse(raw || '{}'); requests.push(body);
       const next = script(body, n++);
+      if (next.delayMs) await sleep(next.delayMs); // a slow model, so a test can act while the model call is pending
       if (next.error) { res.writeHead(next.error, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'scripted model failure', type: 'server_error' } })); return; }
       const chunk = (delta, finish = null) => res.write(`data: ${JSON.stringify({ id: 'c', object: 'chat.completion.chunk', model: body.model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
       res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -114,10 +152,10 @@ export async function startModel(script) {
 export async function startChip({ agentDir, modelBase, mcpUrl, mcpToken, chipToken = `chip-token-${'x'.repeat(24)}` }) {
   const env = { ...process.env, FX_BASE_URL: modelBase, FX_MODEL: 'scripted', COMPUTE_CONFIGURED_CHIP_TOKEN: chipToken, EVE_TELEMETRY_DISABLED: '1', APPBOUNDRY_MCP_URL: mcpUrl, APPPORT_MCP_TOKEN: mcpToken };
   for (const name of Object.keys(env)) if (/^(AI_GATEWAY_|VERCEL)/.test(name)) delete env[name]; // no gateway identity exists
-  const child = spawn(process.execPath, ['node_modules/.bin/chip', 'start', '--host', '127.0.0.1', '--port', '0'], { cwd: agentDir, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [CHIP_BIN, 'start', '--host', '127.0.0.1', '--port', '0'], { cwd: agentDir, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = ''; child.stdout.on('data', (c) => (out += c)); child.stderr.on('data', (c) => (out += c));
   const origin = await new Promise((ok, bad) => { const t = setTimeout(() => bad(new Error(out)), 90000); const look = () => { const m = /Listening on: (http:\/\/[^\s/]+)/.exec(out); if (m) { clearTimeout(t); ok(m[1]); } }; child.stdout.on('data', look); child.once('exit', (c) => bad(new Error(`chip exited ${c}\n${out}`))); });
-  return { origin, headers: { authorization: `Bearer ${chipToken}`, 'content-type': 'application/json' }, stop: () => new Promise((r) => { child.once('exit', r); child.kill('SIGTERM'); setTimeout(r, 5000); }) };
+  return { origin, headers: { authorization: `Bearer ${chipToken}`, 'content-type': 'application/json' }, log: () => out, stop: () => new Promise((r) => { child.once('exit', r); child.kill('SIGTERM'); setTimeout(r, 5000); }) };
 }
 
 export async function create(chip, { message, operationId }) {
