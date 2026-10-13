@@ -20,6 +20,10 @@ import { createFeltDB, parseFlowSpec, validateFlowSpec } from '@feltdb/core';
 const here = new URL('.', import.meta.url);
 const stack = JSON.parse(await readFile(new URL('stack.json', here), 'utf8'));
 const lock = JSON.parse(await readFile(new URL('package-lock.json', here), 'utf8'));
+// What the model is offered from a configured agent with no connections: Chip's remaining defaults. A Chip
+// upgrade that adds or removes a default tool changes this list on purpose, so the change is reviewed.
+const EXPECTED_DEFAULT_TOOLS = ['agent', 'ask_question', 'load_skill', 'task_cancel', 'todo'];
+
 const checks = [];
 const pass = (name, detail) => checks.push({ name, result: 'pass', detail });
 
@@ -427,6 +431,23 @@ async function verifyChipServes() {
     assert.equal(text, 'FX fixture reply', `the FX reply did not reach the session: ${JSON.stringify(events)}`);
     assert.equal(events.at(-1)?.type, 'session.waiting');
     assert.ok(fixture.requests.some(({ body }) => body.model === 'compute-configured-verify' && body.stream === true));
+
+    // The default tool surface is explicit. Chip's built-in shell, file and web tools carry no scope or
+    // delegation enforcement, and whether they could act would otherwise depend on an optional sandbox
+    // package being installed. They are removed with Chip's own mechanism, and the model must not be offered them.
+    const disabled = defaultRuntime.disabled_builtin_tools;
+    assert.deepEqual([...disabled].sort(), ['bash', 'read_file', 'web_fetch', 'write_file'], 'the disabled built-ins are declared in the profile');
+    for (const name of disabled) {
+      const source = await readFile(new URL(`agent/tools/${name}.ts`, here), 'utf8').catch(() => '');
+      assert.match(source, /export default disableTool\(\)/, `agent/tools/${name}.ts must disable the built-in ${name}`);
+    }
+    // Retention can delete a finished run's stream, which Attn and PAX read after the fact. It stays unset
+    // unless a documented product requirement says otherwise.
+    assert.doesNotMatch(await readFile(new URL('agent/agent.ts', here), 'utf8'), /retention/i, 'the configured agent must not set workflow retention');
+    const offered = new Set((fixture.requests[0]?.body.tools ?? []).map((tool) => tool.function?.name));
+    assert.ok(offered.size > 0, 'the model was offered no tools at all; the surface check proved nothing');
+    for (const name of disabled) assert.ok(!offered.has(name), `the model is still offered the built-in ${name}`);
+    assert.deepEqual([...offered].sort(), EXPECTED_DEFAULT_TOOLS, 'the default tool surface changed; review it before accepting the new set');
   } finally {
     child?.kill('SIGTERM');
     await fixture.stop();

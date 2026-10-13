@@ -38,6 +38,11 @@ grep -q 'platform = OS.mac? ? "macos-aarch64" : "linux-x86_64"' "$configured_for
 grep -q "\"$configured_checksum\"" "$configured_formula"
 grep -q "\"$macos_configured_checksum\"" "$configured_formula"
 grep -q 'depends_on "rkendel1/compute/compute"' "$configured_formula"
+# Chip keeps its durable sessions under its working directory, so the launcher must run it in the persistent
+# Compute home, never in the keg or a temporary directory; and it must ship the whole agent, including the
+# tools that disable Chip's built-in shell, file and web tools.
+grep -qF 'work="${COMPUTE_HOME:-$HOME/.compute}/configured/chip"' "$configured_formula"
+grep -qF 'cp -RL "$root/agent" "$work/.agent.$$"' "$configured_formula"
 grep -q 'skip_clean "libexec"' "$configured_formula"
 if grep -q 'depends_on "node' "$configured_formula"; then
   echo "configured formula must use Compute's certified bundled Node runtime" >&2
