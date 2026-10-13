@@ -6,6 +6,46 @@
 // own beyond what is on screen; live changes arrive as lifecycle events.
 'use strict';
 
+// ---- The frame ----------------------------------------------------------------
+//
+// Every page renders inside the shared Stack shell (ui/vendor/stack-ui): this
+// product's navigation, the Work/Manage mode, the daemon's status and token, and
+// the theme preference. The shell owns the layout; the views below fill
+// `main#view` exactly as before.
+
+/// The control plane's surfaces, in order. `className` keeps the mode rules:
+/// an item only one mode uses is hidden in the other.
+const NAVIGATION = [
+  { id: 'home', label: 'Home', href: '#/' },
+  { id: 'software', label: 'Software', href: '#/software' },
+  { id: 'work', label: 'Computers', href: '#/work', className: 'work-only' },
+  { id: 'environments', label: 'Environments', href: '#/environments', className: 'manage-only' },
+  { id: 'projects', label: 'Bundles', href: '#/projects', className: 'manage-only' },
+  { id: 'domains', label: 'Domains', href: '#/domains', className: 'manage-only' },
+  { id: 'services', label: 'Services', href: '#/services', className: 'manage-only' },
+  { id: 'events', label: 'Events', href: '#/events', className: 'manage-only' },
+].map((item, order) => ({ ...item, order, attrs: { 'data-nav': item.id } }));
+
+/// The theme the operator chose, applied before the first paint.
+let themePreference = StackUI.initThemePreference(window);
+
+document.body.prepend(StackUI.dom.Shell({
+  product: { name: 'Compute', homeHref: '#/', mark: 'C' },
+  mainId: 'view',
+  navigation: NAVIGATION,
+  context: h('div', { class: 'modes', role: 'tablist', 'aria-label': 'Mode' },
+    h('a', { href: '#/work', role: 'tab', 'data-mode-link': 'work' }, 'Work'),
+    h('a', { href: '#/environments', role: 'tab', 'data-mode-link': 'manage' }, 'Manage')),
+  account: [
+    h('div', { class: 'daemon', id: 'daemon', 'aria-live': 'polite' }),
+    h('button', { class: 'ghost', id: 'token', type: 'button', title: 'Bearer token for changes, when the daemon requires one' }, 'Token'),
+  ],
+  theme: {
+    preference: themePreference,
+    onChange: (preference) => { themePreference = StackUI.setThemePreference(preference, window); },
+  },
+}));
+
 const view = document.getElementById('view');
 const dialog = document.getElementById('dialog');
 const toastBox = document.getElementById('toast');
@@ -200,6 +240,15 @@ function status(item) {
 /// A rollout's status. `applying` keeps the word the UI has always shown.
 function rolloutState(value) {
   return stackState('compute.rollout.status', value, value === 'applying' ? 'Deploying' : undefined);
+}
+
+/// Where a page sits, as the shared Breadcrumbs: `[label, href]` pairs, the
+/// last being the current page. Keeps the `crumbs` class for existing styles.
+function trail(...items) {
+  return StackUI.dom.Breadcrumbs({
+    className: 'crumbs',
+    items: items.map(([label, href]) => ({ label: String(label), href })),
+  });
 }
 
 function ago(timestamp) {
@@ -578,7 +627,7 @@ async function createEnvironment() {
 }
 
 async function environmentView(name) {
-  const crumbs = h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Environments'), ' / ', name);
+  const crumbs = trail(['Environments', '#/environments'], [name]);
   let environment;
   try {
     environment = await api('GET', `/environments/${enc(name)}`);
@@ -621,61 +670,107 @@ async function environmentView(name) {
       const seen = observed.repositories && observed.repositories[project.repository];
       const built = observed.builds && observed.builds[project.name];
       const current = rollouts.find((rollout) => rollout.project === project.name && rollout.status !== 'superseded');
-      return h('tr', { class: 'link', 'data-project': project.name, onclick: () => { location.hash = `#/software/${enc(project.name)}`; } },
-        h('td', {}, h('strong', {}, project.name)),
-        h('td', {}, current ? [current.version, ' ', rolloutState(current.status)] : h('span', { class: 'meta' }, 'unversioned')),
-        h('td', { class: 'mono' }, revisionText(repository.revision, seen && seen.commit)),
-        // A build's outcome is its job's terminal status (`succeeded`, `failed`,
-        // `cancelled`, `timed_out`, ...), shown in the job's own words.
-        h('td', {}, built ? stackState('compute.job.status', built.evidence.outcome, built.evidence.outcome) : '—'));
+      return {
+        key: project.name,
+        className: 'link',
+        attrs: { 'data-project': project.name },
+        onSelect: () => { location.hash = `#/software/${enc(project.name)}`; },
+        cells: {
+          project: h('strong', {}, project.name),
+          version: current ? h('span', {}, current.version, ' ', rolloutState(current.status)) : h('span', { class: 'meta' }, 'unversioned'),
+          revision: h('span', { class: 'mono' }, revisionText(repository.revision, seen && seen.commit)),
+          // A build's outcome is its job's terminal status (`succeeded`, `failed`,
+          // `cancelled`, `timed_out`, ...), shown in the job's own words.
+          build: built ? stackState('compute.job.status', built.evidence.outcome, built.evidence.outcome) : null,
+        },
+      };
     });
     const endpointOf = (process) => (computer.endpoints || []).find((endpoint) => endpoint.process === process);
     const processes = (computer.desired.processes || []).map((process) => {
       const seen = observed.processes && observed.processes[process.name];
       const endpoint = endpointOf(process.name);
-      return h('tr', { 'data-process': process.name },
-        h('td', {}, h('strong', {}, process.name)),
-        h('td', {}, process.kind || 'application'),
-        h('td', {}, processState(computer, process.name, seen)),
-        h('td', { class: 'mono' }, endpoint && endpoint.url ? h('a', { href: endpoint.url, target: '_blank', rel: 'noopener' }, endpoint.url) : '—'),
-        h('td', {},
-          h('button', { disabled: !running, onclick: () => act(`Restarting ${process.name}`, () => api('POST', `/environments/${enc(name)}/processes/${enc(process.name)}/restart`)) }, 'Restart'), ' ',
-          h('button', { disabled: !running, onclick: async () => {
-            const logs = await api('GET', `/environments/${enc(name)}/logs?process=${enc(process.name)}&limit=200`).catch((error) => ({ log: error.message }));
-            showOutput(`${process.name} log`, logs.log || '', '');
-          } }, 'Logs')));
+      return {
+        key: process.name,
+        attrs: { 'data-process': process.name },
+        cells: {
+          name: h('strong', {}, process.name),
+          kind: process.kind || 'application',
+          health: processState(computer, process.name, seen),
+          endpoint: endpoint && endpoint.url ? h('a', { class: 'mono', href: endpoint.url, target: '_blank', rel: 'noopener' }, endpoint.url) : null,
+          actions: h('span', {},
+            h('button', { disabled: !running, onclick: () => act(`Restarting ${process.name}`, () => api('POST', `/environments/${enc(name)}/processes/${enc(process.name)}/restart`)) }, 'Restart'), ' ',
+            h('button', { disabled: !running, onclick: async () => {
+              const logs = await api('GET', `/environments/${enc(name)}/logs?process=${enc(process.name)}&limit=200`).catch((error) => ({ log: error.message }));
+              showOutput(`${process.name} log`, logs.log || '', '');
+            } }, 'Logs')),
+        },
+      };
     });
     return [
       header,
       h('div', { class: 'subtitle' }, `${(computer.desired.projects || []).length} projects · ${(computer.desired.processes || []).length} processes · desired ${environment.desired_state} · policy ${short(environment.policy_id)}`),
       machineSection(name, environment),
       h('h2', {}, 'Software'),
-      table(['Project', 'Version', 'Revision', 'Build'], rows, 'No projects. Run one.'),
+      StackUI.dom.DataTable({
+        label: 'Software',
+        columns: [{ id: 'project', header: 'Project' }, { id: 'version', header: 'Version' }, { id: 'revision', header: 'Revision' }, { id: 'build', header: 'Build' }],
+        rows,
+        emptyTitle: 'No projects. Run one.',
+      }),
       h('h2', {}, 'Applications, services, and agents'),
-      table(['Name', 'Kind', 'Health', 'Endpoint', ''], processes, 'Nothing runs yet. Add it in Work.'),
+      StackUI.dom.DataTable({
+        label: 'Applications, services, and agents',
+        columns: [{ id: 'name', header: 'Name' }, { id: 'kind', header: 'Kind' }, { id: 'health', header: 'Health' }, { id: 'endpoint', header: 'Endpoint' }, { id: 'actions', header: 'Actions' }],
+        rows: processes,
+        emptyTitle: 'Nothing runs yet. Add it in Work.',
+      }),
       h('h2', {}, 'Deployments'),
-      table(['Kind', 'Project', 'Version', 'Status', 'By', 'When'], rollouts.map((rollout) => h('tr', { class: 'link', onclick: () => { location.hash = `#/operations/rollout/${enc(rollout.rollout_id)}`; } },
-        h('td', {}, rollout.kind), h('td', {}, rollout.project), h('td', {}, rollout.version),
-        h('td', {}, rolloutState(rollout.status)), h('td', {}, rollout.created_by), h('td', {}, ago(rollout.created_at)))), 'Nothing deployed here yet.'),
+      StackUI.dom.DataTable({
+        label: 'Deployments',
+        columns: [{ id: 'kind', header: 'Kind' }, { id: 'project', header: 'Project' }, { id: 'version', header: 'Version' }, { id: 'status', header: 'Status' }, { id: 'by', header: 'By' }, { id: 'when', header: 'When' }],
+        rows: rollouts.map((rollout) => ({
+          key: rollout.rollout_id,
+          className: 'link',
+          attrs: { 'data-rollout': rollout.rollout_id },
+          onSelect: () => { location.hash = `#/operations/rollout/${enc(rollout.rollout_id)}`; },
+          cells: {
+            kind: rollout.kind, project: rollout.project, version: rollout.version,
+            status: rolloutState(rollout.status), by: rollout.created_by, when: ago(rollout.created_at),
+          },
+        })),
+        emptyTitle: 'Nothing deployed here yet.',
+      }),
     ];
   }
-  const rows = environment.projects.map((project) => h('tr', {
-    class: 'link', 'data-project': project.name,
-    onclick: () => { location.hash = `#/environments/${enc(name)}/projects/${enc(project.name)}`; },
-  },
-  h('td', {}, h('strong', {}, project.name)),
-  h('td', { class: 'mono' }, project.revision || '—'),
-  h('td', {}, project.desired_state),
-  h('td', {}, status(project)),
-  h('td', {}, `${project.workload_count} workloads · ${project.service_count} services`),
-  h('td', {}, project.provider),
-  h('td', {}, project.deployment ? [stackState('compute.deployment.status', project.deployment.status), ' ', h('span', { class: 'chip' }, ago(project.deployment.created_at))] : '—')));
+  const rows = environment.projects.map((project) => ({
+    key: project.name,
+    className: 'link',
+    attrs: { 'data-project': project.name },
+    onSelect: () => { location.hash = `#/environments/${enc(name)}/projects/${enc(project.name)}`; },
+    cells: {
+      project: h('strong', {}, project.name),
+      revision: project.revision ? h('span', { class: 'mono' }, project.revision) : null,
+      desired: project.desired_state,
+      status: status(project),
+      workloads: `${project.workload_count} workloads · ${project.service_count} services`,
+      provider: project.provider,
+      deployment: project.deployment
+        ? h('span', {}, stackState('compute.deployment.status', project.deployment.status), ' ', h('span', { class: 'chip' }, ago(project.deployment.created_at)))
+        : null,
+    },
+  }));
   return [
     header,
     h('div', { class: 'subtitle' }, `${environment.project_count} projects · ${environment.workload_count} workloads · desired ${environment.desired_state} · policy ${short(environment.policy_id)}`),
     machineSection(name, environment),
     h('h2', {}, 'Projects'),
-    table(['Project', 'Revision', 'Desired', 'Status', 'Workloads', 'Provider', 'Last deployment'], rows, 'No projects in this environment. Add one.'),
+    StackUI.dom.DataTable({
+      label: 'Projects',
+      columns: [{ id: 'project', header: 'Project' }, { id: 'revision', header: 'Revision' }, { id: 'desired', header: 'Desired' }, { id: 'status', header: 'Status' },
+        { id: 'workloads', header: 'Workloads' }, { id: 'provider', header: 'Provider' }, { id: 'deployment', header: 'Last deployment' }],
+      rows,
+      emptyTitle: 'No projects in this environment. Add one.',
+    }),
   ];
 }
 
@@ -932,7 +1027,7 @@ async function workView(name) {
   const environment = await api('GET', `/environments/${enc(name)}`);
   if (!environment.computer) {
     return [
-      h('div', { class: 'crumbs' }, h('a', { href: '#/work' }, 'Work'), ' / ', name),
+      trail(['Work', '#/work'], [name]),
       h('div', { class: 'panel empty' }, `${name} runs on this control-plane node and has no computer to work in. Manage it instead, or create an environment with a computer.`),
     ];
   }
@@ -1017,7 +1112,7 @@ async function workView(name) {
       onchange: () => edit(name, draft, (next) => { next.lifecycle.lifecycle = value; next.lifecycle.touched = value === 'ephemeral'; }) }), ' ', label);
 
   return h('div', { class: 'work draft', 'data-view': 'work', 'data-environment-id': environment.environment_id },
-    h('div', { class: 'crumbs' }, h('a', { href: '#/work' }, 'Work'), ' / ', name),
+    trail(['Work', '#/work'], [name]),
     h('div', { class: 'title' }, h('h1', {}, name), state(observedOf(computer)),
       h('span', { class: 'chip mono', title: 'Environment ID' }, environment.environment_id),
       h('div', { class: 'actions' },
@@ -1316,7 +1411,7 @@ async function runView() {
       h('button', { class: 'primary', 'data-inspect': 'true', disabled: RUN.step === 'inspecting', onclick: inspectSource }, RUN.step === 'inspecting' ? 'Inspecting…' : 'Inspect'),
       RUN.status ? h('span', { class: 'meta', 'data-run-status': 'true' }, RUN.status) : null));
   return [
-    h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Home'), ' / ', title),
+    trail(['Home', '#/'], [title]),
     h('div', { class: 'title' }, h('h1', {}, title)),
     h('div', { class: 'subtitle' }, 'Compute looks at the source inside the computer and proposes how to run it. Nothing changes until GO.'),
     sourceStep,
@@ -1519,7 +1614,7 @@ async function softwareView(project) {
   h('td', {}, state(rollout.status === 'applying' ? 'deploying' : (rollout.status === 'superseded' ? 'superseded' : rollout.status))),
   h('td', {}, rollout.created_by), h('td', {}, ago(rollout.created_at))));
   return [
-    h('div', { class: 'crumbs' }, h('a', { href: '#/software' }, 'Software'), ' / ', project),
+    trail(['Software', '#/software'], [project]),
     h('div', { class: 'title', 'data-software-view': project }, h('h1', {}, project),
       view.latest_version ? h('span', { class: 'chip' }, `latest ${view.latest_version}`) : null,
       h('div', { class: 'actions' },
@@ -1699,7 +1794,7 @@ async function versionView(project, label) {
   const rollouts = await api('GET', `/rollouts?project=${enc(project)}`);
   const assembly = version.assembly || {};
   return [
-    h('div', { class: 'crumbs' }, h('a', { href: '#/software' }, 'Software'), ' / ', h('a', { href: `#/software/${enc(project)}` }, project), ' / ', label),
+    trail(['Software', '#/software'], [project, `#/software/${enc(project)}`], [label]),
     h('div', { class: 'title', 'data-version-view': label }, h('h1', {}, `${project} ${label}`), state(version.status === 'published' ? 'complete' : (version.status === 'failed' ? 'failed' : 'pending'), version.status),
       h('div', { class: 'actions' }, version.status === 'published'
         ? h('button', { class: 'primary', onclick: async () => deployDialog(project, await api('GET', `/software/${enc(project)}`), { version: label }) }, 'Deploy this version') : null)),
@@ -1741,7 +1836,7 @@ async function operationView(kind, first, second) {
     const failed = version.steps.find((item) => item.status === 'failed');
     pollWhile(version.status === 'publishing');
     return [
-      h('div', { class: 'crumbs' }, h('a', { href: `#/software/${enc(first)}` }, first), ' / publish'),
+      trail(['Software', '#/software'], [first, `#/software/${enc(first)}`], ['publish']),
       h('div', { class: 'title', 'data-operation': version.status }, h('h1', {}, `Publishing ${first} ${second}`),
         state(version.status === 'published' ? 'complete' : (version.status === 'failed' ? 'failed' : 'deploying'), version.status)),
       h('div', { class: 'subtitle' }, `In ${version.environment}'s computer`),
@@ -1759,7 +1854,7 @@ async function operationView(kind, first, second) {
   const verb = { deploy: 'Deploying', promote: 'Promoting', rollback: 'Rolling back' }[rollout.kind];
   const computer = await api('GET', `/environments/${enc(rollout.environment)}/computer`).catch(() => null);
   return [
-    h('div', { class: 'crumbs' }, h('a', { href: `#/software/${enc(rollout.project)}` }, rollout.project), ` / ${rollout.kind}`),
+    trail(['Software', '#/software'], [rollout.project, `#/software/${enc(rollout.project)}`], [rollout.kind]),
     h('div', { class: 'title', 'data-operation': rollout.status }, h('h1', {}, `${verb} ${rollout.project} ${rollout.version}`),
       state(rollout.status === 'active' ? 'running' : (rollout.status === 'failed' ? 'failed' : 'deploying'), rollout.status)),
     h('div', { class: 'subtitle' }, `${rollout.from_environment ? `${rollout.from_environment} → ` : ''}${rollout.environment}${rollout.previous_version ? ` · replacing ${rollout.previous_version}` : ''} · by ${rollout.created_by}`),
@@ -1847,7 +1942,7 @@ async function projectView(environment, name, tab) {
   const base = `#/environments/${enc(environment)}/projects/${enc(name)}`;
   const active = TABS.includes(tab) ? tab : 'Overview';
   return [
-    h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Environments'), ' / ', h('a', { href: `#/environments/${enc(environment)}` }, environment), ' / ', name),
+    trail(['Environments', '#/environments'], [environment, `#/environments/${enc(environment)}`], [name]),
     h('div', { class: 'title' }, h('h1', {}, `${name.toUpperCase()} / ${environment.toUpperCase()}`), status(project),
       h('div', { class: 'actions' },
         h('button', { onclick: () => redeploy(environment, name) }, 'Deploy'),
@@ -1856,11 +1951,24 @@ async function projectView(environment, name, tab) {
         h('button', { onclick: () => projectLifecycle(environment, name, 'restart') }, 'Restart'),
         h('button', { class: 'danger', onclick: () => projectLifecycle(environment, name, 'stop') }, 'Stop'),
         h('button', { class: 'danger', onclick: () => removeProject(environment, name) }, 'Remove'))),
-    h('div', { class: 'tabs', role: 'tablist' }, TABS.map((item) => h('button', {
-      role: 'tab', class: item === active ? 'active' : '', 'aria-selected': String(item === active),
-      onclick: () => { location.hash = `${base}/${item.toLowerCase()}`; },
-    }, item))),
-    await projectTab(environment, name, project, active),
+    // The shared Tabs: arrow keys move between sections, Enter opens one. The
+    // `tabs` and `active` classes keep existing styles and selectors.
+    StackUI.dom.Tabs({
+      className: 'tabs',
+      label: 'Project sections',
+      idPrefix: 'project',
+      panelId: 'project-panel',
+      active,
+      tabs: TABS.map((item) => ({ id: item, label: item, className: item === active ? 'active' : null })),
+      // Choosing a section keeps focus on its tab, where the keyboard user is.
+      onSelect: (item) => {
+        const next = `${base}/${item.toLowerCase()}`;
+        if (location.hash === next) return;
+        focusAfterRoute = `project-tab-${item}`;
+        location.hash = next;
+      },
+    }),
+    StackUI.dom.TabPanel({ id: 'project-panel', idPrefix: 'project', active, children: await projectTab(environment, name, project, active) }),
   ];
 }
 
@@ -2009,7 +2117,7 @@ async function projectDetailView(name) {
     h('span', {}, environment.name),
     member.has(environment.name) ? status(detail.environments.find((item) => item.environment === environment.name)) : h('span', { class: 'chip' }, 'not deployed')));
   return [
-    h('div', { class: 'crumbs' }, h('a', { href: '#/projects' }, 'Projects'), ' / ', name),
+    trail(['Projects', '#/projects'], [name]),
     h('div', { class: 'title' }, h('h1', {}, name.toUpperCase()),
       h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: () => deployWizard({ project: name }) }, 'Add to environment'))),
     h('div', { class: 'subtitle' }, `${detail.revision_count} revisions · latest ${detail.latest_revision || '—'}`),
@@ -2142,9 +2250,8 @@ async function deploymentView(id) {
   const inFlight = RELEASE.slice(0, -1).includes(deployment.status);
   const reason = deployment.failure || deployment.rollback_reason;
   return [
-    h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Environments'), ' / ',
-      h('a', { href: `#/environments/${enc(deployment.environment)}` }, deployment.environment), ' / ',
-      h('a', { href: `#/environments/${enc(deployment.environment)}/projects/${enc(deployment.project)}/deployments` }, deployment.project), ' / ', short(id)),
+    trail(['Environments', '#/environments'], [deployment.environment, `#/environments/${enc(deployment.environment)}`],
+      [deployment.project, `#/environments/${enc(deployment.environment)}/projects/${enc(deployment.project)}/deployments`], [short(id)]),
     h('div', { class: 'title' }, h('h1', {}, `RELEASE ${deployment.revision}`), state(deployment.status),
       h('div', { class: 'actions' },
         deployment.receipt ? h('button', { onclick: () => showReceipt(id) }, 'Receipt') : null,
@@ -2242,7 +2349,7 @@ async function domainView(name) {
   const domain = await api('GET', `/domains/${enc(name)}`);
   const certificate = domain.certificate;
   return [
-    h('div', { class: 'crumbs' }, h('a', { href: '#/domains' }, 'Domains'), ' / ', name),
+    trail(['Domains', '#/domains'], [name]),
     h('div', { class: 'title' }, h('h1', {}, name), state(domain.status),
       h('div', { class: 'actions' },
         h('button', { onclick: () => act('DNS reconciled', () => api('POST', '/dns/reconcile')) }, 'Reconcile DNS'),
@@ -2320,7 +2427,11 @@ async function render() {
   const { nav, render: renderView, mode = 'manage', environment } = route();
   try { sessionStorage.setItem('compute.mode', mode); } catch { /* storage unavailable */ }
   clearTimeout(operationTimer);
-  for (const link of document.querySelectorAll('[data-nav]')) link.classList.toggle('active', link.dataset.nav === nav);
+  // The shell marks the current surface for everyone, not only by colour.
+  for (const link of document.querySelectorAll('[data-nav]')) {
+    if (link.dataset.nav === nav) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  }
   // One control plane, two modes of the same environment: switching keeps it.
   document.body.dataset.mode = mode;
   for (const link of document.querySelectorAll('[data-mode-link]')) {
@@ -2421,6 +2532,18 @@ document.getElementById('token').addEventListener('click', () => {
   ]);
 });
 
-window.addEventListener('hashchange', render);
+// A new route is a new page: render it, then start keyboard and screen-reader
+// users at its content. A section chosen from the project tabs is the same
+// page, so focus returns to that tab instead. Live re-renders (`listen`) never
+// move focus.
+let focusAfterRoute = null;
+window.addEventListener('hashchange', async () => {
+  const target = focusAfterRoute;
+  focusAfterRoute = null;
+  await render();
+  const tab = target && document.getElementById(target);
+  if (tab) tab.focus();
+  else StackUI.focusMain('view');
+});
 render();
 listen();
