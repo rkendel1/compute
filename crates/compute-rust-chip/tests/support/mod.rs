@@ -79,6 +79,11 @@ impl Target {
         self.runtime = Some(runtime);
     }
 
+    /// Where the target keeps its durable job and session records.
+    pub fn store_dir(&self) -> &Path {
+        self.stores.path()
+    }
+
     /// Stop answering, as a machine that went away does.
     pub fn stop(&mut self) {
         if let Some(runtime) = self.runtime.take() {

@@ -182,7 +182,22 @@ other compute-rust-chip tests passed against `main` (agent_contract 1, work 4, p
 | G9 | Native provider has no proxy / custom-CA support | separate follow-up inside the FX provider boundary | fx / chip-rs |
 | G10 | Compute cannot authorize individual capabilities (by design) | decide whether it should; do not invent an interface | owner |
 
-Follow-up issues for these have **not** been filed by this change.
+Follow-up issues are filed as compute#88 (G1) to #97 (G10), each carrying its recorded decision; #97 (G10, by design)
+is closed as not planned.
+
+**Status after the product integration PR.** The product pin (`crates/compute-rust-chip`) is now the immutable chip-rs `main`
+commit `b3f9a1c8…` (merge of chip-rs#38; fx `72ef7a41…` through it), with the §4 edits (a)–(b) applied. G2: the launcher stand-in
+serves SSE when FX asks for a stream. The exit code `3` was diagnosed: the service validates the model provider before it checks
+capacity, and the FX executor requires an endpoint ending in `/chat/completions`; the test passed `http://127.0.0.1:1`, so the
+launch ended with 3 before the capacity check ran. The test now passes a well-formed endpoint (expected code `2` unchanged) and a
+second test pins the `3` for a malformed endpoint. G8 and G6 have launcher-path tests (key sentinel; a model's own claim of
+success does not complete a work). G1/G2/G6/G8 remain open until this PR merges and its CI is observed; the harness in
+`integration/chip-fx` is not yet folded into `crates/compute-rust-chip/tests`.
+
+**New finding (chip-rs, not fixed here).** `FxModelProvider::complete` holds its capability lock for the whole attempt, and
+`chip serve` shares one provider across works, so two concurrent works' model calls are serialized: a second work's inference waits for
+the first's to finish. The old launcher test assumed both could be in flight and waited on a barrier, which then outlasted the 30 s
+attempt budget. The test now holds each work's first reply for a moment and checks that both works are running together instead.
 
 ## 6. Readiness gates for the integration PR
 

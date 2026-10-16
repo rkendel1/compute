@@ -20,9 +20,14 @@ use support::*;
 
 type Script = HashMap<&'static str, Vec<String>>;
 
+/// The provider key the launcher gives Rust Chip. It must reach the model endpoint and nowhere else.
+const SENTINEL_KEY: &str = "sk-never-shown-to-anyone";
+
 struct Mock {
     url: String,
     seen: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// The `Authorization` header of every request: the proof that the key really was sent to the model.
+    auth: Arc<Mutex<Vec<String>>>,
 }
 
 fn marker_of(text: &str) -> Option<&'static str> {
@@ -31,25 +36,28 @@ fn marker_of(text: &str) -> Option<&'static str> {
         .find(|m| text.contains(m))
 }
 
-/// Answers `script[marker][n]` to the n-th request carrying `marker`. When `barrier` is set, the
-/// first answer for every marker is held until all markers have asked: if the works were not
-/// running at the same time, nothing would ever be answered.
-async fn mock(script: Script, barrier: bool) -> Mock {
+/// Answers `script[marker][n]` to the n-th request carrying `marker`. When `hold_first` is set, the
+/// first answer for every marker is held that long, so the works stay in flight together long enough
+/// for the test to observe it. (It cannot wait for the other work's request instead: the service
+/// shares one model provider and FX holds it for the whole attempt, so two model calls are never in
+/// flight at once. That is a property of chip-rs at the pinned commit, not of the Compute adapter.)
+async fn mock(script: Script, hold_first: Option<Duration>) -> Mock {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!(
         "http://{}/v1/chat/completions",
         listener.local_addr().unwrap()
     );
     let seen: Arc<Mutex<HashMap<String, Vec<String>>>> = Arc::default();
-    let expected = script.len();
     let script = Arc::new(script);
     let state = seen.clone();
+    let auth: Arc<Mutex<Vec<String>>> = Arc::default();
+    let auth_state = auth.clone();
     tokio::spawn(async move {
         loop {
             let Ok((mut socket, _)) = listener.accept().await else {
                 return;
             };
-            let (script, state) = (script.clone(), state.clone());
+            let (script, state, auth) = (script.clone(), state.clone(), auth_state.clone());
             tokio::spawn(async move {
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
                 let mut buf = Vec::new();
@@ -61,7 +69,16 @@ async fn mock(script: Script, barrier: bool) -> Mock {
                     }
                     buf.extend_from_slice(&chunk[..n]);
                     if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let head = String::from_utf8_lossy(&buf[..at]).to_ascii_lowercase();
+                        let raw = String::from_utf8_lossy(&buf[..at]).to_string();
+                        if let Some(line) = raw
+                            .lines()
+                            .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+                        {
+                            auth.lock()
+                                .unwrap()
+                                .push(line["authorization:".len()..].trim().to_string());
+                        }
+                        let head = raw.to_ascii_lowercase();
                         let length = head
                             .lines()
                             .find_map(|l| {
@@ -94,11 +111,8 @@ async fn mock(script: Script, barrier: bool) -> Mock {
                     list.push(text);
                     list.len() - 1
                 };
-                if barrier && n == 0 {
-                    let deadline = Instant::now() + Duration::from_secs(60);
-                    while state.lock().unwrap().len() < expected && Instant::now() < deadline {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                    }
+                if let (Some(hold), 0) = (hold_first, n) {
+                    tokio::time::sleep(hold).await;
                 }
                 let reply = script[marker]
                     .get(n)
@@ -129,7 +143,7 @@ async fn mock(script: Script, barrier: bool) -> Mock {
             });
         }
     });
-    Mock { url, seen }
+    Mock { url, seen, auth }
 }
 
 /// One scripted reply as the OpenAI-style event stream FX reads: the content, a stop, the usage, the
@@ -137,7 +151,9 @@ async fn mock(script: Script, barrier: bool) -> Mock {
 fn event_stream(id: &str, content: &str) -> String {
     let mut out = String::new();
     let mut event = |v: Value| out.push_str(&format!("data: {v}\n\n"));
-    event(json!({"id": id, "choices": [{"index": 0, "delta": {"role": "assistant", "content": content}}]}));
+    event(
+        json!({"id": id, "choices": [{"index": 0, "delta": {"role": "assistant", "content": content}}]}),
+    );
     event(json!({"id": id, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}));
     event(json!({"id": id, "choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3}}));
     out.push_str("data: [DONE]\n\n");
@@ -203,7 +219,7 @@ fn launcher(target: &Target, source: &std::path::Path, model: &str, tag: &str) -
         .env("CHIP_PROVIDER", "openai-compatible")
         .env("CHIP_MODEL", "mock-model")
         .env("CHIP_ENDPOINT", model)
-        .env("CHIP_API_KEY", "sk-never-shown-to-anyone")
+        .env("CHIP_API_KEY", SENTINEL_KEY)
         .env_remove("PAX_BIN");
     c
 }
@@ -299,8 +315,8 @@ async fn two_concurrent_rust_chip_works_edit_the_same_file_in_two_compute_enviro
             vec![write("README.md", "BRAVO\n"), read("README.md"), pax_test()],
         ),
     ]);
-    // Neither work is answered until both have asked: they must be running at the same time.
-    let model = mock(script, true).await;
+    // Each work's first answer is held, so both are in flight at once and the test can see it.
+    let model = mock(script, Some(Duration::from_millis(1500))).await;
     let (url, endpoint, tgt_token) = (
         model.url.clone(),
         target.endpoint.clone(),
@@ -329,6 +345,21 @@ async fn two_concurrent_rust_chip_works_edit_the_same_file_in_two_compute_enviro
             &addr,
             "BRAVO: put the word BRAVO in README.md, then verify.",
         );
+        // Both are admitted and running at the same moment, each in its own Compute environment.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let running = |id: &str| {
+                http(&addr, "GET", &format!("/v1/work/{id}"), None).1["status"] == "running"
+            };
+            if running(&a) && running(&b) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the two works were never running together"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
         let (da, db) = (wait_done(&addr, &a), wait_done(&addr, &b));
         let (ka, kb) = (kinds(&addr, &a), kinds(&addr, &b));
         let (_, final_metrics) = http(&addr, "GET", "/v1/metrics", None);
@@ -434,7 +465,7 @@ fn launcher_for(endpoint: &str, token: &str, source: &std::path::Path, model: &s
         .env("CHIP_PROVIDER", "openai-compatible")
         .env("CHIP_MODEL", "mock-model")
         .env("CHIP_ENDPOINT", model)
-        .env("CHIP_API_KEY", "sk-never-shown-to-anyone")
+        .env("CHIP_API_KEY", SENTINEL_KEY)
         .env_remove("PAX_BIN");
     c
 }
@@ -443,17 +474,26 @@ fn launcher_for(endpoint: &str, token: &str, source: &std::path::Path, model: &s
 fn the_launcher_refuses_more_concurrency_than_the_provider_can_isolate_and_needs_configuration() {
     let target = Target::start();
     let source = project("launcher-limits", true);
+    // The model endpoint must be shaped the way the FX executor requires (`.../chat/completions`):
+    // the service checks the model provider before it checks capacity, so a malformed endpoint
+    // ends the launch with exit 3 and the capacity check is never reached. Nothing listens here.
+    const UNREACHABLE_MODEL: &str = "http://127.0.0.1:1/v1/chat/completions";
     // More work at once than isolated Compute sessions the provider declared.
-    let out = launcher(&target, &source, "http://127.0.0.1:1", "limits")
+    let out = launcher(&target, &source, UNREACHABLE_MODEL, "limits")
         .env("COMPUTE_RUST_CHIP_MAX_ENVIRONMENTS", "2")
         .args(["--port", "0", "--max-concurrent-work", "3"])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(String::from_utf8_lossy(&out.stderr).contains("requires isolated environments"));
     assert!(out.stdout.is_empty());
     // No target configured: nothing is run, and nothing falls back to the local machine.
-    let out = launcher(&target, &source, "http://127.0.0.1:1", "limits2")
+    let out = launcher(&target, &source, UNREACHABLE_MODEL, "limits2")
         .env_remove("COMPUTE_RUST_CHIP_TARGET")
         .args(["--port", "0"])
         .output()
@@ -461,4 +501,184 @@ fn the_launcher_refuses_more_concurrency_than_the_provider_can_isolate_and_needs
     assert_eq!(out.status.code(), Some(3));
     assert!(String::from_utf8_lossy(&out.stderr).contains("COMPUTE_RUST_CHIP_TARGET is not set"));
     assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn a_model_endpoint_the_fx_executor_cannot_use_ends_the_launch_before_anything_runs() {
+    let target = Target::start();
+    let source = project("launcher-endpoint", true);
+    let out = launcher(&target, &source, "http://127.0.0.1:1", "endpoint")
+        .args(["--port", "0"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("endpoint ending in /chat/completions")
+            && stderr.contains("nothing was run"),
+        "{stderr}"
+    );
+    assert!(out.stdout.is_empty());
+}
+
+/// Every file under `dir`, as bytes, with its path.
+fn files_under(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                out.push((path, bytes));
+            }
+        }
+    }
+    out
+}
+
+fn contains(haystack: &[u8], needle: &str) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|w| w == needle.as_bytes())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_provider_key_reaches_the_model_and_nothing_compute_stores_or_the_service_reports() {
+    if !pax_installed() {
+        eprintln!("SKIPPED: PAX is not installed");
+        return;
+    }
+    let target = Target::start();
+    let source = project("key-nondisclosure", true);
+    let script: Script = HashMap::from([(
+        "ALPHA",
+        vec![write("README.md", "ALPHA\n"), read("README.md"), pax_test()],
+    )]);
+    let model = mock(script, None).await;
+    let (url, endpoint, tgt_token, src) = (
+        model.url.clone(),
+        target.endpoint.clone(),
+        target.token.clone(),
+        source.clone(),
+    );
+    let (done, events_text, stdout_seen) = tokio::task::spawn_blocking(move || {
+        let service = start(
+            launcher_for(&endpoint, &tgt_token, &src, &url),
+            &["--port", "0"],
+        );
+        let id = submit(
+            &service.addr,
+            "ALPHA: put the word ALPHA in README.md, then verify.",
+        );
+        let done = wait_done(&service.addr, &id);
+        let (_, events) = http(&service.addr, "GET", &format!("/v1/work/{id}/events"), None);
+        let (_, metrics) = http(&service.addr, "GET", "/v1/metrics", None);
+        // Everything the service reports about the work, as text.
+        (
+            done.to_string(),
+            format!("{events}\n{metrics}"),
+            String::new(),
+        )
+    })
+    .await
+    .unwrap();
+    let _ = stdout_seen;
+    assert!(
+        done.contains("\"status\":\"completed\""),
+        "the work did not complete"
+    );
+
+    // Positive control: the key really was sent to the model, so the absence below is not vacuous.
+    let sent = model.auth.lock().unwrap().clone();
+    assert!(
+        !sent.is_empty() && sent.iter().all(|h| h == &format!("Bearer {SENTINEL_KEY}")),
+        "the model endpoint did not receive the configured key as a bearer credential"
+    );
+
+    // Absence: what the service reports, what the model was shown, and everything the Compute
+    // target stored durably. The sentinel is never printed in a failure message.
+    assert!(
+        !done.contains(SENTINEL_KEY),
+        "the key is in the work result"
+    );
+    assert!(
+        !events_text.contains(SENTINEL_KEY),
+        "the key is in the events or metrics"
+    );
+    let shown = model
+        .seen
+        .lock()
+        .unwrap()
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !shown.contains(SENTINEL_KEY),
+        "the key was shown to the model"
+    );
+    let stored = files_under(target.store_dir());
+    assert!(
+        stored
+            .iter()
+            .any(|(_, bytes)| contains(bytes, "capability-exec")),
+        "no job records were found in the target's stores: the check below would prove nothing"
+    );
+    for (path, bytes) in &stored {
+        assert!(
+            !contains(bytes, SENTINEL_KEY),
+            "the key is in a Compute record: {}",
+            path.display()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_models_own_claim_of_success_does_not_complete_a_work_without_the_required_evidence() {
+    if !pax_installed() {
+        eprintln!("SKIPPED: PAX is not installed");
+        return;
+    }
+    let target = Target::start();
+    let source = project("claim-without-evidence", true);
+    // The model asks for nothing and declares victory at once.
+    let script: Script = HashMap::from([(
+        "ALPHA",
+        vec![json!({"decision": "complete", "summary": "all done, trust me"}).to_string()],
+    )]);
+    let model = mock(script, None).await;
+    let (url, endpoint, tgt_token, src) = (
+        model.url.clone(),
+        target.endpoint.clone(),
+        target.token.clone(),
+        source.clone(),
+    );
+    let done = tokio::task::spawn_blocking(move || {
+        let service = start(
+            launcher_for(&endpoint, &tgt_token, &src, &url),
+            &["--port", "0"],
+        );
+        let id = submit(
+            &service.addr,
+            "ALPHA: put the word ALPHA in README.md, then verify.",
+        );
+        wait_done(&service.addr, &id)
+    })
+    .await
+    .unwrap();
+    assert_ne!(
+        done["status"], "completed",
+        "a claim without evidence completed the work"
+    );
+    assert_eq!(done["result"]["verified"], false);
+    assert_eq!(done["result"]["pax_executions"], 0);
+    assert_eq!(done["result"]["audit"]["false_completions"], 0);
+    // Nothing changed in the project either.
+    assert_eq!(
+        std::fs::read_to_string(source.join("README.md")).unwrap(),
+        "baseline\n"
+    );
 }
