@@ -1,0 +1,29 @@
+# Compute -> Rust Chip -> FX integration harness (preparation only; see docs/chip-fx-integration.md).
+#
+# This is deliberately its OWN cargo workspace, like chip-rs's session-memory experiment. The product
+# workspace pins Rust Chip at an older commit that still carries the retired toy FX; the harness pins
+# the chip-rs commit that carries the authoritative FX adapter. Keeping them apart means this crate
+# changes no shipped binary and the two Chip versions never share a dependency graph. The follow-up
+# that moves the product pin forward folds this harness into `crates/compute-rust-chip/tests`.
+[workspace]
+
+[package]
+name = "compute-chip-fx-harness"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Deterministic fakes-only harness for the Compute -> Rust Chip -> FX contract"
+
+# Immutable revisions only (never a branch or tag). The fx rev is the one chip-rs itself builds
+# against (crates/chip-fx/Cargo.toml at the chip-rs rev below); both are checked by tests/pins.rs.
+[dependencies]
+async-trait = "0.1"
+chip-core = { git = "https://github.com/rkendel1/chip-rs", rev = "2ea3ade3b0c824dc82a3f60962115ca6b05906b8" }
+chip-fx = { git = "https://github.com/rkendel1/chip-rs", rev = "2ea3ade3b0c824dc82a3f60962115ca6b05906b8" }
+chip-inference = { git = "https://github.com/rkendel1/chip-rs", rev = "2ea3ade3b0c824dc82a3f60962115ca6b05906b8" }
+fx-core = { git = "https://github.com/rkendel1/fx", rev = "72ef7a41c5f7b714774ec224c38aa23b53325759" }
+fx-single-attempt = { git = "https://github.com/rkendel1/fx", rev = "72ef7a41c5f7b714774ec224c38aa23b53325759" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

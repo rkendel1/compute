@@ -8,3 +8,4 @@
 .env.local
 /compatibility/published-stack/.output
 /compatibility/published-stack/.eve
+/integration/chip-fx/target
