@@ -364,7 +364,7 @@ dependencies = [
 [[package]]
 name = "chip-cli"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "async-trait",
  "chip-compute",
@@ -389,7 +389,7 @@ dependencies = [
 [[package]]
 name = "chip-compute"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -400,7 +400,7 @@ dependencies = [
 [[package]]
 name = "chip-core"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "async-trait",
  "fx-core",
@@ -410,7 +410,7 @@ dependencies = [
 [[package]]
 name = "chip-decision-corpus"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "chip-core",
  "sha2",
@@ -419,7 +419,7 @@ dependencies = [
 [[package]]
 name = "chip-graph"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "proc-macro2",
  "serde",
@@ -432,7 +432,7 @@ dependencies = [
 [[package]]
 name = "chip-local-decision"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "chip-core",
  "chip-wasm-decision",
@@ -441,7 +441,7 @@ dependencies = [
 [[package]]
 name = "chip-pax"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -453,7 +453,7 @@ dependencies = [
 [[package]]
 name = "chip-project"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -465,7 +465,7 @@ dependencies = [
 [[package]]
 name = "chip-reasoning-corpus"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "chip-core",
 ]
@@ -473,7 +473,7 @@ dependencies = [
 [[package]]
 name = "chip-remote-env"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -485,12 +485,12 @@ dependencies = [
 [[package]]
 name = "chip-wasm-decision"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 
 [[package]]
 name = "chip-wasm-decision-host"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "chip-core",
  "chip-wasm-decision",
@@ -500,7 +500,7 @@ dependencies = [
 [[package]]
 name = "chip-wasm-reasoner"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "chip-core",
  "wasmi",
@@ -1417,7 +1417,7 @@ dependencies = [
 [[package]]
 name = "fx-core"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "async-trait",
 ]
@@ -1425,7 +1425,7 @@ dependencies = [
 [[package]]
 name = "fx-provider-http"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?branch=claude%2Fvigilant-noether-j1ddif#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
 dependencies = [
  "async-trait",
  "fx-core",

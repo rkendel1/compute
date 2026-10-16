@@ -1,0 +1,41 @@
+name: chip-fx-integration
+
+# Preparation for wiring Rust Chip and the authoritative FX into Compute (docs/chip-fx-integration.md).
+# The harness is its own cargo workspace (integration/chip-fx) pinned to immutable chip-rs and fx
+# revisions; it uses fixtures only (no provider credentials, no network model, no production effect).
+# The product workspace's own checks for this boundary (pins, no direct host access) run in `test`.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "integration/chip-fx/**"
+      - "crates/compute-rust-chip/**"
+      - "docs/chip-fx-integration.md"
+      - ".github/workflows/chip-fx-integration.yml"
+  push:
+    branches: [main]
+    paths:
+      - "integration/chip-fx/**"
+      - "crates/compute-rust-chip/**"
+      - "docs/chip-fx-integration.md"
+      - ".github/workflows/chip-fx-integration.yml"
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integration/chip-fx
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: wasm32-unknown-unknown
+      - name: Format
+        run: cargo fmt --check
+      - name: Contract, boundary and pin tests (native)
+        run: cargo test --locked
+      - name: Wasm-bound crates build for wasm32 (no native provider stack)
+        run: cargo check --locked -p chip-core -p chip-fx -p fx-core -p fx-single-attempt --target wasm32-unknown-unknown
