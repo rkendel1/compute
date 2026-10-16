@@ -104,21 +104,44 @@ async fn mock(script: Script, barrier: bool) -> Mock {
                     .get(n)
                     .cloned()
                     .unwrap_or_else(|| "{}".into());
+                let id = format!("{}-{n}", marker.to_lowercase());
                 let payload = json!({
-                    "id": format!("{}-{n}", marker.to_lowercase()),
+                    "id": id,
                     "choices": [{"message": {"role": "assistant", "content": reply}}],
                     "usage": {"prompt_tokens": 5, "completion_tokens": 3},
                 })
                 .to_string();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
-                    payload.len()
-                );
+                // Rust Chip's executor is FX, which asks for a stream; answer in the form that was
+                // asked for, with the same scripted content and usage either way.
+                let response = if body["stream"] == json!(true) {
+                    let events = event_stream(&id, &reply);
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{events}",
+                        events.len()
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    )
+                };
                 let _ = socket.write_all(response.as_bytes()).await;
             });
         }
     });
     Mock { url, seen }
+}
+
+/// One scripted reply as the OpenAI-style event stream FX reads: the content, a stop, the usage, the
+/// terminator.
+fn event_stream(id: &str, content: &str) -> String {
+    let mut out = String::new();
+    let mut event = |v: Value| out.push_str(&format!("data: {v}\n\n"));
+    event(json!({"id": id, "choices": [{"index": 0, "delta": {"role": "assistant", "content": content}}]}));
+    event(json!({"id": id, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}));
+    event(json!({"id": id, "choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3}}));
+    out.push_str("data: [DONE]\n\n");
+    out
 }
 
 fn write(path: &str, content: &str) -> String {
