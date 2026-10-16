@@ -17,7 +17,7 @@ use chip_core::{
 };
 use compute_core::SessionStatus;
 use compute_rust_chip::ComputeSessionEnvironments;
-use fx_core::{FxError, ModelProvider, ModelRequest, ModelResponse, Usage};
+use chip_inference::{FxError, ModelProvider, ModelRequest, ModelResponse, Usage};
 use serde_json::json;
 use support::*;
 

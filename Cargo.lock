@@ -364,13 +364,16 @@ dependencies = [
 [[package]]
 name = "chip-cli"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
 dependencies = [
  "async-trait",
  "chip-compute",
  "chip-core",
  "chip-decision-corpus",
+ "chip-fx",
+ "chip-fx-native",
  "chip-graph",
+ "chip-inference",
  "chip-local-decision",
  "chip-pax",
  "chip-project",
@@ -379,8 +382,6 @@ dependencies = [
  "chip-wasm-decision",
  "chip-wasm-decision-host",
  "chip-wasm-reasoner",
- "fx-core",
- "fx-provider-http",
  "serde_json",
  "sha2",
  "tokio",
@@ -389,7 +390,7 @@ dependencies = [
 [[package]]
 name = "chip-compute"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -400,26 +401,52 @@ dependencies = [
 [[package]]
 name = "chip-core"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
 dependencies = [
  "async-trait",
- "fx-core",
+ "chip-inference",
  "sha2",
 ]
 
 [[package]]
 name = "chip-decision-corpus"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
 dependencies = [
  "chip-core",
  "sha2",
 ]
 
 [[package]]
+name = "chip-fx"
+version = "0.1.0"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
+dependencies = [
+ "async-trait",
+ "chip-inference",
+ "fx-core",
+ "fx-single-attempt",
+ "serde_json",
+]
+
+[[package]]
+name = "chip-fx-native"
+version = "0.1.0"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
+dependencies = [
+ "async-trait",
+ "chip-fx",
+ "chip-inference",
+ "fx-core",
+ "fx-native-provider",
+ "fx-single-attempt",
+ "tokio",
+]
+
+[[package]]
 name = "chip-graph"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
 dependencies = [
  "proc-macro2",
  "serde",
@@ -430,9 +457,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chip-inference"
+version = "0.1.0"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
+dependencies = [
+ "async-trait",
+]
+
+[[package]]
 name = "chip-local-decision"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
 dependencies = [
  "chip-core",
  "chip-wasm-decision",
@@ -441,7 +476,7 @@ dependencies = [
 [[package]]
 name = "chip-pax"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -453,7 +488,7 @@ dependencies = [
 [[package]]
 name = "chip-project"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -465,7 +500,7 @@ dependencies = [
 [[package]]
 name = "chip-reasoning-corpus"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
 dependencies = [
  "chip-core",
 ]
@@ -473,7 +508,7 @@ dependencies = [
 [[package]]
 name = "chip-remote-env"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -485,12 +520,12 @@ dependencies = [
 [[package]]
 name = "chip-wasm-decision"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
 
 [[package]]
 name = "chip-wasm-decision-host"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
 dependencies = [
  "chip-core",
  "chip-wasm-decision",
@@ -500,7 +535,7 @@ dependencies = [
 [[package]]
 name = "chip-wasm-reasoner"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/chip-rs?rev=b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3#b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3"
 dependencies = [
  "chip-core",
  "wasmi",
@@ -831,12 +866,12 @@ dependencies = [
  "async-trait",
  "chip-cli",
  "chip-core",
+ "chip-inference",
  "chip-pax",
  "chip-remote-env",
  "compute-agent",
  "compute-core",
  "compute-provider",
- "fx-core",
  "serde_json",
  "sha2",
  "tempfile",
@@ -1417,22 +1452,29 @@ dependencies = [
 [[package]]
 name = "fx-core"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/fx?rev=72ef7a41c5f7b714774ec224c38aa23b53325759#72ef7a41c5f7b714774ec224c38aa23b53325759"
 dependencies = [
- "async-trait",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
-name = "fx-provider-http"
+name = "fx-native-provider"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=f5b6639d9664098c71a6ab407d006653eed91c5b#f5b6639d9664098c71a6ab407d006653eed91c5b"
+source = "git+https://github.com/rkendel1/fx?rev=72ef7a41c5f7b714774ec224c38aa23b53325759#72ef7a41c5f7b714774ec224c38aa23b53325759"
 dependencies = [
- "async-trait",
  "fx-core",
- "reqwest",
- "serde",
+ "fx-single-attempt",
  "serde_json",
- "tokio",
+ "ureq",
+]
+
+[[package]]
+name = "fx-single-attempt"
+version = "0.1.0"
+source = "git+https://github.com/rkendel1/fx?rev=72ef7a41c5f7b714774ec224c38aa23b53325759#72ef7a41c5f7b714774ec224c38aa23b53325759"
+dependencies = [
+ "fx-core",
 ]
 
 [[package]]
@@ -2826,9 +2868,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.151"
+version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
  "itoa",
  "memchr",
@@ -3365,6 +3407,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "ureq"
+version = "3.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a7ac20be9b7726e0bbdbf974c059676d9acb1cd414961f570a4e8231cacd7fc"
+dependencies = [
+ "base64 0.23.1",
+ "log",
+ "percent-encoding",
+ "rustls",
+ "rustls-pki-types",
+ "ureq-proto",
+ "utf8-zero",
+ "webpki-roots",
+]
+
+[[package]]
+name = "ureq-proto"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f86fd172ccca569e458f61b6bdd6220965a9ef36e672a6852953b51a0e1583be"
+dependencies = [
+ "base64 0.23.1",
+ "http",
+ "httparse",
+ "log",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3375,6 +3445,12 @@ dependencies = [
  "percent-encoding",
  "serde",
 ]
+
+[[package]]
+name = "utf8-zero"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e"
 
 [[package]]
 name = "utf8_iter"
