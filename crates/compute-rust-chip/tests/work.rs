@@ -15,9 +15,9 @@ use chip_core::{
     EnvironmentDescription, EnvironmentId, Environments, ExecutionId, ExecutionRequest, Executor,
     InputValue, WorkEnvironment, WorkId, WorkLimits, WorkOutcome,
 };
+use chip_inference::{FxError, ModelProvider, ModelRequest, ModelResponse, Usage};
 use compute_core::SessionStatus;
 use compute_rust_chip::ComputeSessionEnvironments;
-use chip_inference::{FxError, ModelProvider, ModelRequest, ModelResponse, Usage};
 use serde_json::json;
 use support::*;
 
