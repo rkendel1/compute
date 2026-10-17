@@ -49,6 +49,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # The Cloudflare Worker harness, run under Node against real WASI
+      # modules. Required here: a missing Node fails instead of skipping.
+      - name: Cloudflare Worker harness
+        env:
+          COMPUTE_REQUIRE_NODE: "1"
+        run: cargo test --locked -p compute-provider-cloudflare --test harness
       - name: AppPort contract
         working-directory: packages/compute-appport
         run: |

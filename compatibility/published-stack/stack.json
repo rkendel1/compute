@@ -2,15 +2,15 @@
   "format": "compute.distribution-profile@1",
   "profile": "configured",
   "name": "published-compute-ecosystem",
-  "compute": "0.1.17",
+  "compute": "0.1.20",
   "platform": "linux-x86_64",
   "distribution": {
-    "identity": "compute-configured-0.1.17-linux-x86_64",
+    "identity": "compute-configured-0.1.20-linux-x86_64",
     "certification_status": "certified",
-    "base_asset": "compute-0.1.17-linux-x86_64.tar.gz",
-    "configured_asset": "compute-configured-0.1.17-linux-x86_64.tar.gz",
+    "base_asset": "compute-0.1.20-linux-x86_64.tar.gz",
+    "configured_asset": "compute-configured-0.1.20-linux-x86_64.tar.gz",
     "pipeline": "distribution-certification",
-    "release": "https://github.com/rkendel1/compute/releases/tag/v0.1.17"
+    "release": "https://github.com/rkendel1/compute/releases/tag/v0.1.20"
   },
   "runtime": {
     "implementation": "base-compute",
@@ -82,6 +82,22 @@
       "capabilities": ["AppPort/ui/1"],
       "provider": "this-machine",
       "description": "AppPort Services management UI; owns its own state, authentication and management router"
+    }
+  ],
+  "execution_providers": [
+    {
+      "name": "cloudflare",
+      "kind": "cloudflare",
+      "protocol": "compute.cloudflare@1",
+      "profile": "workers-free",
+      "required": false,
+      "implementation": "base-compute",
+      "credentials": { "token_env": "CLOUDFLARE_API_TOKEN", "stored": false },
+      "runs": "short-lived, request-driven WASI modules deployed explicitly as Workers",
+      "refuses": ["persistent_process", "interactive_shell", "native_executable", "container", "process_runtime", "filesystem", "outbound_network", "local_inference"],
+      "setup": "compute-configured-cloudflare-setup",
+      "example": "providers/cloudflare",
+      "documentation": "docs/cloudflare.md"
     }
   ],
   "migrations": [],

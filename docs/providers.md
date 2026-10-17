@@ -3,7 +3,9 @@
 A provider decides where a portable workload is executed. It does not change
 what the workload means. `LocalProvider` calls the local Compute engine;
 `RemoteProvider` transports the same canonical artifact to a Compute server
-speaking `compute.remote@1`.
+speaking `compute.remote@1`; `CloudflareProvider` runs short-lived WASI
+workloads in Cloudflare Workers that Compute deployed explicitly
+(`compute.cloudflare@1`, see [cloudflare.md](cloudflare.md)).
 
 Providers are grouped into caller-owned [provider pools](provider-pools.md),
 and [placement](placement.md) selects the provider that can prove it satisfies
@@ -96,6 +98,7 @@ What each kind of provider offers by default, and how to narrow it:
 | `local` pool member | (this machine) | run, deployments (through this machine's daemon) | - |
 | Compute server | `compute serve` | run, jobs, sessions | `--offer run`, `--offer jobs`, `--offer run,jobs`, ... |
 | Compute daemon | `compute start` | run, jobs, deployments | `--offer deployments`, `--offer run,jobs`, ... |
+| Cloudflare account (`kind = "cloudflare"`) | a pool entry; Workers deployed with `compute cloudflare deploy` | run | the profile (`workers-free`) and `[providers.<id>.cloudflare.limits]` |
 
 A mode that is not offered is neither advertised nor accepted: a
 `compute serve --offer jobs` endpoint refuses `POST /compute/execute` as

@@ -8,6 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use compute_provider::{
     ComputeProvider, LocalProvider, ProviderCapabilities, ProviderErrorKind, RemoteProvider,
 };
+use compute_provider_cloudflare::{CloudflareProvider, CloudflareSettings, CredentialSource};
 use serde::{Deserialize, Serialize};
 
 use crate::PlacementError;
@@ -69,6 +70,10 @@ pub struct ProviderConfig {
     /// issue --token-file`). Read when the pool is built; never shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_file: Option<std::path::PathBuf>,
+    /// The Cloudflare account, profile, and limits of a `cloudflare`
+    /// member. Its API token comes from `token_env` or `token_file`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloudflare: Option<CloudflareSettings>,
 }
 
 impl ProviderConfig {
@@ -163,6 +168,7 @@ impl PoolConfig {
                     priority: 0,
                     token_env: None,
                     token_file: None,
+                    cloudflare: None,
                 },
             )]),
         }
@@ -196,6 +202,26 @@ impl ProviderConfig {
                 }
                 if self.authenticated() {
                     return invalid("a local provider has no credentials");
+                }
+            }
+            ProviderKind::Cloudflare => {
+                if self.endpoint.is_some() || self.application_endpoint.is_some() {
+                    return invalid(
+                        "a cloudflare provider has no endpoint; its Workers are reached through the account",
+                    );
+                }
+                let Some(settings) = &self.cloudflare else {
+                    return invalid(
+                        "a cloudflare provider needs a [providers.<id>.cloudflare] table with account_id",
+                    );
+                };
+                if !self.authenticated() {
+                    return invalid(
+                        "a cloudflare provider needs token_env (or token_file) naming its API token; the token itself is never written in configuration",
+                    );
+                }
+                if let Err(error) = settings.validate() {
+                    return invalid(&error.to_string());
                 }
             }
             ProviderKind::Remote => match &self.endpoint {
@@ -235,13 +261,54 @@ impl ProviderConfig {
         {
             return invalid("application_endpoint must be an http:// or https:// URL");
         }
+        if self.cloudflare.is_some() && self.kind != ProviderKind::Cloudflare {
+            return invalid("a cloudflare table belongs only to a cloudflare provider");
+        }
         Ok(())
     }
 
     /// Configuration fields that identify where the provider is. Used to
     /// invalidate cached capabilities when configuration changes.
     pub fn fingerprint(&self) -> String {
-        crate::canonical_identity(&(self.kind, &self.endpoint, &self.application_endpoint))
+        match &self.cloudflare {
+            None => {
+                crate::canonical_identity(&(self.kind, &self.endpoint, &self.application_endpoint))
+            }
+            Some(cloudflare) => crate::canonical_identity(&(
+                self.kind,
+                &self.endpoint,
+                &self.application_endpoint,
+                cloudflare,
+            )),
+        }
+    }
+
+    /// The Cloudflare provider a `cloudflare` member configures. A missing
+    /// token does not keep it out of the pool: its capabilities are known
+    /// without one, and every account operation names the missing variable.
+    pub fn cloudflare_provider(&self, id: &str) -> Result<CloudflareProvider, PlacementError> {
+        self.validate(id)?;
+        let settings = self.cloudflare.clone().ok_or_else(|| {
+            PlacementError::InvalidConfig(format!("provider {id} is not a cloudflare provider"))
+        })?;
+        let credential = self
+            .token(id)
+            .ok()
+            .flatten()
+            .and_then(compute_provider_cloudflare::Credential::new);
+        CloudflareProvider::new(id, settings, credential, self.credential_source())
+            .map_err(|error| PlacementError::InvalidConfig(format!("provider {id}: {error}")))
+    }
+
+    /// Where a cloudflare member's credential is read from, by name.
+    fn credential_source(&self) -> CredentialSource {
+        match (&self.token_env, &self.token_file) {
+            (_, Some(path)) => CredentialSource::File(path.display().to_string()),
+            (Some(name), None) => CredentialSource::Environment(name.clone()),
+            (None, None) => CredentialSource::Environment(
+                compute_provider_cloudflare::config::DEFAULT_TOKEN_ENV.into(),
+            ),
+        }
     }
 }
 
@@ -334,6 +401,10 @@ impl ProviderPool {
                         remote = remote.with_bearer_token(token);
                     }
                     pool.add_remote(id.clone(), provider.clone(), Arc::new(remote))?;
+                }
+                ProviderKind::Cloudflare => {
+                    let cloudflare = provider.cloudflare_provider(id)?;
+                    pool.add(id.clone(), provider.clone(), Arc::new(cloudflare))?;
                 }
             }
         }

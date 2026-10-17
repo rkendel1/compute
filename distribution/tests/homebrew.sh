@@ -51,6 +51,12 @@ fi
 grep -q 'formula_opt_libexec("compute")}/runtimes/node/bin/node' "$configured_formula"
 grep -q 'compute-configured-verify' "$configured_formula"
 grep -q 'compute-configured-setup' "$configured_formula"
+# The optional Cloudflare provider: a credential-free setup that never overwrites,
+# and a test that exercises it without an account.
+grep -q '(bin/"compute-configured-cloudflare-setup").write' "$configured_formula"
+grep -q 'cloudflare init --account-id "$1" --output "$pool"' "$configured_formula"
+grep -q 'COMPUTE_BIN=' "$configured_formula"
+grep -q 'setup must not overwrite an existing pool file' "$configured_formula"
 grep -q 'COMPUTE_INSTALLED_VERSION' "$configured_formula"
 grep -q 'compute-configured recipe starters --json' "$configured_formula"
 grep -q 'recipes/starters/dev.json' "$configured_formula"

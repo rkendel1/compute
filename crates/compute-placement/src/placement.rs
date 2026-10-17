@@ -830,10 +830,7 @@ fn candidate_reasons(provider: &ProviderEvaluation, policy: &PlacementPolicy) ->
     } else {
         "runtime_requires_preparation".into()
     });
-    reasons.push(match provider.provider_kind {
-        ProviderKind::Local => "local".into(),
-        ProviderKind::Remote => "remote".into(),
-    });
+    reasons.push(provider.provider_kind.to_string());
     reasons.push(format!("pool_priority:{}", provider.priority));
     reasons
 }

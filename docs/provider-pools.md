@@ -27,6 +27,16 @@ priority = 50
 kind = "remote"
 endpoint = "https://compute.example"
 token_env = "COMPUTE_PRODUCTION_TOKEN"
+
+# Optional: short-lived WASI workloads on Cloudflare Workers (docs/cloudflare.md).
+[providers.edge]
+kind = "cloudflare"
+token_env = "CLOUDFLARE_API_TOKEN"
+priority = -100
+
+[providers.edge.cloudflare]
+account_id = "0123456789abcdef0123456789abcdef"
+profile = "workers-free"
 ```
 
 Compute finds the configuration in this order:

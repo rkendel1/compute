@@ -103,6 +103,11 @@ pub enum ProviderErrorKind {
     /// The provider could not confirm that every process the environment
     /// owns is gone. Nothing was reported stopped or destroyed.
     TerminationFailed,
+    /// A provider plan's quota or a configured usage limit is exhausted
+    /// (daily requests, concurrent invocations, script count). Nothing new
+    /// was started; retrying later or on another provider is the caller's
+    /// explicit decision.
+    QuotaExhausted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,7 +189,8 @@ pub enum ArtifactTransport {
 }
 
 impl ArtifactTransport {
-    pub(crate) fn bundle(&self) -> Result<WorkloadBundle, ProviderError> {
+    /// The verified portable bundle this transport carries.
+    pub fn bundle(&self) -> Result<WorkloadBundle, ProviderError> {
         match self {
             Self::Bundle { data } => WorkloadBundle::from_bytes(data),
             Self::Inline {
@@ -313,7 +319,7 @@ impl ProviderRequest {
         Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
     }
 
-    fn validate(&self) -> Result<(), ProviderError> {
+    pub fn validate(&self) -> Result<(), ProviderError> {
         if self.protocol != REMOTE_PROTOCOL {
             return Err(ProviderError::new(
                 ProviderErrorKind::ProtocolUnsupported,
@@ -1339,10 +1345,7 @@ impl LocalProvider {
         result.admission = Some(summary.clone());
         if let Some(receipt) = &mut result.receipt {
             receipt.provider = Some(identity.clone());
-            receipt.provider_protocol = Some(match &identity {
-                ProviderIdentity::Local { .. } => "compute.local@1".into(),
-                ProviderIdentity::Remote { .. } => REMOTE_PROTOCOL.into(),
-            });
+            receipt.provider_protocol = Some(identity.protocol().into());
             receipt.placement = request.execution.placement.clone();
             receipt.scope = request.execution.scope.clone();
             receipt.application = request.execution.application.clone();
@@ -2134,10 +2137,7 @@ fn resident_dependency_capsules() -> Vec<String> {
 }
 
 fn identity_protocol(identity: &ProviderIdentity) -> &'static str {
-    match identity {
-        ProviderIdentity::Local { .. } => "compute.local@1",
-        ProviderIdentity::Remote { .. } => REMOTE_PROTOCOL,
-    }
+    identity.protocol()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3040,6 +3040,7 @@ fn error_status(kind: ProviderErrorKind) -> u16 {
         ProviderErrorKind::SessionConflict => 409,
         ProviderErrorKind::OperationUnsupported => 400,
         ProviderErrorKind::TerminationFailed => 500,
+        ProviderErrorKind::QuotaExhausted => 429,
         ProviderErrorKind::JobExpired => 410,
         ProviderErrorKind::IdempotencyConflict => 409,
         ProviderErrorKind::EvidenceInvalid => 422,

@@ -111,6 +111,7 @@ fn remote_config(endpoint: &str, priority: i64) -> ProviderConfig {
         priority,
         token_env: None,
         token_file: None,
+        cloudflare: None,
     }
 }
 
@@ -152,6 +153,7 @@ impl PlacementHarness {
                 priority: 10,
                 token_env: None,
                 token_file: None,
+                cloudflare: None,
             },
             Arc::new(CountingLocal {
                 inner: LocalProvider::new(),

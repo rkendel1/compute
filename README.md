@@ -89,6 +89,17 @@ compute remote status --provider dev job_...
 compute remote wait --provider dev job_... --timeout 60s
 ```
 
+Short-lived, request-driven WASI workloads can also run on Cloudflare
+Workers, including the free plan, through the same provider boundary. Workers
+are deployed explicitly, and a Worker is not a VM: no processes, shells,
+containers, files, or network. See [docs/cloudflare.md](docs/cloudflare.md).
+
+```sh
+compute cloudflare profile
+compute cloudflare deploy --provider cloudflare hello.wasm
+compute run hello.wasm --provider cloudflare
+```
+
 Durable jobs are documented in [docs/jobs.md](docs/jobs.md).
 
 A session is a temporary computer as one Compute operation: placed like any

@@ -263,6 +263,9 @@ fn explanation(admission: &Admission) -> Vec<String> {
             match &decision.provider.identity {
                 compute_core::ProviderIdentity::Local { id } => format!("{id} (local)"),
                 compute_core::ProviderIdentity::Remote { id, .. } => format!("{id} (remote)"),
+                compute_core::ProviderIdentity::Cloudflare { id, .. } => {
+                    format!("{id} (cloudflare)")
+                }
             }
         ),
         format!(

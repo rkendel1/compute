@@ -1606,9 +1606,42 @@ pub struct ExecutionAdmission {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum ProviderIdentity {
-    Local { id: String },
-    Remote { id: String, endpoint: String },
+    Local {
+        id: String,
+    },
+    Remote {
+        id: String,
+        endpoint: String,
+    },
+    /// A Cloudflare account reached through the Cloudflare provider adapter
+    /// (`compute.cloudflare@1`). The account identifier is not a credential.
+    Cloudflare {
+        id: String,
+        account_id: String,
+    },
 }
+
+impl ProviderIdentity {
+    /// The provider's own identifier, whatever its kind.
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Local { id } | Self::Remote { id, .. } | Self::Cloudflare { id, .. } => id,
+        }
+    }
+
+    /// The provider protocol this identity is bound to in receipts.
+    pub fn protocol(&self) -> &'static str {
+        match self {
+            Self::Local { .. } => "compute.local@1",
+            Self::Remote { .. } => "compute.remote@1",
+            Self::Cloudflare { .. } => CLOUDFLARE_PROTOCOL,
+        }
+    }
+}
+
+/// Protocol of the Cloudflare provider adapter: Compute's contract carried
+/// to Cloudflare's API and Workers runtime.
+pub const CLOUDFLARE_PROTOCOL: &str = "compute.cloudflare@1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionDependencyEvidence {
@@ -2073,6 +2106,9 @@ pub enum RuntimeSource {
     Distribution,
     HostDevelopment,
     Unavailable,
+    /// Supplied by the provider's own platform (a Cloudflare Worker), not
+    /// by a Compute distribution on a host.
+    Provider,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -65,6 +65,7 @@ jobs:
           npm ci --ignore-scripts --prefix compatibility/published-stack
           distribution/scripts/build-configured-agent.sh compatibility/published-stack "$(command -v node)"
           SOURCE_DATE_EPOCH=0 COMPUTE_COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/configured-evidence.json" \
+            COMPUTE_BIN="$PWD/target/release/compute" \
             npm run verify --prefix compatibility/published-stack
           test "$(jq -r .status "$RUNNER_TEMP/configured-evidence.json")" = certified
           test "$(jq -r .platform "$RUNNER_TEMP/configured-evidence.json")" = linux-x86_64
@@ -82,6 +83,9 @@ jobs:
           cp -a compatibility/published-stack/node_modules "$root/node_modules"
           cp -R compatibility/published-stack/agent "$root/agent"
           cp -R compatibility/published-stack/.output "$root/.output"
+          # The optional Cloudflare provider's example pool file and workload.
+          mkdir -p "$root/providers"
+          cp -R examples/cloudflare-workers "$root/providers/cloudflare"
           # Rust Chip: a separate agent workload, launched by compute-configured-rust-chip. It is
           # built by the `cargo build --release --locked` above and shipped beside the npm agent,
           # never inside it.
@@ -184,6 +188,7 @@ jobs:
           npm ci --ignore-scripts --prefix configured-stack
           distribution/scripts/build-configured-agent.sh configured-stack "$(command -v node)"
           SOURCE_DATE_EPOCH=0 COMPUTE_COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/configured-evidence.json" \
+            COMPUTE_BIN="$PWD/target/release/compute" \
             npm run verify --prefix configured-stack
           test "$(jq -r .status "$RUNNER_TEMP/configured-evidence.json")" = preview
           test "$(jq -r .platform "$RUNNER_TEMP/configured-evidence.json")" = macos-aarch64
@@ -199,6 +204,8 @@ jobs:
           cp -a configured-stack/node_modules "$root/node_modules"
           cp -R configured-stack/agent "$root/agent"
           cp -R configured-stack/.output "$root/.output"
+          mkdir -p "$root/providers"
+          cp -R examples/cloudflare-workers "$root/providers/cloudflare"
           mkdir -p "$root/rust-chip/bin"
           cp target/release/compute-rust-chip "$root/rust-chip/bin/compute-rust-chip"
           test "$(find "$root/recipes/starters" -name '*.json' -type f | wc -l | tr -d '[:space:]')" = 7
@@ -238,9 +245,21 @@ jobs:
           pattern: "*-compute-*"
           path: release-assets
           merge-multiple: true
+      # Release notes are docs/release-notes/<tag>.md when the release has them.
+      - uses: actions/checkout@v4
+        with:
+          path: source
+          sparse-checkout: docs/release-notes
+      - name: Release notes
+        id: notes
+        run: |
+          if [ -f "source/docs/release-notes/$GITHUB_REF_NAME.md" ]; then
+            echo "path=source/docs/release-notes/$GITHUB_REF_NAME.md" >> "$GITHUB_OUTPUT"
+          fi
       - name: Publish certified and preview release assets atomically
         uses: softprops/action-gh-release@v2
         with:
+          body_path: ${{ steps.notes.outputs.path }}
           files: |
             release-assets/compute-*.tar.gz
             release-assets/compute-*.tar.gz.sha256

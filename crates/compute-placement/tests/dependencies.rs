@@ -165,6 +165,7 @@ async fn dependency_capsule_matrix() {
             priority: 0,
             token_env: None,
             token_file: None,
+            cloudflare: None,
         },
         Arc::new(LocalProvider::new().with_runtime_catalog(catalog)),
     )
@@ -178,6 +179,7 @@ async fn dependency_capsule_matrix() {
             priority: 10,
             token_env: None,
             token_file: None,
+            cloudflare: None,
         },
         Arc::new(RemoteProvider::new(endpoint.clone())),
     )

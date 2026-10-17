@@ -66,6 +66,26 @@ impl PoolLocation {
             .unwrap_or_else(|| DEFAULT_CAPABILITY_CACHE.into())
     }
 
+    /// The Cloudflare provider a configured `cloudflare` member describes.
+    pub(crate) fn cloudflare(
+        &self,
+        id: &str,
+    ) -> compute_core::Result<compute_provider_cloudflare::CloudflareProvider> {
+        let config = self.config()?;
+        let member = config.providers.get(id).ok_or_else(|| {
+            ComputeError::InvalidWorkload(format!(
+                "provider {id} is not configured in the caller-owned pool"
+            ))
+        })?;
+        if member.kind != compute_placement::ProviderKind::Cloudflare {
+            return Err(ComputeError::InvalidWorkload(format!(
+                "provider {id} is a {} provider, not a cloudflare provider",
+                member.kind
+            )));
+        }
+        member.cloudflare_provider(id).map_err(placement_error)
+    }
+
     pub(crate) fn pool(&self) -> compute_core::Result<ProviderPool> {
         ProviderPool::from_config(&self.config()?).map_err(placement_error)
     }

@@ -702,10 +702,7 @@ impl SessionManager {
             .placement
             .as_ref()
             .map(|placement| placement.provider_id.clone())
-            .unwrap_or_else(|| match &identity {
-                compute_core::ProviderIdentity::Local { id }
-                | compute_core::ProviderIdentity::Remote { id, .. } => id.clone(),
-            });
+            .unwrap_or_else(|| identity.id().to_owned());
         let resources = &bundle.workload.resources;
         let session = ComputeSession {
             version: SESSION_VERSION.into(),

@@ -1,0 +1,27 @@
+[package]
+name = "compute-provider-cloudflare"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cloudflare Workers execution provider for Compute: short-lived, request-driven WASM workloads"
+
+[dependencies]
+async-trait.workspace = true
+base64 = "0.22"
+chrono.workspace = true
+compute-core = { path = "../compute-core" }
+compute-policy = { path = "../compute-policy" }
+compute-provider = { path = "../compute-provider" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+compute-placement = { path = "../compute-placement" }
+tempfile.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+wat.workspace = true

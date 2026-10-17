@@ -22,6 +22,7 @@ compute-state-feltdb = { path = "../compute-state-feltdb" }
 compute-placement = { path = "../compute-placement" }
 compute-policy = { path = "../compute-policy" }
 compute-provider = { path = "../compute-provider" }
+compute-provider-cloudflare = { path = "../compute-provider-cloudflare" }
 compute-runtime = { path = "../compute-runtime" }
 compute-network = { path = "../compute-network" }
 chrono.workspace = true

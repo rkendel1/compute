@@ -25,6 +25,8 @@ pub const DESCRIPTOR_VERSION: &str = "compute.provider.descriptor@1";
 pub enum ProviderKind {
     Local,
     Remote,
+    /// A Cloudflare account, reached through the Cloudflare provider adapter.
+    Cloudflare,
 }
 
 impl ProviderKind {
@@ -32,6 +34,7 @@ impl ProviderKind {
         match self {
             Self::Local => LOCAL_PROTOCOL,
             Self::Remote => REMOTE_PROTOCOL,
+            Self::Cloudflare => compute_core::CLOUDFLARE_PROTOCOL,
         }
     }
 }
@@ -41,6 +44,7 @@ impl std::fmt::Display for ProviderKind {
         formatter.write_str(match self {
             Self::Local => "local",
             Self::Remote => "remote",
+            Self::Cloudflare => "cloudflare",
         })
     }
 }
@@ -825,12 +829,20 @@ fn validate_identity(
         {
             Ok(())
         }
-        (ProviderKind::Local, ProviderIdentity::Remote { .. })
-        | (ProviderKind::Remote, ProviderIdentity::Local { .. }) => Err(invalid(
+        (ProviderKind::Cloudflare, ProviderIdentity::Cloudflare { id, account_id })
+            if text_ok(id) && text_ok(account_id) =>
+        {
+            Ok(())
+        }
+        (ProviderKind::Local, ProviderIdentity::Local { .. })
+        | (ProviderKind::Remote, ProviderIdentity::Remote { .. })
+        | (ProviderKind::Cloudflare, ProviderIdentity::Cloudflare { .. }) => {
+            Err(invalid("provider", "provider identity is malformed"))
+        }
+        _ => Err(invalid(
             "provider",
             format!("configured {kind} provider reported a different provider kind"),
         )),
-        _ => Err(invalid("provider", "provider identity is malformed")),
     }
 }
 

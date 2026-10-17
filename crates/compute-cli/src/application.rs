@@ -683,6 +683,13 @@ pub async fn deploy(
             client: match selected.provider_kind {
                 ProviderKind::Local => ensure_local_daemon(&daemon).await?,
                 ProviderKind::Remote => remote_client(&location, &selected.provider_id)?,
+                // Placement never selects one: it offers no deployments.
+                ProviderKind::Cloudflare => {
+                    return Err(ComputeError::Runtime(format!(
+                        "provider {} (cloudflare) does not host applications",
+                        selected.provider_id
+                    )));
+                }
             },
             provider_id: selected.provider_id.clone(),
             kind: selected.provider_kind,
@@ -968,6 +975,8 @@ async fn find_home(
         let client = match config.kind {
             ProviderKind::Local => daemon.client()?,
             ProviderKind::Remote => remote_client(location, &provider_id)?,
+            // A Cloudflare member hosts no applications to find.
+            ProviderKind::Cloudflare => continue,
         };
         match client
             .get::<ApplicationView>(&format!("/applications/{name}"))
@@ -1048,10 +1057,7 @@ async fn ensure_local_daemon(daemon: &DaemonLocation) -> compute_core::Result<Da
 }
 
 fn provider_error(host: &Host, error: EnvironmentError) -> ComputeError {
-    let kind = match host.kind {
-        ProviderKind::Local => "local",
-        ProviderKind::Remote => "remote",
-    };
+    let kind = host.kind;
     ComputeError::Coded {
         code: error.kind().into(),
         message: format!(

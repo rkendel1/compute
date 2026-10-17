@@ -507,6 +507,14 @@ impl ExecutionReceipt {
                     return Err(invalid("invalid remote provider binding"));
                 }
             }
+            Some(crate::ProviderIdentity::Cloudflare { id, account_id }) => {
+                if id.is_empty()
+                    || account_id.is_empty()
+                    || self.provider_protocol.as_deref() != Some(crate::CLOUDFLARE_PROTOCOL)
+                {
+                    return Err(invalid("invalid cloudflare provider binding"));
+                }
+            }
             None if self.provider_protocol.is_some() => {
                 return Err(invalid(
                     "provider protocol is present without provider identity",

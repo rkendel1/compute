@@ -265,6 +265,7 @@ pub fn member(target: &Target, token_file: &Path) -> ProviderConfig {
         priority: 0,
         token_env: None,
         token_file: Some(token_file.to_path_buf()),
+        cloudflare: None,
     }
 }
 

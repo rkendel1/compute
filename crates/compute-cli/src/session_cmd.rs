@@ -582,6 +582,7 @@ fn print_session(provider: &str, session: &ComputeSession) {
         match &session.provider {
             compute_core::ProviderIdentity::Local { id } => id.clone(),
             compute_core::ProviderIdentity::Remote { endpoint, .. } => endpoint.clone(),
+            compute_core::ProviderIdentity::Cloudflare { id, .. } => id.clone(),
         }
     );
     println!("Job:         {}", session.job_id);

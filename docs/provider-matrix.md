@@ -32,11 +32,16 @@ computers are placed on.
 | Render | provisioning adapter | — | — | — | — | — | — | MISSING |
 | Cloud VM / bare metal | provisioning adapter | — | — | — | — | — | — | MISSING |
 | DNS providers | network | n/a | n/a | n/a | provider credentials | n/a | tests | IMPLEMENTED + VERIFIED |
+| Cloudflare Workers (`workers-free`) | pool member (run only) | no (`sessions_unsupported`) | no (`jobs_unsupported`); synchronous runs of deployed WASI modules | Workers deployed explicitly (`compute cloudflare deploy`), not machines | yes: API token by `token_env`/`token_file`; per-Worker invocation secret | n/a | fake API + harness under Node; live smoke test gated on credentials | IMPLEMENTED |
 
 A pool member authenticates to its target with `token_file` (a file holding
 the token, as the launcher writes) or `token_env`; `compute target list`
 shows how each target authenticates and whether this control plane presents
 a credential, never the credential.
+
+A Cloudflare member is not a target: it hosts no computers, sessions, jobs,
+or applications. It runs one request-driven WASI invocation at a time on a
+Worker Compute deployed explicitly. See [cloudflare.md](cloudflare.md).
 
 A target is any machine that already runs `compute serve` and is named in the
 pool file. Compute cannot create one: there is no provisioning interface.
@@ -56,6 +61,7 @@ pool file. Compute cannot create one: there is no provisioning interface.
 | `provider-render` | Render | **MISSING** | no | yes | — | — |
 | `provider-cloud-vm` | Cloud VMs / bare metal provisioning | **MISSING** | no | yes | — | — |
 | `provider-dns` | DNS providers (for domains) | **IMPLEMENTED + VERIFIED** | yes | yes | — | `crates/compute-network/src/dns.rs`<br>`crates/compute-network/tests/providers.rs`<br>`crates/compute-environment/tests/network.rs` |
+| `provider-cloudflare` | Cloudflare Workers provider (`workers-free`, compute.cloudflare@1) | **IMPLEMENTED** | yes | yes | Runs deployed WASI modules on request; refuses process runtimes, files, network, sessions, jobs and deployments. Verified against a local fake and the harness under Node; the live smoke test needs credentials. | `crates/compute-provider-cloudflare/src/lib.rs#CloudflareProvider`<br>`crates/compute-provider-cloudflare/tests/provider.rs`<br>`crates/compute-provider-cloudflare/tests/placement.rs`<br>`crates/compute-provider-cloudflare/tests/harness.rs`<br>`crates/compute-cli/tests/cloudflare.rs` |
 <!-- /audit -->
 
 ## Placement
