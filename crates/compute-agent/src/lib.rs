@@ -26,14 +26,21 @@
 //! substrate is not a security boundary beyond the isolation profile requested; this crate adds no
 //! sandbox and claims none.
 //!
+//! **Cancellation.** [`AgentSession::cancel`] cancels the commands running in the session with
+//! Compute's own job cancellation, which is idempotent and confirmed: a command is reported
+//! cancelled only when Compute recorded it cancelled, and one cancelled after it started is never
+//! reported as not having run (what it did before termination may have happened). A command whose
+//! caller stops waiting (its future is dropped) is cancelled the same way, never left running.
+//! Stopping the agent's own loop is the agent's business (for Rust Chip, its cancel endpoint).
+//!
 //! **Failure.** Acquisition fails closed: a session that was created but not made usable
 //! (not ready, project not loaded) is destroyed and no agent runs. A failed destroy is counted in
 //! [`HostStats::cleanup_failed`] and never raised; the TTL bounds what it leaves behind.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use compute_core::{
@@ -107,6 +114,8 @@ pub struct HostConfig {
     pub command_timeout: Duration,
     /// The longest to wait for a session to be ready.
     pub ready_timeout: Duration,
+    /// The longest to wait for Compute to confirm a cancelled command ended.
+    pub cancel_timeout: Duration,
 }
 
 impl HostConfig {
@@ -125,6 +134,7 @@ impl HostConfig {
             network: NetworkPolicy::Network,
             command_timeout: Duration::from_secs(600),
             ready_timeout: Duration::from_secs(60),
+            cancel_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -163,6 +173,36 @@ impl fmt::Display for ComputeError {
 }
 
 impl std::error::Error for ComputeError {}
+
+/// What cancelling one in-flight command established. Never more than Compute observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandCancellation {
+    /// Cancelled before it started: it never ran.
+    NotStarted { job_id: String },
+    /// Cancelled while it ran: Compute confirmed the process ended, but what it did before that
+    /// may have happened.
+    Interrupted { job_id: String },
+    /// It ended on its own before the cancellation took effect.
+    AlreadyEnded { job_id: String, status: JobStatus },
+    /// Compute did not confirm an end in time. It is not reported cancelled.
+    Unconfirmed { job_id: String, reason: String },
+}
+
+impl CommandCancellation {
+    pub fn job_id(&self) -> &str {
+        match self {
+            Self::NotStarted { job_id }
+            | Self::Interrupted { job_id }
+            | Self::AlreadyEnded { job_id, .. }
+            | Self::Unconfirmed { job_id, .. } => job_id,
+        }
+    }
+
+    /// Whether Compute confirmed the command is no longer running.
+    pub fn confirmed(&self) -> bool {
+        !matches!(self, Self::Unconfirmed { .. })
+    }
+}
 
 /// What happened when a command ran in a session: reality, not a verdict. `job_id` is the durable
 /// Compute receipt's job; it says Compute ran the command and nothing about any goal.
@@ -238,6 +278,7 @@ impl AgentHost {
         let session = AgentSession {
             host: self.clone(),
             session_id,
+            running: Arc::default(),
         };
         if let Some(source) = &self.config.project_source {
             let load = vec![
@@ -327,6 +368,30 @@ impl AgentHost {
 pub struct AgentSession {
     host: AgentHost,
     session_id: String,
+    /// Jobs of commands that are running now, shared by every clone of the handle.
+    running: Arc<Mutex<BTreeSet<String>>>,
+}
+
+/// Cancels a command's job if its caller stops waiting before it ended.
+struct InFlight {
+    session: AgentSession,
+    job_id: String,
+    ended: bool,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.session.forget(&self.job_id);
+        if self.ended {
+            return;
+        }
+        let (session, job_id) = (self.session.clone(), self.job_id.clone());
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                session.cancel_job(&job_id).await;
+            });
+        }
+    }
 }
 
 impl AgentSession {
@@ -366,6 +431,12 @@ impl AgentSession {
             .map_err(|e| fail("compute refused the command", &e.message))?;
         self.host.counters.commands.fetch_add(1, Ordering::SeqCst);
         let job_id = submitted.job_id.to_string();
+        self.lock_running().insert(job_id.clone());
+        let mut in_flight = InFlight {
+            session: self.clone(),
+            job_id: job_id.clone(),
+            ended: false,
+        };
         let deadline = Instant::now() + config.command_timeout + Duration::from_secs(30);
         loop {
             let job = remote
@@ -374,7 +445,18 @@ impl AgentSession {
                 .map_err(|e| fail("compute could not report the command", &e.message))?;
             match job.status {
                 JobStatus::Succeeded | JobStatus::Failed => break,
-                JobStatus::Cancelled | JobStatus::TimedOut | JobStatus::Rejected => {
+                JobStatus::Cancelled => {
+                    in_flight.ended = true;
+                    return Err(ComputeError(
+                        if job.cancellation.phase.as_deref() == Some("before_execution") {
+                            "compute cancelled the command before it started; it never ran".into()
+                        } else {
+                            "compute cancelled the command while it ran; what it did before it ended may have happened".into()
+                        },
+                    ));
+                }
+                JobStatus::TimedOut | JobStatus::Rejected => {
+                    in_flight.ended = true;
                     return Err(ComputeError(format!(
                         "compute ended the command as {:?}",
                         job.status
@@ -386,6 +468,8 @@ impl AgentSession {
                 _ => tokio::time::sleep(Duration::from_millis(20)).await,
             }
         }
+        in_flight.ended = true;
+        drop(in_flight);
         let result = remote
             .job_result(&job_id)
             .await
@@ -403,6 +487,71 @@ impl AgentSession {
             stderr: result.stderr.text,
             job_id,
         })
+    }
+
+    fn lock_running(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+        self.running.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn forget(&self, job_id: &str) {
+        self.lock_running().remove(job_id);
+    }
+
+    /// The jobs of the commands running in this session now.
+    pub fn running_commands(&self) -> Vec<String> {
+        self.lock_running().iter().cloned().collect()
+    }
+
+    /// Cancels every command running in this session, with Compute's confirmed, idempotent job
+    /// cancellation, and reports what each cancellation established. With nothing running it does
+    /// nothing; asking again changes nothing that already ended.
+    pub async fn cancel(&self) -> Vec<CommandCancellation> {
+        let mut outcomes = Vec::new();
+        for job_id in self.running_commands() {
+            outcomes.push(self.cancel_job(&job_id).await);
+        }
+        outcomes
+    }
+
+    async fn cancel_job(&self, job_id: &str) -> CommandCancellation {
+        let (remote, config) = (&self.host.remote, &self.host.config);
+        let unconfirmed = |reason: String| CommandCancellation::Unconfirmed {
+            job_id: job_id.to_string(),
+            reason,
+        };
+        // A job that already ended keeps its result: Compute's cancel is idempotent.
+        let mut job = match remote.cancel_job(job_id).await {
+            Ok(job) => job,
+            Err(e) => {
+                return unconfirmed(format!("compute refused the cancellation: {}", e.message));
+            }
+        };
+        let deadline = Instant::now() + config.cancel_timeout;
+        while !job.status.is_terminal() {
+            if Instant::now() > deadline {
+                return unconfirmed("compute did not confirm the command ended in time".into());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            job = match remote.job_status(job_id).await {
+                Ok(job) => job,
+                Err(e) => {
+                    return unconfirmed(format!(
+                        "compute could not report the command: {}",
+                        e.message
+                    ));
+                }
+            };
+        }
+        let job_id = job_id.to_string();
+        match job.status {
+            JobStatus::Cancelled
+                if job.cancellation.phase.as_deref() == Some("before_execution") =>
+            {
+                CommandCancellation::NotStarted { job_id }
+            }
+            JobStatus::Cancelled => CommandCancellation::Interrupted { job_id },
+            status => CommandCancellation::AlreadyEnded { job_id, status },
+        }
     }
 
     /// Destroys the session (confirmed teardown; the record stays as evidence).

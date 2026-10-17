@@ -38,7 +38,13 @@ jobs:
       # against the installed published stack.
       - name: Install the published stack
         run: npm ci --ignore-scripts --prefix compatibility/published-stack
+      # PAX is what Rust Chip verifies work with inside Compute sessions. The compute-rust-chip
+      # tests that need it are required here, not skipped (COMPUTE_REQUIRE_PAX). Pinned commit.
+      - name: Install PAX
+        run: cargo install --locked --git https://github.com/rkendel1/pax --rev 31b4871de3b6fea21c26f9d81a68882205e2b656 pax
       - name: Workspace tests
+        env:
+          COMPUTE_REQUIRE_PAX: "1"
         run: cargo test --workspace --locked
       - name: Installer contract
         run: distribution/tests/installer.sh

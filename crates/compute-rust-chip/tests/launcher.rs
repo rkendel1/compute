@@ -178,7 +178,7 @@ fn pax_test() -> String {
 struct Service {
     child: Child,
     addr: String,
-    _stdout: BufReader<std::process::ChildStdout>,
+    _stdout: Option<BufReader<std::process::ChildStdout>>,
 }
 
 impl Drop for Service {
@@ -242,8 +242,49 @@ fn start(mut c: Command, args: &[&str]) -> Service {
     Service {
         child,
         addr,
-        _stdout: stdout,
+        _stdout: Some(stdout),
     }
+}
+
+/// As [`start`], keeping everything the service writes to stdout and stderr: its log.
+fn start_logged(mut c: Command, args: &[&str]) -> (Service, Arc<Mutex<Vec<u8>>>) {
+    let mut child = c
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    log.lock().unwrap().extend_from_slice(line.as_bytes());
+    let addr = line
+        .trim()
+        .strip_prefix("Chip Runtime Service listening on http://")
+        .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
+        .to_string();
+    let drain = |mut from: Box<dyn Read + Send>, into: Arc<Mutex<Vec<u8>>>| {
+        std::thread::spawn(move || {
+            let mut chunk = [0_u8; 4096];
+            while let Ok(n) = from.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                into.lock().unwrap().extend_from_slice(&chunk[..n]);
+            }
+        });
+    };
+    drain(Box::new(stdout), log.clone());
+    drain(Box::new(child.stderr.take().unwrap()), log.clone());
+    (
+        Service {
+            child,
+            addr,
+            _stdout: None,
+        },
+        log,
+    )
 }
 
 fn http(addr: &str, method: &str, path: &str, body: Option<&str>) -> (u16, Value) {
@@ -444,10 +485,13 @@ async fn two_concurrent_rust_chip_works_edit_the_same_file_in_two_compute_enviro
 fn launcher_for(endpoint: &str, token: &str, source: &std::path::Path, model: &str) -> Command {
     // The same launch as `launcher`, without needing the Target value on this thread.
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    // One file per launch: tokens share a fixed prefix, so a name derived from the token would
+    // let concurrent tests overwrite each other's credential.
+    static LAUNCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let token_path = std::env::temp_dir().join(format!(
-        "compute-rust-chip-token-{}-{}",
+        "compute-rust-chip-token-{}-launch-{}",
         std::process::id(),
-        &token[..8.min(token.len())]
+        LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     ));
     std::fs::write(&token_path, token).unwrap();
     let mut c = Command::new(worker());
@@ -544,68 +588,121 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
         .any(|w| w == needle.as_bytes())
 }
 
+/// A value in every command environment Compute receives, so the worker's recorded environment
+/// is known to be the one the launcher configured.
+const COMMAND_ENVIRONMENT_MARKER: &str = "/g8-command-environment-marker";
+
+/// A worker that records the environment it was started with in `dump`, then runs the real one.
+/// It stands where Rust Chip's worker stands inside each Compute session.
+fn recording_worker(dir: &std::path::Path, dump: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("recording-worker");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nenv >> '{}'\nexec '{}' \"$@\"\n",
+            dump.display(),
+            worker()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// G8 (compute#95): the provider key reaches the model endpoint and nowhere else. It runs on the
+/// real integration path (the launcher, Rust Chip's service, FX, Compute sessions and the worker)
+/// and needs no PAX: the work's verdict is irrelevant here, only where the key went.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_provider_key_reaches_the_model_and_nothing_compute_stores_or_the_service_reports() {
-    if !pax_installed() {
-        eprintln!("SKIPPED: PAX is not installed");
-        return;
-    }
     let target = Target::start();
     let source = project("key-nondisclosure", true);
     let script: Script = HashMap::from([(
         "ALPHA",
-        vec![write("README.md", "ALPHA\n"), read("README.md"), pax_test()],
+        vec![write("README.md", "ALPHA\n"), read("README.md")],
     )]);
     let model = mock(script, None).await;
+    let scratch = tempfile::tempdir().unwrap();
+    let dump = scratch.path().join("worker-environment");
+    let recorder = recording_worker(scratch.path(), &dump);
     let (url, endpoint, tgt_token, src) = (
         model.url.clone(),
         target.endpoint.clone(),
         target.token.clone(),
         source.clone(),
     );
-    let (done, events_text, stdout_seen) = tokio::task::spawn_blocking(move || {
-        let service = start(
-            launcher_for(&endpoint, &tgt_token, &src, &url),
-            &["--port", "0"],
+    let (done, reported, log) = tokio::task::spawn_blocking(move || {
+        let mut launch = launcher_for(&endpoint, &tgt_token, &src, &url);
+        launch.env("COMPUTE_RUST_CHIP_WORKER", &recorder);
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+        launch.env(
+            "COMPUTE_RUST_CHIP_COMMAND_PATH",
+            format!("{home}/.cargo/bin:/usr/local/bin:/usr/bin:/bin:{COMMAND_ENVIRONMENT_MARKER}"),
         );
+        let (service, log) = start_logged(launch, &["--port", "0"]);
         let id = submit(
             &service.addr,
             "ALPHA: put the word ALPHA in README.md, then verify.",
         );
         let done = wait_done(&service.addr, &id);
+        let (_, work) = http(&service.addr, "GET", &format!("/v1/work/{id}"), None);
         let (_, events) = http(&service.addr, "GET", &format!("/v1/work/{id}/events"), None);
         let (_, metrics) = http(&service.addr, "GET", "/v1/metrics", None);
-        // Everything the service reports about the work, as text.
-        (
-            done.to_string(),
-            format!("{events}\n{metrics}"),
-            String::new(),
-        )
+        drop(service);
+        // Give the log readers a moment to drain what the service wrote before it stopped.
+        std::thread::sleep(Duration::from_millis(200));
+        let log = log.lock().unwrap().clone();
+        (done, format!("{work}\n{events}\n{metrics}"), log)
     })
     .await
     .unwrap();
-    let _ = stdout_seen;
     assert!(
-        done.contains("\"status\":\"completed\""),
-        "the work did not complete"
+        done["status"] != "running" && done["status"] != "queued",
+        "the work did not end"
     );
 
-    // Positive control: the key really was sent to the model, so the absence below is not vacuous.
+    // Positive controls, so each absence below is not vacuous: the key really was sent to the
+    // model, the worker really ran in Compute sessions, and the records really hold command
+    // environments.
     let sent = model.auth.lock().unwrap().clone();
     assert!(
         !sent.is_empty() && sent.iter().all(|h| h == &format!("Bearer {SENTINEL_KEY}")),
         "the model endpoint did not receive the configured key as a bearer credential"
     );
-
-    // Absence: what the service reports, what the model was shown, and everything the Compute
-    // target stored durably. The sentinel is never printed in a failure message.
+    let stored = files_under(target.store_dir());
     assert!(
-        !done.contains(SENTINEL_KEY),
-        "the key is in the work result"
+        stored
+            .iter()
+            .any(|(_, bytes)| contains(bytes, "capability-exec")),
+        "no job records were found in the target's stores: the check below would prove nothing"
+    );
+    let worker_environment = std::fs::read(&dump).unwrap_or_default();
+    assert!(
+        contains(&worker_environment, COMMAND_ENVIRONMENT_MARKER),
+        "the worker's environment was not recorded, so it cannot show the key was not forwarded"
+    );
+    assert!(!log.is_empty(), "the service wrote no log at all");
+    // compute#91: the no-persistence limitation is said where an operator sees it.
+    assert!(
+        contains(&log, "works are not persisted"),
+        "the service did not warn that works are not persisted"
+    );
+
+    // Absence: what the service reports, what it logged, what the model was shown, and everything
+    // the Compute target stored durably: events, session data, job records and receipts, and the
+    // command environment of every session command (the worker's environment). The sentinel is
+    // never printed in a failure message.
+    assert!(
+        !done.to_string().contains(SENTINEL_KEY) && !reported.contains(SENTINEL_KEY),
+        "the key is in the work, its events, or the metrics"
     );
     assert!(
-        !events_text.contains(SENTINEL_KEY),
-        "the key is in the events or metrics"
+        !contains(&log, SENTINEL_KEY),
+        "the key is in the service's log"
+    );
+    assert!(
+        !contains(&worker_environment, SENTINEL_KEY),
+        "the key was forwarded into the session worker's environment"
     );
     let shown = model
         .seen
@@ -619,13 +716,6 @@ async fn the_provider_key_reaches_the_model_and_nothing_compute_stores_or_the_se
     assert!(
         !shown.contains(SENTINEL_KEY),
         "the key was shown to the model"
-    );
-    let stored = files_under(target.store_dir());
-    assert!(
-        stored
-            .iter()
-            .any(|(_, bytes)| contains(bytes, "capability-exec")),
-        "no job records were found in the target's stores: the check below would prove nothing"
     );
     for (path, bytes) in &stored {
         assert!(
@@ -681,4 +771,109 @@ async fn a_models_own_claim_of_success_does_not_complete_a_work_without_the_requ
         std::fs::read_to_string(source.join("README.md")).unwrap(),
         "baseline\n"
     );
+}
+
+/// G3 (compute#90): Compute asks Rust Chip to cancel through Chip's own endpoint, and reports
+/// what Chip established: a queued work never ran; a running work is asked to stop (advisory: it
+/// is not reported cancelled); a finished work is unchanged; asking again changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn compute_cancels_through_chips_endpoint_and_reports_what_stopped() {
+    use compute_rust_chip::cancel::{ChipCancellation, request};
+    if !pax_installed() {
+        eprintln!("SKIPPED: PAX is not installed");
+        return;
+    }
+    let target = Target::start();
+    let source = project("cancel", true);
+    // ALPHA's first model reply is held, so it is cancelled during a provider call; BETA waits
+    // in the queue behind it, so it is cancelled before any provider call.
+    let script: Script = HashMap::from([
+        ("ALPHA", vec![write("README.md", "ALPHA\n"), pax_test()]),
+        ("BETA", vec![write("README.md", "BETA\n"), pax_test()]),
+    ]);
+    let model = mock(script, Some(Duration::from_secs(2))).await;
+    let (url, endpoint, tgt_token, src) = (
+        model.url.clone(),
+        target.endpoint.clone(),
+        target.token.clone(),
+        source.clone(),
+    );
+    let service = tokio::task::spawn_blocking(move || {
+        start(
+            launcher_for(&endpoint, &tgt_token, &src, &url),
+            &["--port", "0", "--max-concurrent-work", "1"],
+        )
+    })
+    .await
+    .unwrap();
+    let addr = service.addr.clone();
+    let (alpha, beta) = {
+        let addr = addr.clone();
+        tokio::task::spawn_blocking(move || {
+            (
+                submit(
+                    &addr,
+                    "ALPHA: put the word ALPHA in README.md, then verify.",
+                ),
+                submit(&addr, "BETA: put the word BETA in README.md, then verify."),
+            )
+        })
+        .await
+        .unwrap()
+    };
+
+    // Cancel ALPHA while its first model call is in flight (the mock holds the reply).
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while model
+        .seen
+        .lock()
+        .unwrap()
+        .get("ALPHA")
+        .is_none_or(Vec::is_empty)
+    {
+        assert!(Instant::now() < deadline, "ALPHA never called the model");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        request(&addr, &beta).await.unwrap(),
+        ChipCancellation::Cancelled
+    );
+    assert_eq!(
+        request(&addr, &alpha).await.unwrap(),
+        ChipCancellation::Requested
+    );
+    assert_eq!(
+        request(&addr, "work_nope").await.unwrap(),
+        ChipCancellation::Unknown
+    );
+
+    let (alpha_done, beta_done) = {
+        let addr = addr.clone();
+        let (alpha, beta) = (alpha.clone(), beta.clone());
+        tokio::task::spawn_blocking(move || (wait_done(&addr, &alpha), wait_done(&addr, &beta)))
+            .await
+            .unwrap()
+    };
+    assert_eq!(beta_done["status"], "cancelled");
+    assert!(
+        model
+            .seen
+            .lock()
+            .unwrap()
+            .get("BETA")
+            .is_none_or(Vec::is_empty),
+        "a work cancelled in the queue reached the model"
+    );
+    // Requested is not cancelled: Chip reports however the running work actually ended.
+    assert_eq!(alpha_done["cancellation_requested"], true);
+    assert_ne!(alpha_done["status"], "running");
+
+    // After completion, and repeatedly: nothing changes.
+    for _ in 0..2 {
+        assert_eq!(
+            request(&addr, &alpha).await.unwrap(),
+            ChipCancellation::AlreadyFinished
+        );
+    }
+    drop(service);
 }

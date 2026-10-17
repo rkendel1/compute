@@ -119,3 +119,43 @@ deliberate and unchanged.
 - Each operation is a durable Compute job, which is slower than a local call; a work makes many.
 - A session whose destroy fails (the target unreachable at release) is recorded as a cleanup failure
   and left to its TTL (default 30 minutes). It does not change the work's result or hold its slot.
+- **Works are not persisted, and nothing is replayed.** `compute-rust-chip serve` keeps no turn
+  records. A work interrupted by a crash is lost, and running its prompt again may repeat
+  capabilities that already ran: there is no idempotence guard and no exactly-once effect. The
+  service says so on stderr when it starts. See [Turn records](#turn-records-and-recovery-decision).
+- **Rust Chip inside Compute's WASM runtime is not supported.** Compute's `wasm` runtime
+  (wasmtime, WASI preview 1) runs WASI workloads; it does not run chip-rs's `chip-wasm-host`. A
+  Wasm-hosted Chip has no native model provider and needs one supplied by its host, and no such
+  bridge exists in Compute. That chip-rs's Wasm-bound crates compile for `wasm32-unknown-unknown`
+  is not evidence that they run under Compute. Run Rust Chip natively (`compute-rust-chip`), as
+  above. This is reopened only with a concrete requirement and a conformance test that exercises a
+  real host-supplied provider boundary (compute#94).
+
+## Cancellation
+
+A request to stop work, reported as what actually stopped (compute#90):
+
+- `compute_rust_chip::cancel::request(service, work)` calls Rust Chip's `POST /v1/work/{id}/cancel`.
+  A queued work is removed before it starts and never ran. A running work is asked to stop
+  (`cancellation_requested`): no further model call is made, but what is in flight is not
+  interrupted, and the work ends however Chip establishes. A finished work is unchanged.
+- `ComputeSessionEnvironments::cancel_work(work)` (and `compute_agent::AgentSession::cancel`)
+  cancels the work's running Compute commands with Compute's own job cancellation, which is
+  idempotent and confirmed: a command is reported cancelled only when Compute recorded it
+  cancelled, and one cancelled while it ran is reported as possibly effective, never as not
+  having run. A command whose caller stops waiting is cancelled, not left running.
+- An effect that already happened stays done. Nothing is retried or replayed.
+
+## Turn records and recovery (decision)
+
+Recorded for compute#91 (G4).
+
+- **Authority.** Compute's durable state (FeltDB through `compute-state`) is the authority for
+  durable Compute work and for turn records. Rust Chip owns the live agent loop and its runtime
+  lifecycle; it does not create a competing durable source of truth for Compute work.
+- **This release.** No turn persistence, no automatic crash recovery, no transparent replay, and
+  no exactly-once claim. The warning that rerunning a prompt may repeat a capability stays
+  visible (above, and at `serve` start).
+- **Later.** Durable recovery, if built, is designed around the Compute-owned record together with
+  explicit effect and idempotency semantics. A durable record alone cannot make effects on
+  arbitrary external systems exactly-once. No automatic retry or replay is added as a shortcut.
