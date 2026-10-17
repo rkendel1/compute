@@ -516,7 +516,30 @@ mod executable {
         let path = dir.join("pax");
         std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_executable(&path);
         PaxExecutable::new(path)
+    }
+
+    /// A file just written cannot be executed while another test's spawn still holds an
+    /// inherited write descriptor (`ETXTBSY`, see `compute_core::executables`). Waits that
+    /// out, bounded, before the code under test runs it once; any other error is real. The
+    /// stub only prints, so running it to probe has no effect.
+    fn wait_until_executable(path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match std::process::Command::new(path).arg("--probe").output() {
+                Ok(_) => return,
+                Err(e) if compute_core::executables::is_busy(&e) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "{} stayed busy",
+                        path.display()
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(e) => panic!("{} cannot be executed: {e}", path.display()),
+            }
+        }
     }
 
     fn respond(name: &str, value: &Value) -> String {
