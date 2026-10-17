@@ -165,6 +165,47 @@ assert.match(agentSource, /from "@appport\/fx"/);
 await verifyChipServes();
 pass('agent_session', `the installed Chip served the configured agent: POST /eve/v1/session returned 202, and its stream carried the FX reply to session.waiting`);
 
+// Optional execution providers: declared as data, implemented by base Compute, never required.
+// With COMPUTE_BIN (as compute-configured-verify sets it), the installed Compute must report each
+// provider's profile and capabilities without a credential.
+for (const provider of stack.execution_providers ?? []) {
+  assert.equal(provider.required, false, `${provider.name}: an execution provider must be optional`);
+  assert.equal(provider.implementation, 'base-compute', `${provider.name}: implemented by base Compute, not forked`);
+  assert.equal(provider.credentials?.stored, false, `${provider.name}: credentials must never be stored`);
+  assert.match(provider.credentials?.token_env ?? '', /^[A-Z][A-Z0-9_]*$/, `${provider.name}: credentials are referenced by variable name`);
+  for (const refused of ['persistent_process', 'native_executable', 'container']) {
+    assert.ok(provider.refuses.includes(refused), `${provider.name}: must declare that it refuses ${refused}`);
+  }
+  let detail = 'declared';
+  if (process.env.COMPUTE_BIN && provider.kind === 'cloudflare') {
+    const env = { ...process.env };
+    delete env[provider.credentials.token_env];
+    const run = (args) => execFileSync(process.env.COMPUTE_BIN, args, { encoding: 'utf8', env });
+    const profile = JSON.parse(run(['cloudflare', 'profile', provider.profile, '--json']));
+    assert.equal(profile.name, provider.profile);
+    for (const refused of provider.refuses) {
+      assert.ok(profile.capabilities && Object.entries({
+        persistent_process: 'persistent_processes', interactive_shell: 'interactive_shell',
+        native_executable: 'native_executables', container: 'containers', process_runtime: 'process_runtimes',
+        filesystem: 'filesystem', outbound_network: 'outbound_network', local_inference: 'local_inference',
+      }).every(([name, field]) => name !== refused || profile.capabilities[field] === false), `${provider.name}: the installed profile does not refuse ${refused}`);
+    }
+    const work = await mkdtemp(join(tmpdir(), 'compute-provider-'));
+    try {
+      const pool = join(work, 'pool.toml');
+      await writeFile(pool, `[providers.${provider.name}]\nkind = "${provider.kind}"\ntoken_env = "${provider.credentials.token_env}"\n\n[providers.${provider.name}.cloudflare]\naccount_id = "0123456789abcdef0123456789abcdef"\nprofile = "${provider.profile}"\n`);
+      const capabilities = JSON.parse(run(['provider', 'capabilities', provider.name, '--json', '--pool-config', pool, '--capability-cache', join(work, 'cache.json')]));
+      assert.equal(capabilities.protocol, provider.protocol);
+      assert.equal(capabilities.execution?.sessions ?? false, false);
+      assert.equal(capabilities.execution?.deployments, false);
+    } finally {
+      await rm(work, { recursive: true, force: true });
+    }
+    detail = `the installed Compute reports the ${provider.profile} profile and ${provider.protocol} capabilities without a credential`;
+  }
+  pass(`execution_provider_${provider.name}`, `${provider.name} is optional, credential-free in configuration, and ${detail}`);
+}
+
 const versions = new Map();
 for (const [path, entry] of Object.entries(lock.packages)) {
   if (!path.includes('node_modules/') || !entry.version) continue;

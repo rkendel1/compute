@@ -2202,10 +2202,7 @@ impl Daemon {
         for (id, provider) in &configs {
             let record = ProviderRecord {
                 provider_id: id.clone(),
-                kind: match provider.kind {
-                    ProviderKind::Local => "local".into(),
-                    ProviderKind::Remote => "remote".into(),
-                },
+                kind: provider.kind.to_string(),
                 endpoint: provider.endpoint.clone(),
                 priority: provider.priority,
                 registered_by: self.instance_id.clone(),
@@ -2411,10 +2408,7 @@ fn lock_state_dir(state_dir: &std::path::Path) -> Result<std::fs::File, Environm
 }
 
 fn identity_label(identity: &compute_core::ProviderIdentity) -> String {
-    match identity {
-        compute_core::ProviderIdentity::Local { id } => id.clone(),
-        compute_core::ProviderIdentity::Remote { id, .. } => id.clone(),
-    }
+    identity.id().to_owned()
 }
 
 /// The daemon's provider pool. `local` is always the daemon's own node.
@@ -2451,6 +2445,11 @@ fn build_pool(config: &DaemonConfig) -> Result<ProviderPool, EnvironmentError> {
                 pool.add_remote(id.clone(), provider.clone(), Arc::new(remote))
                     .map_err(invalid)?;
             }
+            ProviderKind::Cloudflare => {
+                let cloudflare = provider.cloudflare_provider(id).map_err(invalid)?;
+                pool.add(id.clone(), provider.clone(), Arc::new(cloudflare))
+                    .map_err(invalid)?;
+            }
         }
     }
     if !has_local {
@@ -2463,6 +2462,7 @@ fn build_pool(config: &DaemonConfig) -> Result<ProviderPool, EnvironmentError> {
                 priority: 0,
                 token_env: None,
                 token_file: None,
+                cloudflare: None,
             },
             config.provider.clone(),
         )

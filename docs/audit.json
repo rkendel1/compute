@@ -758,6 +758,26 @@
    "notes": ""
   },
   {
+   "id": "provider-cloudflare",
+   "area": "provider",
+   "name": "Cloudflare Workers provider (`workers-free`, compute.cloudflare@1)",
+   "status": "IMPLEMENTED",
+   "user_can_use": "yes",
+   "in_complete_model": true,
+   "evidence": {
+    "source": [
+     "crates/compute-provider-cloudflare/src/lib.rs#CloudflareProvider"
+    ],
+    "tests": [
+     "crates/compute-provider-cloudflare/tests/provider.rs",
+     "crates/compute-provider-cloudflare/tests/placement.rs",
+     "crates/compute-provider-cloudflare/tests/harness.rs",
+     "crates/compute-cli/tests/cloudflare.rs"
+    ]
+   },
+   "notes": "Runs deployed WASI modules on request; refuses process runtimes, files, network, sessions, jobs and deployments. Verified against a local fake and the harness under Node; the live smoke test needs credentials."
+  },
+  {
    "id": "run-a-project",
    "area": "projects",
    "name": "Inspect a source in the computer and propose an assembly",
@@ -2237,6 +2257,102 @@
    "tests": [
     "crates/compute-cli/tests/product.rs",
     "packages/compute-appport/src/provider.ts"
+   ]
+  },
+  {
+   "command": "compute cloudflare profile",
+   "about": "Show a Cloudflare execution profile: what it runs, what it refuses, and the plan limits Cloudflare enforces. Needs no account",
+   "help_defect": null,
+   "interface": "Cloudflare v4 API and workers.dev, through the cloudflare pool member (compute-provider-cloudflare)",
+   "state": "none (static profile)",
+   "authority": "Cloudflare API token named by token_env/token_file (never stored)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cloudflare.rs"
+   ]
+  },
+  {
+   "command": "compute cloudflare init",
+   "about": "Write a credential-free pool file with a cloudflare member; never overwrites an existing file",
+   "help_defect": null,
+   "interface": "Cloudflare v4 API and workers.dev, through the cloudflare pool member (compute-provider-cloudflare)",
+   "state": "writes a pool file",
+   "authority": "Cloudflare API token named by token_env/token_file (never stored)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cloudflare.rs"
+   ]
+  },
+  {
+   "command": "compute cloudflare validate",
+   "about": "Check a cloudflare provider: its configuration, its credential, and its account",
+   "help_defect": null,
+   "interface": "Cloudflare v4 API and workers.dev, through the cloudflare pool member (compute-provider-cloudflare)",
+   "state": "none",
+   "authority": "Cloudflare API token named by token_env/token_file (never stored)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/cloudflare.rs"
+   ]
+  },
+  {
+   "command": "compute cloudflare deploy",
+   "about": "Deploy a WASI module as a Worker; idempotent; prints a deployment receipt",
+   "help_defect": null,
+   "interface": "Cloudflare v4 API and workers.dev, through the cloudflare pool member (compute-provider-cloudflare)",
+   "state": "Cloudflare (a Worker named by its content digest)",
+   "authority": "Cloudflare API token named by token_env/token_file (never stored)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-provider-cloudflare/tests/provider.rs"
+   ]
+  },
+  {
+   "command": "compute cloudflare status",
+   "about": "Whether a module's Worker is deployed, and with which deployment",
+   "help_defect": null,
+   "interface": "Cloudflare v4 API and workers.dev, through the cloudflare pool member (compute-provider-cloudflare)",
+   "state": "none",
+   "authority": "Cloudflare API token named by token_env/token_file (never stored)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-provider-cloudflare/tests/provider.rs"
+   ]
+  },
+  {
+   "command": "compute cloudflare invoke",
+   "about": "Invoke a deployed module once and print its outcome and invocation record. Never deploys",
+   "help_defect": null,
+   "interface": "Cloudflare v4 API and workers.dev, through the cloudflare pool member (compute-provider-cloudflare)",
+   "state": "none (an invocation record is printed)",
+   "authority": "Cloudflare API token named by token_env/token_file (never stored)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-provider-cloudflare/tests/provider.rs"
+   ]
+  },
+  {
+   "command": "compute cloudflare delete",
+   "about": "Delete a Worker Compute deployed: by module, or by Worker name",
+   "help_defect": null,
+   "interface": "Cloudflare v4 API and workers.dev, through the cloudflare pool member (compute-provider-cloudflare)",
+   "state": "Cloudflare (removes the Worker)",
+   "authority": "Cloudflare API token named by token_env/token_file (never stored)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-provider-cloudflare/tests/provider.rs"
+   ]
+  },
+  {
+   "command": "compute cloudflare list",
+   "about": "List the Workers this provider's prefix names on the account",
+   "help_defect": null,
+   "interface": "Cloudflare v4 API and workers.dev, through the cloudflare pool member (compute-provider-cloudflare)",
+   "state": "none",
+   "authority": "Cloudflare API token named by token_env/token_file (never stored)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-provider-cloudflare/tests/provider.rs"
    ]
   },
   {

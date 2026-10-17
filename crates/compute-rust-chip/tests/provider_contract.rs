@@ -196,3 +196,27 @@ async fn acquisition_failure_fails_closed_and_creates_nothing() {
     assert!(envs.acquire(WorkId::new("A")).await.is_err());
     let _ = (CapabilityId::new("pax.test"), EnvironmentId::new("x"));
 }
+
+/// G3 (compute#90): a work's Compute commands are cancellable by work. An idle work, an unknown
+/// work and a released work have nothing to cancel, and nothing is reported cancelled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_works_commands_are_cancelled_by_work_and_nothing_else_is() {
+    if !pax_installed() {
+        eprintln!("SKIPPED: PAX is not installed");
+        return;
+    }
+    let target = Target::start();
+    let source = project("cancel-by-work", true);
+    let provider = provider(&target, &source, 2);
+    let envs = Environments::new(provider.clone());
+    let owned = envs.acquire(WorkId::new("A")).await.unwrap();
+    assert!(provider.cancel_work(&WorkId::new("A")).await.is_empty());
+    assert!(
+        provider
+            .cancel_work(&WorkId::new("nobody"))
+            .await
+            .is_empty()
+    );
+    drop(owned);
+    assert!(provider.cancel_work(&WorkId::new("A")).await.is_empty());
+}

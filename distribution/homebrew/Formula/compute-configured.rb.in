@@ -36,13 +36,33 @@ class ComputeConfigured < Formula
       #!/bin/sh
       version=$("#{formula_opt_bin("compute")}/compute" --version) || exit
       version=${version#compute }
-      COMPUTE_INSTALLED_VERSION="$version" exec "#{formula_opt_libexec("compute")}/runtimes/node/bin/node" "#{libexec}/verify.mjs"
+      COMPUTE_INSTALLED_VERSION="$version" COMPUTE_BIN="#{formula_opt_bin("compute")}/compute" \\
+        exec "#{formula_opt_libexec("compute")}/runtimes/node/bin/node" "#{libexec}/verify.mjs"
     SH
     (bin/"compute-configured-setup").write <<~SH
       #!/bin/sh
       "#{bin}/compute-configured-verify" >/dev/null || exit
       status=$("#{formula_opt_libexec("compute")}/runtimes/node/bin/node" -p "require('#{libexec}/stack.json').distribution.certification_status") || exit
       printf '%s\n' "Configured Compute is $status and active through COMPUTE_STACKS."
+    SH
+    # The Cloudflare execution provider the profile declares as optional. Base
+    # Compute carries the provider; this only writes a credential-free pool file
+    # for it under COMPUTE_HOME, and never overwrites one that exists, so an
+    # upgrade or a second run leaves the user's configuration as it is. The API
+    # token is never an argument: the pool file names the variable that holds it.
+    (bin/"compute-configured-cloudflare-setup").write <<~SH
+      #!/bin/sh
+      if [ "$#" -ne 1 ]; then
+        echo "usage: compute-configured-cloudflare-setup ACCOUNT_ID" >&2
+        echo "  writes ${COMPUTE_HOME:-$HOME/.compute}/configured/cloudflare/compute-pool.toml (see docs/cloudflare.md)" >&2
+        exit 2
+      fi
+      pool="${COMPUTE_HOME:-$HOME/.compute}/configured/cloudflare/compute-pool.toml"
+      "#{formula_opt_bin("compute")}/compute" cloudflare init --account-id "$1" --output "$pool" || exit
+      "#{formula_opt_bin("compute")}/compute" cloudflare validate --provider cloudflare --offline --pool-config "$pool" || exit
+      printf '%s\n' "Use it with: export COMPUTE_POOL_CONFIG='$pool'" \\
+        "Then provide the token without writing it down: read -rs CLOUDFLARE_API_TOKEN && export CLOUDFLARE_API_TOKEN" \\
+        "Check the account: compute cloudflare validate --provider cloudflare"
     SH
     # The agent runtime the configured profile declares. Chip is a configured
     # component, so this wrapper lives here and nowhere else: base Compute has no
@@ -166,5 +186,26 @@ class ComputeConfigured < Formula
     assert_match "usage: compute-rust-chip",
                  shell_output("#{bin}/compute-configured-rust-chip 2>&1", 2)
     assert_match "unknown agent", shell_output("#{bin}/compute-configured-agent --agent nope 2>&1", 2)
+    # The optional Cloudflare provider: declared by the profile, reported by the
+    # installed Compute, set up without a credential, and set up only once.
+    cloudflare = JSON.parse((libexec/"stack.json").read)
+                     .fetch("execution_providers").find { |provider| provider["kind"] == "cloudflare" }
+    refute_nil cloudflare, "the configured profile declares no cloudflare provider"
+    assert_equal false, cloudflare.fetch("required")
+    profile = JSON.parse(shell_output("#{bin}/compute-configured cloudflare profile #{cloudflare.fetch("profile")} --json"))
+    assert_equal false, profile.fetch("capabilities").fetch("persistent_processes")
+    ENV.delete("CLOUDFLARE_API_TOKEN")
+    assert_match "Credential     missing",
+                 shell_output("#{bin}/compute-configured-cloudflare-setup 0123456789abcdef0123456789abcdef")
+    pool = testpath/"state/configured/cloudflare/compute-pool.toml"
+    assert_predicate pool, :file?
+    refute_match(/token\s*=/, pool.read.lines.reject { |line| line.start_with?("#") }.join)
+    before = pool.read
+    shell_output("#{bin}/compute-configured-cloudflare-setup fedcba9876543210fedcba9876543210")
+    assert_equal before, pool.read, "setup must not overwrite an existing pool file"
+    capabilities = JSON.parse(shell_output("#{formula_opt_bin("compute")}/compute provider capabilities cloudflare " \
+                                           "--json --pool-config #{pool} --capability-cache #{testpath}/cache.json"))
+    assert_equal "compute.cloudflare@1", capabilities.fetch("protocol")
+    assert_predicate libexec/"providers/cloudflare/hello.wasm", :file?
   end
 end

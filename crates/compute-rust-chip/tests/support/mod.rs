@@ -170,11 +170,18 @@ pub fn worker() -> String {
     env!("CARGO_BIN_EXE_compute-rust-chip").to_string()
 }
 
+/// Whether PAX is on the search path. Tests that need it say `SKIPPED` without it, so a skip is
+/// never mistaken for a pass; with `COMPUTE_REQUIRE_PAX` set (as CI sets it), a missing PAX fails
+/// the test instead.
 pub fn pax_installed() -> bool {
-    std::process::Command::new("pax")
+    let found = std::process::Command::new("pax")
         .arg("--version")
         .output()
-        .is_ok_and(|o| o.status.success())
+        .is_ok_and(|o| o.status.success());
+    if !found && std::env::var_os("COMPUTE_REQUIRE_PAX").is_some() {
+        panic!("COMPUTE_REQUIRE_PAX is set but `pax` is not on the search path");
+    }
+    found
 }
 
 /// The configuration a Compute-configured launch would supply: the target, the project, Rust

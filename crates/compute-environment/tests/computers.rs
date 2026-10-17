@@ -327,6 +327,7 @@ fn pool(targets: &[(&str, &Target)]) -> PoolConfig {
                         priority: 0,
                         token_env: None,
                         token_file: Some(target.token_file.clone()),
+                        cloudflare: None,
                     },
                 )
             })

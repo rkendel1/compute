@@ -15,6 +15,7 @@ use compute_runtime::Compute;
 mod admission;
 mod application;
 mod certification;
+mod cloudflare_cmd;
 mod computer_cmd;
 mod contract;
 mod control_state;
@@ -95,6 +96,9 @@ enum Commands {
     Placement(pool::PlacementCommand),
     /// Place a workload on a compatible provider and execute or submit it.
     Pool(pool::PoolCommand),
+    /// Deploy, invoke, inspect, and delete Workers on a Cloudflare provider,
+    /// and show its execution profile.
+    Cloudflare(cloudflare_cmd::CloudflareCommand),
     /// The computers and infrastructure environments are placed on.
     Target(computer_cmd::TargetCommand),
     /// Temporary, authorized, durable computers: create one, run commands
@@ -1693,6 +1697,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Jobs(command) => pool::jobs(command).await?,
         Commands::Placement(command) => pool::placement(command).await?,
         Commands::Pool(command) => pool::pool(command).await?,
+        Commands::Cloudflare(command) => cloudflare_cmd::cloudflare(command).await?,
         Commands::Session(command) => session_cmd::session(*command).await?,
         Commands::Target(command) => computer_cmd::target(command).await?,
         Commands::Policy(command) => policy_cmd::policy(command).await?,

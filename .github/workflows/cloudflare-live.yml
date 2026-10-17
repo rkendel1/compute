@@ -1,0 +1,30 @@
+name: cloudflare-live
+
+# The live Cloudflare smoke test: deploy a uniquely named Worker on the free
+# plan, invoke it, verify its evidence, delete it, and confirm nothing is
+# left. Only on demand, only with the repository's Cloudflare secrets. Normal
+# CI never needs an account. Without the secrets this job fails ("NOT RUN");
+# it never reports a skipped live test as a passed one.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Live smoke test
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          COMPUTE_CLOUDFLARE_LIVE_ACCOUNT_ID: ${{ secrets.COMPUTE_CLOUDFLARE_LIVE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$COMPUTE_CLOUDFLARE_LIVE_ACCOUNT_ID" ]; then
+            echo "::error::NOT RUN: set the CLOUDFLARE_API_TOKEN and COMPUTE_CLOUDFLARE_LIVE_ACCOUNT_ID secrets"
+            exit 1
+          fi
+          cargo test --locked -p compute-provider-cloudflare --test live -- --ignored --nocapture

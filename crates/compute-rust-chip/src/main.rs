@@ -70,6 +70,10 @@ async fn main() {
         }
         Some("serve") => match configuration() {
             Ok(config) => {
+                // The documented limitation, said where an operator sees it (compute#91).
+                eprintln!(
+                    "note: works are not persisted. A work interrupted by a crash is lost, and running its prompt again may repeat capabilities that already ran; nothing is replayed automatically."
+                );
                 let provider = compute_rust_chip::ComputeSessionEnvironments::new(config);
                 let environments = Arc::new(Environments::new(Arc::new(provider)));
                 chip_cli::service::serve_in(&args[2..], Some(environments)).await

@@ -29,6 +29,9 @@ pub fn inspect(path: &Path, json: bool) -> Result<()> {
                 compute_core::ProviderIdentity::Remote { id, .. } => {
                     println!("  Remote:      {id}")
                 }
+                compute_core::ProviderIdentity::Cloudflare { id, account_id } => {
+                    println!("  Cloudflare:  {id} (account {account_id})")
+                }
             }
             if let Some(protocol) = &receipt.provider_protocol {
                 println!("  Protocol:    {protocol}");

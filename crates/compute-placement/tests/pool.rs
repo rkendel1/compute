@@ -137,6 +137,7 @@ fn remote(endpoint: &str, priority: i64) -> ProviderConfig {
         priority,
         token_env: None,
         token_file: None,
+        cloudflare: None,
     }
 }
 
@@ -148,6 +149,7 @@ fn local(priority: i64) -> ProviderConfig {
         priority,
         token_env: None,
         token_file: None,
+        cloudflare: None,
     }
 }
 

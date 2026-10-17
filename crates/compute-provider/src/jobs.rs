@@ -114,10 +114,7 @@ impl JobManager {
             let provider_id = job
                 .provider_id
                 .clone()
-                .unwrap_or_else(|| match &job.provider {
-                    compute_core::ProviderIdentity::Local { id }
-                    | compute_core::ProviderIdentity::Remote { id, .. } => id.clone(),
-                });
+                .unwrap_or_else(|| job.provider.id().to_owned());
             if job.reservation.is_none() {
                 job.reservation = Some(ComputeReservation {
                     reservation_id: ReservationId::generate(),
@@ -350,10 +347,7 @@ impl JobManager {
             .placement
             .as_ref()
             .map(|placement| placement.provider_id.clone())
-            .unwrap_or_else(|| match self.provider.identity() {
-                compute_core::ProviderIdentity::Local { id }
-                | compute_core::ProviderIdentity::Remote { id, .. } => id,
-            });
+            .unwrap_or_else(|| self.provider.identity().id().to_owned());
         let reservation = ComputeReservation {
             reservation_id: ReservationId::generate(),
             job_id: job_id.clone(),

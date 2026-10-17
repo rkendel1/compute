@@ -202,6 +202,10 @@ impl Synthetic {
                     id: format!("https://{id}.example"),
                     endpoint: format!("https://{id}.example"),
                 },
+                ProviderKind::Cloudflare => ProviderIdentity::Cloudflare {
+                    id: id.into(),
+                    account_id: "0123456789abcdef0123456789abcdef".into(),
+                },
             },
             artifact_modes: vec!["bundle".into(), "inline".into()],
             isolation_profiles: self.isolation.clone(),
@@ -308,6 +312,7 @@ pub fn config(entries: &[(&str, ProviderKind, i64)]) -> PoolConfig {
                         priority: *priority,
                         token_env: None,
                         token_file: None,
+                        cloudflare: None,
                     },
                 )
             })

@@ -1,0 +1,30 @@
+# A pool with this machine and a Cloudflare account on the Workers Free plan.
+#
+# The account's API token is never written here: token_env names the
+# environment variable that holds it. Create the token in the Cloudflare
+# dashboard with the "Edit Cloudflare Workers" template (Workers Scripts
+# Edit on this account).
+
+[providers.local]
+kind = "local"
+priority = 100
+
+# A low priority keeps existing work where it runs: Compute selects this
+# member only when you name it (--provider cloudflare) or when nothing else
+# is compatible. Placement never moves a workload here on its own.
+[providers.cloudflare]
+kind = "cloudflare"
+token_env = "CLOUDFLARE_API_TOKEN"
+priority = -100
+
+[providers.cloudflare.cloudflare]
+# Your account ID: Cloudflare dashboard → Workers & Pages → Account details.
+account_id = "0123456789abcdef0123456789abcdef"
+profile = "workers-free"
+worker_prefix = "compute-"
+
+[providers.cloudflare.cloudflare.limits]
+timeout_ms = 10000
+max_module_bytes = 10485760
+max_output_bytes = 1048576
+max_concurrent_invocations = 6

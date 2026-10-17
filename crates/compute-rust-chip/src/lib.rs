@@ -54,6 +54,9 @@ use compute_agent::{AgentHost, AgentSession, HostConfig};
 use compute_core::{NetworkPolicy, SessionResources};
 use compute_provider::RemoteProvider;
 
+pub mod cancel;
+pub mod work;
+
 pub use compute_agent::PROJECT_DIRECTORY;
 
 /// Operator configuration for the Compute-backed environments. None of it comes from a client or a
@@ -148,6 +151,8 @@ pub struct ComputeSessionEnvironments {
     host: AgentHost,
     config: ComputeSessionConfig,
     live: Mutex<HashMap<EnvironmentId, AgentSession>>,
+    /// Which environment each running work owns, so a work's commands can be cancelled.
+    works: Mutex<HashMap<WorkId, EnvironmentId>>,
     runtime: tokio::runtime::Handle,
 }
 
@@ -158,6 +163,7 @@ impl ComputeSessionEnvironments {
             host: AgentHost::new(config.host()),
             config,
             live: Mutex::new(HashMap::new()),
+            works: Mutex::new(HashMap::new()),
             runtime: tokio::runtime::Handle::current(),
         }
     }
@@ -177,6 +183,22 @@ impl ComputeSessionEnvironments {
     pub fn remote(&self) -> &RemoteProvider {
         self.host.remote()
     }
+
+    /// Cancels the Compute commands a work is running now, with Compute's confirmed, idempotent
+    /// job cancellation (see `compute_agent::AgentSession::cancel`). A work with no environment, or
+    /// nothing running, has nothing to cancel. This does not stop Rust Chip's loop: that is Chip's
+    /// cancel endpoint (see [`cancel`]).
+    pub async fn cancel_work(&self, work: &WorkId) -> Vec<compute_agent::CommandCancellation> {
+        let session = {
+            let works = lock(&self.works);
+            let live = lock(&self.live);
+            works.get(work).and_then(|id| live.get(id)).cloned()
+        };
+        match session {
+            Some(session) => session.cancel().await,
+            None => Vec::new(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -185,7 +207,7 @@ impl EnvironmentProvider for ComputeSessionEnvironments {
         self.config.max_environments
     }
 
-    async fn acquire(&self, _work: &WorkId) -> Result<Arc<dyn WorkEnvironment>, EnvironmentError> {
+    async fn acquire(&self, work: &WorkId) -> Result<Arc<dyn WorkEnvironment>, EnvironmentError> {
         // Never a fallback: not another session, not the host.
         let session = self
             .host
@@ -200,6 +222,7 @@ impl EnvironmentProvider for ComputeSessionEnvironments {
         let runner = Arc::new(SessionRunner(session.clone()));
         match RemoteEnvironment::connect(id.clone(), runner, worker).await {
             Ok(environment) => {
+                lock(&self.works).insert(work.clone(), id.clone());
                 lock(&self.live).insert(id, session);
                 Ok(Arc::new(environment))
             }
@@ -210,7 +233,8 @@ impl EnvironmentProvider for ComputeSessionEnvironments {
         }
     }
 
-    fn release(&self, _work: &WorkId, environment: &EnvironmentId) {
+    fn release(&self, work: &WorkId, environment: &EnvironmentId) {
+        lock(&self.works).remove(work);
         let Some(session) = lock(&self.live).remove(environment) else {
             return;
         };

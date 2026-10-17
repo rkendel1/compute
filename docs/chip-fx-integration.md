@@ -194,6 +194,20 @@ second test pins the `3` for a malformed endpoint. G8 and G6 have launcher-path 
 success does not complete a work). G1/G2/G6/G8 remain open until this PR merges and its CI is observed; the harness in
 `integration/chip-fx` is not yet folded into `crates/compute-rust-chip/tests`.
 
+**Status after the gap PR (compute#88–#96).**
+
+| # | Status | Where |
+| --- | --- | --- |
+| G1 | Pin `b3f9a1c8…` with (a)–(b). The `compute-rust-chip` tests that need PAX used to print `SKIPPED` and pass in CI, where PAX was not installed, so `work`, `provider_contract` and the launcher tests had never run there. CI now installs PAX at a pinned commit and sets `COMPUTE_REQUIRE_PAX`, which turns a missing PAX into a failure. | `.github/workflows/test.yml`, `tests/support/mod.rs` |
+| G2 | SSE stand-in and the `3`/`2` diagnosis (above). Concurrent launcher tests also shared one token file (named from the token's fixed prefix) and overwrote each other's credential; each launch now has its own. | `tests/launcher.rs` |
+| G3 | Compute side done: `AgentSession::cancel` (Compute's confirmed, idempotent job cancellation; an interrupted command is never reported as not having run), commands whose caller stops waiting are cancelled rather than left running, `ComputeSessionEnvironments::cancel_work`, and `compute_rust_chip::cancel::request` for Chip's `POST /v1/work/{id}/cancel`. Propagating Chip's cancellation into FX's `CancelSignal` is chip-rs's half. | `compute-agent`, `src/cancel.rs`, `tests/cancellation.rs`, `tests/launcher.rs` |
+| G4 | Decision recorded in [rust-chip.md](rust-chip.md#turn-records-and-recovery-decision); the no-persistence warning is printed when `serve` starts and checked by a test. | `src/main.rs` |
+| G5 | chip-rs API change (typed delivery certainty). | chip-rs |
+| G6 | `compute_rust_chip::work::HostWork` refuses a work without `required_observations`; a model's claim never completes a host work (tested without PAX). The service's kinds are the typed contracts of its entry. | `src/work.rs`, `tests/host_work.rs` |
+| G7 | Documented unsupported at the Wasm runtime and in [rust-chip.md](rust-chip.md#limits). | `compute-runtime-wasm`, docs |
+| G8 | On the real launcher path: the key reaches the model; it is in no work, event, metric, service log, model input, stored Compute record or the session worker's recorded environment. A mutation that leaks it into the worker's environment fails the test. | `tests/launcher.rs` |
+| G9 | FX native provider (tracked by chip-rs#35). | fx / chip-rs |
+
 **New finding (chip-rs, not fixed here).** `FxModelProvider::complete` holds its capability lock for the whole attempt, and
 `chip serve` shares one provider across works, so two concurrent works' model calls are serialized: a second work's inference waits for
 the first's to finish. The old launcher test assumed both could be in flight and waited on a barrier, which then outlasted the 30 s

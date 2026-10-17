@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "compute-agent"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "compute-core",
  "compute-provider",
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "compute-cli"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "assert_cmd",
  "async-trait",
@@ -647,6 +647,7 @@ dependencies = [
  "compute-policy",
  "compute-project",
  "compute-provider",
+ "compute-provider-cloudflare",
  "compute-runtime",
  "compute-state",
  "compute-state-feltdb",
@@ -668,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "compute-core"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "chrono",
@@ -684,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "compute-environment"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -719,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "compute-network"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "chrono",
@@ -739,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "compute-placement"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "chrono",
@@ -747,6 +748,7 @@ dependencies = [
  "compute-policy",
  "compute-project",
  "compute-provider",
+ "compute-provider-cloudflare",
  "compute-runtime",
  "serde",
  "serde_json",
@@ -760,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "compute-policy"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "compute-core",
  "serde",
@@ -772,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "compute-project"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "compute-core",
  "serde",
@@ -784,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "compute-provider"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "chrono",
@@ -803,8 +805,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "compute-provider-cloudflare"
+version = "0.1.20"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "compute-core",
+ "compute-placement",
+ "compute-policy",
+ "compute-provider",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wat",
+]
+
+[[package]]
 name = "compute-runtime"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "chrono",
@@ -822,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "compute-runtime-conformance"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "compute-core",
  "serde_json",
@@ -832,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "compute-runtime-process"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "compute-core",
@@ -846,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "compute-runtime-wasm"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "compute-core",
@@ -861,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "compute-rust-chip"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "chip-cli",
@@ -880,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "compute-state"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -895,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "compute-state-feltdb"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "chrono",
@@ -909,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "compute-state-file"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "compute-state",
@@ -921,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "compute-state-memory"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "compute-state",
@@ -930,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "compute-worker-github"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "chrono",
