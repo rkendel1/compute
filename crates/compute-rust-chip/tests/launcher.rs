@@ -210,6 +210,10 @@ fn launcher(target: &Target, source: &std::path::Path, model: &str, tag: &str) -
         .env("COMPUTE_RUST_CHIP_PROJECT", source)
         .env("COMPUTE_RUST_CHIP_WORKER", worker())
         .env(
+            "COMPUTE_RUST_CHIP_SESSION_MEMORY",
+            TEST_SESSION_MEMORY.to_string(),
+        )
+        .env(
             "COMPUTE_RUST_CHIP_COMMAND_PATH",
             format!("{home}/.cargo/bin:/usr/local/bin:/usr/bin:/bin"),
         )
@@ -500,6 +504,10 @@ fn launcher_for(endpoint: &str, token: &str, source: &std::path::Path, model: &s
         .env("COMPUTE_RUST_CHIP_TARGET_TOKEN_FILE", token_path)
         .env("COMPUTE_RUST_CHIP_PROJECT", source)
         .env("COMPUTE_RUST_CHIP_WORKER", worker())
+        .env(
+            "COMPUTE_RUST_CHIP_SESSION_MEMORY",
+            TEST_SESSION_MEMORY.to_string(),
+        )
         .env(
             "COMPUTE_RUST_CHIP_COMMAND_PATH",
             format!("{home}/.cargo/bin:/usr/local/bin:/usr/bin:/bin"),

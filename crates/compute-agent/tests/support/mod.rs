@@ -156,6 +156,9 @@ pub fn host_config(target: &Target, source: &Path) -> compute_agent::HostConfig 
     let mut config = compute_agent::HostConfig::new(target.endpoint.clone());
     config.token = Some(target.token.clone());
     config.project_source = Some(source.display().to_string());
+    // The default (1 GiB) is admitted against the host's available memory at that moment, which a
+    // CI runner under the parallel workspace tests does not always have.
+    config.resources.memory_bytes = Some(256 << 20);
     config
         .command_environment
         .insert("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into());
