@@ -11,9 +11,9 @@ description = "Run Rust Chip (chip-rs) as a Compute workload: one isolated Compu
 # nothing here. It is unrelated to the npm Chip/Eve agent the configured distribution also ships.
 [dependencies]
 async-trait.workspace = true
-chip-cli = { git = "https://github.com/rkendel1/chip-rs", rev = "b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3" }
-chip-core = { git = "https://github.com/rkendel1/chip-rs", rev = "b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3" }
-chip-remote-env = { git = "https://github.com/rkendel1/chip-rs", rev = "b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3" }
+chip-cli = { git = "https://github.com/rkendel1/chip-rs", rev = "c14522a11e15c1b307db8ac0c274844adeac50a8" }
+chip-core = { git = "https://github.com/rkendel1/chip-rs", rev = "c14522a11e15c1b307db8ac0c274844adeac50a8" }
+chip-remote-env = { git = "https://github.com/rkendel1/chip-rs", rev = "c14522a11e15c1b307db8ac0c274844adeac50a8" }
 compute-agent = { path = "../compute-agent" }
 compute-core = { path = "../compute-core" }
 compute-provider = { path = "../compute-provider" }
@@ -22,8 +22,8 @@ sha2.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-chip-pax = { git = "https://github.com/rkendel1/chip-rs", rev = "b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3" }
-chip-inference = { git = "https://github.com/rkendel1/chip-rs", rev = "b3f9a1c87b80a37bab3cc40b93bb4e6fd7d075a3" }
+chip-pax = { git = "https://github.com/rkendel1/chip-rs", rev = "c14522a11e15c1b307db8ac0c274844adeac50a8" }
+chip-inference = { git = "https://github.com/rkendel1/chip-rs", rev = "c14522a11e15c1b307db8ac0c274844adeac50a8" }
 serde_json.workspace = true
 async-trait.workspace = true
 tempfile.workspace = true
