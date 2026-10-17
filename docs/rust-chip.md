@@ -52,6 +52,7 @@ workload an isolated computer plus `exec`: an ephemeral **session**.
 | the work's operations | `exec(argv, env)`: a durable job with captured output and a receipt; no stdin |
 | `release` | `POST /compute/sessions/{id}/destroy` (confirmed teardown; the record stays as evidence) |
 | `isolation_capacity` | `COMPUTE_RUST_CHIP_MAX_ENVIRONMENTS` (default 2) |
+| session resources | 1 CPU; memory `COMPUTE_RUST_CHIP_SESSION_MEMORY` in bytes (default 1 GiB), admitted against what the target has available |
 | `EnvironmentId` | an opaque hash of the session id; never the session id, a path or a host |
 
 **Who decides what.** Rust Chip validates every capability request and owns its meaning

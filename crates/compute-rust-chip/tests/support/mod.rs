@@ -186,6 +186,11 @@ pub fn pax_installed() -> bool {
 
 /// The configuration a Compute-configured launch would supply: the target, the project, Rust
 /// Chip's executable, and the tool locations the target's commands need.
+/// What a test session asks for. The default (1 GiB) is admitted against the host's available
+/// memory at that moment, which a CI runner under the parallel workspace tests does not always have;
+/// these sessions only run small commands.
+pub const TEST_SESSION_MEMORY: u64 = 256 << 20;
+
 pub fn config(target: &Target, source: &Path, max_environments: usize) -> ComputeSessionConfig {
     let mut config = ComputeSessionConfig::new(
         target.endpoint.clone(),
@@ -194,6 +199,7 @@ pub fn config(target: &Target, source: &Path, max_environments: usize) -> Comput
     );
     config.token = Some(target.token.clone());
     config.max_environments = max_environments;
+    config.resources.memory_bytes = Some(TEST_SESSION_MEMORY);
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     let path = format!("{home}/.cargo/bin:/usr/local/bin:/usr/bin:/bin");
     config.command_environment.insert("PATH".into(), path);

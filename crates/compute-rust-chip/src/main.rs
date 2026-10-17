@@ -53,6 +53,17 @@ fn configuration() -> Result<compute_rust_chip::ComputeSessionConfig, String> {
             .parse()
             .map_err(|_| "COMPUTE_RUST_CHIP_MAX_ENVIRONMENTS must be a number".to_string())?;
     }
+    if let Ok(bytes) = std::env::var("COMPUTE_RUST_CHIP_SESSION_MEMORY") {
+        let bytes: u64 = bytes
+            .trim()
+            .parse()
+            .ok()
+            .filter(|bytes| *bytes > 0)
+            .ok_or_else(|| {
+                "COMPUTE_RUST_CHIP_SESSION_MEMORY must be a number of bytes".to_string()
+            })?;
+        config.resources.memory_bytes = Some(bytes);
+    }
     Ok(config)
 }
 

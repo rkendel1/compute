@@ -13,6 +13,7 @@ async fn rust_chip_launches_through_the_agent_contract() {
     let source = project("agent-contract", true);
     let mut host_config = compute_agent::HostConfig::new(target.endpoint.clone());
     host_config.token = Some(target.token.clone());
+    host_config.resources.memory_bytes = Some(TEST_SESSION_MEMORY);
     host_config.project_source = Some(source.display().to_string());
     let host = AgentHost::new(host_config);
 
