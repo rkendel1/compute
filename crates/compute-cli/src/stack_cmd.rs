@@ -774,7 +774,7 @@ fn check(
                 severity: "drift",
                 kind: "source-moved".into(),
                 detail: format!(
-                    "{} moved beyond the locked {} to {}{}",
+                    "{0} resolves to {2} at the reference the manifest follows; the lock has {1}{3}",
                     source.name,
                     source.from.as_deref().map(short_commit).unwrap_or("-"),
                     source.to.as_deref().map(short_commit).unwrap_or("-"),
