@@ -3934,6 +3934,102 @@
    "authority": "daemon scopes (read; operate to write)",
    "ui": null,
    "tests": []
+  },
+  {
+   "command": "compute stack check",
+   "about": "Report drift between the manifest, the known-good lock, the declared sources and the registry, and the lock's inventory findings",
+   "help_defect": null,
+   "interface": "local; git and npm for the declared sources and registry",
+   "state": "reads stacks/<name>/stack.lock",
+   "authority": "none (reads public sources; promote needs --approve --approved-by)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-project/tests/stack_sync.rs"
+   ]
+  },
+  {
+   "command": "compute stack consumers",
+   "about": "The consumers of one provided package and, with --target, what moving each of them there leaves to do",
+   "help_defect": null,
+   "interface": "local; git and npm for the declared sources and registry",
+   "state": "reads a lock",
+   "authority": "none (reads public sources; promote needs --approve --approved-by)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-project/tests/stack_sync.rs"
+   ]
+  },
+  {
+   "command": "compute stack diff",
+   "about": "Explain what changed between two revisions and which acceptance suites it affects",
+   "help_defect": null,
+   "interface": "local; git and npm for the declared sources and registry",
+   "state": "reads locks",
+   "authority": "none (reads public sources; promote needs --approve --approved-by)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-project/tests/stack_sync.rs"
+   ]
+  },
+  {
+   "command": "compute stack inventory",
+   "about": "Every use of every provided package at a revision's locked commits, and the findings",
+   "help_defect": null,
+   "interface": "local; git and npm for the declared sources and registry",
+   "state": "reads a lock",
+   "authority": "none (reads public sources; promote needs --approve --approved-by)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-project/tests/stack_sync.rs"
+   ]
+  },
+  {
+   "command": "compute stack promote",
+   "about": "Make a tested candidate the known-good revision (recorded evidence and explicit approval)",
+   "help_defect": null,
+   "interface": "local; git and npm for the declared sources and registry",
+   "state": "writes stack.lock and history/",
+   "authority": "none (reads public sources; promote needs --approve --approved-by)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-project/tests/stack_sync.rs"
+   ]
+  },
+  {
+   "command": "compute stack reproduce",
+   "about": "Restore every input of a revision from its declared sources and the registry, and verify each against the lock",
+   "help_defect": null,
+   "interface": "local; git and npm for the declared sources and registry",
+   "state": "writes a work directory",
+   "authority": "none (reads public sources; promote needs --approve --approved-by)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-project/tests/stack_sync.rs"
+   ]
+  },
+  {
+   "command": "compute stack test",
+   "about": "Materialize a revision from its declared sources and run its acceptance suites",
+   "help_defect": null,
+   "interface": "local; git and npm for the declared sources and registry",
+   "state": "writes evidence/<digest>.json with --record",
+   "authority": "none (reads public sources; promote needs --approve --approved-by)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-project/tests/stack_sync.rs"
+   ]
+  },
+  {
+   "command": "compute stack update",
+   "about": "Resolve a candidate revision; the known-good lock is never changed",
+   "help_defect": null,
+   "interface": "local; git and npm for the declared sources and registry",
+   "state": "writes candidates/<digest>.lock",
+   "authority": "none (reads public sources; promote needs --approve --approved-by)",
+   "ui": "none",
+   "tests": [
+    "crates/compute-project/tests/stack_sync.rs"
+   ]
   }
  ],
  "api": [

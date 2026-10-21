@@ -75,6 +75,21 @@ Nothing in Compute knows either name; a new stack is a new directory.
 `--stack PATH` names a directory or file; a project may set `[stack] name` in
 `compute.toml`.
 
+## Assembly: sources, the lock, and acceptance
+
+A stack also says how it is **assembled**, in tables outside the fingerprint:
+
+- `[[source]]`: the repositories the stack is built from, followed at a branch
+  (`track`) or held at a `ref`, and the packages each `provides`;
+- `[[relationship]]`, `[[copy]]` and `[[divergence]]`: what must agree across
+  them;
+- `[[acceptance]]`: the suites a revision must pass.
+
+`compute stack` resolves these into an exact, canonical lock (`stack.lock`)
+with a cross-repository package and source inventory. It promotes a new
+revision only from recorded, passing evidence and a named approval. See
+[stack-sync.md](stack-sync.md).
+
 ## How a stack flows through Compute
 
 A stack is not a branch in the executor. It is more requirements:
