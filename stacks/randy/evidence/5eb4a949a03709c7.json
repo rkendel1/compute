@@ -1,0 +1,195 @@
+{
+  "format": "compute.stack-evidence@1",
+  "stack": "randy",
+  "lock": "sha256:5eb4a949a03709c7807a13abf3b9c75fae18335577c12f12464547dd01892a67",
+  "harness": {
+    "repository": "https://github.com/rkendel1/compute",
+    "commit": "39cc5155cb520bb295069b4a9e265ec289b0ebce",
+    "dirty": false
+  },
+  "selection": "all",
+  "materialized": {
+    "status": "passed",
+    "sources": [
+      {
+        "name": "appboundry",
+        "commit": "42f633502091eb6f728fe9a40fd72e3a1846fcae",
+        "tree_matches": true,
+        "files_match": true
+      },
+      {
+        "name": "appport",
+        "commit": "a0be74454f1924d772be710d16af37de400209cb",
+        "tree_matches": true,
+        "files_match": true
+      },
+      {
+        "name": "appport-services",
+        "commit": "df0afbef2c468e5944ac62360179c229459f4f8c",
+        "tree_matches": true,
+        "files_match": true
+      },
+      {
+        "name": "appworks",
+        "commit": "47a356e7054a7e28b96792d53a4e968e49076b83",
+        "tree_matches": true,
+        "files_match": true
+      },
+      {
+        "name": "authboundry",
+        "commit": "02191c3808a08c92dc5d946711d31d03af6f30f4",
+        "tree_matches": true,
+        "files_match": true
+      },
+      {
+        "name": "compute",
+        "commit": "876362214b8f14716ab819d6b599f73e9fa3b236",
+        "tree_matches": true,
+        "files_match": true
+      },
+      {
+        "name": "feltdb",
+        "commit": "0a310ff5494518176b17dad476206f5dacabadf7",
+        "tree_matches": true,
+        "files_match": true
+      },
+      {
+        "name": "invoice-desk",
+        "commit": "f7291e8c46cb3be1a37e31e54b8cfa22d5f10b32",
+        "tree_matches": true,
+        "files_match": true
+      },
+      {
+        "name": "pax",
+        "commit": "674f3b3143874d1a692aca103b33f89da31a82ac",
+        "tree_matches": true,
+        "files_match": true
+      },
+      {
+        "name": "stack-agent",
+        "commit": "b3718dd7148d440b1eb4ee616aaaf56381bddb68",
+        "tree_matches": true,
+        "files_match": true
+      }
+    ]
+  },
+  "suites": [
+    {
+      "name": "package-set",
+      "mode": "deterministic",
+      "mandatory": true,
+      "status": "passed",
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 11,
+      "log_sha256": "sha256:07e7cffecd95cd80aec7d11b875232c0e97cb237d6af4924cb84f88a7d43ab65",
+      "artifacts": {
+        "lock": "sha256:3baafd0e0b3681eff0b803647820b2bae901e3eb3cc43c697c6a0ab9cb9b86b1",
+        "tree": "sha256:a92e73081fea74e7c44f2757b3a6f6b67316020c75fc47d288848eb56257d70f"
+      },
+      "detail": "every package installed with its locked integrity and loaded; npm ls valid"
+    },
+    {
+      "name": "generated-bridge-mcp",
+      "mode": "live",
+      "mandatory": true,
+      "status": "passed",
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 27,
+      "log_sha256": "sha256:43be3455bafd4b9f266cadab346a1204a143048704b2c5ea5a6fe66ea6af9681",
+      "artifacts": {
+        "cases": "sha256:ef0463bdba2602e42d35e7250e7b7df04847d31bcd6bd6f0335fe126900af8f1",
+        "generated": "sha256:ed218bef0ee64158ae6045882cff388c76d0b74460a0850c862d7e2cfbb31da7"
+      },
+      "detail": "MCP cases over the generated bridge with @appport/sdk 1.1.22; tokenless caller: 401"
+    },
+    {
+      "name": "chip-live-mcp",
+      "mode": "live",
+      "mandatory": true,
+      "status": "passed",
+      "passed": 47,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 166,
+      "log_sha256": "sha256:7650f0f1c498ec81fa90e58a38fa6a3650d4dcdfc97476b33e16a6453547d4d1",
+      "artifacts": {
+        "binaries": "sha256:275acd192dafde8dcd557fd8b102f237ce372bf40c6ef46cb92c9b8dfe7bab36",
+        "results": "sha256:c0ec543b1899b35750d450d81063f331200ae4f80a2bed587edd8b5645405a3f"
+      },
+      "detail": "stage 3 checks: reads, an authorized write, forbidden calls, restart without repeating writes, outcome evidence"
+    },
+    {
+      "name": "delegation-revocation",
+      "mode": "deterministic",
+      "mandatory": true,
+      "status": "passed",
+      "passed": 26,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 47,
+      "log_sha256": "sha256:8ab19f539698b45b8a94f09b667b4fb71f4a1c9f6f9585fd599f4214ac4e0f2b",
+      "artifacts": {
+        "log": "sha256:7bd530d4f16ba99435a6b3bded863b0c5d72a52b44cf6e4e5834e0200a7c68b2"
+      },
+      "detail": "authboundry agent_credentials"
+    },
+    {
+      "name": "uncertain-outcomes",
+      "mode": "deterministic",
+      "mandatory": true,
+      "status": "passed",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 116,
+      "log_sha256": "sha256:956c5f8f4edb805ea7f023f84f39278b581ed9ea31426a2fb26761b9f7f50ad5",
+      "artifacts": {
+        "log": "sha256:3346561b3f3bd2c1af06834a1dd92793c706c91ac1d5f6f837ace7afe9bb956d"
+      },
+      "detail": "chip-agent-state outcome_unknown, chip-appport-source live_transport"
+    },
+    {
+      "name": "pax-contract",
+      "mode": "deterministic",
+      "mandatory": true,
+      "status": "passed",
+      "passed": 80,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 27,
+      "log_sha256": "sha256:f9fc98d30d76391333fc59dbd6df2feb672d2367581a4fa50b434fa1d4471a78",
+      "artifacts": {
+        "log": "sha256:02ad0db55842a9e18f70dbd4ab27bf06d5bdb2366e518153e3198419cb1db77d"
+      },
+      "detail": "chip-pax against pax 674f3b3"
+    },
+    {
+      "name": "recipe-contracts",
+      "mode": "deterministic",
+      "mandatory": true,
+      "status": "passed",
+      "passed": 274,
+      "failed": 0,
+      "skipped": 6,
+      "seconds": 39,
+      "log_sha256": "sha256:b91fcaa936601bf595ffeb864e44d6ce4e399deef696f7c4539bdaaca9b723cd",
+      "artifacts": {
+        "report": "sha256:5c88e6d963852906804631f18f8511b5cfc0e8010199c91283d5cbbb95f920a4"
+      },
+      "detail": "appworks vitest"
+    }
+  ],
+  "started_at": "2026-10-21T03:08:29Z",
+  "finished_at": "2026-10-21T03:16:01Z",
+  "host": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "git": "git version 2.43.0",
+    "node": "v22.22.0",
+    "npm": "10.9.4",
+    "os": "linux-x86_64"
+  }
+}
