@@ -598,8 +598,23 @@ fn an_upgrade_plan_lists_every_consumer_and_what_is_outstanding() {
     );
     let plan = upgrade_plan(&lock.inventory, &stack, "npm:@t/lib", "1.2.0").unwrap();
     assert_eq!((plan.at_target, plan.outstanding), (1, 0), "{plan:#?}");
+    // A commit moves the copy; its Cargo.lock path entry follows it and is not an action.
     let plan = upgrade_plan(&lock.inventory, &stack, "cargo:tlib", LIB_MAIN).unwrap();
     let app = &plan.consumers[0];
+    // Held deliberately behind the fixed pin: accepted, not outstanding.
+    assert_eq!(
+        (app.status.as_str(), app.actions.len()),
+        ("accepted", 1),
+        "{plan:#?}"
+    );
+    assert_eq!((plan.accepted, plan.outstanding), (1, 0));
+    let locked = self::stack(&MANIFEST.replace("policy = \"fixed\"", "policy = \"locked\""));
+    let relocked = resolve_stack(&locked, &Overrides::default(), &world()).unwrap();
+    let moved = upgrade_plan(&relocked.inventory, &locked, "cargo:tlib", LIB_MAIN).unwrap();
+    assert_eq!(
+        moved.consumers[0].status, "manual",
+        "a copy with local files is moved by a person: {moved:#?}"
+    );
     assert!(
         app.actions
             .iter()

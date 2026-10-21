@@ -2186,13 +2186,17 @@ pub struct UpgradePlan {
     pub canonical: Canonical,
     pub consumers: Vec<ConsumerPlan>,
     pub at_target: usize,
+    /// Held where they are by a declared divergence or a fixed pin.
+    pub accepted: usize,
+    /// Still to move (`outstanding` or `manual`).
     pub outstanding: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConsumerPlan {
     pub consumer: String,
-    /// `at-target`, `outstanding`, `accepted` (a declared divergence holds it), or `manual` (a copy with local files).
+    /// `at-target`, `outstanding`, `accepted` (a declared divergence holds it), or `manual` (a copy
+    /// with local files, or one with no declared origin: a person moves it).
     pub status: String,
     pub actions: Vec<String>,
 }
@@ -2207,16 +2211,26 @@ pub fn upgrade_plan(
 ) -> Option<UpgradePlan> {
     let entry = inventory.packages.iter().find(|p| p.package == package)?;
     let name = package.split_once(':').map_or(package, |(_, n)| n);
-    let mut consumers: BTreeMap<String, Vec<(bool, String, bool)>> = BTreeMap::new();
+    let commit_target = target.len() == 40 && target.bytes().all(|b| b.is_ascii_hexdigit());
+    // (at target, action, kind of action)
+    let mut consumers: BTreeMap<String, Vec<(bool, String, &'static str)>> = BTreeMap::new();
     for used in &entry.uses {
-        if used.consumer == entry.canonical.source && used.kind != "resolved" {
+        // The canonical source is not its own consumer, and a resolution that
+        // follows a path, a link, or a copy moves when that does.
+        if used.consumer == entry.canonical.source
+            || (used.kind == "resolved"
+                && !(used.origin == "registry" || used.origin.starts_with("git:")))
+        {
+            continue;
+        }
+        // A commit moves copies and git pins; a version moves declarations and resolutions.
+        if commit_target != (used.kind == "copy" || used.origin.starts_with("git:")) {
             continue;
         }
         let at_target = match used.kind.as_str() {
             "copy" => {
-                used.version.as_deref() == Some(target)
-                    || used.matches.as_deref() == Some("canonical-locked")
-                        && entry.canonical.commit.starts_with(target)
+                used.matches.as_deref() == Some("canonical-locked")
+                    && entry.canonical.commit == target
             }
             "declared" => match &used.specifier {
                 Some(spec) if used.origin == "registry" => {
@@ -2231,90 +2245,97 @@ pub fn upgrade_plan(
             },
             _ => used.version.as_deref().is_none_or(|v| v == target),
         };
-        let accepted = inventory.findings.iter().any(|f| {
+        let held = inventory.findings.iter().any(|f| {
             f.status == "accepted"
                 && f.package == package
                 && f.consumer == used.consumer
-                && used.path.starts_with(f.path.as_str())
                 && !f.path.is_empty()
+                && used.path.starts_with(f.path.as_str())
         });
-        let action = match used.kind.as_str() {
-            "declared" => format!(
-                "{}: {} {name} {} → admit {target}",
-                used.path,
-                used.scope,
-                used.specifier.clone().unwrap_or_default()
+        let (action, kind) = match used.kind.as_str() {
+            "declared" => (
+                format!(
+                    "{}: {} {name} {} → admit {target}",
+                    used.path,
+                    used.scope,
+                    used.specifier.clone().unwrap_or_default()
+                ),
+                "edit",
             ),
-            "resolved" => format!(
-                "{}: re-resolve {name} {} → {target} with the consumer's own package manager",
-                used.path,
-                used.version.clone().unwrap_or_default()
+            "resolved" => (
+                format!(
+                    "{}: re-resolve {name} {} → {target} with the consumer's own package manager",
+                    used.path,
+                    used.version.clone().unwrap_or_default()
+                ),
+                "edit",
             ),
-            "installed" => format!(
-                "{}: committed install {} → reinstall {target}",
-                used.path,
-                used.version.clone().unwrap_or_default()
+            "installed" => (
+                format!(
+                    "{}: committed install {} → reinstall {target}",
+                    used.path,
+                    used.version.clone().unwrap_or_default()
+                ),
+                "edit",
             ),
             _ => {
                 let copy = stack
                     .copies
                     .iter()
                     .find(|c| c.consumer == used.consumer && c.path == used.path);
+                let mapped = |c: &SourceCopy| {
+                    c.map
+                        .iter()
+                        .map(|(h, t)| format!("{h}←{t}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
                 match copy {
-                    Some(c) if !c.local.is_empty() => format!(
-                        "{}: re-copy {} from {}@{target}; keep its local files ({}) and review them by hand",
-                        used.path,
-                        c.map
-                            .iter()
-                            .map(|(h, t)| format!("{h}←{t}"))
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        entry.canonical.source,
-                        c.local.join(", ")
+                    Some(c) if !c.local.is_empty() => (
+                        format!(
+                            "{}: re-copy {} from {}@{target}; keep its local files ({}) and review them by hand",
+                            used.path,
+                            mapped(c),
+                            entry.canonical.source,
+                            c.local.join(", ")
+                        ),
+                        "manual",
                     ),
-                    Some(c) => format!(
-                        "{}: re-copy {} from {}@{target}",
-                        used.path,
-                        c.map
-                            .iter()
-                            .map(|(h, t)| format!("{h}←{t}"))
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        entry.canonical.source
+                    Some(c) => (
+                        format!(
+                            "{}: re-copy {} from {}@{target}",
+                            used.path,
+                            mapped(c),
+                            entry.canonical.source
+                        ),
+                        "edit",
                     ),
-                    None => format!(
-                        "{}: an undeclared copy ({}) — declare its origin before upgrading it",
-                        used.path,
-                        used.version.clone().unwrap_or_default()
+                    None => (
+                        format!(
+                            "{}: an undeclared copy ({}): declare its origin before upgrading it",
+                            used.path,
+                            used.version.clone().unwrap_or_default()
+                        ),
+                        "manual",
                     ),
                 }
             }
         };
-        let manual = used.kind == "copy";
         consumers.entry(used.consumer.clone()).or_default().push((
             at_target,
             action,
-            accepted || manual,
+            if held { "accepted" } else { kind },
         ));
     }
     let mut plans = vec![];
     for (consumer, items) in consumers {
-        let pending: Vec<&(bool, String, bool)> = items.iter().filter(|(ok, _, _)| !ok).collect();
+        let pending: Vec<&(bool, String, &str)> = items.iter().filter(|(ok, _, _)| !ok).collect();
         let status = if pending.is_empty() {
             "at-target"
-        } else if pending.iter().all(|(_, _, held)| *held)
-            && pending
-                .iter()
-                .any(|(_, a, _)| a.contains("re-copy") || a.contains("undeclared copy"))
-        {
-            "manual"
-        } else if inventory
-            .findings
-            .iter()
-            .any(|f| f.package == package && f.consumer == consumer && f.status == "accepted")
-            && pending.iter().all(|(_, _, held)| *held)
-        {
+        } else if pending.iter().all(|(_, _, kind)| *kind == "accepted") {
             "accepted"
+        } else if pending.iter().any(|(_, _, kind)| *kind == "manual") {
+            "manual"
         } else {
             "outstanding"
         };
@@ -2324,12 +2345,14 @@ pub fn upgrade_plan(
             actions: pending.into_iter().map(|(_, a, _)| a.clone()).collect(),
         });
     }
-    let at_target = plans.iter().filter(|p| p.status == "at-target").count();
+    let count = |status: &str| plans.iter().filter(|p| p.status == status).count();
+    let (at_target, accepted) = (count("at-target"), count("accepted"));
     Some(UpgradePlan {
         package: package.into(),
         target: target.into(),
         canonical: entry.canonical.clone(),
-        outstanding: plans.len() - at_target,
+        outstanding: plans.len() - at_target - accepted,
+        accepted,
         at_target,
         consumers: plans,
     })

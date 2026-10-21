@@ -1246,6 +1246,7 @@ fn test(
         (false, _) => format!("selected:{}", selected.join(",")),
     };
     let started_at = now();
+    let harness_before = harness_identity(&located.harness);
     if !json {
         println!(
             "testing {label} ({}) in {}",
@@ -1296,11 +1297,19 @@ fn test(
         }
         results.push(result);
     }
+    let harness_after = harness_identity(&located.harness);
     let evidence = Evidence {
         format: EVIDENCE_FORMAT.into(),
         stack: located.stack.name.clone(),
         lock: digest.clone(),
-        harness: harness_identity(&located.harness),
+        harness: Harness {
+            // The suites ran from the harness as it was at the start: it is clean only if it was
+            // committed then and still is, at the same commit.
+            dirty: harness_before.dirty
+                || harness_after.dirty
+                || harness_before.commit != harness_after.commit,
+            ..harness_before
+        },
         selection,
         materialized,
         suites: results,
@@ -1764,9 +1773,10 @@ pub fn stack(command: StackCommand) -> compute_core::Result<()> {
                         .expect("present");
                     print(json, &plan, || {
                         println!(
-                            "{package} -> {target}: {} of {} consumers at target, {} outstanding",
+                            "{package} -> {target}: {} of {} consumers at target, {} held by a declared reason, {} outstanding",
                             plan.at_target,
                             plan.consumers.len(),
+                            plan.accepted,
                             plan.outstanding
                         );
                         for consumer in &plan.consumers {
