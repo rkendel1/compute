@@ -19,6 +19,13 @@ APPPORT_UPSTREAM=http://127.0.0.1:3911 APPPORT_MCP_TOKEN=$writer APPPORT_MCP_SCO
 trap 'kill $app $r $w 2>/dev/null || true' EXIT
 for port in 3911 3921 3922; do for _ in $(seq 1 150); do curl -s -o /dev/null "http://127.0.0.1:$port/" && break; sleep 0.2; done; done
 endpoint=/apps/com.example.invoice-desk/mcp
+# A bridge whose endpoint never came up is a failed case with its reason, not a harness error.
+for log in dev-writer dev-reader app; do
+  if ! kill -0 "$( [ $log = app ] && echo $app || { [ $log = dev-writer ] && echo $w || echo $r; } )" 2>/dev/null; then
+    reason=$(grep -m1 -iE 'error|cannot' "$out/$log.log" || echo "exited")
+    result failed 0 1 0 "$log exited before serving: $reason" generated="$out/generated.sha256"; exit 1
+  fi
+done
 unauthorized=$(curl -s -o "$out/no-token.json" -w '%{http_code}' -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' --data '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "http://127.0.0.1:3922$endpoint")
 set +e
 node "$tools/mcp-client-cases.mjs" "http://127.0.0.1:3921$endpoint" "$reader" "http://127.0.0.1:3922$endpoint" "$writer" "$db" >"$out/mcp-cases.json"
