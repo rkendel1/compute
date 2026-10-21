@@ -1,0 +1,124 @@
+name: stack
+
+# The assembled stacks (stacks/<name>/stack.toml) stay reproducible and in sync.
+#
+# `contract` runs on every change to the stack tooling or a stack: the
+# manifest and lock tests, and `compute stack check --offline`, which fails
+# on what blocks promotion (a violated relationship, an unexplained change to
+# copied source, a lockfile that contradicts its manifest) and reports drift
+# without failing.
+#
+# `candidate` runs when a pull request adds a candidate lock, on a schedule,
+# and on demand: it resolves the manifest's sources and packages again, says
+# what moved, and runs only the acceptance suites the change affects, against
+# fresh clones of the locked commits. It records evidence as a workflow
+# artifact. It never promotes: `compute stack promote` needs that evidence
+# committed and a named human approval.
+#
+# Sources are read with git over HTTPS. Private sources need a read-only
+# token in the STACK_SOURCES_TOKEN secret; without it `candidate` fails at
+# resolution and says which repository refused.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * *"
+  pull_request:
+    paths:
+      - "stacks/**"
+      - "compatibility/stack/**"
+      - "crates/compute-project/src/stack*.rs"
+      - "crates/compute-project/tests/stack*.rs"
+      - "crates/compute-cli/src/stack_cmd.rs"
+      - ".github/workflows/stack.yml"
+  push:
+    branches: [main]
+    paths:
+      - "stacks/**"
+      - "compatibility/stack/**"
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Manifest, lock, and inventory tests
+        run: cargo test --locked -p compute-project --test stack --test stack_sync
+      - name: Build compute
+        run: cargo build --locked -p compute-cli
+      - name: Every stack's lock against its manifest
+        run: |
+          for manifest in stacks/*/stack.toml; do
+            stack=$(basename "$(dirname "$manifest")")
+            if grep -q '^\[\[source\]\]' "$manifest"; then
+              target/debug/compute stack check --stack "$stack" --offline --fail-on violation
+            fi
+          done
+
+  candidate:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      COMPUTE_STACK_CACHE: ${{ runner.temp }}/stack-cache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - name: Read access to private sources
+        env:
+          TOKEN: ${{ secrets.STACK_SOURCES_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
+      - name: Build compute
+        run: cargo build --locked -p compute-cli
+      - name: Choose the candidate
+        id: pick
+        run: |
+          # A candidate a pull request adds is tested as it is; otherwise the
+          # manifest is resolved again.
+          added=""
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            added=$(git diff --name-only --diff-filter=A "origin/${{ github.base_ref }}...HEAD" -- 'stacks/randy/candidates/*.lock' | head -1)
+          fi
+          if [ -n "$added" ]; then
+            candidate=$(basename "$added" .lock)
+          else
+            target/debug/compute stack update --candidate --json > update.json
+            candidate=$(node -p 'require("./update.json").candidate.replace("sha256:","").slice(0,16)')
+          fi
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+      - name: Drift against the known-good lock
+        run: target/debug/compute stack check --json > check.json || true
+      - name: What the candidate changes
+        run: |
+          if [ -f stacks/randy/stack.lock ]; then
+            target/debug/compute stack diff current "${{ steps.pick.outputs.candidate }}"
+          fi
+      - name: The affected suites, from fresh clones of the locked commits
+        run: |
+          impacted=""
+          if [ -f stacks/randy/stack.lock ]; then impacted="--impacted-from current"; fi
+          target/debug/compute stack test "${{ steps.pick.outputs.candidate }}" $impacted --record --workdir "$RUNNER_TEMP/stack-run"
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stack-evidence
+          path: |
+            check.json
+            update.json
+            stacks/randy/candidates/
+            stacks/randy/evidence/
+            ${{ runner.temp }}/stack-run/out/
+          if-no-files-found: ignore
