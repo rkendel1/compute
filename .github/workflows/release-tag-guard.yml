@@ -1,0 +1,19 @@
+name: release-tag-guard
+
+# distribution-certification builds and publishes a release only for a
+# lowercase `vX.Y.Z` tag. V0.1.20 was created by hand in the GitHub UI: nothing
+# built it, the release became "latest" with no assets, and the Homebrew tap's
+# sync failed on it every hour. A tag that looks like a release but will not
+# be built fails here, where whoever pushed it sees it.
+
+on:
+  push:
+    tags: ["V*", "[0-9]*"]
+
+jobs:
+  refuse:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::error::'$GITHUB_REF_NAME' is not a release tag: only 'vX.Y.Z' (lowercase v) runs distribution-certification. Delete this tag and any release made from it, then push 'v${GITHUB_REF_NAME#[Vv]}'."
+          exit 1

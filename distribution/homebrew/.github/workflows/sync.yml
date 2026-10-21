@@ -24,7 +24,14 @@ jobs:
             exit 0
           fi
           tag=$(jq -r .tag_name "$RUNNER_TEMP/release.json")
-          [[ "$tag" == v* ]]
+          # Only a lowercase `vX.Y.Z` tag runs distribution-certification, which
+          # builds and attaches the assets. V0.1.20 was a release made by hand in
+          # the GitHub UI: it became "latest" with no assets, and every sync
+          # after it failed here without saying why.
+          if [[ "$tag" != v* ]]; then
+            echo "::error::latest release '$tag' is not a 'vX.Y.Z' tag, so distribution-certification never built it. Delete that release and push the lowercase tag instead." >&2
+            exit 1
+          fi
           version="${tag#v}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           asset="compute-$version-linux-x86_64.tar.gz"
@@ -39,14 +46,19 @@ jobs:
           macos_checksum_url=$(jq -r --arg name "$macos_asset.sha256" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
           macos_configured_url=$(jq -r --arg name "$macos_configured_asset" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
           macos_configured_checksum_url=$(jq -r --arg name "$macos_configured_asset.sha256" '.assets[] | select(.name == $name) | .browser_download_url' "$RUNNER_TEMP/release.json")
-          test -n "$archive_url"
-          test -n "$checksum_url"
-          test -n "$configured_url"
-          test -n "$configured_checksum_url"
-          test -n "$macos_url"
-          test -n "$macos_checksum_url"
-          test -n "$macos_configured_url"
-          test -n "$macos_configured_checksum_url"
+          missing=()
+          [ -n "$archive_url" ] || missing+=("$asset")
+          [ -n "$checksum_url" ] || missing+=("$asset.sha256")
+          [ -n "$configured_url" ] || missing+=("$configured_asset")
+          [ -n "$configured_checksum_url" ] || missing+=("$configured_asset.sha256")
+          [ -n "$macos_url" ] || missing+=("$macos_asset")
+          [ -n "$macos_checksum_url" ] || missing+=("$macos_asset.sha256")
+          [ -n "$macos_configured_url" ] || missing+=("$macos_configured_asset")
+          [ -n "$macos_configured_checksum_url" ] || missing+=("$macos_configured_asset.sha256")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::latest release $tag is missing assets: ${missing[*]}" >&2
+            exit 1
+          fi
           checksum=$(curl -fsSL --proto '=https' --proto-redir '=https' "$checksum_url" | cut -d ' ' -f 1)
           configured_checksum=$(curl -fsSL --proto '=https' --proto-redir '=https' "$configured_checksum_url" | cut -d ' ' -f 1)
           macos_checksum=$(curl -fsSL --proto '=https' --proto-redir '=https' "$macos_checksum_url" | cut -d ' ' -f 1)
