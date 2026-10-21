@@ -133,7 +133,10 @@ jobs:
           # `$(dirname $0)/../Formula`, so the only inputs that count are the ones
           # this tap carries. Installing them here is what stops the tap's committed
           # templates from winning.
-          distribution/homebrew/scripts/install-release-templates.sh \
+          #
+          # The contents API does not carry the executable bit, so the fetched
+          # script is run by `sh`; it marks the installed scripts executable.
+          sh distribution/homebrew/scripts/install-release-templates.sh \
             distribution/homebrew .
           # Fail before publishing if the release's wrapper cannot manage services.
           grep -F 'export COMPUTE_CONFIGURED_HOME=' Formula/compute-configured.rb.in
