@@ -65,3 +65,299 @@ name = "appboundry"
 kind = "package"
 source = "npm:@appport/appboundry"
 version = "1.1.1"
+
+# ---------------------------------------------------------------------------
+# Assembly: where the stack's software comes from, how its parts must relate,
+# and what must pass before a revision is known-good. None of this is
+# materialized on a Computer and none of it is in the fingerprint; it is
+# resolved into stack.lock (`compute stack`, docs/stack-sync.md). Each source
+# is followed at a branch (`track`) for candidates, or held at an exact `ref`.
+# ---------------------------------------------------------------------------
+
+[[source]]
+name = "appport"
+repository = "github:rkendel1/appport"
+track = "main"
+provides = ["npm:@appport/core", "npm:@appport/sdk", "npm:@appport/protocol", "npm:@appport/mcp"]
+record = [
+  "packages/sdk/package.json#/version",
+  "packages/core/package.json#/version",
+  "packages/protocol/package.json#/version",
+  "packages/mcp/package.json#/version",
+]
+contracts = ["spec/", "packages/protocol/src/"]
+
+[[source]]
+name = "appboundry"
+repository = "github:rkendel1/appboundry"
+track = "main"
+provides = ["npm:appport", "npm:@appport/appboundry"]
+record = [
+  "packages/cli/package.json#/version",
+  "packages/appboundry/package.json#/version",
+  "release/version.json#/version",
+]
+contracts = ["spec/", "packages/cli/src/mcp-host.ts", "packages/core/src/contract-artifact.ts", "release/packages.json"]
+
+[[source]]
+name = "authboundry"
+repository = "github:rkendel1/authboundry"
+track = "main"
+provides = ["npm:@authboundry/core"]
+record = ["package.json#/version"]
+contracts = ["crates/contract/", "crates/authz/src/", "docs/AGENT-CREDENTIALS.md"]
+
+[[source]]
+name = "feltdb"
+repository = "github:rkendel1/flow_db"
+track = "main"
+provides = ["npm:@feltdb/core", "cargo:feltdb"]
+record = ["packages/core/package.json#/version"]
+contracts = ["crates/feltdb/src/agent_transition_contract.rs"]
+# FeltDB's own statement of which release each consumer should run.
+expectations = "product-certification/feltdb/compatibility-manifest.json"
+
+[[source]]
+name = "appport-services"
+repository = "github:rkendel1/appport-services"
+track = "main"
+provides = ["npm:@appport/services"]
+record = ["package.json#/version"]
+
+[[source]]
+name = "stack-agent"
+repository = "github:rkendel1/stack-agent"
+track = "main"
+contracts = ["crates/chip-core/src/lib.rs", "crates/chip-agent-state/src/lib.rs"]
+
+[[source]]
+name = "pax"
+repository = "github:rkendel1/pax"
+ref = "v0.4.1"
+contracts = ["src/execution_result.rs", "src/observe.rs"]
+
+[[source]]
+name = "appworks"
+repository = "github:rkendel1/appworks"
+track = "main"
+provides = ["npm:@appport/recipe", "npm:@appport/recipe-distribution"]
+record = ["packages/recipe/package.json#/version"]
+
+# The harness itself, inventoried as a consumer (its FeltDB and AppPort
+# packages). The stack's own lock history is not part of what it consumes.
+[[source]]
+name = "compute"
+repository = "github:rkendel1/compute"
+track = "main"
+ignore = ["stacks/"]
+
+# The existing application the acceptance suites integrate: held exactly.
+[[source]]
+name = "invoice-desk"
+repository = "github:ranazaeem1/invoice-approval-desk"
+ref = "f7291e8c46cb3be1a37e31e54b8cfa22d5f10b32"
+
+# --- Published packages and the sources they come from -----------------------
+
+[[relationship]]
+name = "appport-sdk-published-from-appport"
+kind = "published-from"
+package = "@appport/sdk"
+source = "appport"
+path = "packages/sdk/package.json"
+
+[[relationship]]
+name = "appport-core-published-from-appport"
+kind = "published-from"
+package = "@appport/core"
+source = "appport"
+path = "packages/core/package.json"
+
+[[relationship]]
+name = "appboundry-published-from-appboundry"
+kind = "published-from"
+package = "@appport/appboundry"
+source = "appboundry"
+path = "packages/appboundry/package.json"
+
+[[relationship]]
+name = "authboundry-published-from-authboundry"
+kind = "published-from"
+package = "@authboundry/core"
+source = "authboundry"
+path = "package.json"
+
+[[relationship]]
+name = "feltdb-published-from-flow-db"
+kind = "published-from"
+package = "@feltdb/core"
+source = "feltdb"
+path = "packages/core/package.json"
+
+[[relationship]]
+name = "services-published-from-appport-services"
+kind = "published-from"
+package = "@appport/services"
+source = "appport-services"
+path = "package.json"
+
+# --- Package-to-package requirements inside the stack -------------------------
+
+[[relationship]]
+name = "sdk-requires-core"
+kind = "package-dependency"
+package = "@appport/sdk"
+dependency = "@appport/core"
+policy = "same"
+
+[[relationship]]
+name = "services-requires-feltdb"
+kind = "package-dependency"
+package = "@appport/services"
+dependency = "@feltdb/core"
+policy = "same"
+
+[[relationship]]
+name = "authboundry-own-feltdb"
+kind = "package-dependency"
+package = "@authboundry/core"
+dependency = "@feltdb/core"
+policy = "nested"
+reason = "@authboundry/core 1.15.3 pins @feltdb/core 0.11.5 exactly; it runs its own copy until AuthBoundry releases against the stack's FeltDB (release decision pending)"
+
+[[relationship]]
+name = "authboundry-own-services"
+kind = "package-dependency"
+package = "@authboundry/core"
+dependency = "@appport/services"
+policy = "nested"
+reason = "@authboundry/core 1.15.3 pins @appport/services 0.3.2 exactly; it runs its own copy until AuthBoundry releases against the stack's services (release decision pending)"
+
+# --- Git pins one source holds on another -------------------------------------
+
+[[relationship]]
+name = "stack-agent-ci-pins-pax"
+kind = "pin"
+consumer = "stack-agent"
+file = ".github/workflows/ci.yml"
+pattern = 'test "$(git -C "$RUNNER_TEMP/pax" rev-parse HEAD)" = {commit}'
+target = "pax"
+policy = "locked"
+
+[[relationship]]
+name = "stack-agent-vendors-feltdb"
+kind = "pin"
+consumer = "stack-agent"
+file = "vendor/feltdb/VENDORED.md"
+pattern = "commit: {commit}"
+target = "feltdb"
+policy = "fixed"
+reason = "the Rust FeltDB is vendored byte for byte; moving it is a reviewed change in stack-agent, not a stack update"
+
+# --- Copies of provided source kept inside another source --------------------
+
+[[copy]]
+name = "stack-agent-vendored-feltdb"
+package = "cargo:feltdb"
+consumer = "stack-agent"
+path = "vendor/feltdb"
+origin = "stack-agent-vendors-feltdb"
+map = ["src=crates/feltdb/src", "LICENSE=LICENSE"]
+local = ["Cargo.toml", "rustfmt.toml", "VENDORED.md"]
+reason = "per vendor/feltdb/VENDORED.md: Cargo.toml is written for the copy (inherited values written out, benches and dev-dependencies omitted, lints relaxed, publish = false), rustfmt.toml keeps upstream's formatting, VENDORED.md records the origin"
+
+# --- Who consumes what: a change to a provider affects its consumers ----------
+
+[[relationship]]
+name = "bridges-import-the-appport-sdk"
+kind = "consumes"
+consumer = "appboundry"
+provider = "appport"
+contract = "generated appport/server.ts imports @appport/sdk (published from appport)"
+
+[[relationship]]
+name = "host-asks-authboundry"
+kind = "consumes"
+consumer = "appboundry"
+provider = "authboundry"
+contract = "POST /_authboundry/authorize/check, agent credentials"
+
+[[relationship]]
+name = "chip-calls-the-mcp-endpoint"
+kind = "consumes"
+consumer = "stack-agent"
+provider = "appboundry"
+contract = "POST /apps/<id>/mcp (appboundry/* tool metadata, errors, evidence)"
+
+[[relationship]]
+name = "chip-reads-pax"
+kind = "consumes"
+consumer = "stack-agent"
+provider = "pax"
+contract = "pax.execution-result.v1, pax.observation.v1"
+
+[[relationship]]
+name = "chip-persists-in-feltdb"
+kind = "consumes"
+consumer = "stack-agent"
+provider = "feltdb"
+contract = "feltdb.agent.transition v1 (vendored)"
+
+[[relationship]]
+name = "authboundry-stores-in-feltdb"
+kind = "consumes"
+consumer = "authboundry"
+provider = "feltdb"
+contract = "@feltdb/core control-plane store"
+
+[[relationship]]
+name = "recipes-use-appport-contracts"
+kind = "consumes"
+consumer = "appworks"
+provider = "appport"
+contract = "@appport/protocol, @appport/integration, @appport/schema"
+
+# --- What must pass before a revision is known-good ---------------------------
+# Implementations: compatibility/stack/<name>.sh. Declaration order is run order.
+
+[[acceptance]]
+name = "package-set"
+covers = ["feltdb", "appport-core", "appport-sdk", "appport-services", "authboundry", "appboundry"]
+mode = "deterministic"
+description = "the stack's exact packages install from the registry with their locked integrity, resolve together, and load"
+
+[[acceptance]]
+name = "generated-bridge-mcp"
+covers = ["appboundry", "appport", "invoice-desk", "stack-agent"]
+mode = "live"
+description = "a packaged CLI from the locked appboundry generates a bridge for the locked invoice desk; over MCP a generic client sees grant-filtered tools, its authorized write persists, refusals change nothing (SQLite)"
+
+[[acceptance]]
+name = "chip-live-mcp"
+covers = ["appboundry", "stack-agent", "invoice-desk", "feltdb"]
+mode = "live"
+description = "Chip's work loop with durable state and a scripted model against the live endpoint: reads, an authorized write, forbidden calls, interrupted and ambiguous writes never repeated after restart, evidence that tells outcomes apart"
+
+[[acceptance]]
+name = "delegation-revocation"
+covers = ["authboundry", "appboundry"]
+mode = "deterministic"
+description = "AuthBoundry denies delegated authority at the next decision after the delegator loses it, through the real HTTP decision route"
+
+[[acceptance]]
+name = "uncertain-outcomes"
+covers = ["stack-agent", "feltdb"]
+mode = "deterministic"
+description = "an execution whose outcome is unknown leaves its intent open; the live MCP transport tells refusals, failures, unreachable endpoints and lost answers apart"
+
+[[acceptance]]
+name = "pax-contract"
+covers = ["pax", "stack-agent"]
+mode = "deterministic"
+description = "Chip's PAX adapter against PAX built from the locked ref"
+
+[[acceptance]]
+name = "recipe-contracts"
+covers = ["appworks", "appport"]
+mode = "deterministic"
+description = "AppWorks recipe validation, locks and packages, from a checkout without Git history"
