@@ -1,0 +1,8 @@
+{
+  "approved_at": "2026-10-21T12:35:14Z",
+  "approved_by": "randy@kendelconsulting.com",
+  "evidence": "sha256:8c17564cb4fa2c0782b732c7b63b6760baeb583d1ce8639abb3f1ba02181068c",
+  "format": "compute.stack-approval@1",
+  "lock": "sha256:49dac03ebaec716fbd6f19304fe10014bc75ec709dc7df3d9e39398ae6fe06d8",
+  "previous": "sha256:5eb4a949a03709c7807a13abf3b9c75fae18335577c12f12464547dd01892a67"
+}

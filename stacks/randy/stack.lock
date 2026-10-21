@@ -1097,7 +1097,7 @@
       },
       {
         "canonical": {
-          "commit": "42f633502091eb6f728fe9a40fd72e3a1846fcae",
+          "commit": "c2141b3d72413904dfb25b2373205a52cd31b874",
           "path": "packages/appboundry",
           "source": "appboundry",
           "tree": "4bfe08bcce0d91e094224e457371c0413a4b6bac",
@@ -3645,7 +3645,7 @@
           {
             "consumer": "appboundry",
             "context": "package",
-            "digest": "eb7be4b597822a5342c94995a12d4921b9c66746",
+            "digest": "b2868838ed71e2689160743929a99ac711353c2c",
             "direct": true,
             "kind": "copy",
             "matches": "differs",
@@ -4754,10 +4754,10 @@
       },
       {
         "canonical": {
-          "commit": "42f633502091eb6f728fe9a40fd72e3a1846fcae",
+          "commit": "c2141b3d72413904dfb25b2373205a52cd31b874",
           "path": "packages/cli",
           "source": "appboundry",
-          "tree": "74124e0e0cc6262a9417b3cef68aa8f1e9dadc8b",
+          "tree": "bb1f97714ba05d660df3a54d19b1e712aa658f00",
           "version": "1.1.20"
         },
         "package": "npm:appport",
@@ -5063,7 +5063,7 @@
   ],
   "relationships": [
     {
-      "detail": "appboundry@42f6335 declares @appport/appboundry 1.1.1, the published version, whose artifact records no source commit: they cannot be shown to match",
+      "detail": "appboundry@c2141b3 declares @appport/appboundry 1.1.1, the published version, whose artifact records no source commit: they cannot be shown to match",
       "kind": "published-from",
       "name": "appboundry-published-from-appboundry",
       "status": "drift"
@@ -5179,7 +5179,7 @@
   ],
   "sources": [
     {
-      "commit": "42f633502091eb6f728fe9a40fd72e3a1846fcae",
+      "commit": "c2141b3d72413904dfb25b2373205a52cd31b874",
       "files": {
         "package-lock.json": "sha256:2e696576f695dc44f91e9cc1380133d43fab17d4d74b45700ad71557c8647166",
         "package.json": "sha256:0de2d497594c6661f6d58c96ba1374e06a213c0a641c4b188b26355193d248d5",
@@ -5193,12 +5193,12 @@
         "release/version.json#/version": "1.1.20"
       },
       "repository": "github:rkendel1/appboundry",
-      "requested": "track:main",
+      "requested": "candidate:claude/admiring-edison-6i07sn",
       "toolchains": {
         "node": ">=20",
         "package-manager": "pnpm@10.33.0"
       },
-      "tree": "4c9dfd1406af5175879e5362dadac12b96708d57"
+      "tree": "b65def1f1cccdba79ab92cdfc0776b686aa7ee9c"
     },
     {
       "commit": "a0be74454f1924d772be710d16af37de400209cb",
