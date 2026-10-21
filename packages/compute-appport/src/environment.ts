@@ -13,6 +13,7 @@ import type {
   EnvironmentSummary,
   EnvironmentView,
   ProjectAddInput,
+  ProjectLoadInput,
   ProjectView,
 } from "./types.js";
 
@@ -28,6 +29,7 @@ export interface EnvironmentApi {
   createEnvironment(definition: EnvironmentCreateInput): Promise<EnvironmentView>;
   environmentLifecycle(environment: string, action: "start" | "stop" | "restart"): Promise<EnvironmentView>;
   addProject(environment: string, project: ProjectAddInput["project"]): Promise<ProjectView>;
+  loadProject(input: ProjectLoadInput): Promise<ProjectView>;
   removeProject(environment: string, project: string): Promise<{ removed: string }>;
   listProjects(): Promise<ProjectSummary[]>;
   /** A project in one environment, or across every environment. */
@@ -96,6 +98,27 @@ export class ComputeDaemonClient implements EnvironmentApi {
 
   addProject(environment: string, project: ProjectAddInput["project"]): Promise<ProjectView> {
     return this.request("POST", `/environments/${segment(environment)}/projects`, project);
+  }
+
+  /**
+   * Load a Git repository as a project into an environment with a computer.
+   * The repository is checked out in the computer; a project that is already
+   * there keeps the build, tests and commands not given here.
+   */
+  async loadProject({ environment, project, url, revision, build, test }: ProjectLoadInput): Promise<ProjectView> {
+    const base = `/environments/${segment(environment)}`;
+    const computer = await this.request<{ desired: { projects?: Array<Record<string, unknown> & { name: string; repository: string }> } }>(
+      "GET", `${base}/computer`,
+    );
+    const existing = computer.desired.projects?.find((spec) => spec.name === project);
+    const spec = { ...(existing ?? { name: project, repository: project }) };
+    if (build !== undefined) spec.build = build;
+    if (test !== undefined) spec.test = test;
+    await this.request("POST", `${base}/repositories`, {
+      name: spec.repository, url, revision: revision ?? "HEAD",
+    });
+    await this.request("POST", `${base}/projects`, spec);
+    return this.request("GET", `${base}/projects/${segment(project)}`);
   }
 
   removeProject(environment: string, project: string): Promise<{ removed: string }> {

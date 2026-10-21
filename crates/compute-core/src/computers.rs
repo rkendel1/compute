@@ -628,6 +628,22 @@ fn valid_command(kind: &str, name: &str, command: &[String]) -> crate::Result<()
     Ok(())
 }
 
+/// Where an imported source's repository lives in a computer's workspace.
+pub const IMPORTED_SOURCES: &str = ".compute/sources/";
+
+/// Whether a repository URL names the same repository wherever it is
+/// resolved: a URL, an `scp`-style remote, an absolute path, or an imported
+/// source. Any other relative path would be resolved in the computer's
+/// workspace, where the repository the caller meant is not.
+pub fn repository_url_is_resolvable(url: &str) -> bool {
+    url.starts_with('/')
+        || url.contains("://")
+        || url.starts_with(IMPORTED_SOURCES)
+        || url
+            .split_once(':')
+            .is_some_and(|(host, _)| host.contains('@') && !host.contains('/'))
+}
+
 impl EnvironmentContents {
     pub fn validate(&self) -> crate::Result<()> {
         let invalid = |message: String| Err(crate::ComputeError::InvalidWorkload(message));
@@ -647,6 +663,13 @@ impl EnvironmentContents {
                         repository.name
                     ));
                 }
+            }
+            if !repository_url_is_resolvable(&repository.url) {
+                return invalid(format!(
+                    "repository {} has the relative URL {}: the computer would look for it in \
+                     its own workspace, not on your machine. Give an absolute path or a URL",
+                    repository.name, repository.url
+                ));
             }
         }
         let known = |repository: &Option<String>, owner: &str| match repository {
@@ -1106,6 +1129,31 @@ pub struct ProjectProposal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repository_url_must_mean_the_same_repository_in_the_computer() {
+        for url in [
+            "https://github.com/acme/app.git",
+            "file:///srv/app",
+            "git@github.com:acme/app.git",
+            "/Users/me/app",
+            ".compute/sources/app",
+        ] {
+            assert!(repository_url_is_resolvable(url), "{url}");
+        }
+        for url in ["./app", "app", "~/app", "../app", "dir/with:colon"] {
+            assert!(!repository_url_is_resolvable(url), "{url}");
+        }
+        let mut contents = EnvironmentContents::default();
+        contents.repositories.push(RepositorySpec {
+            name: "app".into(),
+            url: "./app".into(),
+            revision: "main".into(),
+            sync: 0,
+        });
+        let refused = contents.validate().unwrap_err().to_string();
+        assert!(refused.contains("absolute path or a URL"), "{refused}");
+    }
 
     fn process(name: &str, repository: Option<&str>) -> ProcessSpec {
         ProcessSpec {

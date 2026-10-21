@@ -182,8 +182,38 @@ pub fn command_in_directory(
         [
             ("HOME".to_owned(), directory.clone()),
             ("COMPUTE_SESSION_WORKSPACE".to_owned(), directory),
+            (
+                "PATH".to_owned(),
+                node_path(std::env::var("PATH").ok().as_deref()),
+            ),
         ],
     )
+}
+
+/// The PATH of a command run directly on this node: the system directories,
+/// then the node's own absolute PATH entries, then Homebrew's prefix, each
+/// only when it exists. Tools the node's operator installed (Homebrew's
+/// `node`, `npm` and `python`, a toolchain on PATH) are found by builds and
+/// package installs; a command's own PATH still wins.
+fn node_path(host: Option<&str>) -> String {
+    let mut entries = vec![
+        "/usr/local/bin".to_owned(),
+        "/usr/bin".to_owned(),
+        "/bin".to_owned(),
+    ];
+    let extra = host
+        .unwrap_or_default()
+        .split(':')
+        .chain(["/opt/homebrew/bin", "/opt/homebrew/sbin"]);
+    for entry in extra {
+        if entry.starts_with('/')
+            && !entries.iter().any(|known| known == entry)
+            && Path::new(entry).is_dir()
+        {
+            entries.push(entry.to_owned());
+        }
+    }
+    entries.join(":")
 }
 
 /// A provider request that runs `command` on this node as it is. Providers
@@ -2066,4 +2096,26 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), ProviderError> 
         .persist(path)
         .map_err(|error| transport_error(error.error))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::node_path;
+
+    #[test]
+    fn a_node_command_finds_the_nodes_tools_after_the_system_directories() {
+        let tools = tempfile::tempdir().unwrap();
+        let tools = tools.path().to_str().unwrap();
+        let path = node_path(Some(&format!("/usr/bin:relative:{tools}:/nonexistent")));
+        let entries = path.split(':').collect::<Vec<_>>();
+        assert_eq!(entries[..3], ["/usr/local/bin", "/usr/bin", "/bin"]);
+        assert!(entries.contains(&tools), "{path}");
+        assert!(!entries.contains(&"relative"), "{path}");
+        assert!(!entries.contains(&"/nonexistent"), "{path}");
+        assert_eq!(
+            entries.iter().filter(|entry| **entry == "/usr/bin").count(),
+            1
+        );
+        assert!(node_path(None).starts_with("/usr/local/bin:/usr/bin:/bin"));
+    }
 }

@@ -1437,6 +1437,12 @@ async function waitForComputer(name, until) {
 
 async function inspectSource() {
   if (!RUN.source.url.trim()) { toast('Choose a repository or folder first', true); return; }
+  // The computer resolves a relative folder in its own workspace, not here.
+  const url = RUN.source.url.trim();
+  if (!(url.startsWith('/') || url.includes('://') || /^[^/:]*@[^/:]+:/.test(url))) {
+    toast('Give the folder as an absolute path (/Users/you/app), or a Git URL', true);
+    return;
+  }
   RUN.step = 'inspecting';
   RUN.proposal = null;
   await render();

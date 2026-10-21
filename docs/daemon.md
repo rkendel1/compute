@@ -296,6 +296,7 @@ admission.
 | `compute.environment.list@1`, `.inspect@1`, `.status@1` | `compute.environment.read` |
 | `compute.environment.create@1`, `.start@1`, `.stop@1`, `.restart@1` | `compute.environment.<operation>` |
 | `compute.environment.project.add@1`, `.remove@1` | same as the capability |
+| `compute.environment.project.load@1` (a Git repository into an environment with a computer) | `compute.environment.project.add` |
 | `compute.project.list@1`, `.inspect@1` | `compute.project.read` |
 | `compute.project.start@1`, `.stop@1`, `.restart@1` | same as the capability |
 | `compute.deployment.inspect@1` | `compute.deployment.read` |

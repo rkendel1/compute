@@ -715,6 +715,18 @@ export const projectAddInputSchema = s.object({
   }),
 });
 
+/** A Git repository loaded as a project into an environment with a computer. */
+export const projectLoadInputSchema = s.object({
+  environment: s.string({ minLength: 1 }),
+  project: name,
+  /** A Git URL, or an absolute path to a repository the computer can read. */
+  url: s.string({ minLength: 1 }),
+  /** A branch, tag, or commit. The repository's default branch when omitted. */
+  revision: s.optional(s.string({ minLength: 1 })),
+  build: s.optional(s.array(s.string())),
+  test: s.optional(s.array(s.string())),
+});
+
 export const projectRemoveInputSchema = s.object({
   environment: s.string({ minLength: 1 }),
   project: name,

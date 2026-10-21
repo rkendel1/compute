@@ -1292,9 +1292,28 @@ async fn route(
             if Box::pin(daemon.has_computer(id)).await? {
                 // A project in an environment with a computer is software
                 // in one of its repositories, built and run there.
+                let project: Value = parse(body)?;
+                if ["workloads", "revision", "desired_state", "source", "env"]
+                    .iter()
+                    .any(|field| project.get(field).is_some())
+                {
+                    return Err(EnvironmentError::Invalid(format!(
+                        "{id} has a computer: a project there is software in one of its \
+                         repositories, not a bundle of workloads. Add the repository \
+                         (POST /environments/{id}/repositories {{name, url, revision}}), then \
+                         the project ({{name, repository, build, test}})"
+                    )));
+                }
                 ok(to_value(
-                    Box::pin(daemon.upsert_project(id, &principal.operator_id, parse(body)?))
-                        .await?,
+                    Box::pin(
+                        daemon.upsert_project(
+                            id,
+                            &principal.operator_id,
+                            serde_json::from_value(project)
+                                .map_err(|error| EnvironmentError::Invalid(error.to_string()))?,
+                        ),
+                    )
+                    .await?,
                 )?)
             } else {
                 created(to_value(

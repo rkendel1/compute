@@ -24,6 +24,29 @@ use compute_environment::{
 
 use crate::environment_cmd::{error, parse_pair, print_json};
 
+/// A repository URL as the computer must see it. A local path is resolved
+/// here, on the caller's machine: `~` and relative paths mean this machine's
+/// folders, and the computer would resolve them in its own workspace.
+pub(crate) fn repository_url(url: &str) -> compute_core::Result<String> {
+    if compute_core::repository_url_is_resolvable(url) {
+        return Ok(url.to_owned());
+    }
+    let path = match url.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            let home = std::env::var_os("HOME").ok_or_else(|| {
+                ComputeError::Runtime(format!("{url} names a home folder, and HOME is not set"))
+            })?;
+            PathBuf::from(home).join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(url),
+    };
+    let path = std::path::absolute(&path)
+        .map_err(|error| ComputeError::Runtime(format!("could not resolve {url}: {error}")))?;
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| ComputeError::Runtime(format!("{} is not UTF-8", path.display())))
+}
+
 /// The computer an environment asks for. Any of these makes
 /// `compute environment create` create an environment on a computer.
 #[derive(Args, Debug, Clone, Default)]
@@ -1124,7 +1147,7 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                         &format!("/environments/{}/repositories", args.environment),
                         Some(&RepositorySpec {
                             name: args.name.clone(),
-                            url: args.url.clone(),
+                            url: repository_url(&args.url)?,
                             revision: args.revision.clone(),
                             sync: 0,
                         }),
@@ -1322,7 +1345,7 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                 .post(
                     &format!("/environments/{environment}/propose"),
                     Some(&compute_environment::ProposeRequest {
-                        url,
+                        url: repository_url(&url)?,
                         revision,
                         name,
                     }),
