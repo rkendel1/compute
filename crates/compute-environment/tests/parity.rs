@@ -168,5 +168,14 @@ async fn every_api_route_is_served() {
             );
         }
     }
+    // And the other direction: nothing undeclared is served, even to a
+    // caller with every scope.
+    for path in ["/undeclared", "/environments/nowhere/undeclared"] {
+        let error = client
+            .get::<serde_json::Value>(path)
+            .await
+            .expect_err("undeclared");
+        assert_eq!(error.kind(), "no_route", "{path}");
+    }
     daemon.shutdown().await;
 }
