@@ -1777,7 +1777,7 @@ pub async fn project(command: ProjectCommand) -> compute_core::Result<()> {
     Ok(())
 }
 
-fn print_project(environment: &str, view: &ProjectView, json: bool) {
+pub(crate) fn print_project(environment: &str, view: &ProjectView, json: bool) {
     if json {
         print_json(view);
         return;

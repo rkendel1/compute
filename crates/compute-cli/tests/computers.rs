@@ -1303,4 +1303,42 @@ fn a_project_added_to_a_computer_is_loaded_and_listed() {
         Some(&"true".into()),
         "{build}"
     );
+
+    // A GitHub selection arrives as a provider-neutral, immutable Git source; loading it puts the
+    // repository at that exact commit, and the project in it, into the computer.
+    let source = moved["observed"]["repositories"]["web"]["commit"].clone();
+    let url = added["source"].as_str().unwrap().to_owned();
+    let file = root.join("source.json");
+    std::fs::write(
+        &file,
+        serde_json::json!({
+            "source": "git", "url": url, "owner": "local", "repository": "app",
+            "ref": "v2", "commit": source,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let loaded = cli.json(&[
+        "environment",
+        "source",
+        "myapp",
+        "--file",
+        file.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(loaded["name"], "app");
+    let checked_out = cli.computer_until("the loaded source", |view| {
+        view["converged"] == true && view["observed"]["repositories"]["app"]["commit"] == source
+    });
+    assert_eq!(
+        checked_out["observed"]["repositories"]["app"]["revision"],
+        source
+    );
+    let refused = cli.run(&["environment", "source", "myapp", "--file", "/dev/null"]);
+    assert!(!refused.status.success(), "an empty source is refused");
+    assert_eq!(
+        build.as_array().and_then(|build| build.last()),
+        Some(&"true".into()),
+        "{build}"
+    );
 }

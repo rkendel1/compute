@@ -727,6 +727,19 @@ export const projectLoadInputSchema = s.object({
   test: s.optional(s.array(s.string())),
 });
 
+/** A provider-neutral, immutable Git source (what `@appport/github` produces) to load into a computer. */
+export const sourceLoadInputSchema = s.object({
+  environment: s.string({ minLength: 1 }),
+  source: s.object({
+    source: s.literal("git"),
+    url: s.string({ minLength: 1 }),
+    owner: s.string({ minLength: 1 }),
+    repository: s.string({ minLength: 1 }),
+    ref: s.string({ minLength: 1 }),
+    commit: s.string({ pattern: "^([0-9a-f]{40}|[0-9a-f]{64})$" }),
+  }),
+});
+
 export const projectRemoveInputSchema = s.object({
   environment: s.string({ minLength: 1 }),
   project: name,

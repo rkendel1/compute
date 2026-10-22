@@ -441,6 +441,17 @@ pub enum ComputerCommands {
     /// files; `discover` lists what the workspace's `.env` files ask for. What
     /// depends on a change restarts in place.
     Config(ConfigArgs),
+    /// Load a provider-neutral Git source (the immutable `{source, url, owner,
+    /// repository, ref, commit}` a GitHub selection produces) into the
+    /// computer: its repository at that commit, and the project in it.
+    Source {
+        environment: String,
+        /// A JSON file holding the source; `-` reads it from standard input.
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect a project's source in the computer and propose how to run
     /// it: runtime, dependencies, build, tests, start command, ports,
     /// services, configuration. Nothing changes.
@@ -1335,6 +1346,28 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
         }
         ComputerCommands::Release(args) => release(client, &args).await?,
         ComputerCommands::Config(args) => configuration(client, args).await?,
+        ComputerCommands::Source {
+            environment,
+            file,
+            json,
+        } => {
+            let text = if file.as_os_str() == "-" {
+                std::io::read_to_string(std::io::stdin())
+            } else {
+                std::fs::read_to_string(&file)
+            }
+            .map_err(|e| ComputeError::Runtime(format!("cannot read {}: {e}", file.display())))?;
+            let source: compute_environment::GitRepositorySource = serde_json::from_str(&text)
+                .map_err(|e| ComputeError::InvalidWorkload(format!("not a Git source: {e}")))?;
+            let view: compute_environment::ProjectView = client
+                .post(
+                    &format!("/environments/{environment}/sources"),
+                    Some(&source),
+                )
+                .await
+                .map_err(error)?;
+            crate::environment_cmd::print_project(&environment, &view, json);
+        }
         ComputerCommands::Propose {
             environment,
             url,

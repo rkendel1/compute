@@ -1,5 +1,10 @@
 # Audit: Compute and AppPort Services — control plane and UI
 
+> **Update.** Since this audit, `compute up` starts and registers the services a configured
+> profile declares (`crates/compute-cli/src/managed.rs`), on the bundled Node and from an
+> allow-listed environment. AppPort Services management still needs an operator-supplied
+> AuthBoundry authorizer module (`APPPORT_AUTHORITY`); without one it serves discovery only.
+
 **Date:** 2026-10-01 · **Type:** audit only; no product code changed.
 
 **Sources read** (shallow clones, current default branches): `rkendel1/compute`

@@ -715,6 +715,20 @@ export interface EnvironmentWorkloadDefinition {
   desired_state?: DesiredState | undefined;
 }
 
+export interface GitRepositorySource {
+  source: "git";
+  url: string;
+  owner: string;
+  repository: string;
+  ref: string;
+  commit: string;
+}
+
+export interface SourceLoadInput {
+  environment: string;
+  source: GitRepositorySource;
+}
+
 export interface ProjectLoadInput {
   environment: string;
   project: string;

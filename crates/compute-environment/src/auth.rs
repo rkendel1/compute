@@ -151,7 +151,7 @@ pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
         | ("POST", ["deployments"])
         | ("POST", ["deployments", "promote"])
         | ("POST", ["deployments", _, "rollback"])
-        | ("POST", ["environments", _, "projects"])
+        | ("POST", ["environments", _, "projects" | "sources"])
         | ("DELETE", ["environments", _, "projects", _]) => Scope::Deploy,
         ("POST", ["environments"])
         | ("DELETE", ["environments", _])

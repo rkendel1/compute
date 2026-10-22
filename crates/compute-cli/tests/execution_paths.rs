@@ -248,13 +248,13 @@ fn every_execution_site_is_classified() {
             },
             Allowed {
                 file: "crates/compute-cli/src/managed.rs",
-                count: 1,
-                why: "`compute up`/`compute down` for a configured installation: the managed services the distribution profile declares (its own installed executables, e.g. `appport-services serve`)",
+                count: 3,
+                why: "`compute up`/`compute down` for a configured installation: the managed services the distribution profile declares (its own installed executables, e.g. `appport-services serve`), started directly or on the bundled Node it declares as its interpreter",
             },
             Allowed {
                 file: "crates/compute-cli/src/stack_cmd.rs",
-                count: 8,
-                why: "`compute stack` tooling: git and npm to inspect sources and the registry, tool versions for the host record, and the stack's own recorded test suites (bash); operator tooling, never a workload",
+                count: 10,
+                why: "`compute stack` tooling: git and npm to inspect sources and the registry, tool versions for the host record, the stack's own recorded test suites (bash), and ssh-keygen to sign and verify approvals (plus its unit test, which makes a key); operator tooling, never a workload",
             },
             Allowed {
                 file: "crates/compute-cli/src/session_cmd.rs",

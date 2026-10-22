@@ -15,6 +15,7 @@ import type {
   ProjectAddInput,
   ProjectLoadInput,
   ProjectView,
+  SourceLoadInput,
 } from "./types.js";
 
 /**
@@ -30,6 +31,7 @@ export interface EnvironmentApi {
   environmentLifecycle(environment: string, action: "start" | "stop" | "restart"): Promise<EnvironmentView>;
   addProject(environment: string, project: ProjectAddInput["project"]): Promise<ProjectView>;
   loadProject(input: ProjectLoadInput): Promise<ProjectView>;
+  loadSource(input: SourceLoadInput): Promise<ProjectView>;
   removeProject(environment: string, project: string): Promise<{ removed: string }>;
   listProjects(): Promise<ProjectSummary[]>;
   /** A project in one environment, or across every environment. */
@@ -119,6 +121,11 @@ export class ComputeDaemonClient implements EnvironmentApi {
     });
     await this.request("POST", `${base}/projects`, spec);
     return this.request("GET", `${base}/projects/${segment(project)}`);
+  }
+
+  /** Load an immutable Git source into an environment's computer: its repository at the commit, and the project in it. */
+  loadSource({ environment, source }: SourceLoadInput): Promise<ProjectView> {
+    return this.request("POST", `/environments/${segment(environment)}/sources`, source);
   }
 
   removeProject(environment: string, project: string): Promise<{ removed: string }> {

@@ -3202,6 +3202,18 @@
    "tests": []
   },
   {
+   "command": "compute environment source",
+   "about": "Load a provider-neutral Git source (the immutable `{source, url, owner, repository, ref, commit}` a GitHub selection produces) into the computer: its repository at that commit, and the project in it",
+   "help_defect": null,
+   "interface": "daemon API /environments",
+   "state": "durable",
+   "authority": "daemon scopes; owner for computer environments",
+   "ui": null,
+   "tests": [
+    "crates/compute-cli/tests/computers.rs"
+   ]
+  },
+  {
    "command": "compute environment propose",
    "about": "Inspect a project's source in the computer and propose how to run it: runtime, dependencies, build, tests, start command, ports, services, configuration. Nothing changes",
    "help_defect": null,
@@ -4676,6 +4688,15 @@
    "method": "POST",
    "path": "/environments/{environment}/lifecycle",
    "scope": "Operate",
+   "ui": false,
+   "cli": true,
+   "appport": true,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/sources",
+   "scope": "Deploy",
    "ui": false,
    "cli": true,
    "appport": true,

@@ -99,6 +99,10 @@ asset's SHA-256 into the formula; the formula never builds Compute or downloads
 runtimes independently. No cross-repository write credential is stored in this
 repository.
 
+Every release asset carries a signed build-provenance attestation (Sigstore,
+through GitHub) naming the workflow run and commit that built it. Check a
+download with `gh attestation verify ASSET --repo rkendel1/compute`.
+
 Repository tests prove the templates; they cannot prove the tap. The tap is
 proved by `distribution/tests/live-tap-release.sh [VERSION]`. It fetches the
 live tap's formulas over the network and requires them to be byte-identical to

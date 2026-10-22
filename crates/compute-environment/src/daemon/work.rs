@@ -183,6 +183,58 @@ impl Daemon {
         .await
     }
 
+    /// Load a provider-neutral Git source (what `@appport/github` produces for a
+    /// selected repository) into the environment's computer: its repository,
+    /// checked out at the source's immutable commit, and the project in it. A
+    /// project that is already there keeps its build, tests, and commands.
+    pub async fn load_source(
+        self: &Arc<Self>,
+        environment: &str,
+        operator: &str,
+        source: GitRepositorySource,
+    ) -> Result<crate::status::ProjectView, EnvironmentError> {
+        let request = source.propose().map_err(EnvironmentError::Invalid)?;
+        let name = request
+            .name
+            .clone()
+            .ok_or_else(|| EnvironmentError::Invalid("the source names no repository".into()))?;
+        let repository = compute_core::RepositorySpec {
+            name: name.clone(),
+            url: request.url.clone(),
+            revision: request.revision.clone().unwrap_or_default(),
+            sync: 0,
+        };
+        let description = format!("source {} at {}", repository.url, repository.revision);
+        let project = name.clone();
+        self.change_contents(environment, operator, description, move |contents| {
+            match contents
+                .repositories
+                .iter_mut()
+                .find(|existing| existing.name == repository.name)
+            {
+                Some(existing) => *existing = repository.clone(),
+                None => contents.repositories.push(repository.clone()),
+            }
+            if !contents
+                .projects
+                .iter()
+                .any(|existing| existing.name == project)
+            {
+                contents.projects.push(compute_core::ProjectSpec {
+                    name: project.clone(),
+                    repository: repository.name.clone(),
+                    build: vec![],
+                    test: vec![],
+                    commands: Default::default(),
+                    checks: vec![],
+                });
+            }
+            Ok(())
+        })
+        .await?;
+        self.project(environment, &name).await
+    }
+
     /// Replace the environment's configuration: every process, build, and
     /// command sees it, and what depends on it restarts in place.
     pub async fn set_config(
