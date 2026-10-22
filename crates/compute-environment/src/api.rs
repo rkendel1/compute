@@ -895,9 +895,17 @@ async fn route(
         ("POST", ["environments", id, "replace"]) => ok(to_value(
             Box::pin(daemon.replace_computer(id, &principal.operator_id, parse(body)?)).await?,
         )?),
-        ("POST", ["environments", id, "fork"]) => created(to_value(
-            Box::pin(daemon.fork_environment(id, &principal.operator_id, parse(body)?)).await?,
-        )?),
+        ("POST", ["environments", id, "fork"]) => {
+            let request: ForkRequest = parse(body)?;
+            match request.state {
+                ForkState::Workspace => created(to_value(
+                    Box::pin(daemon.fork_environment(id, &principal.operator_id, request)).await?,
+                )?),
+                ForkState::Machine => created(to_value(
+                    Box::pin(daemon.fork_machine(id, &principal.operator_id, request)).await?,
+                )?),
+            }
+        }
         // Recipes: lifecycle policy as data. Resolving is read only.
         ("GET", ["recipes"]) => ok(to_value(Box::pin(daemon.recipes()).await?)?),
         ("GET", ["recipes", "starters"]) => ok(to_value(crate::recipe_starters())?),

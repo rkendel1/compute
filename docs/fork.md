@@ -77,6 +77,35 @@ or a digest mismatch inside the new computer), `applying contents`,
 unsupported workspace entry (symlink, special file), and an oversized archive
 are refused at the export, before anything is created. There is no rollback.
 
+## Machine fork (`state: machine`)
+
+`compute environment fork SOURCE NAME --machine`
+(`POST /environments/{environment}/fork` with `"state": "machine"`) forks the
+running machine itself: memory and disk, on the source's own target, so
+processes continue in NAME from where they were. It is a different
+operation from the workspace fork above, asked for by name. Neither is ever
+substituted for the other.
+
+```text
+fork SOURCE NAME --machine
+  refuse: a reserved name, a name in use, a non-owner, a computer that is not
+    running, one whose backend lacks `fork`, a --target other than the
+    source's                                                  (nothing created)
+  candidate: an environment whose computer spec says "fork SOURCE's session"
+    (ComputerSpec.fork); the controller's ordinary provisioning asks the
+    target for one child of that session, named by the computer's reference,
+    so a controller that restarts gets the same child back
+  wait until it runs and its declared contents (SOURCE's) are held
+  HANDOFF, as above
+```
+
+Same identity invariant: a new environment, a new computer, a new session,
+owned by the operator who forked, with configuration values copied only with
+`--copy-config`. What differs is what is inherited: the machine's memory
+and disk (the target's checkpoint is recorded in the child's lineage and the
+report) instead of the portable workspace. The backends that can do it are
+in [session-backends.md](session-backends.md#machine-fork).
+
 ## Not built
 
 Streaming artifacts. [Checkpoint](checkpoint.md) and [restore](restore.md) makes the same

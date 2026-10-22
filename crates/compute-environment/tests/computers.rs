@@ -152,6 +152,55 @@ impl SessionProvider for Steered {
     async fn claim(&self, id: &str) -> Result<(), ProviderError> {
         self.inner.claim(id).await
     }
+
+    // With the `fork` capability, a machine is its workspace directory: a
+    // checkpoint copies it and a child starts from the copy.
+    async fn checkpoint(
+        &self,
+        id: &str,
+        checkpoint: &str,
+    ) -> Result<compute_core::MachineCheckpoint, ProviderError> {
+        if !self.capabilities.fork {
+            return Err(compute_provider::unsupported("steered", "fork"));
+        }
+        copy_tree(
+            &self.root.join(id),
+            &self.root.join(".checkpoints").join(checkpoint),
+        );
+        Ok(compute_core::MachineCheckpoint {
+            id: checkpoint.into(),
+            evidence: BTreeMap::from([("snapshot".into(), format!("steered:{checkpoint}"))]),
+        })
+    }
+    async fn provision_from(
+        &self,
+        request: &ProvisionRequest,
+        checkpoint: &str,
+    ) -> Result<ProvisionedSession, ProviderError> {
+        let provisioned = self.provision(request).await?;
+        copy_tree(
+            &self.root.join(".checkpoints").join(checkpoint),
+            &self.root.join(&provisioned.provider_session_id),
+        );
+        Ok(provisioned)
+    }
+    async fn release_checkpoint(&self, checkpoint: &str) -> Result<(), ProviderError> {
+        let _ = std::fs::remove_dir_all(self.root.join(".checkpoints").join(checkpoint));
+        Ok(())
+    }
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let path = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &path);
+        } else if entry.file_type().unwrap().is_file() {
+            std::fs::copy(entry.path(), path).unwrap();
+        }
+    }
 }
 
 /// A target: a server hosting sessions, in a runtime of its own. It can be
@@ -3392,6 +3441,7 @@ async fn a_workspace_that_changes_while_it_is_captured_is_refused() {
                 name: "busy-copy".into(),
                 target: None,
                 copy_config: false,
+                state: Default::default(),
             },
         )
         .await;
@@ -3759,6 +3809,7 @@ fn fork_of(name: &str) -> ForkRequest {
         name: name.into(),
         target: None,
         copy_config: false,
+        state: Default::default(),
     }
 }
 
@@ -6553,4 +6604,116 @@ async fn the_orphan_sweep_keeps_a_derived_environments_machine() {
             .any(|(kind, _)| kind == "computer.orphan_destroyed")
     );
     second.shutdown().await;
+}
+
+fn machine_fork(name: &str) -> ForkRequest {
+    ForkRequest {
+        name: name.into(),
+        target: None,
+        copy_config: false,
+        state: ForkState::Machine,
+    }
+}
+
+/// A machine fork is a new environment whose computer is a child of the
+/// source's running machine, on the source's target, made through the
+/// ordinary provisioning of a computer. Where it cannot mean that it is
+/// refused before anything is created, never turned into a workspace fork.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_machine_is_forked_into_a_new_environment_on_its_target() {
+    let forking = tempfile::tempdir().unwrap();
+    let plain = tempfile::tempdir().unwrap();
+    let forks = SessionCapabilities {
+        fork: true,
+        ..full()
+    };
+    let target_a = Target::start(Steered::new(forking.path(), forks, None), &[]);
+    let target_b = Target::start(Steered::new(plain.path(), full(), None), &[]);
+    let (daemon, _node) = start_daemon(
+        Arc::new(MemoryState::new()),
+        pool(&[("target-a", &target_a), ("target-b", &target_b)]),
+    )
+    .await;
+    for (name, target) in [("origin", "target-a"), ("plain", "target-b")] {
+        let mut origin = definition(
+            name,
+            ComputerLifecycle::Persistent,
+            requirements(),
+            EnvironmentContents::default(),
+        );
+        origin.computer.target = Some(target.into());
+        daemon
+            .create_computer_environment(origin, "alice")
+            .await
+            .unwrap();
+        running_computer(&daemon, name).await;
+    }
+    sh(&daemon, "origin", "echo before > marker").await;
+
+    let report = daemon
+        .fork_machine("origin", "alice", machine_fork("copy"))
+        .await
+        .unwrap();
+    let origin = running_computer(&daemon, "origin").await;
+    assert_eq!(report.state, ForkState::Machine);
+    assert_eq!(report.target, "target-a");
+    assert_eq!(Some(&report.source_session), origin.session_id.as_ref());
+    assert_ne!(report.session, report.source_session);
+    assert_eq!(report.omitted_config, vec!["APP_ENV".to_string()]);
+    let checkpoint = report.checkpoint.clone().expect("the target's checkpoint");
+    let child = target_a.client().session(&report.session).await.unwrap();
+    let lineage = child.lineage.expect("the child's lineage");
+    assert_eq!(lineage.parent_session_id.0, report.source_session);
+    assert_eq!(lineage.checkpoint, checkpoint.id);
+    assert!(
+        child
+            .reference
+            .as_deref()
+            .is_some_and(|reference| reference.starts_with("cmp_")),
+        "the child carries its computer's reference: {:?}",
+        child.reference
+    );
+
+    // The fork holds what the source held, and from then on is its own.
+    assert_eq!(sh(&daemon, "copy", "cat marker").await, "before\n");
+    sh(&daemon, "copy", "echo after > marker").await;
+    assert_eq!(sh(&daemon, "origin", "cat marker").await, "before\n");
+    assert!(
+        events(&daemon, "copy")
+            .await
+            .iter()
+            .any(|(kind, data)| { kind == "environment.command" && data["state"] == "machine" })
+    );
+
+    // Refused, with nothing created: a name in use, another target, a
+    // computer that cannot fork its machine, and anyone but the owner.
+    assert!(matches!(
+        daemon
+            .fork_machine("origin", "alice", machine_fork("copy"))
+            .await,
+        Err(EnvironmentError::Conflict(_))
+    ));
+    let mut elsewhere = machine_fork("elsewhere");
+    elsewhere.target = Some("target-b".into());
+    assert!(matches!(
+        daemon.fork_machine("origin", "alice", elsewhere).await,
+        Err(EnvironmentError::Invalid(_))
+    ));
+    let refused = daemon
+        .fork_machine("plain", "alice", machine_fork("plain-copy"))
+        .await;
+    assert!(
+        matches!(&refused, Err(EnvironmentError::Invalid(message)) if message.contains("workspace")),
+        "{refused:?}"
+    );
+    assert!(matches!(
+        daemon
+            .fork_machine("origin", "mallory", machine_fork("stolen"))
+            .await,
+        Err(EnvironmentError::Forbidden(_))
+    ));
+    for name in ["elsewhere", "plain-copy", "stolen"] {
+        assert!(daemon.computer(name).await.is_err(), "{name} was created");
+    }
+    daemon.shutdown().await;
 }

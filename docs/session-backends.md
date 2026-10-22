@@ -18,9 +18,9 @@ substrate (fakes or skips). A skipped test is not verification.
 | Hosts sessions | yes | yes | yes | **no** (`sessions_unsupported`) |
 | `exec` | yes | yes | yes | n/a |
 | bounded stdin (`--stdin`) | yes | yes | yes | stdin per invocation |
-| streaming stdin (`exec --interactive`) | **no** | **no** | yes; KVM verification pending | no |
+| streaming stdin (`exec --interactive`) | **no** | **no** | yes, verified on KVM | no |
 | output while running, from an offset (`attach`, `POST /compute/jobs/{id}/output`) | yes | yes | yes | no |
-| `terminal`: PTY, resize (`exec --tty`, `attach`) | **no** | **no** | yes; KVM verification pending | no |
+| `terminal`: PTY, resize (`exec --tty`, `attach`) | **no** | **no** | yes, verified on KVM | no |
 | signals to a running command | cancel only | cancel only | any signal to its process group (`session input --signal`); cancel | no |
 | workspace files (`session file`) | yes | yes | yes | n/a |
 | `network` | host network or `none`* | engine network or `none` | **egress gateway only** (no NIC) | none |
@@ -107,7 +107,10 @@ resume to ready 136 ms.
 
 `compute session fork SESSION [--count N]` (`POST /compute/sessions/{id}/fork`,
 1 to 16 children) on a provider that declares `fork`; anywhere else it is
-refused with `operation_unsupported` and nothing is created.
+refused with `operation_unsupported` and nothing is created. That is the
+target protocol. A control plane forks through the controller instead:
+`compute environment fork SOURCE NAME --machine`, which makes NAME's computer
+a child of SOURCE's machine ([fork.md](fork.md#machine-fork-state-machine)).
 
 | Question | Answer |
 | --- | --- |
@@ -168,7 +171,9 @@ attach socket against the real agent (`tests/guest_terminal.rs`); the
 output API and refusals on the session server; and through the CLI on KVM
 (`microvm.rs`: a PTY in the guest, typed input, exit codes, a resize, a
 detached command reattached with its earlier output, a signal, a receipt
-that verifies). Not yet exercised: a microVM session created with a
+that verifies), passing in CI run 39745416297. Through the controller, a
+control plane reaches the same command with `POST /environments/{e}/exec`
+and the environment's job routes ([api.md](api.md)). Not yet exercised: a microVM session created with a
 `restricted` or `isolated` host profile (the job's client process must be
 able to create its attach socket), and interactive commands in containers.
 

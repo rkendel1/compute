@@ -196,6 +196,49 @@ pub struct ForkRequest {
     /// reported.
     #[serde(default)]
     pub copy_config: bool,
+    /// What the fork carries: the portable workspace (the default), or the
+    /// running machine itself.
+    #[serde(default, skip_serializing_if = "ForkState::is_workspace")]
+    pub state: ForkState,
+}
+
+/// What a fork carries. Neither is ever substituted for the other: a
+/// computer that cannot fork its machine refuses `machine`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkState {
+    /// The workspace's files, moved through export, seed and verify, into a
+    /// new machine that placement chooses.
+    #[default]
+    Workspace,
+    /// The running machine, memory and disk, on the source's own target:
+    /// processes keep running in the fork from where they were.
+    Machine,
+}
+
+impl ForkState {
+    pub fn is_workspace(&self) -> bool {
+        *self == Self::Workspace
+    }
+}
+
+/// What a machine fork did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineForkReport {
+    pub source: String,
+    pub environment: String,
+    pub state: ForkState,
+    pub target: String,
+    /// The source's machine session and the fork's, on that target.
+    pub source_session: String,
+    pub session: String,
+    /// The target's checkpoint of the source's machine, with its evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<compute_core::MachineCheckpoint>,
+    /// Configuration names not copied.
+    pub omitted_config: Vec<String>,
+    /// The fork's computer once its contents converged.
+    pub computer: ComputerView,
 }
 
 /// What a fork did and what it verified.

@@ -359,6 +359,11 @@ pub enum ComputerCommands {
         /// Also copy configuration values (they may be credentials).
         #[arg(long)]
         copy_config: bool,
+        /// Fork the running machine itself (memory and disk, on the same
+        /// target) instead of its workspace files. Refused where the
+        /// computer cannot.
+        #[arg(long)]
+        machine: bool,
         #[arg(long)]
         json: bool,
     },
@@ -969,6 +974,46 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
             name,
             target,
             copy_config,
+            machine: true,
+            json,
+        } => {
+            let report: compute_environment::MachineForkReport = client
+                .post(
+                    &format!("/environments/{environment}/fork"),
+                    Some(&compute_environment::ForkRequest {
+                        name,
+                        target,
+                        copy_config,
+                        state: compute_environment::ForkState::Machine,
+                    }),
+                )
+                .await
+                .map_err(error)?;
+            if json {
+                print_json(&report);
+            } else {
+                println!(
+                    "Forked {}'s running machine into {} on {}",
+                    report.source, report.environment, report.target
+                );
+                if let Some(checkpoint) = &report.checkpoint {
+                    println!("Checkpoint: {}", checkpoint.id);
+                }
+                if !report.omitted_config.is_empty() {
+                    println!(
+                        "Config:   {} not copied (use --copy-config)",
+                        report.omitted_config.join(", ")
+                    );
+                }
+                print_computer(&report.computer, false);
+            }
+        }
+        ComputerCommands::Fork {
+            environment,
+            name,
+            target,
+            copy_config,
+            machine: false,
             json,
         } => {
             let report: compute_environment::ForkReport = client
@@ -978,6 +1023,7 @@ pub async fn run(client: &DaemonClient, command: ComputerCommands) -> compute_co
                         name,
                         target,
                         copy_config,
+                        state: compute_environment::ForkState::Workspace,
                     }),
                 )
                 .await

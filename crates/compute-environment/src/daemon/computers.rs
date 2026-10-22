@@ -996,6 +996,18 @@ impl Daemon {
         definition: ComputerEnvironmentDefinition,
         operator: &str,
     ) -> Result<EnvironmentView, EnvironmentError> {
+        self.create_computer_environment_with(definition, operator, None)
+            .await
+    }
+
+    /// Create an environment on a computer whose first machine is, with
+    /// `fork`, a fork of another computer's running machine.
+    pub(crate) async fn create_computer_environment_with(
+        self: &Arc<Self>,
+        definition: ComputerEnvironmentDefinition,
+        operator: &str,
+        fork: Option<compute_core::MachineFork>,
+    ) -> Result<EnvironmentView, EnvironmentError> {
         validate_name("environment", &definition.name)?;
         validate_env("environment", &definition.env)?;
         if let Some(policy) = &definition.policy {
@@ -1063,7 +1075,7 @@ impl Daemon {
             }),
             generation: 1,
             destroy_requested_at: None,
-            fork: None,
+            fork,
         };
         let mut contents = definition.contents.clone();
         contents.generation = 1;
@@ -2584,7 +2596,10 @@ impl Daemon {
     // ---- The controller ----------------------------------------------------
 
     /// The computer record after reading back this controller's writes.
-    async fn fresh_computer(&self, environment_id: &str) -> Option<Stored<ComputerRecord>> {
+    pub(crate) async fn fresh_computer(
+        &self,
+        environment_id: &str,
+    ) -> Option<Stored<ComputerRecord>> {
         let _ = self.refresh_targeted().await;
         self.stored_computer(environment_id).await
     }
@@ -3259,6 +3274,14 @@ impl Daemon {
             .clone()
             .expect("provisioning computers are placed");
         let client = self.target_client(&target)?;
+        if computer.session_id.is_none()
+            && let Some(fork) = spec
+                .fork
+                .as_ref()
+                .filter(|fork| fork.generation == spec.generation)
+        {
+            return self.fork_step(record, stored, fork, &client, &target).await;
+        }
         let Some(session_id) = computer.session_id.clone() else {
             // Keyed by the computer's reference, so repeating this after a
             // restart finds the same session instead of making another.
@@ -3389,6 +3412,104 @@ impl Daemon {
                 _ => Ok(Step::Wait(POLL)),
             },
             Err(error) => self.target_unreachable(stored, name, &target, error).await,
+        }
+    }
+
+    /// The first machine of a forked computer: a child of the source's
+    /// running session, on the source's target, named by this computer's
+    /// reference so that repeating the step after a restart returns the
+    /// same child. Readiness, the lifetime claim and the contents are then
+    /// the ordinary provisioning steps.
+    async fn fork_step(
+        &self,
+        record: &Stored<EnvironmentRecord>,
+        stored: &Stored<ComputerRecord>,
+        fork: &compute_core::MachineFork,
+        client: &RemoteProvider,
+        target: &str,
+    ) -> Result<Step, EnvironmentError> {
+        let name = &record.value.name;
+        let computer = &stored.value;
+        let refuse = |code: &'static str, message: String, retryable: bool| async move {
+            self.record_failure(
+                stored,
+                name,
+                "provisioning",
+                code,
+                &message,
+                retryable,
+                Some(target),
+            )
+            .await?;
+            if retryable {
+                return Ok(Step::Wait(BACKOFF));
+            }
+            let refreshed = self.fresh_computer(&record.id).await;
+            self.fail_computer(refreshed.as_ref().unwrap_or(stored), name)
+                .await
+        };
+        if target != fork.target {
+            return refuse(
+                "fork_target",
+                format!(
+                    "a machine fork runs where its source is ({}), not on {target}",
+                    fork.target
+                ),
+                false,
+            )
+            .await;
+        }
+        let reference = computer
+            .reference
+            .clone()
+            .expect("placed computers have a reference");
+        let request = compute_core::SessionForkRequest {
+            count: 1,
+            references: vec![reference],
+        };
+        match client.fork_session_with(&fork.session_id, &request).await {
+            Ok(forked) => {
+                let Some(child) = forked.children.into_iter().next() else {
+                    return refuse(
+                        "fork_refused",
+                        forked
+                            .refused
+                            .unwrap_or_else(|| "the target made no child".into()),
+                        false,
+                    )
+                    .await;
+                };
+                let mut value = computer.clone();
+                value.session_id = Some(child.session_id.0.clone());
+                value.provider_kind = Some(child.provider_kind.clone());
+                value.provider_resource = child.provider_session_id.clone();
+                value.failure = None;
+                self.advance(
+                    stored,
+                    name,
+                    value,
+                    Some((
+                        events::COMPUTER_PROVISIONED,
+                        format!("{name}'s computer is a fork of a running machine on {target}"),
+                        json!({
+                            "environment_id": record.id,
+                            "target": target,
+                            "session_id": child.session_id,
+                            "forked_from": {
+                                "environment_id": fork.source_environment_id,
+                                "session_id": fork.session_id,
+                            },
+                            "checkpoint": forked.checkpoint,
+                        }),
+                    )),
+                )
+                .await?;
+                Ok(Step::Continue)
+            }
+            Err(error) => {
+                let retryable = error.kind == ProviderErrorKind::ProviderUnavailable;
+                refuse("fork_refused", error.to_string(), retryable).await
+            }
         }
     }
 
