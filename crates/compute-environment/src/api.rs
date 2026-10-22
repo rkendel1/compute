@@ -955,6 +955,17 @@ async fn route(
         ("GET", ["environments", id, "jobs", job]) => ok(to_value(
             Box::pin(daemon.computer_job(id, &principal.operator_id, job)).await?,
         )?),
+        ("POST", ["environments", id, "jobs", job, "output"]) => ok(to_value(
+            Box::pin(daemon.computer_job_output(id, &principal.operator_id, job, parse(body)?))
+                .await?,
+        )?),
+        ("POST", ["environments", id, "jobs", job, "input"]) => ok(Box::pin(
+            daemon.computer_job_input(id, &principal.operator_id, job, parse(body)?),
+        )
+        .await?),
+        ("POST", ["environments", id, "jobs", job, "cancel"]) => ok(to_value(
+            Box::pin(daemon.computer_job_cancel(id, &principal.operator_id, job)).await?,
+        )?),
         ("GET", ["environments", id, "logs"]) => ok(Box::pin(daemon.computer_logs(
             id,
             &principal.operator_id,

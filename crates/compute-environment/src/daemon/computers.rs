@@ -2258,6 +2258,25 @@ impl Daemon {
         operator: &str,
         job_id: &str,
     ) -> Result<ComputerJob, EnvironmentError> {
+        let (client, job) = self.environment_job(environment, operator, job_id).await?;
+        let result = if job.status.is_terminal() {
+            client.job_result(job_id).await.ok()
+        } else {
+            None
+        };
+        Ok(ComputerJob { job, result })
+    }
+
+    /// A job this environment's computer ran, in its current session or a
+    /// retired one, and the target holding it. Any other job, on any
+    /// target, is not found: an environment's owner reaches only its
+    /// environment's work.
+    async fn environment_job(
+        &self,
+        environment: &str,
+        operator: &str,
+        job_id: &str,
+    ) -> Result<(Arc<RemoteProvider>, compute_core::ExecutionJob), EnvironmentError> {
         let record = self.owned_environment(environment, operator).await?;
         let computer = self
             .stored_computer(&record.id)
@@ -2284,12 +2303,74 @@ impl Daemon {
                 "job {job_id} in environment {environment}"
             )));
         }
-        let result = if job.status.is_terminal() {
-            client.job_result(job_id).await.ok()
-        } else {
-            None
-        };
-        Ok(ComputerJob { job, result })
+        Ok((client, job))
+    }
+
+    /// A job's output from a byte offset, waiting a bounded time for more:
+    /// how an interactive command's output reaches a control plane.
+    pub async fn computer_job_output(
+        &self,
+        environment: &str,
+        operator: &str,
+        job_id: &str,
+        request: compute_core::JobOutputRequest,
+    ) -> Result<compute_core::JobOutput, EnvironmentError> {
+        let (client, _) = self.environment_job(environment, operator, job_id).await?;
+        client
+            .job_output(
+                job_id,
+                &request.stream,
+                request.offset,
+                request.wait_ms.min(MAX_OUTPUT_WAIT_MS),
+            )
+            .await
+            .map_err(target_error)
+    }
+
+    /// Input, a resize, a signal, or the end of input for a running
+    /// interactive job of this environment. The target refuses a job that
+    /// is not interactive or no longer running.
+    pub async fn computer_job_input(
+        &self,
+        environment: &str,
+        operator: &str,
+        job_id: &str,
+        mut input: serde_json::Value,
+    ) -> Result<serde_json::Value, EnvironmentError> {
+        let (client, job) = self.environment_job(environment, operator, job_id).await?;
+        // The job is the one in the path; a body naming another is refused
+        // rather than redirected.
+        if let Some(named) = input.get("job_id")
+            && named.as_str() != Some(job_id)
+        {
+            return Err(EnvironmentError::Invalid(format!(
+                "the input names job {named}, not {job_id}"
+            )));
+        }
+        if let Some(fields) = input.as_object_mut() {
+            fields.insert("job_id".into(), json!(job_id));
+        }
+        let input: compute_core::SessionInput = serde_json::from_value(input)
+            .map_err(|error| EnvironmentError::Invalid(format!("input: {error}")))?;
+        let session = job.session_id.ok_or_else(|| {
+            EnvironmentError::Invalid(format!("job {job_id} is not a session's job"))
+        })?;
+        client
+            .session_input(&session.0, &input)
+            .await
+            .map_err(target_error)?;
+        Ok(json!({ "job_id": job_id, "accepted": true }))
+    }
+
+    /// Cancel a job of this environment.
+    pub async fn computer_job_cancel(
+        &self,
+        environment: &str,
+        operator: &str,
+        job_id: &str,
+    ) -> Result<compute_core::ExecutionJob, EnvironmentError> {
+        let (client, _) = self.environment_job(environment, operator, job_id).await?;
+        client.cancel_job(job_id).await.map_err(target_error)
     }
 
     /// The computer's output: every job it ran, or one process's log.
@@ -4915,6 +4996,10 @@ fn remove<T>(items: &mut Vec<T>, wanted: &str, name: impl Fn(&T) -> &String) -> 
     items.retain(|item| name(item) != wanted);
     items.len() != before
 }
+
+/// The longest a controller waits on a target for output past an offset;
+/// a caller polls again for more.
+const MAX_OUTPUT_WAIT_MS: u64 = 10_000;
 
 fn target_error(error: compute_provider::ProviderError) -> EnvironmentError {
     match error.kind {

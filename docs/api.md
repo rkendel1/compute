@@ -114,7 +114,7 @@ registry, and is audited like any other controller operation.
 | Piece | State |
 | --- | --- |
 | Registry, `GET /api`, `/compute/*` fully declared, scopes derived from it | implemented |
-| Environment job output, input, cancel | planned |
+| Environment job output, input, cancel | implemented |
 | Machine fork through environments | planned |
 | Legacy marking and deprecation headers | planned |
 | Removing legacy routes (`compute.api@2`) | after client migration (UI, CLI, `@compute/appport`) |

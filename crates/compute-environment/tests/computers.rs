@@ -810,6 +810,33 @@ async fn only_the_owner_changes_or_uses_a_computer() {
     );
     forbidden(
         daemon
+            .computer_job_output(
+                "owned",
+                "mallory",
+                "job_x",
+                compute_core::JobOutputRequest {
+                    stream: "stdout".into(),
+                    offset: 0,
+                    wait_ms: 0,
+                },
+            )
+            .await
+            .map(|_| ()),
+    );
+    forbidden(
+        daemon
+            .computer_job_input("owned", "mallory", "job_x", serde_json::json!({}))
+            .await
+            .map(|_| ()),
+    );
+    forbidden(
+        daemon
+            .computer_job_cancel("owned", "mallory", "job_x")
+            .await
+            .map(|_| ()),
+    );
+    forbidden(
+        daemon
             .upsert_process(
                 "owned",
                 "mallory",
@@ -6332,4 +6359,118 @@ async fn configuration_works_over_http_and_never_returns_a_secret_or_crosses_own
         before
     );
     server.abort();
+}
+
+/// A command's output, its input and its cancellation reach a control plane
+/// through the environment that owns the computer, never the target, and
+/// only for that environment's own jobs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_jobs_are_read_driven_and_cancelled_through_it() {
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let (daemon, _node) =
+        start_daemon(Arc::new(MemoryState::new()), pool(&[("target-a", &target)])).await;
+    for name in ["mine", "other"] {
+        daemon
+            .create_computer_environment(
+                definition(
+                    name,
+                    ComputerLifecycle::Persistent,
+                    requirements(),
+                    EnvironmentContents::default(),
+                ),
+                "alice",
+            )
+            .await
+            .unwrap();
+        computer_where(&daemon, name, "the computer", |view| {
+            view.status == ComputerStatus::Running
+        })
+        .await;
+    }
+    let (_, job) = run(
+        &daemon,
+        "mine",
+        "alice",
+        &["sh", "-c", "printf hello-world"],
+    )
+    .await;
+    let job_id = job.job.job_id.0.clone();
+    let read = |offset| compute_core::JobOutputRequest {
+        stream: "stdout".into(),
+        offset,
+        wait_ms: 0,
+    };
+    let output = daemon
+        .computer_job_output("mine", "alice", &job_id, read(0))
+        .await
+        .unwrap();
+    assert_eq!(output.data, b"hello-world");
+    assert!(output.complete);
+    let rest = daemon
+        .computer_job_output("mine", "alice", &job_id, read(6))
+        .await
+        .unwrap();
+    assert_eq!(rest.data, b"world");
+
+    // Another environment of the same owner does not reach this job.
+    assert!(matches!(
+        daemon
+            .computer_job_output("other", "alice", &job_id, read(0))
+            .await,
+        Err(EnvironmentError::NotFound(_))
+    ));
+
+    // This target has no terminals: an interactive command is refused, not
+    // run without one, and a finished command takes no input.
+    let mut interactive = SessionCommand::new(vec!["cat".into()]);
+    interactive.interactive = true;
+    assert!(matches!(
+        daemon.computer_exec("mine", "alice", interactive).await,
+        Err(EnvironmentError::Invalid(_))
+    ));
+    let refused = daemon
+        .computer_job_input(
+            "mine",
+            "alice",
+            &job_id,
+            serde_json::json!({ "data": "aGk=" }),
+        )
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(matches!(
+        daemon
+            .computer_job_input(
+                "mine",
+                "alice",
+                &job_id,
+                serde_json::json!({ "job_id": "job_another" }),
+            )
+            .await,
+        Err(EnvironmentError::Invalid(_))
+    ));
+
+    // A running command is cancelled through its environment.
+    let sleeping = daemon
+        .computer_exec(
+            "mine",
+            "alice",
+            SessionCommand::new(vec!["sleep".into(), "60".into()]),
+        )
+        .await
+        .unwrap();
+    daemon
+        .computer_job_cancel("mine", "alice", &sleeping.job_id)
+        .await
+        .unwrap();
+    let ended = eventually("the cancelled command", async || {
+        daemon
+            .computer_job("mine", "alice", &sleeping.job_id)
+            .await
+            .ok()
+            .filter(|job| job.job.status.is_terminal())
+    })
+    .await;
+    assert_eq!(ended.job.status, compute_core::JobStatus::Cancelled);
+    daemon.shutdown().await;
 }

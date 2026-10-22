@@ -5646,6 +5646,33 @@
    "cli": true,
    "appport": false,
    "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/jobs/{job}/output",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/jobs/{job}/input",
+   "scope": "Execute",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/jobs/{job}/cancel",
+   "scope": "Execute",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
   }
  ],
  "ui": {

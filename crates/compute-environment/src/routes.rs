@@ -438,6 +438,27 @@ pub const ROUTES: &[Route] = &[
         Controller,
     ),
     route(
+        "POST",
+        "/environments/{environment}/jobs/{job}/output",
+        Read,
+        "environment.job.output",
+        Controller,
+    ),
+    route(
+        "POST",
+        "/environments/{environment}/jobs/{job}/input",
+        Execute,
+        "environment.job.input",
+        Controller,
+    ),
+    route(
+        "POST",
+        "/environments/{environment}/jobs/{job}/cancel",
+        Execute,
+        "environment.job.cancel",
+        Controller,
+    ),
+    route(
         "GET",
         "/environments/{environment}/logs",
         Read,
