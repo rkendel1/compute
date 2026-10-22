@@ -125,6 +125,31 @@ fn microvm_lifecycle_latency() {
         .max(2);
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().to_path_buf();
+    // The same network as the acceptance test: an egress gateway is the
+    // only way out of a VM.
+    let gateway = format!("127.0.0.1:{}", free_port());
+    std::fs::write(
+        root.join("egress.json"),
+        r#"{"allow":[{"host":"example.com","ports":[80,443]}]}"#,
+    )
+    .unwrap();
+    let _gateway = Running(
+        std::process::Command::new(env!("CARGO_BIN_EXE_compute"))
+            .args(["egress", "serve", "--rules"])
+            .arg(root.join("egress.json"))
+            .args(["--listen", &gateway])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while std::net::TcpStream::connect(&gateway).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "the egress gateway never answered"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let listen = format!("127.0.0.1:{}", free_port());
     let credential = targets::issue(&root, "node", "cli");
     std::fs::write(
@@ -152,6 +177,7 @@ fn microvm_lifecycle_latency() {
                 &firecracker,
             ])
             .args(["--vm-kernel", &kernel, "--vm-rootfs", &rootfs])
+            .args(["--vm-egress", &gateway])
             .stdout(Stdio::null())
             .spawn()
             .unwrap(),
@@ -269,7 +295,7 @@ fn microvm_lifecycle_latency() {
             "vmm": command_line(&firecracker, &["--version"]).lines().next().unwrap_or_default(),
             "guest_kernel": guest_kernel,
             "rootfs_bytes": std::fs::metadata(&rootfs).map(|meta| meta.len()).unwrap_or(0),
-            "vm": { "vcpus": 1, "memory_mib": 256, "network": "network" },
+            "vm": { "vcpus": 1, "memory_mib": 256, "network": "egress gateway (example.com only)" },
             "note": "CLI times include the CLI process, HTTP, authorization, the durable job, and admission; backend phases are the provider's own, from lifecycle.jsonl",
         },
         "cli": cli.iter().map(|(operation, (cold, warm))| {
