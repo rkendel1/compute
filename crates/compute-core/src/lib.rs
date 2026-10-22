@@ -2735,6 +2735,9 @@ pub trait RuntimeAdapter: Send + Sync {
 pub struct ExecutionControl {
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     log_directory: Option<PathBuf>,
+    /// Stop appending to the live logs at the workload's output limits, so
+    /// a log is the same bounded prefix the result keeps.
+    bounded_logs: bool,
     /// The workload's process (and process group) once spawned; 0 before.
     process: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Execution identity reserved when the execution was accepted, so a
@@ -2752,6 +2755,18 @@ impl ExecutionControl {
     pub fn with_log_directory(mut self, directory: impl Into<PathBuf>) -> Self {
         self.log_directory = Some(directory.into());
         self
+    }
+
+    /// Bound the live logs by the workload's `stdout_bytes` and
+    /// `stderr_bytes`, as a durable job's are. Without it (a supervised
+    /// service) every byte is appended.
+    pub fn with_bounded_logs(mut self) -> Self {
+        self.bounded_logs = true;
+        self
+    }
+
+    pub fn logs_bounded(&self) -> bool {
+        self.bounded_logs
     }
 
     pub fn log_directory(&self) -> Option<&Path> {
