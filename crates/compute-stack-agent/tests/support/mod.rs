@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use compute_rust_chip::{ComputeSessionConfig, ComputeSessionEnvironments};
+use compute_stack_agent::{ComputeSessionConfig, ComputeSessionEnvironments};
 
 pub struct Target {
     runtime: Option<tokio::runtime::Runtime>,
@@ -123,7 +123,8 @@ const TESTS: &str =
 /// A git repository: a Rust crate whose tests pass, and a README. `tests_pass = false` makes the
 /// crate's test fail.
 pub fn project(tag: &str, tests_pass: bool) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("compute-rust-chip-{}-{tag}", std::process::id()));
+    let root =
+        std::env::temp_dir().join(format!("compute-stack-agent-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(root.join("tests")).unwrap();
@@ -167,7 +168,7 @@ fn git(root: &Path, args: &[&str]) {
 }
 
 pub fn worker() -> String {
-    env!("CARGO_BIN_EXE_compute-rust-chip").to_string()
+    env!("CARGO_BIN_EXE_compute-stack-agent").to_string()
 }
 
 /// Whether PAX is on the search path. Tests that need it say `SKIPPED` without it, so a skip is

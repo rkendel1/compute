@@ -1,5 +1,10 @@
 # EVE/Chip operation contract (as it exists)
 
+> **Historical.** This page records the npm Chip/Eve agent and npm FX that `compute-configured`
+> shipped up to 0.1.20. They are retired: the configured agent is now
+> [stack-agent](stack-agent.md) (Chip + FX in one Rust executable), and nothing in the current
+> profile, formula or release pipeline refers to the npm agent.
+
 Scope: the contract Attn can rely on today through `@appport/chip` 0.54.4
 (`POST /eve/v1/session` …). **Nothing here is a proposal for a new API**; where
 a semantic is absent it says so. Source: reading the installed package's docs

@@ -40,7 +40,7 @@ async fn serving() -> Node {
     }
 }
 
-/// A configured distribution profile declaring Chip as its default agent
+/// A configured distribution profile declaring stack-agent as its default agent
 /// runtime, exactly as `compute-configured` ships it.
 fn configured_profile(root: &std::path::Path) {
     std::fs::write(
@@ -49,18 +49,17 @@ fn configured_profile(root: &std::path::Path) {
   "format": "compute.distribution-profile@1",
   "profile": "configured",
   "agent": {
-    "default": "chip",
+    "default": "stack-agent",
     "runtimes": [
       {
-        "name": "chip",
-        "package": "@appport/chip",
-        "version": "0.54.3",
-        "executable": "node_modules/.bin/chip",
-        "node": "runtimes/node/bin/node",
+        "name": "stack-agent",
+        "package": "github:rkendel1/stack-agent",
+        "version": "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14",
+        "executable": "stack-agent/bin/compute-stack-agent",
         "default": true,
         "capabilities": ["Agent/loop@1"],
-        "lifecycle": "execution",
-        "environment": "compute.execution"
+        "lifecycle": "service",
+        "environment": "compute.session"
       }
     ]
   }
@@ -77,7 +76,7 @@ fn configured_profile(root: &std::path::Path) {
 /// neighbours and make "base Compute advertises nothing" a race rather than a
 /// fact. Observing both sides here keeps the assertion honest.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn base_advertises_no_agent_runtime_and_configured_advertises_chip() {
+async fn base_advertises_no_agent_runtime_and_configured_advertises_stack_agent() {
     // Remove any ambient value first: a base installation has no profile, and
     // the controller must answer exactly as it would on a developer machine.
     unsafe { std::env::remove_var(agents::PROFILE_HOME_ENV) };
@@ -102,20 +101,16 @@ async fn base_advertises_no_agent_runtime_and_configured_advertises_chip() {
     unsafe { std::env::remove_var(agents::PROFILE_HOME_ENV) };
 
     let agents_view = &info["agents"];
-    assert_eq!(agents_view["default"], "chip");
-    let chip = &agents_view["runtimes"][0];
-    assert_eq!(chip["name"], "chip");
-    assert_eq!(chip["package"], "@appport/chip");
-    assert_eq!(chip["version"], "0.54.3");
-    assert_eq!(chip["default"], true);
-    // Chip runs on the distribution's bundled Node, never the host's.
-    assert_eq!(chip["node"], "runtimes/node/bin/node");
-    // An execution owns the lifecycle; the agent runtime does not outlive it.
-    assert_eq!(chip["lifecycle"], "execution");
-    // The public package identity is the contract. Chip's internal entry file
-    // is not, and must not leak into what a control plane depends on.
-    assert!(!info.to_string().contains("chip-framework"));
-    assert!(!info.to_string().contains("node_modules/eve"));
+    assert_eq!(agents_view["default"], "stack-agent");
+    let agent = &agents_view["runtimes"][0];
+    assert_eq!(agent["name"], "stack-agent");
+    assert_eq!(agent["package"], "github:rkendel1/stack-agent");
+    assert_eq!(agent["version"], "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14");
+    assert_eq!(agent["default"], true);
+    // A long-running service whose capabilities run in Compute sessions.
+    assert_eq!(agent["lifecycle"], "service");
+    assert_eq!(agent["environment"], "compute.session");
+    assert!(!info.to_string().contains("@appport/chip"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -125,9 +120,9 @@ async fn a_control_plane_can_resolve_the_default_without_hardcoding_a_version() 
     let capabilities = agents::declared(home.path());
 
     // This is the whole OpenDots contract: read the default's identity from the
-    // contract, rather than knowing that the default is chip@0.54.3.
+    // contract, rather than knowing which commit the default is pinned to.
     let default = capabilities.default_runtime().expect("a default runtime");
-    assert_eq!(default.name, "chip");
+    assert_eq!(default.name, "stack-agent");
     assert!(default.default);
     assert_eq!(capabilities.runtimes.len(), 1);
 }

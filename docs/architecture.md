@@ -1,7 +1,7 @@
 # Compute architecture
 
-> Rust Chip (the `chip-rs` agent runtime) can run as a workload on a session, beside the configured
-> distribution's npm Chip/Eve agent: [rust-chip.md](rust-chip.md). Compute is an agent-neutral
+> stack-agent (Chip + FX in one Rust executable) is the configured distribution's agent; each of its
+> capabilities runs in a Compute session: [stack-agent.md](stack-agent.md). Compute is an agent-neutral
 > execution environment (*Compute provides the computer; agents provide the agency*):
 > [agents.md](agents.md).
 
@@ -69,7 +69,7 @@ There are three kinds of process:
 `compute run` is a fourth path with no process at all: the CLI runs a
 workload in-process with the local provider (or submits it to a pool with
 `compute pool run`).
-| 34 | Compute is agent-neutral: it provides the computer and never interprets what an agent did. `compute-agent` depends on no agent runtime; a launch returns what happened (exit code, output, receipt), never a verdict on a goal; one work gets one session; acquisition fails closed; cleanup failure is recorded, not raised. | `compute-agent/tests/agents.rs` (launch, collision, isolation, failure isolation, fail-closed acquisition, cleanup), `compute-agent/tests/dependencies.rs`, `compute-rust-chip/tests/agent_contract.rs`, `distribution/tests/configured-rust-chip.sh` |
+| 34 | Compute is agent-neutral: it provides the computer and never interprets what an agent did. `compute-agent` depends on no agent runtime; a launch returns what happened (exit code, output, receipt), never a verdict on a goal; one work gets one session; acquisition fails closed; cleanup failure is recorded, not raised. | `compute-agent/tests/agents.rs` (launch, collision, isolation, failure isolation, fail-closed acquisition, cleanup), `compute-agent/tests/dependencies.rs`, `compute-stack-agent/tests/agent_contract.rs`, `distribution/tests/configured-stack-agent.sh` |
 
 ## Modules
 
@@ -88,7 +88,7 @@ workload in-process with the local provider (or submits it to a pool with
 | `compute-network` | 1.7k | DNS providers, ACME, TLS, ingress for node environments |
 | `compute-environment` | 23.0k | The daemon: API (`api.rs`, `ROUTES`), auth, controllers (`daemon/computers.rs`, `software.rs`, `work.rs`, `release.rs`, `reconcile.rs`, …), the supervisor data plane, the UI (`ui/app.js`, 2.3k lines) |
 | `compute-agent` | 0.4k | The agent boundary: launch any executable (`AgentSpec`) in one isolated session per work (`AgentHost`, `AgentSession`); knows no agent ([agents.md](agents.md)) |
-| `compute-rust-chip` | 0.3k | The adapter and executable that let Rust Chip's published environment contract run on `compute-agent` ([rust-chip.md](rust-chip.md)) |
+| `compute-stack-agent` | 0.3k | The adapter and executable that let stack-agent's published environment contract run on `compute-agent` ([stack-agent.md](stack-agent.md)) |
 | `compute-cli` | 17.6k | The `compute` binary: launcher, 182 commands |
 | `packages/compute-appport` | TS | The agent/automation client: every UI operation |
 | `packages/compute-state-model` | TS | `compute.flow`, the generated FeltDB manifest |
@@ -277,9 +277,6 @@ legacy deployment model:
               ──▶  an ephemeral process      no record, no endpoint, no recovery
               ──▶  a local, non-deployment receipt (only when asked)
 
- agent invocation (ChipAgentExecutor) ──▶ one synchronous `compute-configured-chip invoke`
-               an ephemeral process: no record, no endpoint, no recovery
-
  node environments (G-ARCH-5, blocked) ──▶ the daemon host's supervisor
 
  compute-configured (a configured installation) ──▶ the services its profile declares
@@ -313,7 +310,7 @@ the target, the supervisor, an upgraded controller, or the packaged binary
 for read-only version and starter-catalog verification), a tool (curl, npm,
 compilers, the FeltDB verifier, the read-only `pax` project observer,
 runtime acquisition, container engines behind a target's container
-sessions), or — only in a configured installation, and only an executable
+sessions, `compute stack`'s git, npm and recorded test-suite tooling), or — only in a configured installation, and only an executable
 the installed distribution itself ships — a **managed service** declared in
 the distribution profile; none runs a workload.
 

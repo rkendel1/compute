@@ -8,10 +8,10 @@
 //! * [`HostBoundary`] sits behind Chip's capability boundary (`CapabilityBackend`): it is the
 //!   host that declares, authorizes and executes capabilities, and records the evidence.
 //! * [`FakeEnvironments`] is an `EnvironmentProvider`, the generic contract Compute serves with a
-//!   Compute session today (`crates/compute-rust-chip`).
+//!   Compute session today (`crates/compute-stack-agent`).
 //!
 //! What this does NOT prove: that Compute's own session, admission, policy or persistence code works
-//! (that is covered by `crates/compute-rust-chip/tests` at the product pin), or anything about a
+//! (that is covered by `crates/compute-stack-agent/tests` at the product pin), or anything about a
 //! live provider. See docs/chip-fx-integration.md.
 
 use std::collections::{BTreeSet, VecDeque};
@@ -320,7 +320,7 @@ impl WorkEnvironment for FakeEnvironment {
 }
 
 /// An `EnvironmentProvider` that hands out one environment, backed by the host boundary. This is the
-/// seam `ComputeSessionEnvironments` (compute-rust-chip) implements with a Compute session.
+/// seam `ComputeSessionEnvironments` (compute-stack-agent) implements with a Compute session.
 pub struct FakeEnvironments {
     host: Arc<HostBoundary>,
     pub acquired: AtomicUsize,

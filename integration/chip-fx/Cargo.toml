@@ -1,10 +1,8 @@
-# Compute -> Rust Chip -> FX integration harness (preparation only; see docs/chip-fx-integration.md).
+# Compute -> Chip -> FX contract harness (see docs/chip-fx-integration.md).
 #
-# This is deliberately its OWN cargo workspace, like chip-rs's session-memory experiment. The product
-# workspace pins Rust Chip at an older commit that still carries the retired toy FX; the harness pins
-# the chip-rs commit that carries the authoritative FX adapter. Keeping them apart means this crate
-# changes no shipped binary and the two Chip versions never share a dependency graph. The follow-up
-# that moves the product pin forward folds this harness into `crates/compute-rust-chip/tests`.
+# Its OWN cargo workspace: deterministic fakes-only contract tests of the real Chip work loop, the
+# real Chip->FX adapter and the real FX executor, at the same stack-agent commit the product
+# workspace (crates/compute-stack-agent) builds. Chip and FX are one repository, one commit.
 [workspace]
 
 [package]
@@ -15,15 +13,15 @@ license = "MIT"
 publish = false
 description = "Deterministic fakes-only harness for the Compute -> Rust Chip -> FX contract"
 
-# Immutable revisions only (never a branch or tag). The fx rev is the one chip-rs itself builds
-# against (crates/chip-fx/Cargo.toml at the chip-rs rev below); both are checked by tests/pins.rs.
+# Immutable revisions only (never a branch or tag), all one stack-agent commit; checked by
+# tests/pins.rs against the product workspace's pin.
 [dependencies]
 async-trait = "0.1"
-chip-core = { git = "https://github.com/rkendel1/chip-rs", rev = "2ea3ade3b0c824dc82a3f60962115ca6b05906b8" }
-chip-fx = { git = "https://github.com/rkendel1/chip-rs", rev = "2ea3ade3b0c824dc82a3f60962115ca6b05906b8" }
-chip-inference = { git = "https://github.com/rkendel1/chip-rs", rev = "2ea3ade3b0c824dc82a3f60962115ca6b05906b8" }
-fx-core = { git = "https://github.com/rkendel1/fx", rev = "72ef7a41c5f7b714774ec224c38aa23b53325759" }
-fx-single-attempt = { git = "https://github.com/rkendel1/fx", rev = "72ef7a41c5f7b714774ec224c38aa23b53325759" }
+chip-core = { git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
+chip-fx = { git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
+chip-inference = { git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
+fx-core = { git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
+fx-single-attempt = { git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

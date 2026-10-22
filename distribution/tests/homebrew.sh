@@ -38,11 +38,8 @@ grep -q 'platform = OS.mac? ? "macos-aarch64" : "linux-x86_64"' "$configured_for
 grep -q "\"$configured_checksum\"" "$configured_formula"
 grep -q "\"$macos_configured_checksum\"" "$configured_formula"
 grep -q 'depends_on "rkendel1/compute/compute"' "$configured_formula"
-# Chip keeps its durable sessions under its working directory, so the launcher must run it in the persistent
-# Compute home, never in the keg or a temporary directory; and it must ship the whole agent, including the
-# tools that disable Chip's built-in shell, file and web tools.
-grep -qF 'work="${COMPUTE_HOME:-$HOME/.compute}/configured/chip"' "$configured_formula"
-grep -qF 'cp -RL "$root/agent" "$work/.agent.$$"' "$configured_formula"
+# stack-agent runs from an allow-listed environment: the shell's other credentials never reach it.
+grep -qF 'unset "$name"' "$configured_formula"
 grep -q 'skip_clean "libexec"' "$configured_formula"
 if grep -q 'depends_on "node' "$configured_formula"; then
   echo "configured formula must use Compute's certified bundled Node runtime" >&2
@@ -67,11 +64,10 @@ grep -q 'recipes/starters/dev.json' "$configured_formula"
 # `GET /v1/ui`: a silently absent feature, not a visible failure.
 grep -q 'export COMPUTE_CONFIGURED_HOME=' "$configured_formula"
 
-# Chip belongs to the configured distribution and nowhere else. Its launcher,
-# the real runtime it starts, and the failure it gives when that runtime is
-# missing are proved in their own contract, which renders these same formulas.
-"$repository/distribution/tests/configured-chip.sh"
-"$repository/distribution/tests/configured-rust-chip.sh"
+# The agent belongs to the configured distribution and nowhere else. Its launcher,
+# what it passes through, and the failure it gives when the executable is missing
+# are proved in their own contract, which renders these same formulas.
+"$repository/distribution/tests/configured-stack-agent.sh"
 
 test -f "$work/tap/.github/workflows/tests.yml"
 test -f "$work/tap/.github/workflows/sync.yml"
@@ -79,7 +75,7 @@ test -x "$work/tap/scripts/update-formula.sh"
 test -f "$work/tap/README.md"
 # A seeded tap must carry the guards it needs to check what it renders. v0.1.16
 # shipped without them, so nothing in the tap could notice that its rendered
-# formula had lost the Chip launcher.
+# formula had lost its agent launcher.
 test -x "$work/tap/scripts/check-runtime-payload-invariant.sh"
 test -x "$work/tap/scripts/check-configured-launchers.sh"
 test -x "$work/tap/scripts/install-release-templates.sh"
@@ -93,7 +89,7 @@ test -x "$work/tap/scripts/install-release-templates.sh"
 
 # The release templates must actually reach the renderer. v0.1.16 fetched them,
 # rendered from the tap's stale copies, and published a configured formula with no
-# Chip launcher. This reproduces that: a stale tap template, the release
+# agent launcher. This reproduces that: a stale tap template, the release
 # templates installed into the renderer's own input path, and the rendered formula
 # required to carry the launcher.
 "$repository/distribution/tests/tap-sync-launchers.sh"

@@ -29,31 +29,31 @@ fn every_git_dependency_is_pinned_to_a_full_commit_never_a_branch_or_tag() {
     assert!(git_dependencies >= 5);
 }
 
-/// chip-rs builds against one FX revision. If a chip-rs bump moves it, a second FX version would
-/// enter the graph silently; this fails instead, and the pins are moved together (docs/chip-fx-integration.md).
+/// Chip and FX are one stack-agent commit, and it is the one the shipped product builds: the
+/// harness never certifies a different Chip from the one Compute ships.
 #[test]
-fn the_resolved_graph_has_exactly_one_fx_revision() {
-    let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock")).unwrap();
-    let mut revs = std::collections::BTreeSet::new();
-    for line in lock
-        .lines()
-        .filter(|l| l.contains("source = \"git+https://github.com/rkendel1/fx"))
-    {
-        revs.insert(
-            line.split('#')
-                .nth(1)
-                .unwrap_or("")
-                .trim_end_matches('"')
-                .to_string(),
+fn the_harness_and_the_product_pin_the_same_stack_agent_commit() {
+    let revs = |manifest: &str| -> std::collections::BTreeSet<String> {
+        manifest
+            .lines()
+            .filter(|l| l.contains("rkendel1/stack-agent"))
+            .filter_map(|l| Some(l.split("rev = \"").nth(1)?.split('"').next()?.to_string()))
+            .collect()
+    };
+    let harness = revs(&manifest());
+    let product = revs(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/compute-stack-agent/Cargo.toml"
+        ))
+        .unwrap(),
+    );
+    assert_eq!(harness.len(), 1, "harness pins: {harness:?}");
+    assert_eq!(harness, product, "the harness and the product pin different commits");
+    for line in manifest().lines().filter(|l| l.contains("git = ")) {
+        assert!(
+            line.contains("rkendel1/stack-agent"),
+            "Chip and FX come from stack-agent only: {line}"
         );
     }
-    assert_eq!(
-        revs.len(),
-        1,
-        "more than one FX revision resolved: {revs:?}"
-    );
-    assert!(
-        manifest().contains(revs.iter().next().unwrap()),
-        "Cargo.toml's fx rev is not the resolved one"
-    );
 }

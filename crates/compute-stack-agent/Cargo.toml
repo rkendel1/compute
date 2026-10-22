@@ -1,0 +1,29 @@
+[package]
+name = "compute-stack-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Run stack-agent as a Compute workload: one isolated Compute session per Chip work"
+
+# stack-agent is a standalone agent runtime. This crate is the Compute side of the generic
+# environment contract it publishes (`chip-core`'s `EnvironmentProvider`); stack-agent depends on
+# nothing here. It is the only agent the configured distribution ships.
+[dependencies]
+async-trait.workspace = true
+chip-cli = { package = "stack-agent", git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
+chip-core = { git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
+chip-remote-env = { git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
+compute-agent = { path = "../compute-agent" }
+compute-core = { path = "../compute-core" }
+compute-provider = { path = "../compute-provider" }
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+chip-pax = { git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
+chip-inference = { git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
+serde_json.workspace = true
+async-trait.workspace = true
+tempfile.workspace = true

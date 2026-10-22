@@ -1,5 +1,10 @@
 # Configured Chip 0.54.4 + FX 0.1.0: runtime evidence
 
+> **Historical.** This page records the npm Chip/Eve agent and npm FX that `compute-configured`
+> shipped up to 0.1.20. They are retired: the configured agent is now
+> [stack-agent](stack-agent.md) (Chip + FX in one Rust executable), and nothing in the current
+> profile, formula or release pipeline refers to the npm agent.
+
 This records what the configured runtime does with the published packages pinned in
 `compatibility/published-stack`. It is the post-upgrade evidence for Chip's session
 contract: the `operationId` results below are those of the actual Chip 0.54.4 release,

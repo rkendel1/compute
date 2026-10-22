@@ -5,7 +5,7 @@ use std::path::Path;
 use compute_core::WorkloadBundle;
 use compute_policy::EffectivePolicy;
 use compute_state::{
-    Collection, DeploymentRecord, EventRecord, ExecutionRecord, ProjectRecord,
+    Collection, DeploymentRecord, EnvironmentRecord, EventRecord, ExecutionRecord, ProjectRecord,
     ProjectRevisionRecord, Query, ReceiptRecord, Stored, ids,
 };
 
@@ -112,6 +112,11 @@ impl Daemon {
                 };
             }
         }
+        // A computer's projects are software in its repositories: they are
+        // listed, but the computer's own state above already accounts for them.
+        if let Some(computer) = &computer {
+            views.extend(computer_projects(&record, computer));
+        }
         Ok(EnvironmentView {
             version: ENVIRONMENT_VERSION.into(),
             environment_id: record.id.clone(),
@@ -169,7 +174,24 @@ impl Daemon {
             .environment(environment)
             .map(|record| record.value.name.clone())
             .ok_or_else(|| EnvironmentError::NotFound(format!("environment {environment}")))?;
-        self.project_view(&name, project).await
+        match self.project_view(&name, project).await {
+            Err(EnvironmentError::NotFound(missing)) => {
+                let record = self.inner.lock().await.desired.environment(&name).cloned();
+                let computer = match &record {
+                    Some(record) => self.computer_view_of(record).await,
+                    None => None,
+                };
+                record
+                    .zip(computer)
+                    .and_then(|(record, computer)| {
+                        computer_projects(&record, &computer)
+                            .into_iter()
+                            .find(|view| view.name == project)
+                    })
+                    .ok_or(EnvironmentError::NotFound(missing))
+            }
+            found => found,
+        }
     }
 
     async fn project_view(
@@ -471,6 +493,48 @@ impl Daemon {
         for name in names {
             summaries.push(self.project_summary(&name).await?);
         }
+        let computers = self
+            .inner
+            .lock()
+            .await
+            .desired
+            .environments
+            .values()
+            .filter(|record| record.value.computer.is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        for record in computers {
+            let Some(computer) = self.computer_view_of(&record).await else {
+                continue;
+            };
+            for view in computer_projects(&record, &computer) {
+                let placement = ProjectPlacement {
+                    environment: view.environment.clone(),
+                    revision: view.revision.clone(),
+                    revision_id: view.revision_id.clone(),
+                    desired_state: view.desired_state,
+                    actual_state: view.actual_state,
+                    health: view.health,
+                    deployment: None,
+                };
+                match summaries
+                    .iter_mut()
+                    .find(|summary| summary.name == view.name)
+                {
+                    Some(summary) => summary.environments.push(placement),
+                    None => summaries.push(ProjectSummary {
+                        project_id: view.project_id,
+                        name: view.name,
+                        source: view.source,
+                        created_at: record.value.created_at,
+                        revision_count: 0,
+                        latest_revision: None,
+                        environments: vec![placement],
+                    }),
+                }
+            }
+        }
+        summaries.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(summaries)
     }
 
@@ -518,8 +582,14 @@ impl Daemon {
     }
 
     pub async fn project_detail(&self, name: &str) -> Result<ProjectDetail, EnvironmentError> {
-        self.refresh_for_read().await?;
-        let summary = self.project_summary(name).await?;
+        // Every place the project is: bundle placements and the computers
+        // that hold it as software.
+        let summary = self
+            .projects()
+            .await?
+            .into_iter()
+            .find(|summary| summary.name == name)
+            .ok_or_else(|| EnvironmentError::NotFound(format!("project {name}")))?;
         let revisions = self.revisions(name).await?;
         let deployments = self
             .deployments(None, Some(name.to_string()), Some(50))
@@ -810,6 +880,89 @@ fn summary(deployment: Stored<DeploymentRecord>) -> DeploymentSummary {
 
 /// Aggregate child states into a parent state.
 /// An environment's state and health from its computer's observed reality.
+/// The projects of an environment with a computer: software in its
+/// repositories, as the computer last observed it. They have no bundle
+/// revision and no workloads; the revision is the commit the repository
+/// resolved to, or the revision asked for until it has.
+fn computer_projects(
+    record: &Stored<EnvironmentRecord>,
+    computer: &ComputerView,
+) -> Vec<ProjectView> {
+    use compute_core::ProcessState;
+    use sha2::{Digest, Sha256};
+
+    let observed = &computer.observed;
+    let (machine_state, machine_health) = computer_state(&computer.reality.observed);
+    computer
+        .desired
+        .projects
+        .iter()
+        .map(|project| {
+            let repository = computer
+                .desired
+                .repositories
+                .iter()
+                .find(|repository| repository.name == project.repository);
+            let synced = observed.repositories.get(&project.repository);
+            let build = observed.builds.get(&project.name);
+            let processes = computer
+                .desired
+                .processes
+                .iter()
+                .filter(|process| process.repository.as_deref() == Some(&project.repository))
+                .filter_map(|process| observed.processes.get(&process.name))
+                .map(|process| process.state)
+                .collect::<Vec<_>>();
+            let failed =
+                |evidence: &compute_core::OperationEvidence| evidence.outcome != "succeeded";
+            let (actual_state, health) = if machine_state != ActualState::Running {
+                (machine_state, machine_health)
+            } else if synced.is_some_and(|synced| failed(&synced.evidence))
+                || build.is_some_and(|build| failed(&build.evidence))
+                || processes.contains(&ProcessState::Failed)
+            {
+                (ActualState::Failed, Health::Unhealthy)
+            } else if synced.is_none() || processes.contains(&ProcessState::Starting) {
+                (ActualState::Starting, Health::Unknown)
+            } else if processes.contains(&ProcessState::Running) {
+                (ActualState::Running, Health::Healthy)
+            } else if build.is_some() {
+                (ActualState::Completed, Health::Healthy)
+            } else {
+                (ActualState::Pending, Health::Unknown)
+            };
+            let digest = Sha256::digest(format!("computer-project\0{}", project.name));
+            ProjectView {
+                project_id: format!("prj_{}", crate::auth::hex(&digest[..8])),
+                name: project.name.clone(),
+                environment: record.value.name.clone(),
+                environment_id: record.id.clone(),
+                revision: synced
+                    .and_then(|synced| synced.commit.clone())
+                    .or_else(|| repository.map(|repository| repository.revision.clone()))
+                    .unwrap_or_default(),
+                revision_id: String::new(),
+                revision_digest: String::new(),
+                source: repository.map(|repository| repository.url.clone()),
+                desired_state: record.value.desired_state,
+                actual_state,
+                health,
+                deployment: None,
+                deployed_at: build
+                    .map(|build| build.evidence.at)
+                    .or_else(|| synced.map(|synced| synced.evidence.at))
+                    .unwrap_or(record.value.created_at),
+                config: computer.config.clone(),
+                workload_count: 0,
+                service_count: 0,
+                provider: computer.target.clone().unwrap_or_else(|| "computer".into()),
+                workloads: vec![],
+                disk_bytes: 0,
+            }
+        })
+        .collect()
+}
+
 fn computer_state(observed: &str) -> (ActualState, Health) {
     match observed {
         "running" => (ActualState::Running, Health::Healthy),

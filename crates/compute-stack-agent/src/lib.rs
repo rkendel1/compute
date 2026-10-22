@@ -1,33 +1,32 @@
-//! Rust Chip as a Compute workload.
+//! stack-agent as a Compute workload.
 //!
-//! **Two agents, kept apart.** The configured distribution already ships an npm agent (Chip/Eve,
-//! with the npm FX) behind `compute-configured-chip`. This crate is something else: the Rust
-//! agent runtime from `chip-rs` ("Rust Chip"), with its own Rust FX, its own launcher
-//! (`compute-configured-rust-chip`) and its own executable (`compute-rust-chip`). Nothing here
-//! calls, replaces or shares a name with the npm agent.
+//! **The configured agent.** stack-agent (Chip agent orchestration + FX inference, one Rust
+//! workspace: <https://github.com/rkendel1/stack-agent>) is the only agent the configured
+//! distribution ships, behind `compute-configured-stack-agent`. This crate hosts it: the agent loop
+//! and the model credential stay in this process, and every capability runs in a Compute session.
 //!
-//! **Rust Chip is an agent; Compute hosts agents.** The agent-neutral half (a session per work,
+//! **stack-agent is an agent; Compute hosts agents.** The agent-neutral half (a session per work,
 //! project loading, `exec(argv, env)`, receipts, teardown, failure isolation) is the
 //! `compute-agent` crate, which knows no agent. This crate is the thin adapter that lets *Rust
 //! Chip's* environment contract be served by it, and the `chip` launcher entry (`main.rs`). The
 //! adapter carries no Compute logic and no Chip logic: Chip's semantics stay in Chip.
 //!
-//! **The seam.** Rust Chip publishes a generic environment contract (`chip-core`:
+//! **The seam.** stack-agent publishes a generic environment contract (`chip-core`:
 //! `EnvironmentProvider` / `WorkEnvironment`). [`ComputeSessionEnvironments`] implements it with
 //! the Compute primitive that already gives one workload an isolated computer: a *session*
 //! (ephemeral, owned, placed on a target, a private workspace per session, every command a durable
-//! job with a receipt). Rust Chip depends on nothing in Compute; Compute depends only on that
+//! job with a receipt). stack-agent depends on nothing in Compute; Compute depends only on that
 //! generic contract.
 //!
 //! ```text
-//! work A ── acquire ──▶ Compute session A ◀─ exec(argv, env) ─ Rust Chip's worker ─ project A
-//! work B ── acquire ──▶ Compute session B ◀─ exec(argv, env) ─ Rust Chip's worker ─ project B
+//! work A ── acquire ──▶ Compute session A ◀─ exec(argv, env) ─ stack-agent's worker ─ project A
+//! work B ── acquire ──▶ Compute session B ◀─ exec(argv, env) ─ stack-agent's worker ─ project B
 //! ```
 //!
 //! **What Compute does and does not do.** Compute provides the computer: it creates the session,
 //! runs commands in it (`exec(argv, env)`, captured output and a receipt, no stdin) and destroys
-//! it. It does not decide what a capability means: Rust Chip validated `project.write`, and the
-//! command Compute runs is Rust Chip's own executor (`compute-rust-chip capability-exec`) acting
+//! it. It does not decide what a capability means: stack-agent validated `project.write`, and the
+//! command Compute runs is stack-agent's own executor (`compute-stack-agent capability-exec`) acting
 //! on the project in that session. A Compute receipt says Compute ran a command. It is never a Rust
 //! Chip receipt and never establishes that a goal was met.
 //!
@@ -68,7 +67,7 @@ pub struct ComputeSessionConfig {
     pub token: Option<String>,
     /// Where the project is loaded from, as the target sees it (a git URL or a path).
     pub project_source: String,
-    /// Rust Chip's executable as the target sees it: it is what runs in each session.
+    /// stack-agent's executable as the target sees it: it is what runs in each session.
     pub worker_program: String,
     /// Environment for every command in a session (`PATH`, tool locations the target needs).
     pub command_environment: BTreeMap<String, String>,
@@ -127,7 +126,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Rust Chip's `exec(argv, env)`, served by one Compute session.
+/// stack-agent's `exec(argv, env)`, served by one Compute session.
 struct SessionRunner(AgentSession);
 
 #[async_trait::async_trait]
@@ -146,7 +145,7 @@ impl CommandRunner for SessionRunner {
     }
 }
 
-/// An environment provider that gives each Rust Chip work its own Compute session.
+/// An environment provider that gives each stack-agent work its own Compute session.
 pub struct ComputeSessionEnvironments {
     host: AgentHost,
     config: ComputeSessionConfig,
@@ -186,7 +185,7 @@ impl ComputeSessionEnvironments {
 
     /// Cancels the Compute commands a work is running now, with Compute's confirmed, idempotent
     /// job cancellation (see `compute_agent::AgentSession::cancel`). A work with no environment, or
-    /// nothing running, has nothing to cancel. This does not stop Rust Chip's loop: that is Chip's
+    /// nothing running, has nothing to cancel. This does not stop stack-agent's loop: that is Chip's
     /// cancel endpoint (see [`cancel`]).
     pub async fn cancel_work(&self, work: &WorkId) -> Vec<compute_agent::CommandCancellation> {
         let session = {

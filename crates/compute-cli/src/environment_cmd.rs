@@ -1315,12 +1315,15 @@ pub enum ProjectCommands {
         json: bool,
     },
     /// Register a revision from compute.project.toml and deploy it to an
-    /// environment.
+    /// environment. In an environment with a computer, add the Git
+    /// repository at --source (a folder or a URL) and the project in it.
     Add {
         name: String,
         #[arg(long)]
         environment: String,
-        /// Directory containing compute.project.toml. Defaults to ./NAME.
+        /// Directory containing compute.project.toml (or, for an
+        /// environment with a computer, a Git folder or URL). Defaults to
+        /// ./NAME.
         #[arg(long)]
         source: Option<PathBuf>,
         #[arg(long)]
@@ -1432,6 +1435,64 @@ fn load_revision(
     Ok(definition)
 }
 
+/// Add a project to an environment with a computer: its source becomes a
+/// repository in the computer, checked out at `revision` (the default
+/// branch when none is given), and the project is the software in it. A
+/// project that is already there keeps its build, tests, and commands.
+async fn add_computer_project(
+    client: &DaemonClient,
+    environment: &str,
+    name: &str,
+    source: Option<PathBuf>,
+    revision: Option<String>,
+) -> compute_core::Result<ProjectView> {
+    let source = source.unwrap_or_else(|| PathBuf::from(name));
+    let source = source.to_str().ok_or_else(|| {
+        ComputeError::InvalidWorkload(format!("{} is not UTF-8", source.display()))
+    })?;
+    let computer: compute_environment::ComputerView = client
+        .get(&format!("/environments/{environment}/computer"))
+        .await
+        .map_err(error)?;
+    let project = computer
+        .desired
+        .projects
+        .iter()
+        .find(|project| project.name == name)
+        .cloned()
+        .unwrap_or_else(|| compute_core::ProjectSpec {
+            name: name.into(),
+            repository: name.into(),
+            build: vec![],
+            test: vec![],
+            commands: BTreeMap::new(),
+            checks: vec![],
+        });
+    let _: compute_environment::ComputerView = client
+        .post(
+            &format!("/environments/{environment}/repositories"),
+            Some(&compute_core::RepositorySpec {
+                name: project.repository.clone(),
+                url: crate::computer_cmd::repository_url(source)?,
+                revision: revision.unwrap_or_else(|| "HEAD".into()),
+                sync: 0,
+            }),
+        )
+        .await
+        .map_err(error)?;
+    let _: compute_environment::ComputerView = client
+        .post(
+            &format!("/environments/{environment}/projects"),
+            Some(&project),
+        )
+        .await
+        .map_err(error)?;
+    client
+        .get(&format!("/environments/{environment}/projects/{name}"))
+        .await
+        .map_err(error)
+}
+
 pub async fn project(command: ProjectCommand) -> compute_core::Result<()> {
     let client = command.daemon.client()?;
     match command.command {
@@ -1501,6 +1562,23 @@ pub async fn project(command: ProjectCommand) -> compute_core::Result<()> {
             stopped,
             json,
         } => {
+            let target: EnvironmentView = client
+                .get(&format!("/environments/{environment}"))
+                .await
+                .map_err(error)?;
+            if target.computer.is_some() {
+                if !env.is_empty() || stopped {
+                    return Err(ComputeError::InvalidWorkload(format!(
+                        "{environment} has a computer: its projects take configuration from \
+                         `compute environment config`, and run while the computer does \
+                         (--set and --stopped apply to bundle projects)"
+                    )));
+                }
+                let view =
+                    add_computer_project(&client, &environment, &name, source, revision).await?;
+                print_project(&environment, &view, json);
+                return Ok(());
+            }
             let mut definition = load_revision(&name, source, revision)?;
             definition.env.extend(env);
             if stopped {

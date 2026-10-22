@@ -16,22 +16,6 @@ source = "npm:@feltdb/core"
 version = "0.11.9"
 
 [[component]]
-name = "chip"
-kind = "agent-runtime"
-source = "npm:@appport/chip"
-version = "0.54.4"
-default = true
-executable = "chip"
-lifecycle = "execution"
-health_command = "--version"
-
-[[component]]
-name = "fx"
-kind = "model-provider"
-source = "npm:@appport/fx"
-version = "0.1.2"
-
-[[component]]
 name = "appport-core"
 kind = "package"
 source = "npm:@appport/core"

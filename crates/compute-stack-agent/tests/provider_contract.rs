@@ -1,5 +1,5 @@
-//! The generic Rust Chip environment contract, held against the real Compute-backed provider.
-//! (The contract's own tests live in `chip-rs`; they use fakes. These use a real target.)
+//! The generic stack-agent environment contract, held against the real Compute-backed provider.
+//! (The contract's own tests live in `stack-agent`; they use fakes. These use a real target.)
 
 mod support;
 
@@ -19,7 +19,7 @@ fn read(path: &str) -> ExecutionRequest {
 }
 
 async fn session_status(
-    provider: &compute_rust_chip::ComputeSessionEnvironments,
+    provider: &compute_stack_agent::ComputeSessionEnvironments,
     session: &str,
 ) -> SessionStatus {
     for _ in 0..200 {
@@ -50,7 +50,7 @@ async fn acquire_gives_a_real_session_with_the_project_and_release_destroys_it()
     assert!(id.as_str().starts_with("env_") && !id.as_str().contains(&session));
     assert!(!id.as_str().contains('/'));
 
-    // Capabilities execute in the session: Rust Chip's own executor reads the project there.
+    // Capabilities execute in the session: stack-agent's own executor reads the project there.
     let set = owned.environment().capabilities();
     let declared: Vec<String> = set
         .capabilities()
@@ -169,12 +169,12 @@ async fn acquisition_failure_fails_closed_and_creates_nothing() {
     let mut dead = config(&target, &source, 1);
     dead.endpoint = "http://127.0.0.1:1".into();
     let envs = Environments::new(Arc::new(
-        compute_rust_chip::ComputeSessionEnvironments::new(dead),
+        compute_stack_agent::ComputeSessionEnvironments::new(dead),
     ));
     let err = envs.acquire(WorkId::new("A")).await.err().unwrap();
     assert!(matches!(err, EnvironmentError::Unavailable(_)), "{err}");
     // 2. A project that cannot be loaded: the session that was made is destroyed again.
-    let missing = std::env::temp_dir().join("compute-rust-chip-no-such-project");
+    let missing = std::env::temp_dir().join("compute-stack-agent-no-such-project");
     let provider = provider(&target, &missing, 1);
     let envs = Environments::new(provider.clone());
     let err = envs.acquire(WorkId::new("A")).await.err().unwrap();
@@ -191,7 +191,7 @@ async fn acquisition_failure_fails_closed_and_creates_nothing() {
     let mut wrong = config(&target, &source, 1);
     wrong.token = Some("not-the-token".into());
     let envs = Environments::new(Arc::new(
-        compute_rust_chip::ComputeSessionEnvironments::new(wrong),
+        compute_stack_agent::ComputeSessionEnvironments::new(wrong),
     ));
     assert!(envs.acquire(WorkId::new("A")).await.is_err());
     let _ = (CapabilityId::new("pax.test"), EnvironmentId::new("x"));

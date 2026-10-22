@@ -1,5 +1,8 @@
 # Attn → Compute-configured → FX → AppPort: dependency and authority map
 
+> **Update.** The configured agent is now [stack-agent](stack-agent.md); the npm Chip/Eve agent,
+> its built-in tools and its FX adapter described below are retired from `compute-configured`.
+
 Status: **audit only, not a certification.** Sources are file reads of shallow
 clones taken 2026-10-12 (attn, chip-rs, 3fx, pax, compute). Nothing here was
 run except the Compute-side `npm run verify` noted below. `appport`,

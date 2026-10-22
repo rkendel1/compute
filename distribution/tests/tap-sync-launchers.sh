@@ -1,10 +1,10 @@
 #!/bin/sh
-# A release that ships the Chip launcher must produce a tap that ships it.
+# A release that ships the agent launcher must produce a tap that ships it.
 #
 # This is the whole v0.1.16 defect in one test. The sync workflow fetched the
 # release tag's templates, then rendered the tap's own older copies, so 0.1.16
 # published a configured formula with correct URLs and correct checksums and no
-# `compute-configured-chip`. Every check anyone had written for that formula
+# its agent launcher (then `compute-configured-chip`). Every check anyone had written for that formula
 # passed; the installed product simply had no way to reach its agent runtime.
 #
 # The test builds a tap whose committed templates are that stale shape, renders it
@@ -37,7 +37,7 @@ render() {
     "$macos_checksum" "$macos_configured_checksum" > /dev/null
 }
 
-# ---- a tap whose committed templates predate the Chip launcher ----------------
+# ---- a tap whose committed templates predate the agent launcher ---------------
 #
 # The stale copy is the real shape under test: the configured template with the
 # agent-runtime launcher block removed, which is what the tap still carried when
@@ -46,22 +46,22 @@ mkdir -p "$tap/Formula" "$tap/scripts"
 cp "$templates/Formula/compute.rb.in" "$tap/Formula/compute.rb.in"
 cp "$templates/scripts/update-formula.sh" "$tap/scripts/update-formula.sh"
 chmod +x "$tap/scripts/update-formula.sh"
-sed -e '/# The agent runtime the configured profile declares/,/^    SH$/d' \
+sed -e '/# The agent: stack-agent/,/^    SH$/d' \
   "$templates/Formula/compute-configured.rb.in" > "$tap/Formula/compute-configured.rb.in"
 
 # The launcher is the `(bin/"NAME").write` line. Matching on the write rather
 # than on the bare name matters: the `test do` block also names the launcher, and
 # a check that only looked for the name would pass on a stale template and prove
 # nothing.
-launcher='bin/"compute-configured-chip"'
+launcher='bin/"compute-configured-stack-agent"'
 if grep -qF "$launcher" "$tap/Formula/compute-configured.rb.in"; then
-  fail "the stale tap template still ships the Chip launcher; it is not the shape under test"
+  fail "the stale tap template still ships the agent launcher; it is not the shape under test"
 fi
 
 # Rendering the stale tap is exactly what published 0.1.16's formula.
 render
 if grep -qF "$launcher" "$tap/Formula/compute-configured.rb"; then
-  fail "the stale template unexpectedly produced a Chip launcher"
+  fail "the stale template unexpectedly produced the agent launcher"
 fi
 
 # ...and the guard must refuse that render rather than publish a tap that only
@@ -70,21 +70,21 @@ if "$templates/scripts/check-configured-launchers.sh" \
   "$tap/Formula/compute-configured.rb" "$tap/Formula/compute.rb" \
   "$templates/Formula/compute-configured.rb.in" \
   "$templates/Formula/compute.rb.in" > "$work/guard.log" 2>&1; then
-  fail "the launcher guard accepted a tap formula that dropped compute-configured-chip"
+  fail "the launcher guard accepted a tap formula that dropped compute-configured-stack-agent"
 fi
-if ! grep -qF 'compute-configured-chip' "$work/guard.log"; then
+if ! grep -qF 'compute-configured-stack-agent' "$work/guard.log"; then
   fail "the guard failed without naming the launcher it was protecting"
 fi
 
 # ---- the real sync path: install the release templates, then render ----------
 "$templates/scripts/install-release-templates.sh" "$templates" "$tap" > /dev/null
 if ! grep -qF "$launcher" "$tap/Formula/compute-configured.rb.in"; then
-  fail "installing the release templates did not install the Chip launcher template"
+  fail "installing the release templates did not install the agent launcher template"
 fi
 
 render
 if ! grep -qF "$launcher" "$tap/Formula/compute-configured.rb"; then
-  fail "a release that ships compute-configured-chip produced a tap formula without it"
+  fail "a release that ships compute-configured-stack-agent produced a tap formula without it"
 fi
 
 # The guard now accepts it, because the rendered launchers match the release tag.
@@ -104,7 +104,7 @@ fi
 
 # Base Compute must never grow an agent launcher.
 if grep -qF "$launcher" "$tap/Formula/compute.rb"; then
-  fail "the base formula ships a Chip launcher"
+  fail "the base formula ships an agent launcher"
 fi
 
 printf 'tap sync launcher contract passed\n'

@@ -121,6 +121,16 @@ compute environment start myapp     # resumed: the same machine
 compute environment destroy myapp   # the machine goes; the record stays
 ```
 
+A repository's URL is a Git URL or an absolute path. The CLI resolves a
+local folder (`./app`, `~/src/app`) on your machine before it sends it; the
+API refuses any other relative path, which the computer would otherwise look
+for in its own workspace. `compute project add web --environment myapp
+--source ./app` adds the repository and the project in one step, and every
+project listing (`compute project list`, `compute project status`, the UI,
+and AppPort's `compute.project.*`) shows a computer's projects with the
+commit their repository resolved to. Through AppPort, an agent loads one
+with `compute.environment.project.load`.
+
 ## Targets
 
 A **target** is a member of the daemon's provider pool that hosts

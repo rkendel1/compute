@@ -19,43 +19,57 @@
     "shared_ui": true
   },
   "agent": {
-    "default": "chip",
+    "default": "stack-agent",
     "runtimes": [
       {
-        "name": "chip",
-        "package": "@appport/chip",
-        "version": "0.54.4",
-        "executable": "node_modules/.bin/chip",
-        "node": "runtimes/node/bin/node",
+        "name": "stack-agent",
+        "package": "github:rkendel1/stack-agent",
+        "version": "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14",
+        "executable": "stack-agent/bin/compute-stack-agent",
         "default": true,
-        "capabilities": ["Agent/loop@1"],
-        "lifecycle": "execution",
+        "capabilities": [
+          "Agent/loop@1"
+        ],
+        "lifecycle": "service",
         "health": {
           "kind": "invocation",
-          "command": ["--version"],
-          "expect": "0.54.4"
+          "command": [],
+          "expect": "usage: compute-stack-agent"
         },
-        "environment": "compute.execution",
-        "project": "agent",
-        "disabled_builtin_tools": ["bash", "read_file", "write_file", "web_fetch"],
+        "environment": "compute.session",
+        "capability_execution": {
+          "where": "compute-session",
+          "worker": "capability-exec",
+          "one_session_per_work": true,
+          "project_source": "COMPUTE_STACK_AGENT_PROJECT",
+          "target": "COMPUTE_STACK_AGENT_TARGET",
+          "network": "COMPUTE_STACK_AGENT_NETWORK"
+        },
         "model_provider": {
-          "package": "@appport/fx",
-          "version": "0.1.2",
-          "adapter": "@appport/chip/models/fx",
-          "protocol": "openai-compatible",
+          "implementation": "fx (in-process, Rust)",
           "configuration": {
-            "base_url": "FX_BASE_URL",
-            "model": "FX_MODEL",
-            "api_key_env": "FX_API_KEY_ENV",
-            "context_window_tokens": "FX_CONTEXT_WINDOW_TOKENS"
+            "provider": "CHIP_PROVIDER",
+            "model": "CHIP_MODEL",
+            "endpoint": "CHIP_ENDPOINT",
+            "api_key": "CHIP_API_KEY"
           },
-          "credentials": "runtime-environment"
+          "credentials": "agent-process-only"
         },
         "http": {
-          "command": ["start"],
-          "routes": ["POST /eve/v1/session", "GET /eve/v1/session/:sessionId/stream"],
-          "auth": "COMPUTE_CONFIGURED_CHIP_TOKEN"
-        }
+          "command": [
+            "serve"
+          ],
+          "routes": [
+            "POST /v1/work",
+            "GET /v1/work/{id}",
+            "GET /v1/work/{id}/events",
+            "POST /v1/work/{id}/cancel",
+            "GET /v1/metrics",
+            "GET /health"
+          ],
+          "auth": "loopback-only"
+        },
+        "state": "FeltDB file under the agent's runtime data directory (--state-db)"
       }
     ]
   },
@@ -63,9 +77,12 @@
     "owner": "compute",
     "root": "COMPUTE_HOME",
     "model": "compute-state",
-    "authoritative_durable_backend": "compute-state-feltdb",
+    "authoritative_durable_backend": "compute-state-file",
     "shared_with_base": true,
-    "additional_stores": []
+    "additional_stores": [],
+    "optional_durable_backends": [
+      "compute-state-feltdb"
+    ]
   },
   "configuration": {
     "stack_path": "stacks/configured/stack.toml",
@@ -76,10 +93,18 @@
     {
       "name": "appport-services",
       "executable": "node_modules/.bin/appport-services",
-      "arguments": ["serve", "--host", "127.0.0.1", "--port", "4100"],
+      "arguments": [
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "4100"
+      ],
       "endpoint": "http://127.0.0.1:4100",
       "readiness_path": "/v1/ui",
-      "capabilities": ["AppPort/ui/1"],
+      "capabilities": [
+        "AppPort/ui/1"
+      ],
       "provider": "this-machine",
       "description": "AppPort Services management UI; owns its own state, authentication and management router"
     }
@@ -92,9 +117,21 @@
       "profile": "workers-free",
       "required": false,
       "implementation": "base-compute",
-      "credentials": { "token_env": "CLOUDFLARE_API_TOKEN", "stored": false },
+      "credentials": {
+        "token_env": "CLOUDFLARE_API_TOKEN",
+        "stored": false
+      },
       "runs": "short-lived, request-driven WASI modules deployed explicitly as Workers",
-      "refuses": ["persistent_process", "interactive_shell", "native_executable", "container", "process_runtime", "filesystem", "outbound_network", "local_inference"],
+      "refuses": [
+        "persistent_process",
+        "interactive_shell",
+        "native_executable",
+        "container",
+        "process_runtime",
+        "filesystem",
+        "outbound_network",
+        "local_inference"
+      ],
       "setup": "compute-configured-cloudflare-setup",
       "example": "providers/cloudflare",
       "documentation": "docs/cloudflare.md"
@@ -102,9 +139,7 @@
   ],
   "migrations": [],
   "packages": {
-    "@appport/chip": "0.54.4",
     "@appport/core": "1.0.3",
-    "@appport/fx": "0.1.2",
     "@appport/github": "1.0.2",
     "@appport/runtime": "0.4.6",
     "@appport/server": "1.0.2",
@@ -117,21 +152,31 @@
   },
   "contracts": {
     "appport": "AppPort/1",
-    "github_ui": "AppPort/ui/1",
     "feltdb_protocol": 1,
     "git_source": 1
   },
   "allowed_version_skew": {
     "@feltdb/core": {
-      "versions": ["0.11.1", "0.11.5", "0.11.9"],
+      "versions": [
+        "0.11.1",
+        "0.11.5",
+        "0.11.9"
+      ],
       "reason": "@authboundry/core 1.15.3 embeds 0.11.5 and its @appport/services 0.3.2 embeds 0.11.1; the stack verifies the published graph against FeltDB protocol 1"
     },
     "@appport/services": {
-      "versions": ["0.3.2", "0.4.6", "0.4.11"],
+      "versions": [
+        "0.3.2",
+        "0.4.6",
+        "0.4.11"
+      ],
       "reason": "@authboundry/core 1.15.3 embeds 0.3.2; @appport/github 1.0.2 pins 0.4.6; the configured stack itself resolves 0.4.11, the release whose `appport-services` executable runs the standalone management host that serves the AppPort/ui/1 discovery document at GET /v1/ui"
     },
     "@appport/protocol": {
-      "versions": ["1.0.2", "1.0.3"],
+      "versions": [
+        "1.0.2",
+        "1.0.3"
+      ],
       "reason": "@appport/services 0.4.11 declares @appport/protocol ^1.0.3 to build its AppPort/ui/1 contribution with the protocol's own validateUiContribution/filterUiContribution, while @appport/core 1.0.3 and the 1.0.2 @appport/server, @appport/client, @appport/schema and @appport/authorization packages pin 1.0.2"
     }
   }

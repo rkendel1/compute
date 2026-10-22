@@ -1,5 +1,10 @@
 # Compute 0.1.17 through the live Homebrew tap: consumer validation
 
+> **Historical.** This page records the npm Chip/Eve agent and npm FX that `compute-configured`
+> shipped up to 0.1.20. They are retired: the configured agent is now
+> [stack-agent](stack-agent.md) (Chip + FX in one Rust executable), and nothing in the current
+> profile, formula or release pipeline refers to the npm agent.
+
 Validated 2026-10-05 against release **`v0.1.17`** (tag object `5703ff7`,
 commit `e149961`) and the live tap **`rkendel1/homebrew-compute@90eb29e`**.
 The automated invariant that now protects this path is

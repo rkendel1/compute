@@ -63,7 +63,6 @@ jobs:
         shell: bash
         run: |
           npm ci --ignore-scripts --prefix compatibility/published-stack
-          distribution/scripts/build-configured-agent.sh compatibility/published-stack "$(command -v node)"
           SOURCE_DATE_EPOCH=0 COMPUTE_COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/configured-evidence.json" \
             COMPUTE_BIN="$PWD/target/release/compute" \
             npm run verify --prefix compatibility/published-stack
@@ -81,45 +80,20 @@ jobs:
           cp "$RUNNER_TEMP/configured-evidence.json" "$root/evidence.json"
           cp -a compute-distribution/recipes "$root/recipes"
           cp -a compatibility/published-stack/node_modules "$root/node_modules"
-          cp -R compatibility/published-stack/agent "$root/agent"
-          cp -R compatibility/published-stack/.output "$root/.output"
           # The optional Cloudflare provider's example pool file and workload.
           mkdir -p "$root/providers"
           cp -R examples/cloudflare-workers "$root/providers/cloudflare"
-          # Rust Chip: a separate agent workload, launched by compute-configured-rust-chip. It is
-          # built by the `cargo build --release --locked` above and shipped beside the npm agent,
-          # never inside it.
-          mkdir -p "$root/rust-chip/bin"
-          cp target/release/compute-rust-chip "$root/rust-chip/bin/compute-rust-chip"
+          # The agent: stack-agent, hosted by Compute (compute-stack-agent), launched by
+          # compute-configured-stack-agent. Built by the `cargo build --release --locked` above.
+          mkdir -p "$root/stack-agent/bin"
+          cp target/release/compute-stack-agent "$root/stack-agent/bin/compute-stack-agent"
           test "$(find "$root/recipes/starters" -name '*.json' -type f | wc -l | tr -d '[:space:]')" = 7
           asset="compute-configured-$version-linux-x86_64.tar.gz"
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - "$root" | gzip -n -9 > "$asset"
           sha256sum "$asset" > "$asset.sha256"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
-      # The Chip launcher is proved against the tree this job just assembled and
-      # is about to publish, not against the source checkout. COMPUTE_TEST_NODE
-      # is the runner's Node: the formula resolves the Node the installed
-      # distribution bundles, and on a build runner that role is played by the
-      # runner's own -- the same major the profile requires. The launcher is
-      # required, not optional, so a regression here fails certification instead
-      # of degrading to a skip.
-      - name: Prove the configured Chip launcher against the assembled distribution
-        run: |
-          COMPUTE_TEST_MODULES="compute-configured/node_modules" \
-          COMPUTE_TEST_NODE="$(command -v node)" \
-          COMPUTE_TEST_REQUIRE_RUNTIME=1 \
-            distribution/tests/configured-chip.sh
-      # The configured runtime path, on the same assembled bytes: the rendered
-      # launcher starts the real Chip, which serves the configured agent through
-      # FX to a local OpenAI-compatible fixture, and records operationId behavior.
-      - name: Prove Chip -> FX -> provider against the assembled distribution
-        run: |
-          COMPUTE_TEST_CONFIGURED_ROOT="compute-configured" \
-          COMPUTE_TEST_NODE="$(command -v node)" \
-          COMPUTE_TEST_EVIDENCE="$RUNNER_TEMP/configured-chip-fx.json" \
-            distribution/tests/configured-chip-fx.sh
-      - name: Prove the assembled configured asset contains the Rust Chip agent, apart from the npm agent
-        run: COMPUTE_TEST_CONFIGURED_ROOT="compute-configured" distribution/tests/configured-rust-chip.sh
+      - name: Prove the assembled configured asset contains stack-agent and no npm agent
+        run: COMPUTE_TEST_CONFIGURED_ROOT="compute-configured" distribution/tests/configured-stack-agent.sh
       - name: The configured asset names no machine-specific path
         run: distribution/scripts/check-configured-paths.sh compute-configured
       - uses: actions/upload-artifact@v4
@@ -186,7 +160,6 @@ jobs:
             configured-stack/stack.json > "$RUNNER_TEMP/stack.json"
           mv "$RUNNER_TEMP/stack.json" configured-stack/stack.json
           npm ci --ignore-scripts --prefix configured-stack
-          distribution/scripts/build-configured-agent.sh configured-stack "$(command -v node)"
           SOURCE_DATE_EPOCH=0 COMPUTE_COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/configured-evidence.json" \
             COMPUTE_BIN="$PWD/target/release/compute" \
             npm run verify --prefix configured-stack
@@ -202,29 +175,19 @@ jobs:
           cp "$RUNNER_TEMP/configured-evidence.json" "$root/evidence.json"
           cp -a compute-distribution/recipes "$root/recipes"
           cp -a configured-stack/node_modules "$root/node_modules"
-          cp -R configured-stack/agent "$root/agent"
-          cp -R configured-stack/.output "$root/.output"
           mkdir -p "$root/providers"
           cp -R examples/cloudflare-workers "$root/providers/cloudflare"
-          mkdir -p "$root/rust-chip/bin"
-          cp target/release/compute-rust-chip "$root/rust-chip/bin/compute-rust-chip"
+          mkdir -p "$root/stack-agent/bin"
+          cp target/release/compute-stack-agent "$root/stack-agent/bin/compute-stack-agent"
           test "$(find "$root/recipes/starters" -name '*.json' -type f | wc -l | tr -d '[:space:]')" = 7
           asset="compute-configured-$version-macos-aarch64.tar.gz"
           brew install gnu-tar
           gtar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - "$root" | gzip -n -9 > "$asset"
           shasum -a 256 "$asset" > "$asset.sha256"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
-      - name: Prove the configured Chip launcher and Chip -> FX -> provider on the preview
+      - name: Prove stack-agent on the preview
         run: |
-          COMPUTE_TEST_MODULES="compute-configured/node_modules" \
-          COMPUTE_TEST_NODE="$(command -v node)" \
-          COMPUTE_TEST_REQUIRE_RUNTIME=1 \
-            distribution/tests/configured-chip.sh
-          COMPUTE_TEST_CONFIGURED_ROOT="compute-configured" \
-          COMPUTE_TEST_NODE="$(command -v node)" \
-          COMPUTE_TEST_EVIDENCE="$RUNNER_TEMP/configured-chip-fx.json" \
-            distribution/tests/configured-chip-fx.sh
-          COMPUTE_TEST_CONFIGURED_ROOT="compute-configured" distribution/tests/configured-rust-chip.sh
+          COMPUTE_TEST_CONFIGURED_ROOT="compute-configured" distribution/tests/configured-stack-agent.sh
           distribution/scripts/check-configured-paths.sh compute-configured
       - uses: actions/upload-artifact@v4
         with:

@@ -1201,3 +1201,106 @@ fn env_files_are_imported_through_the_cli_and_no_output_shows_a_secret() {
     let json = cli.json(&["environment", "config", "discover", "myapp", "--json"]);
     assert_eq!(json["files"][0]["kind"], "requirements");
 }
+
+/// `compute project add` loads a project into an environment with a
+/// computer, from a folder named relative to the caller, and every project
+/// listing shows it: in the environment, across environments, and by name.
+#[test]
+fn a_project_added_to_a_computer_is_loaded_and_listed() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().to_path_buf();
+    repository(&root);
+    let (_target, cli, _) = controller_with_target(&root);
+    cli.ok(&[
+        "environment",
+        "create",
+        "myapp",
+        "--cpu",
+        "1",
+        "--memory",
+        "64Mi",
+        "--persistent",
+    ]);
+
+    // `./app` is the caller's folder (the CLI runs in `root`): the computer
+    // is given its absolute path, never a path in its own workspace.
+    let added = cli.json(&[
+        "project",
+        "add",
+        "web",
+        "--environment",
+        "myapp",
+        "--source",
+        "./app",
+        "--revision",
+        "v1",
+        "--json",
+    ]);
+    assert_eq!(added["name"], "web");
+    let source = added["source"].as_str().unwrap();
+    assert!(
+        source.starts_with('/') && source.ends_with("/app"),
+        "{added:#}"
+    );
+    let loaded = cli.computer_until("the project's repository", |view| {
+        view["converged"] == true && view["observed"]["repositories"]["web"]["commit"].is_string()
+    });
+    let commit = loaded["observed"]["repositories"]["web"]["commit"].clone();
+
+    let listed = cli.json(&["project", "list", "--environment", "myapp", "--json"]);
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed:#}");
+    assert_eq!(listed[0]["name"], "web");
+    assert_eq!(listed[0]["revision"], commit);
+    let status = cli.json(&[
+        "project",
+        "status",
+        "web",
+        "--environment",
+        "myapp",
+        "--json",
+    ]);
+    assert_eq!(status["revision"], commit);
+    let everywhere = cli.json(&["project", "list", "--json"]);
+    let web = everywhere
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["name"] == "web")
+        .unwrap_or_else(|| panic!("{everywhere:#}"));
+    assert_eq!(web["environments"][0]["environment"], "myapp");
+    let detail = cli.json(&["project", "status", "web", "--json"]);
+    assert_eq!(detail["environments"][0]["revision"], commit);
+
+    // Adding it again moves the checkout and keeps the project's build.
+    cli.ok(&[
+        "environment",
+        "project",
+        "add",
+        "myapp",
+        "web",
+        "--repository",
+        "web",
+        "--build",
+        "true",
+    ]);
+    cli.ok(&[
+        "project",
+        "add",
+        "web",
+        "--environment",
+        "myapp",
+        "--source",
+        "./app",
+        "--revision",
+        "v2",
+    ]);
+    let moved = cli.computer_until("the new revision", |view| {
+        view["converged"] == true && view["observed"]["repositories"]["web"]["revision"] == "v2"
+    });
+    let build = &moved["desired"]["projects"][0]["build"];
+    assert_eq!(
+        build.as_array().and_then(|build| build.last()),
+        Some(&"true".into()),
+        "{build}"
+    );
+}

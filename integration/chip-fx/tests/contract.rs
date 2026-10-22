@@ -24,7 +24,7 @@ fn reply(text: &str) -> Attempt {
 
 fn reason(evidence: &Evidence) -> String {
     match evidence.outcome() {
-        chip_core::WorkOutcome::Failed { reason }
+        chip_core::WorkOutcome::Failed { reason, .. }
         | chip_core::WorkOutcome::Blocked { reason }
         | chip_core::WorkOutcome::Escalated { reason } => reason.clone(),
         other => panic!("expected a non-success outcome with a reason, got {other:?}"),

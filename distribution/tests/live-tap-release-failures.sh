@@ -10,7 +10,7 @@ set -eu
 # The first case replays the v0.1.16 incident itself: the live configured
 # formula is rendered from the stale v0.1.15 template with the current
 # release's own version and checksums, so URLs and checksums are all correct
-# and only the Chip launcher is gone.
+# and only the agent launcher is gone.
 #
 # Needs the network, like the test it exercises. Usage:
 #   live-tap-release-failures.sh [VERSION]
@@ -62,7 +62,7 @@ expect() {
 version=${1:-}
 
 # The v0.1.16 incident: the stale template, the current version and checksums.
-expect 'CONFIGURED CHIP PAYLOAD MISSING' compute-configured "
+expect 'CONFIGURED AGENT PAYLOAD MISSING' compute-configured "
   version=\$(grep -o 'releases/download/v[^/]*/' \"\$1\" | head -n 1 | sed 's|releases/download/v||; s|/||')
   set -- \"\$1\" \$(grep -oE '\"[0-9a-f]{64}\"' \"\$1\" | tr -d '\"')
   sed -e \"s/@VERSION@/\$version/g\" -e \"s/@MACOS_CONFIGURED_SHA256@/\$2/g\" \
@@ -73,7 +73,7 @@ expect 'LIVE TAP ARTIFACT URL MISMATCH' compute-configured \
   "sed -i.bak 's|#{platform}|linux-x86_64|' \"\$1\""
 expect 'LIVE TAP CHECKSUM MISMATCH' compute \
   "perl -pi -e 's/\"[0-9a-f]{64}\"/\"\${\\(\"0\" x 64)}\"/' \"\$1\""
-expect 'BASE COMPUTE CONTAINS CHIP PAYLOAD' compute \
+expect 'BASE COMPUTE CONTAINS AGENT PAYLOAD' compute \
   "printf '# chip\n' >> \"\$1\""
 expect 'INVALID HOMEBREW FORMULA' compute-configured \
   "printf 'end\n' >> \"\$1\""

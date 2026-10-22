@@ -158,6 +158,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-stream"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
+dependencies = [
+ "async-stream-impl",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream-impl"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -191,6 +213,21 @@ name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
+name = "base64ct"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+
+[[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bit-vec"
@@ -362,35 +399,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "chip-cli"
+name = "chip-agent-state"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "async-trait",
- "chip-compute",
  "chip-core",
- "chip-decision-corpus",
- "chip-fx",
- "chip-fx-native",
- "chip-graph",
  "chip-inference",
- "chip-local-decision",
- "chip-pax",
- "chip-project",
- "chip-reasoning-corpus",
- "chip-remote-env",
- "chip-wasm-decision",
- "chip-wasm-decision-host",
- "chip-wasm-reasoner",
+ "feltdb",
+ "serde",
  "serde_json",
  "sha2",
- "tokio",
 ]
 
 [[package]]
 name = "chip-compute"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -401,7 +426,7 @@ dependencies = [
 [[package]]
 name = "chip-core"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "async-trait",
  "chip-inference",
@@ -411,16 +436,31 @@ dependencies = [
 [[package]]
 name = "chip-decision-corpus"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "chip-core",
  "sha2",
 ]
 
 [[package]]
+name = "chip-experiments"
+version = "0.1.0"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
+dependencies = [
+ "async-trait",
+ "chip-core",
+ "chip-inference",
+ "chip-project",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "chip-fx"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "async-trait",
  "chip-inference",
@@ -432,7 +472,7 @@ dependencies = [
 [[package]]
 name = "chip-fx-native"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "async-trait",
  "chip-fx",
@@ -446,7 +486,7 @@ dependencies = [
 [[package]]
 name = "chip-graph"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "proc-macro2",
  "serde",
@@ -459,7 +499,7 @@ dependencies = [
 [[package]]
 name = "chip-inference"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "async-trait",
 ]
@@ -467,31 +507,43 @@ dependencies = [
 [[package]]
 name = "chip-local-decision"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "chip-core",
  "chip-wasm-decision",
 ]
 
 [[package]]
+name = "chip-otel"
+version = "0.1.0"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
+dependencies = [
+ "chip-agent-state",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "chip-pax"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "async-trait",
  "chip-core",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
 [[package]]
 name = "chip-project"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "async-trait",
  "chip-core",
+ "rustix 1.1.5",
  "serde_json",
  "sha2",
  "tokio",
@@ -500,7 +552,7 @@ dependencies = [
 [[package]]
 name = "chip-reasoning-corpus"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "chip-core",
 ]
@@ -508,7 +560,7 @@ dependencies = [
 [[package]]
 name = "chip-remote-env"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "async-trait",
  "chip-core",
@@ -520,12 +572,12 @@ dependencies = [
 [[package]]
 name = "chip-wasm-decision"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 
 [[package]]
 name = "chip-wasm-decision-host"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "chip-core",
  "chip-wasm-decision",
@@ -535,7 +587,7 @@ dependencies = [
 [[package]]
 name = "chip-wasm-reasoner"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=c14522a11e15c1b307db8ac0c274844adeac50a8#c14522a11e15c1b307db8ac0c274844adeac50a8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "chip-core",
  "wasmi",
@@ -884,11 +936,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "compute-rust-chip"
+name = "compute-stack-agent"
 version = "0.1.20"
 dependencies = [
  "async-trait",
- "chip-cli",
  "chip-core",
  "chip-inference",
  "chip-pax",
@@ -898,6 +949,7 @@ dependencies = [
  "compute-provider",
  "serde_json",
  "sha2",
+ "stack-agent",
  "tempfile",
  "tokio",
 ]
@@ -968,6 +1020,12 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
 ]
+
+[[package]]
+name = "const-oid"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "core-foundation"
@@ -1201,6 +1259,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "curve25519-dalek"
+version = "4.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "curve25519-dalek-derive",
+ "digest",
+ "fiat-crypto",
+ "rustc_version",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek-derive"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1213,6 +1298,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef552e6f588e446098f6ba40d89ac146c8c7b64aade83c051ee00bb5d2bc18d"
 dependencies = [
  "uuid",
+]
+
+[[package]]
+name = "der"
+version = "0.7.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
+dependencies = [
+ "const-oid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1281,6 +1376,30 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "ed25519"
+version = "2.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
+dependencies = [
+ "pkcs8",
+ "signature",
+]
+
+[[package]]
+name = "ed25519-dalek"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519",
+ "serde",
+ "sha2",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -1354,6 +1473,29 @@ dependencies = [
  "rustix 1.1.5",
  "windows-sys 0.59.0",
 ]
+
+[[package]]
+name = "feltdb"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26f9012e9ea8976c7571ff0ec05b2ff4b4173a6e33ea88fe1af57ef8520a020c"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "bincode",
+ "ed25519-dalek",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "fiat-crypto"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "filetime"
@@ -1476,7 +1618,7 @@ dependencies = [
 [[package]]
 name = "fx-core"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/fx?rev=0babf6a0fb767a2532a94d3163664980d88ed783#0babf6a0fb767a2532a94d3163664980d88ed783"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "serde",
  "serde_json",
@@ -1485,7 +1627,7 @@ dependencies = [
 [[package]]
 name = "fx-native-provider"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/fx?rev=0babf6a0fb767a2532a94d3163664980d88ed783#0babf6a0fb767a2532a94d3163664980d88ed783"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "fx-core",
  "fx-single-attempt",
@@ -1496,7 +1638,7 @@ dependencies = [
 [[package]]
 name = "fx-single-attempt"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/fx?rev=0babf6a0fb767a2532a94d3163664980d88ed783#0babf6a0fb767a2532a94d3163664980d88ed783"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "fx-core",
 ]
@@ -2280,6 +2422,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "pkcs8"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
+dependencies = [
+ "der",
+ "spki",
+]
+
+[[package]]
 name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2952,6 +3104,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "signature"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
+dependencies = [
+ "rand_core 0.6.4",
+]
+
+[[package]]
 name = "simd_cesu8"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2999,10 +3160,51 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
+name = "spki"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
+dependencies = [
+ "base64ct",
+ "der",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "stack-agent"
+version = "0.1.0"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
+dependencies = [
+ "async-trait",
+ "chip-agent-state",
+ "chip-compute",
+ "chip-core",
+ "chip-decision-corpus",
+ "chip-experiments",
+ "chip-fx",
+ "chip-fx-native",
+ "chip-graph",
+ "chip-inference",
+ "chip-local-decision",
+ "chip-otel",
+ "chip-pax",
+ "chip-project",
+ "chip-reasoning-corpus",
+ "chip-remote-env",
+ "chip-wasm-decision",
+ "chip-wasm-decision-host",
+ "chip-wasm-reasoner",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "toml",
+]
 
 [[package]]
 name = "string-interner"

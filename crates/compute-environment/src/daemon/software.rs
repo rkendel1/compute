@@ -548,6 +548,13 @@ impl Daemon {
                 "a source URL or path is required".into(),
             ));
         }
+        if !compute_core::repository_url_is_resolvable(&request.url) {
+            return Err(EnvironmentError::Invalid(format!(
+                "{} is a relative path: the computer would look for it in its own workspace, \
+                 not on your machine. Give an absolute path or a URL",
+                request.url
+            )));
+        }
         if let Some(revision) = &request.revision
             && (revision.starts_with('-') || revision.bytes().any(|byte| byte.is_ascii_control()))
         {

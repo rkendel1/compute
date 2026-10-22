@@ -1,5 +1,10 @@
 # Compute + Rust Chip + FX: integration contract (preparation)
 
+> **Update.** Chip and FX are now one repository, [stack-agent](https://github.com/rkendel1/stack-agent),
+> and the product (`crates/compute-stack-agent`) and this harness (`integration/chip-fx`) pin the same
+> stack-agent commit; `integration/chip-fx/tests/pins.rs` fails if they differ. The pin tables below
+> record the earlier chip-rs and fx revisions this preparation measured.
+
 Status: **preparation only.** Nothing here changes a shipped binary or an execution path. This page
 records what the three repositories actually expose today (measured, with commit ids), the contract
 the real integration must meet, the gaps found, and the checks that now keep the boundaries honest.
@@ -13,7 +18,7 @@ Compute host ──► Chip agent runtime ──► FX inference boundary ──
 
 FX never depends on Chip; Chip never depends on Compute. Compute depends on Chip only through Chip's
 generic environment contract, and reaches effects only through the session `exec` primitive. See
-[agents.md](agents.md) and [rust-chip.md](rust-chip.md) for the existing, shipped half of this.
+[agents.md](agents.md) and [stack-agent.md](stack-agent.md) for the existing, shipped half of this.
 
 ## 1. Audit
 
@@ -21,7 +26,7 @@ generic environment contract, and reaches effects only through the session `exec
 
 | Piece | Where | Fact |
 | --- | --- | --- |
-| Compute's Rust Chip adapter | `crates/compute-rust-chip` | `ComputeSessionEnvironments` implements Chip's `EnvironmentProvider`; `compute-rust-chip serve` runs Chip's runtime service over Compute sessions; `capability-exec` is the worker Chip runs inside a session. Shipped; its 11 tests (plus the 3 added here) pass at the product pin (**verified**). |
+| Compute's Rust Chip adapter | `crates/compute-stack-agent` | `ComputeSessionEnvironments` implements Chip's `EnvironmentProvider`; `compute-stack-agent serve` runs Chip's runtime service over Compute sessions; `capability-exec` is the worker Chip runs inside a session. Shipped; its 11 tests (plus the 3 added here) pass at the product pin (**verified**). |
 | Agent-neutral host | `crates/compute-agent` | `AgentHost::acquire` → `AgentSession::{exec, launch, release}`. Depends on no agent (enforced by `crates/compute-agent/tests/dependencies.rs`). |
 | Chip's contract | chip-rs `chip-core` | `EnvironmentProvider` / `WorkEnvironment::capabilities() -> Arc<CapabilitySet>`; the set is both `CapabilityProvider` and `Executor`; `Agent::run_work(spec, local_policy, decision_boundary) -> WorkReport`. |
 | Chip over FX | chip-rs `chip-fx` | `FxModelProvider<P: ProviderPort>`: one `complete` = one FX attempt; takes a `CancelSignal` and a per-attempt budget. |
@@ -38,14 +43,14 @@ generic environment contract, and reaches effects only through the session `exec
 
 **Change made here:** the product pin is now `rev = "f5b6639d…"` (the same commit, no `branch`), with
 `Cargo.lock` updated to match (`cargo metadata --locked` passes). The build graph is identical; only the
-mutable name is gone. `crates/compute-rust-chip/tests/integration_boundary.rs` fails if a branch/tag
+mutable name is gone. `crates/compute-stack-agent/tests/integration_boundary.rs` fails if a branch/tag
 pin returns.
 
 ### Entry points (exact, none invented)
 
 | Need | Entry point | Where |
 | --- | --- | --- |
-| Start a Chip turn / work | `POST /v1/work {"goal","kind"}` on the service `compute-rust-chip serve` runs (`chip_cli::service::serve_in(args, Some(environments))`); in-process: `Agent::run_work` | chip-rs `service.rs`, `chip-core` |
+| Start a Chip turn / work | `POST /v1/work {"goal","kind"}` on the service `compute-stack-agent serve` runs (`chip_cli::service::serve_in(args, Some(environments))`); in-process: `Agent::run_work` | chip-rs `service.rs`, `chip-core` |
 | Supply authorized capabilities | `EnvironmentProvider::acquire(&WorkId) -> Arc<dyn WorkEnvironment>`; `WorkEnvironment::capabilities() -> Arc<CapabilitySet>` | `chip-core::environment` |
 | Invoke FX | `FxModelProvider::complete` (library); `provider_selection::build_model` (binary) | `chip-fx`, `chip-cli` |
 | Deliver cancellation | to Chip: `POST /v1/work/{id}/cancel`; to FX: `CancelSignal::cancelled()` polled by FX before the provider call and between polls | `service.rs`, `chip-fx::native` |
@@ -72,7 +77,7 @@ No fallback to another session or to the host. Shutdown of the service does not 
 attempts beyond the cooperative signal below.
 
 **Provider and model configuration.** Chip's own `CHIP_PROVIDER` / `CHIP_MODEL` / `CHIP_ENDPOINT`,
-passed through untouched by `compute-rust-chip serve`; Compute is not the model provider. Supported:
+passed through untouched by `compute-stack-agent serve`; Compute is not the model provider. Supported:
 `openai-compatible`, `anthropic`. Ollama's own API is not supported (use its OpenAI-compatible
 endpoint). HTTP proxy and custom CA are **not supported** by the native provider (chip-rs documents
 this; implementing it is out of scope here).
@@ -90,7 +95,7 @@ credential store is introduced.
 inputs before anything runs; the backend that owns a declared id is the last gate and must re-check at
 execution time (the harness's `HostBoundary` does, and a revoked capability is refused with no effect).
 Invocation in production: Chip asks the session to run its own executor
-(`compute-rust-chip capability-exec`) via Compute `exec`. Results: an `ExecutionResult` becomes an
+(`compute-stack-agent capability-exec`) via Compute `exec`. Results: an `ExecutionResult` becomes an
 observation the next inference sees. Compute does not know what a capability means
 ([agents.md](agents.md)); if Compute must authorize individual capabilities, **no interface for that
 exists** and none is invented here (gap G10).
@@ -110,7 +115,7 @@ to Chip's `POST /v1/work/{id}/cancel` or to FX's signal.
 
 **Persistence, interrupted turns, recovery.** Compute's durable state is FeltDB through
 `compute-state`; Chip has its own Zig-compatible session store (`chip-session`, `chip-turns`). The shipped
-`chip serve` / `compute-rust-chip serve` do **not** persist turns. A crash mid-work loses the work;
+`chip serve` / `compute-stack-agent serve` do **not** persist turns. A crash mid-work loses the work;
 re-running the prompt re-executes capabilities; nothing replays automatically and there is no
 idempotence guard. This is the open design question recorded as the unapproved crash-recovery
 differences in the fx parity evidence. Do not promise transparent recovery or exactly-once effects.
@@ -136,7 +141,7 @@ Chip has no native provider, so it needs a host-supplied provider as the Node br
 
 **Versions and pinning.** Immutable revisions only. Update procedure: (1) merge the chip-rs change to
 `main`; (2) set the chip-rs `rev` and, if chip-rs moved its fx `rev`, the fx `rev`, together; (3) run
-`integration/chip-fx` (`cargo test --locked`, the Wasm check) and the product `compute-rust-chip` tests;
+`integration/chip-fx` (`cargo test --locked`, the Wasm check) and the product `compute-stack-agent` tests;
 (4) record the pair here. `tests/pins.rs` fails on a branch/tag/short pin and on two FX revisions in one
 graph. Compatibility expectation: Chip's `EnvironmentProvider` / `CapabilitySet` / `Executor` and FX's
 `ProviderPort` are the only seams Compute relies on; a change to them is a breaking change for this repo.
@@ -154,18 +159,18 @@ no retry, no fallback, no repeated effect (a failure *after* an executed effect 
 effect); proposed / authorized / executed / outcome kept apart.
 
 **What it does not prove:** that Compute's session, admission, policy or persistence code works with
-the new Chip (the existing `compute-rust-chip` tests cover those at the product pin); anything about a
+the new Chip (the existing `compute-stack-agent` tests cover those at the product pin); anything about a
 live provider; recovery; Wasm execution. Passing it does not make the integration production-ready.
 
 ## 4. Measured drift between the product pin and chip-rs `main`
 
-Done in a scratch copy, not committed. Against `2ea3ade3…`, `compute-rust-chip` (lib and bin) compiles
+Done in a scratch copy, not committed. Against `2ea3ade3…`, `compute-stack-agent` (lib and bin) compiles
 unchanged. Needed: (a) remove the `fx-core` dev-dependency (the toy crate is gone; tests use
 `chip_inference` instead: one import line in `tests/work.rs`); (b) `serde_json` locked at 1.0.154 (FX
 requires `=1.0.154`; Compute locks 1.0.151); (c) the two `launcher.rs` tests fail: the model stand-in
 there is non-streaming JSON while the default executor is FX (the same fix chip-rs applied to its own
 stand-ins), and one of them exits 3 where 2 is expected for a cause not yet diagnosed. After (a)–(b) the
-other compute-rust-chip tests passed against `main` (agent_contract 1, work 4, provider_contract 4).
+other compute-stack-agent tests passed against `main` (agent_contract 1, work 4, provider_contract 4).
 
 ## 5. Gaps
 
@@ -185,26 +190,26 @@ other compute-rust-chip tests passed against `main` (agent_contract 1, work 4, p
 Follow-up issues are filed as compute#88 (G1) to #97 (G10), each carrying its recorded decision; #97 (G10, by design)
 is closed as not planned.
 
-**Status after the product integration PR.** The product pin (`crates/compute-rust-chip`) is now the immutable chip-rs `main`
+**Status after the product integration PR.** The product pin (`crates/compute-stack-agent`) is now the immutable chip-rs `main`
 commit `b3f9a1c8…` (merge of chip-rs#38; fx `72ef7a41…` through it), with the §4 edits (a)–(b) applied. G2: the launcher stand-in
 serves SSE when FX asks for a stream. The exit code `3` was diagnosed: the service validates the model provider before it checks
 capacity, and the FX executor requires an endpoint ending in `/chat/completions`; the test passed `http://127.0.0.1:1`, so the
 launch ended with 3 before the capacity check ran. The test now passes a well-formed endpoint (expected code `2` unchanged) and a
 second test pins the `3` for a malformed endpoint. G8 and G6 have launcher-path tests (key sentinel; a model's own claim of
 success does not complete a work). G1/G2/G6/G8 remain open until this PR merges and its CI is observed; the harness in
-`integration/chip-fx` is not yet folded into `crates/compute-rust-chip/tests`.
+`integration/chip-fx` is not yet folded into `crates/compute-stack-agent/tests`.
 
 **Status after the gap PR (compute#88–#96).** The product pin is now chip-rs `c14522a…` (merge of chip-rs#42; fx `0babf6a…`, the merge of fx#31).
 
 | # | Status | Where |
 | --- | --- | --- |
-| G1 | Pin `b3f9a1c8…` with (a)–(b). The `compute-rust-chip` tests that need PAX used to print `SKIPPED` and pass in CI, where PAX was not installed, so `work`, `provider_contract` and the launcher tests had never run there. CI now installs PAX at a pinned commit and sets `COMPUTE_REQUIRE_PAX`, which turns a missing PAX into a failure. | `.github/workflows/test.yml`, `tests/support/mod.rs` |
+| G1 | Pin `b3f9a1c8…` with (a)–(b). The `compute-stack-agent` tests that need PAX used to print `SKIPPED` and pass in CI, where PAX was not installed, so `work`, `provider_contract` and the launcher tests had never run there. CI now installs PAX at a pinned commit and sets `COMPUTE_REQUIRE_PAX`, which turns a missing PAX into a failure. | `.github/workflows/test.yml`, `tests/support/mod.rs` |
 | G2 | SSE stand-in and the `3`/`2` diagnosis (above). Concurrent launcher tests also shared one token file (named from the token's fixed prefix) and overwrote each other's credential; each launch now has its own. | `tests/launcher.rs` |
-| G3 | Compute side done: `AgentSession::cancel` (Compute's confirmed, idempotent job cancellation; an interrupted command is never reported as not having run), commands whose caller stops waiting are cancelled rather than left running, `ComputeSessionEnvironments::cancel_work`, and `compute_rust_chip::cancel::request` for Chip's `POST /v1/work/{id}/cancel`. Chip's half landed in chip-rs#42: a run's cancellation is scoped to its model call (`chip_fx::with_call_cancel`), so a model call in flight through FX is abandoned at its next poll with its delivery certainty. | `compute-agent`, `src/cancel.rs`, `tests/cancellation.rs`, `tests/launcher.rs`; chip-rs `chip-fx`, `chip-fx-native` |
-| G4 | Decision recorded in [rust-chip.md](rust-chip.md#turn-records-and-recovery-decision); the no-persistence warning is printed when `serve` starts and checked by a test. | `src/main.rs` |
+| G3 | Compute side done: `AgentSession::cancel` (Compute's confirmed, idempotent job cancellation; an interrupted command is never reported as not having run), commands whose caller stops waiting are cancelled rather than left running, `ComputeSessionEnvironments::cancel_work`, and `compute_stack_agent::cancel::request` for Chip's `POST /v1/work/{id}/cancel`. Chip's half landed in chip-rs#42: a run's cancellation is scoped to its model call (`chip_fx::with_call_cancel`), so a model call in flight through FX is abandoned at its next poll with its delivery certainty. | `compute-agent`, `src/cancel.rs`, `tests/cancellation.rs`, `tests/launcher.rs`; chip-rs `chip-fx`, `chip-fx-native` |
+| G4 | Decision recorded in [stack-agent.md](stack-agent.md#turn-records-and-recovery-decision); the no-persistence warning is printed when `serve` starts and checked by a test. | `src/main.rs` |
 | G5 | Done in chip-rs#42: `WorkOutcome::Failed { reason, delivery }` and `WorkEvent::WorkFailed` carry FX's delivery certainty as a field (`result.delivery` in the service). | chip-rs `chip-core` |
-| G6 | `compute_rust_chip::work::HostWork` refuses a work without `required_observations`; a model's claim never completes a host work (tested without PAX). The service's kinds are the typed contracts of its entry. | `src/work.rs`, `tests/host_work.rs` |
-| G7 | Documented unsupported at the Wasm runtime and in [rust-chip.md](rust-chip.md#limits). | `compute-runtime-wasm`, docs |
+| G6 | `compute_stack_agent::work::HostWork` refuses a work without `required_observations`; a model's claim never completes a host work (tested without PAX). The service's kinds are the typed contracts of its entry. | `src/work.rs`, `tests/host_work.rs` |
+| G7 | Documented unsupported at the Wasm runtime and in [stack-agent.md](stack-agent.md#limits). | `compute-runtime-wasm`, docs |
 | G8 | On the real launcher path: the key reaches the model; it is in no work, event, metric, service log, model input, stored Compute record or the session worker's recorded environment. A mutation that leaks it into the worker's environment fails the test. | `tests/launcher.rs` |
 | G9 | Done: an explicit HTTP `CONNECT` proxy in `fx-native-provider` with proxy and private-CA TLS integration tests (fx#31), wired in Chip as `CHIP_PROXY*` (chip-rs#42; chip-rs#35 closed). | fx / chip-rs |
 
@@ -229,6 +234,6 @@ attempt budget. The test now holds each work's first reply for a moment and chec
 ## 7. Smallest follow-up to wire it for real
 
 One PR: G1 (bump the pin with the three §4 edits), G2 (streaming launcher stand-ins), move
-`integration/chip-fx/tests/contract.rs` into `crates/compute-rust-chip/tests` against
+`integration/chip-fx/tests/contract.rs` into `crates/compute-stack-agent/tests` against
 `ComputeSessionEnvironments`, and G8. Cancellation (G3) and persistence (G4) each need a prior decision
 and are separate.

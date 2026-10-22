@@ -803,7 +803,7 @@ git rev-parse HEAD
 /// Where an imported source's repository lives in the workspace: a
 /// repository URL the computer resolves itself.
 pub(crate) fn imported_source(repository: &str) -> String {
-    format!(".compute/sources/{repository}")
+    format!("{}{repository}", compute_core::IMPORTED_SOURCES)
 }
 
 /// Append base64 chunks (`COMPUTE_IMPORT_0`, `_1`, …, in the environment)

@@ -46,6 +46,7 @@ import {
   environmentSelectorSchema,
   environmentViewSchema,
   projectAddInputSchema,
+  projectLoadInputSchema,
   projectRemoveInputSchema,
   projectRemoveResultSchema,
   projectViewSchema,
@@ -887,6 +888,15 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
     attributes: { ...environmentAttributes, "compute.executes": true },
     handler: ({ environment, project }) => api(() => environments.addProject(environment, project)),
   });
+  const projectLoad = defineCapability({
+    name: "compute.environment.project.load", version: 1,
+    description: "Load a Git repository as a project into an environment with a computer: the computer checks it out at a revision, builds it, and restarts what runs from it.",
+    input: projectLoadInputSchema, output: projectViewSchema, effect: "consequential",
+    authorization: ["compute.environment.project.add"],
+    authorizationContract: { required: true, scopes: ["compute.environment.project.add"] },
+    attributes: { ...environmentAttributes, "compute.executes": true },
+    handler: (input) => api(() => environments.loadProject(input)),
+  });
   const projectRemove = defineCapability({
     name: "compute.environment.project.remove", version: 1,
     description: "Stop and remove one project. Sibling projects keep running.",
@@ -1119,7 +1129,7 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
       policyInspect, policyCheck, policyExplain, admission,
       submit, status, cancel, result, jobReceipt,
       environmentList, environmentInspect, environmentStatus, environmentCreate,
-      environmentStart, environmentStop, environmentRestart, projectAdd, projectRemove,
+      environmentStart, environmentStop, environmentRestart, projectAdd, projectLoad, projectRemove,
       projectList, projectInspect, projectStart, projectStop, projectRestart,
       deploymentInspect, deploymentCreate, deploymentPromote, deploymentRollback,
       domainList, domainInspect, domainCreate, domainRemove,

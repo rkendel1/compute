@@ -1,5 +1,10 @@
 # Spike: scripted FX → Chip → MCP → AppBoundry host → verified WASM
 
+> **Historical.** This page records the npm Chip/Eve agent and npm FX that `compute-configured`
+> shipped up to 0.1.20. They are retired: the configured agent is now
+> [stack-agent](../../stack-agent.md) (Chip + FX in one Rust executable), and nothing in the current
+> profile, formula or release pipeline refers to the npm agent.
+
 **Status: spike evidence, not certification.** It shows the hop exists and what it
 returns. It is not wired into CI, does not include Attn, AuthBoundry denial, FeltDB
 persistence of the invocation, or PAX, and it depends on an AppBoundry host built

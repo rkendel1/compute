@@ -715,6 +715,15 @@ export interface EnvironmentWorkloadDefinition {
   desired_state?: DesiredState | undefined;
 }
 
+export interface ProjectLoadInput {
+  environment: string;
+  project: string;
+  url: string;
+  revision?: string | undefined;
+  build?: string[] | undefined;
+  test?: string[] | undefined;
+}
+
 export interface ProjectAddInput {
   environment: string;
   project: {

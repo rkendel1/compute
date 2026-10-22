@@ -112,6 +112,9 @@ async function daemon(): Promise<{ endpoint: string; seen: Seen[]; close: () => 
     }
     if (route === "DELETE /environments/my-app") return reply(200, { ...view, status: "destroying" });
     if (route === "GET /targets") return reply(200, [{ target_id: "railway-1", kind: "remote", health: "healthy", hosts_computers: true, features: ["containers"] }]);
+    if (route === "POST /environments/my-app/repositories") return reply(200, view);
+    if (route === "POST /environments/my-app/projects") return reply(200, view);
+    if (route === "GET /environments/my-app/projects/app") return reply(200, { project_id: "prj_1", name: "app", environment: "my-app" });
     if (route === "GET /environments/other/computer") return reply(403, { kind: "authorization_denied", message: "environment other belongs to another principal" });
     return reply(404, { kind: "not_found", message: route });
   });
@@ -219,6 +222,22 @@ test("the software lifecycle is the same API the UI uses", async () => {
     assert.equal(done.status, "active");
     assert.deepEqual(seen, ["running", "succeeded"]);
     assert.equal((await rollbackVersion(client, "web", "production")).kind, "rollback");
+  } finally {
+    stub.close();
+  }
+});
+
+test("a Git repository is loaded as a project into a computer", async () => {
+  const stub = await daemon();
+  try {
+    const client = new ComputeDaemonClient({ endpoint: stub.endpoint, token: "secret" });
+    const loaded = await client.loadProject({ environment: "my-app", project: "app", url: "https://example.invalid/app.git", test: ["npm", "test"] });
+    assert.equal(loaded.name, "app");
+    const sent = stub.seen.filter((entry) => entry.method === "POST").map(({ path, body }) => ({ path, body }));
+    assert.deepEqual(sent, [
+      { path: "/environments/my-app/repositories", body: { name: "app", url: "https://example.invalid/app.git", revision: "HEAD" } },
+      { path: "/environments/my-app/projects", body: { name: "app", repository: "app", test: ["npm", "test"] } },
+    ]);
   } finally {
     stub.close();
   }

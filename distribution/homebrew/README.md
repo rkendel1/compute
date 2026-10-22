@@ -53,30 +53,22 @@ Mutable state remains in `$COMPUTE_HOME` (default `~/.compute`) and survives
 
 `compute-configured` depends on this formula; it does not build or install a
 second Compute binary. Its immutable configured asset contains the locked npm
-artifacts, registry integrity metadata, stack manifest, the built configured
-agent, and verification evidence. Homebrew never resolves arbitrary latest
+artifacts, registry integrity metadata, stack manifest, the stack-agent
+executable, and verification evidence. Homebrew never resolves arbitrary latest
 package versions.
 
-The configured stack:
-
-```text
-compute-configured
-├── Compute       execution
-├── Chip 0.54.4   agent runtime          (@appport/chip)
-└── FX 0.1.2      model/provider layer   (@appport/fx)
-```
-
-Chip runs the agent; FX makes its model calls to the provider you configure;
-Compute stays the execution substrate and loads neither. Serve the configured
-agent with a provider of your choice; no Vercel or AI Gateway account is used:
+The configured agent is [stack-agent](https://github.com/rkendel1/stack-agent):
+Chip agent orchestration and FX inference in one Rust executable. Its loop and
+your model key stay in its own process; every capability it runs runs in a
+Compute session on the target you choose:
 
 ```sh
-export COMPUTE_CONFIGURED_CHIP_TOKEN=…        # bearer token for the HTTP API
-export FX_BASE_URL=http://localhost:11434/v1  # any OpenAI-compatible endpoint
-export FX_MODEL=qwen3-coder
-compute-configured-chip start --port 3000     # POST /eve/v1/session
+export COMPUTE_STACK_AGENT_TARGET=http://127.0.0.1:8080   # a `compute serve` target
+export COMPUTE_STACK_AGENT_TARGET_TOKEN_FILE=target.token
+export COMPUTE_STACK_AGENT_PROJECT=https://github.com/you/app.git
+export CHIP_PROVIDER=openai-compatible CHIP_MODEL=… CHIP_ENDPOINT=… CHIP_API_KEY=…
+compute-configured-stack-agent serve --port 8765   # POST /v1/work (loopback only)
 ```
 
-For an endpoint that needs a key, set `FX_API_KEY_ENV` to the *name* of the
-variable holding it. `compute-configured-verify` reports the installed
-versions and proves the Chip → FX → provider path against a local fixture.
+`compute-configured-verify` reports the installed versions and checks the
+agent's pin and executable.

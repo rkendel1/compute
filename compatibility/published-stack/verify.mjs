@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { createServer } from 'node:http';
-import { cp, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,9 +18,6 @@ import { createFeltDB, parseFlowSpec, validateFlowSpec } from '@feltdb/core';
 const here = new URL('.', import.meta.url);
 const stack = JSON.parse(await readFile(new URL('stack.json', here), 'utf8'));
 const lock = JSON.parse(await readFile(new URL('package-lock.json', here), 'utf8'));
-// What the model is offered from a configured agent with no connections: Chip's remaining defaults. A Chip
-// upgrade that adds or removes a default tool changes this list on purpose, so the change is reviewed.
-const EXPECTED_DEFAULT_TOOLS = ['agent', 'ask_question', 'load_skill', 'task_cancel', 'todo'];
 
 const checks = [];
 const pass = (name, detail) => checks.push({ name, result: 'pass', detail });
@@ -36,7 +31,9 @@ assert.equal(stack.runtime.shared_binary, true);
 assert.equal(stack.runtime.shared_cli, true);
 assert.equal(stack.runtime.shared_ui, true);
 assert.equal(stack.state.root, 'COMPUTE_HOME');
-assert.equal(stack.state.authoritative_durable_backend, 'compute-state-feltdb');
+// The backend Compute actually uses when nothing selects another (crates/compute-cli/src/control_state.rs).
+assert.equal(stack.state.authoritative_durable_backend, 'compute-state-file');
+assert.deepEqual(stack.state.optional_durable_backends, ['compute-state-feltdb']);
 assert.equal(stack.state.shared_with_base, true);
 assert.deepEqual(stack.state.additional_stores, []);
 assert.equal(stack.configuration.activation, 'COMPUTE_STACKS');
@@ -45,7 +42,7 @@ assert.deepEqual(stack.migrations, []);
 if (process.env.COMPUTE_INSTALLED_VERSION) {
   assert.equal(process.env.COMPUTE_INSTALLED_VERSION, stack.compute, 'Base Compute version drift');
 }
-pass('distribution_profile', `configured is an additive ${stack.distribution.certification_status} profile over the same Compute binary, UI, CLI, and FeltDB-backed state model`);
+pass('distribution_profile', `configured is an additive ${stack.distribution.certification_status} profile over the same Compute binary, UI, CLI and state model (file by default, FeltDB when configured)`);
 for (const [name, version] of Object.entries(stack.packages)) {
   assert.equal(lock.packages[`node_modules/${name}`]?.version, version, `${name} version drift`);
 }
@@ -56,114 +53,53 @@ for (const [path, entry] of Object.entries(lock.packages)) {
 }
 pass('package_compatibility', `${Object.keys(stack.packages).length} exact top-level registry packages resolved with integrity`);
 
-// ---- The configured default agent runtime --------------------------------
+// ---- The configured agent: stack-agent ----------------------------------
 //
-// Chip is installed here, not resolved later: the artifact ships the package,
-// its dependency closure, and the Node it needs. Every check below reads the
-// installed tree, so a missing or wrong agent runtime fails certification
-// rather than degrading silently to "no agent".
+// stack-agent (Chip agent orchestration + FX inference) is one Rust executable, hosted by Compute
+// as `compute-stack-agent`: the agent loop and the model credential stay in that process, and every
+// capability runs in a Compute session of its own. No npm agent or npm model provider is part of
+// this artifact.
 
 const agent = stack.agent;
 assert.ok(agent, 'the configured profile declares no agent runtime');
-assert.ok(agent.default, 'the configured profile names no default agent runtime');
-const defaultRuntime = agent.runtimes.find(({ name }) => name === agent.default);
-assert.ok(defaultRuntime, `the default agent runtime ${agent.default} is not declared`);
-
-// Package identity is the contract. Chip's published bin target is an internal
-// filename (`bin/eve.js`) and its pre-rename package name was `eve`; neither is
-// a dependency this artifact may acquire.
-assert.equal(defaultRuntime.package, '@appport/chip');
-const forbidden = Object.keys(lock.packages).filter((path) => {
-  const name = path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length);
-  return name === 'eve' || name === 'chip-framework';
-});
-assert.deepEqual(forbidden, [], 'the configured artifact must not depend on eve or chip-framework');
-
-const chipRoot = new URL('node_modules/@appport/chip/', here);
-const chipManifest = JSON.parse(await readFile(new URL('package.json', chipRoot), 'utf8'));
-assert.equal(chipManifest.version, defaultRuntime.version, 'the installed Chip is not the certified version');
-assert.equal(chipManifest.name, '@appport/chip');
-// Chip requires Node >= 24, and the profile declares the same floor; the Node
-// this verifier runs on is the one the distribution bundles.
-assert.match(chipManifest.engines?.node ?? '', />=\s*24/, 'Chip requires Node >= 24');
-const profilePackage = JSON.parse(await readFile(new URL('package.json', here), 'utf8'));
-assert.match(profilePackage.engines?.node ?? '', />=\s*24/, 'the configured profile must require the Node its agent runtime needs');
-assert.ok(Number(process.versions.node.split('.')[0]) >= 24, `the configured Node is ${process.version}; Chip requires >= 24`);
-
-// The executable must exist and run on the Node this distribution ships.
-const executable = new URL(defaultRuntime.executable, here);
-assert.ok(await stat(executable).then((s) => s.isFile()).catch(() => false),
-  `${defaultRuntime.executable} is not in the configured artifact`);
-const { execFileSync } = await import('node:child_process');
-const reported = execFileSync(process.execPath, [fileURLToPath(executable), ...defaultRuntime.health.command], {
-  encoding: 'utf8', timeout: 120_000,
-}).trim();
-assert.equal(reported, defaultRuntime.health.expect, 'the configured agent runtime did not report its certified version');
-assert.equal(defaultRuntime.lifecycle, 'execution', 'an agent runtime is invoked inside an execution');
-assert.ok(defaultRuntime.node, 'the agent runtime does not name the Node it runs on');
-pass('agent_runtime', `${defaultRuntime.name}@${defaultRuntime.version} (${defaultRuntime.package}) is the installed default, reports ${reported}, and runs inside an execution`);
-
-// ---- FX: Chip's model provider layer --------------------------------------
-//
-// Chip owns the agent loop; FX owns the model call and its transport. The
-// configured agent joins them through Chip's public adapter
-// (`@appport/chip/models/fx`) and FX's public model API (`createFxModel`).
-// Compute itself never loads either. Every check below crosses that boundary
-// with the installed packages; only the model endpoint is a local fixture.
-
-const fxDeclaration = defaultRuntime.model_provider;
-assert.ok(fxDeclaration, 'the configured agent runtime declares no model provider');
-assert.equal(fxDeclaration.package, '@appport/fx');
-assert.equal(fxDeclaration.adapter, '@appport/chip/models/fx');
-assert.equal(stack.packages['@appport/fx'], fxDeclaration.version, 'the FX pin and the agent runtime disagree');
-const fxManifest = JSON.parse(await readFile(new URL('node_modules/@appport/fx/package.json', here), 'utf8'));
-assert.equal(fxManifest.name, '@appport/fx', 'the installed model provider is not @appport/fx');
-assert.equal(fxManifest.version, fxDeclaration.version, 'the installed FX is not the certified version');
-assert.equal(lock.packages['node_modules/@appport/fx']?.resolved,
-  `https://registry.npmjs.org/@appport/fx/-/fx-${fxDeclaration.version}.tgz`,
-  '@appport/fx must come from its published registry tarball');
-// Vercel's unrelated `libfx` package shares FX's lineage but not its identity.
-assert.equal(lock.packages['node_modules/libfx'], undefined, 'the configured artifact must not depend on libfx');
-
-const { fx } = await import('@appport/chip/models/fx');
-const { createFxModel } = await import('@appport/fx');
-const fixture = await startModelFixture();
-try {
-  const model = fx(await createFxModel({ baseUrl: fixture.baseUrl, model: 'compute-configured-verify' }));
-  assert.equal(model.specificationVersion, 'v4');
-  assert.equal(model.provider, 'fx.openai-compatible');
-  const prompt = [
-    { role: 'system', content: 'Reply with the fixture text.' },
-    { role: 'user', content: [{ type: 'text', text: 'ping' }] },
-  ];
-  const streamed = [];
-  const reader = (await model.doStream({ prompt })).stream.getReader();
-  for (let part = await reader.read(); !part.done; part = await reader.read()) streamed.push(part.value);
-  assert.equal(streamed.filter(({ type }) => type === 'text-delta').map(({ delta }) => delta).join(''), 'FX fixture reply');
-  assert.equal(streamed.find(({ type }) => type === 'finish')?.finishReason?.unified, 'stop');
-  await assert.rejects(
-    model.doGenerate({ prompt: [{ role: 'user', content: [{ type: 'text', text: 'fixture-fail' }] }] }),
-    (error) => /fixture rejected the request/.test(`${error.message} ${error.responseBody ?? ''}`),
-    'a provider failure must reach Chip as an error, never as a reply',
-  );
-  const [first] = fixture.requests;
-  assert.equal(first.url, '/v1/chat/completions');
-  assert.equal(first.body.model, 'compute-configured-verify');
-  assert.equal(first.authorization, undefined, 'no credential is sent unless FX_API_KEY_ENV names one');
-} finally {
-  await fixture.stop();
+assert.equal(agent.default, 'stack-agent');
+assert.deepEqual(agent.runtimes.map(({ name }) => name), ['stack-agent'], 'stack-agent is the only agent');
+const defaultRuntime = agent.runtimes[0];
+assert.equal(defaultRuntime.package, 'github:rkendel1/stack-agent');
+assert.match(defaultRuntime.version, /^[0-9a-f]{40}$/, 'stack-agent is pinned to a full commit');
+assert.equal(defaultRuntime.executable, 'stack-agent/bin/compute-stack-agent');
+assert.equal(defaultRuntime.lifecycle, 'service');
+assert.equal(defaultRuntime.environment, 'compute.session');
+assert.equal(defaultRuntime.capability_execution?.where, 'compute-session');
+assert.equal(defaultRuntime.model_provider?.credentials, 'agent-process-only');
+assert.equal(defaultRuntime.http?.auth, 'loopback-only');
+for (const name of ['@appport/chip', '@appport/fx', 'eve', 'chip-framework', 'libfx']) {
+  const found = Object.keys(lock.packages).filter((path) => path.endsWith(`node_modules/${name}`));
+  assert.deepEqual(found, [], `the configured artifact must not contain ${name}`);
 }
-pass('model_provider', `@appport/fx@${fxManifest.version} served Chip's fx() adapter: streamed a reply from an OpenAI-compatible endpoint and surfaced its failure, with no Gateway credential`);
-
-// The agent Chip serves is the configured one, built from the pinned Chip.
-const built = JSON.parse(await readFile(new URL('.output/eve-cache.json', here), 'utf8').catch(() => 'null'));
-assert.ok(built, 'the configured agent has not been built (.output is missing)');
-assert.equal(built.eveVersion, defaultRuntime.version, 'the configured agent was built with a different Chip');
-const agentSource = await readFile(new URL(`${defaultRuntime.project}/agent.ts`, here), 'utf8');
-assert.match(agentSource, /from "@appport\/chip\/models\/fx"/);
-assert.match(agentSource, /from "@appport\/fx"/);
-await verifyChipServes();
-pass('agent_session', `the installed Chip served the configured agent: POST /eve/v1/session returned 202, and its stream carried the FX reply to session.waiting`);
+// The pin the profile declares is the one Compute builds: the source tree's Cargo.toml when it is
+// present (CI, before assembly), and the shipped executable itself when it is (an installation).
+const cargo = await readFile(new URL('../../crates/compute-stack-agent/Cargo.toml', here), 'utf8').catch(() => null);
+if (cargo) {
+  const pins = [...cargo.matchAll(/git = "https:\/\/github\.com\/rkendel1\/stack-agent", rev = "([0-9a-f]{40})"/g)].map((m) => m[1]);
+  assert.ok(pins.length > 0, 'compute-stack-agent does not depend on stack-agent');
+  assert.deepEqual([...new Set(pins)], [defaultRuntime.version], 'the profile and Cargo.toml pin different stack-agent commits');
+}
+const { execFileSync, spawnSync } = await import('node:child_process');
+const executable = fileURLToPath(new URL(defaultRuntime.executable, here));
+let agentDetail = 'pinned in the source tree';
+if (await stat(executable).then((s) => s.isFile()).catch(() => false)) {
+  const run = spawnSync(executable, defaultRuntime.health.command, { encoding: 'utf8', timeout: 60_000, env: {} });
+  assert.equal(run.status, 2, 'compute-stack-agent with no subcommand must print its usage and exit 2');
+  assert.match(run.stderr, new RegExp(defaultRuntime.health.expect));
+  // A non-loopback listener is refused before anything starts: the service has no authentication.
+  const remote = spawnSync(executable, ['serve', '--host', '0.0.0.0'], { encoding: 'utf8', timeout: 60_000, env: {} });
+  assert.equal(remote.status, 2, 'compute-stack-agent must refuse a non-loopback --host');
+  agentDetail = 'the installed executable runs, and refuses a non-loopback listener';
+} else {
+  assert.ok(cargo, `${defaultRuntime.executable} is not in the artifact and no source tree pins it`);
+}
+pass('agent_runtime', `stack-agent@${defaultRuntime.version.slice(0, 12)} is the only agent; ${agentDetail}`);
 
 // Optional execution providers: declared as data, implemented by base Compute, never required.
 // With COMPUTE_BIN (as compute-configured-verify sets it), the installed Compute must report each
@@ -348,8 +284,7 @@ const evidence = {
   versions: {
     'compute-configured': stack.compute,
     compute: stack.compute,
-    chip: defaultRuntime.version,
-    fx: fxDeclaration.version,
+    'stack-agent': defaultRuntime.version,
     node: process.version,
   },
   checks,
@@ -357,175 +292,3 @@ const evidence = {
 const output = process.env.COMPUTE_COMPATIBILITY_EVIDENCE;
 if (output) await writeFile(output, `${JSON.stringify(evidence, null, 2)}\n`);
 console.log(JSON.stringify(evidence, null, 2));
-
-// ---- Fixtures and the served-agent check ---------------------------------
-
-/**
- * A deterministic OpenAI-compatible Chat Completions endpoint on loopback. It
- * stands in for a model only; FX's real transport and Chip's real adapter talk
- * to it exactly as they would to a hosted provider.
- */
-async function startModelFixture() {
-  const requests = [];
-  const server = createServer((req, res) => {
-    let raw = '';
-    req.on('data', (chunk) => { raw += chunk; });
-    req.on('end', () => {
-      const body = JSON.parse(raw || '{}');
-      requests.push({ url: req.url, authorization: req.headers.authorization, body });
-      const prompt = JSON.stringify(body.messages ?? []);
-      if (prompt.includes('fixture-fail')) {
-        res.writeHead(400, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: { message: 'fixture rejected the request', type: 'invalid_request' } }));
-        return;
-      }
-      const pieces = ['FX ', 'fixture ', 'reply'];
-      if (!body.stream) {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({
-          id: 'chatcmpl-fixture', object: 'chat.completion', model: body.model,
-          choices: [{ index: 0, message: { role: 'assistant', content: pieces.join('') }, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
-        }));
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'text/event-stream' });
-      const chunk = (delta, finish = null) => res.write(`data: ${JSON.stringify({
-        id: 'chatcmpl-fixture', object: 'chat.completion.chunk', model: body.model,
-        choices: [{ index: 0, delta, finish_reason: finish }],
-      })}\n\n`);
-      for (const content of pieces) chunk({ content });
-      chunk({}, 'stop');
-      res.end('data: [DONE]\n\n');
-    });
-  });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  return {
-    baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
-    requests,
-    stop: () => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); }),
-  };
-}
-
-/**
- * Serve the configured agent with the installed Chip (`chip start`, the
- * production server), from a throwaway working directory linked to this
- * installation the way the configured launcher links it, and run one session
- * through FX to the fixture.
- */
-async function verifyChipServes() {
-  const work = await mkdtemp(join(tmpdir(), 'compute-configured-chip-'));
-  const fixture = await startModelFixture();
-  const token = createHash('sha256').update(`${process.pid}:${Date.now()}:${Math.random()}`).digest('hex');
-  const env = { ...process.env };
-  // The configured agent needs no Gateway or Vercel identity; prove it.
-  for (const name of Object.keys(env)) {
-    if (/^(AI_GATEWAY_|VERCEL)/.test(name) || /^FX_/.test(name)) delete env[name];
-  }
-  Object.assign(env, {
-    FX_BASE_URL: fixture.baseUrl,
-    FX_MODEL: 'compute-configured-verify',
-    COMPUTE_CONFIGURED_CHIP_TOKEN: token,
-    EVE_TELEMETRY_DISABLED: '1',
-  });
-  let child;
-  try {
-    // Chip locates the application through agent/ and package.json, which must
-    // be real files; the installed dependencies and build output are linked.
-    for (const entry of ['agent', 'package.json']) {
-      await cp(fileURLToPath(new URL(entry, here)), join(work, entry), { recursive: true });
-    }
-    for (const entry of ['node_modules', '.output']) {
-      await symlink(fileURLToPath(new URL(entry, here)), join(work, entry));
-    }
-    child = spawn(process.execPath, [fileURLToPath(executable), 'start', '--host', '127.0.0.1', '--port', '0'], {
-      cwd: work, env, stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let output = '';
-    child.stdout.on('data', (chunk) => { output += chunk; });
-    child.stderr.on('data', (chunk) => { output += chunk; });
-    const origin = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`chip start did not listen:\n${output}`)), 120_000);
-      const look = () => {
-        const match = /Listening on: (http:\/\/[^\s/]+)/.exec(output);
-        if (match) { clearTimeout(timer); resolve(match[1]); }
-      };
-      child.stdout.on('data', look);
-      child.once('exit', (code) => { clearTimeout(timer); reject(new Error(`chip start exited ${code}:\n${output}`)); });
-    });
-    const health = await fetch(`${origin}/eve/v1/health`);
-    assert.equal(health.status, 200, 'the configured Chip is not healthy');
-    const refused = await fetch(`${origin}/eve/v1/session`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ message: 'ping' }),
-    });
-    assert.equal(refused.status, 401, 'the configured Chip admitted an unauthenticated caller');
-    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
-    const created = await fetch(`${origin}/eve/v1/session`, {
-      method: 'POST', headers, body: JSON.stringify({ message: 'ping', operationId: 'compute-configured-verify' }),
-    });
-    assert.equal(created.status, 202);
-    const { sessionId, status } = await created.json();
-    assert.equal(status, 'accepted');
-    const events = await readSession(origin, sessionId, headers);
-    const text = events.filter(({ type, data }) => type === 'message.appended' && data?.messageDelta !== undefined)
-      .map(({ data }) => data.messageDelta).join('');
-    assert.equal(text, 'FX fixture reply', `the FX reply did not reach the session: ${JSON.stringify(events)}`);
-    assert.equal(events.at(-1)?.type, 'session.waiting');
-    assert.ok(fixture.requests.some(({ body }) => body.model === 'compute-configured-verify' && body.stream === true));
-
-    // The default tool surface is explicit. Chip's built-in shell, file and web tools carry no scope or
-    // delegation enforcement, and whether they could act would otherwise depend on an optional sandbox
-    // package being installed. They are removed with Chip's own mechanism, and the model must not be offered them.
-    const disabled = defaultRuntime.disabled_builtin_tools;
-    assert.deepEqual([...disabled].sort(), ['bash', 'read_file', 'web_fetch', 'write_file'], 'the disabled built-ins are declared in the profile');
-    for (const name of disabled) {
-      const source = await readFile(new URL(`agent/tools/${name}.ts`, here), 'utf8').catch(() => '');
-      assert.match(source, /export default disableTool\(\)/, `agent/tools/${name}.ts must disable the built-in ${name}`);
-    }
-    // Retention can delete a finished run's stream, which Attn and PAX read after the fact. It stays unset
-    // unless a documented product requirement says otherwise.
-    assert.doesNotMatch(await readFile(new URL('agent/agent.ts', here), 'utf8'), /retention/i, 'the configured agent must not set workflow retention');
-    const offered = new Set((fixture.requests[0]?.body.tools ?? []).map((tool) => tool.function?.name));
-    assert.ok(offered.size > 0, 'the model was offered no tools at all; the surface check proved nothing');
-    for (const name of disabled) assert.ok(!offered.has(name), `the model is still offered the built-in ${name}`);
-    assert.deepEqual([...offered].sort(), EXPECTED_DEFAULT_TOOLS, 'the default tool surface changed; review it before accepting the new set');
-  } finally {
-    child?.kill('SIGTERM');
-    await fixture.stop();
-    await rm(work, { recursive: true, force: true });
-  }
-}
-
-/** Read a session's NDJSON stream until the current turn settles. */
-async function readSession(origin, sessionId, headers, deadlineMs = 60_000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), deadlineMs);
-  const events = [];
-  try {
-    for (let attempt = 0; ; attempt += 1) {
-      // The stream may briefly report the run as not yet readable after the
-      // 202; the published client retries the same window.
-      const response = await fetch(`${origin}/eve/v1/session/${sessionId}/stream`, { headers, signal: controller.signal });
-      if (response.status === 404 && attempt < 50) { await new Promise((r) => setTimeout(r, 200)); continue; }
-      assert.equal(response.status, 200, `stream ${sessionId} answered ${response.status}`);
-      const decoder = new TextDecoder();
-      let buffered = '';
-      for await (const chunk of response.body) {
-        buffered += decoder.decode(chunk, { stream: true });
-        let newline;
-        while ((newline = buffered.indexOf('\n')) >= 0) {
-          const line = buffered.slice(0, newline).trim();
-          buffered = buffered.slice(newline + 1);
-          if (!line) continue;
-          const event = JSON.parse(line);
-          events.push(event);
-          if (event.type === 'session.waiting' || event.type === 'session.completed' || event.type === 'session.failed') return events;
-        }
-      }
-      return events;
-    }
-  } finally {
-    clearTimeout(timer);
-    controller.abort();
-  }
-}
