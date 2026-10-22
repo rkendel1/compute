@@ -34,21 +34,22 @@ fn main() {
             }
         }
     }
-    // Forwards may also come from the kernel command line, where an init
-    // takes no arguments of its own: compute.forward=3128:3128.
-    if let Ok(cmdline) = std::fs::read_to_string("/proc/cmdline") {
-        for word in cmdline.split_whitespace() {
-            if let Some((listen, port)) = word
-                .strip_prefix("compute.forward=")
-                .and_then(|value| value.split_once(':'))
-                .and_then(|(listen, port)| Some((listen.parse().ok()?, port.parse().ok()?)))
-            {
-                forwards.push((listen, port));
+    if std::process::id() == 1 {
+        // /proc exists only once init has mounted it.
+        compute_guest::init_guest();
+        // Forwards may also come from the kernel command line, where an init
+        // takes no arguments of its own: compute.forward=3128:3128.
+        if let Ok(cmdline) = std::fs::read_to_string("/proc/cmdline") {
+            for word in cmdline.split_whitespace() {
+                if let Some((listen, port)) = word
+                    .strip_prefix("compute.forward=")
+                    .and_then(|value| value.split_once(':'))
+                    .and_then(|(listen, port)| Some((listen.parse().ok()?, port.parse().ok()?)))
+                {
+                    forwards.push((listen, port));
+                }
             }
         }
-    }
-    if std::process::id() == 1 {
-        compute_guest::init_guest();
         supervise(unix, forwards);
     }
     agent(unix, forwards);

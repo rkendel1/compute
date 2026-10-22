@@ -181,7 +181,7 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
     assert_eq!(exec("ls /sys/class/net").trim(), "lo");
 
     // Egress goes through the gateway, and only where it allows.
-    let allowed = exec("wget -q -O - http://example.com/ | head -c 2000");
+    let allowed = exec("wget -q -O - http://example.com/");
     assert!(allowed.contains("Example Domain"), "{allowed}");
     let refused = compute(
         &root,

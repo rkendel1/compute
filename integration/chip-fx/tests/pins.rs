@@ -49,7 +49,10 @@ fn the_harness_and_the_product_pin_the_same_stack_agent_commit() {
         .unwrap(),
     );
     assert_eq!(harness.len(), 1, "harness pins: {harness:?}");
-    assert_eq!(harness, product, "the harness and the product pin different commits");
+    assert_eq!(
+        harness, product,
+        "the harness and the product pin different commits"
+    );
     for line in manifest().lines().filter(|l| l.contains("git = ")) {
         assert!(
             line.contains("rkendel1/stack-agent"),
