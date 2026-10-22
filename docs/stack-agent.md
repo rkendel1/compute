@@ -106,6 +106,25 @@ the operator configured (`COMPUTE_STACK_AGENT_COMMAND_PATH`, `_CARGO_HOME`, `_RU
 key never enters a session (`crates/compute-stack-agent/tests/launcher.rs`,
 `the_provider_key_reaches_the_model_and_nothing_compute_stores_or_the_service_reports`).
 
+## From the Work page
+
+The Work page has an **Agent** panel: type a goal, press Run, watch the service's events, cancel. The
+controller carries each call to the service you started above and returns its answer; it stores
+nothing and forwards no Compute credential.
+
+| Route | Calls |
+| --- | --- |
+| `GET /agent` | whether a service answers, at which address (`reachable: false` says why and how to start it) |
+| `POST /agent/work` | `POST /v1/work` with only `{goal}` (and `kind`) |
+| `GET /agent/work/{work}`, `…/events` | the service's work record and events |
+| `POST /agent/work/{work}/cancel` | `POST /v1/work/{id}/cancel` |
+
+`COMPUTE_STACK_AGENT_URL` says where the service listens (default `http://127.0.0.1:8765`). Only a plain
+`http` loopback address is accepted, because the service has no authentication of its own. The service
+runs each goal in its own session, never in the computer whose page you are looking at. The Manage page
+no longer offers an "Agent" template: a template cannot supply the target, token and model key the
+service needs, and the placeholder it used (`exec ./agent`) never ran.
+
 ## Packaging
 
 The configured formula installs `compute-configured-stack-agent` and `compute-configured-agent`. The

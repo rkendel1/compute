@@ -820,7 +820,12 @@ fn accept_cloexec(listener: libc::c_int) -> libc::c_int {
     // SAFETY: accept without an address; the result is checked by the caller.
     #[cfg(target_os = "linux")]
     return unsafe {
-        libc::accept4(listener, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_CLOEXEC)
+        libc::accept4(
+            listener,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            libc::SOCK_CLOEXEC,
+        )
     };
     #[cfg(not(target_os = "linux"))]
     {
