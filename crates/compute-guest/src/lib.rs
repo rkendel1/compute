@@ -72,6 +72,13 @@ pub enum Request {
         #[serde(default, with = "bytes")]
         stdin: Vec<u8>,
     },
+    /// Mix the host's fresh entropy into the guest kernel's pool and force
+    /// its random number generator to reseed. A forked machine starts with
+    /// its siblings' generator state; this makes their output diverge.
+    Reseed {
+        #[serde(with = "bytes")]
+        entropy: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +103,8 @@ pub enum Event {
         code: Option<i32>,
         signal: Option<i32>,
     },
+    /// The kernel took the entropy and reseeded.
+    Reseeded,
 }
 
 pub async fn write_frame<W: AsyncWrite + Unpin, T: Serialize>(
@@ -154,7 +163,55 @@ pub async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(stream: S) -> i
             cwd,
             stdin,
         } => exec(argv, env, cwd, stdin, &mut reader, &mut writer).await,
+        Request::Reseed { entropy } => {
+            let answer = match reseed_kernel(&entropy) {
+                Ok(()) => Event::Reseeded,
+                Err(message) => Event::Error { message },
+            };
+            write_frame(&mut writer, &answer).await
+        }
     }
+}
+
+/// The most entropy one reseed carries.
+pub const MAX_RESEED_BYTES: usize = 512;
+
+/// `RNDADDENTROPY` (credit the entropy) then `RNDRESEEDCRNG` on
+/// `/dev/urandom`. Needs CAP_SYS_ADMIN, which the agent has as PID 1.
+fn reseed_kernel(entropy: &[u8]) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    if entropy.is_empty() || entropy.len() > MAX_RESEED_BYTES {
+        return Err(format!("reseed takes 1 to {MAX_RESEED_BYTES} bytes"));
+    }
+    // _IOW('R', 0x03, int[2]) and _IO('R', 0x07).
+    const RNDADDENTROPY: libc::c_ulong = 0x4008_5203;
+    const RNDRESEEDCRNG: libc::c_ulong = 0x5207;
+    let device = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/urandom")
+        .map_err(|error| format!("/dev/urandom: {error}"))?;
+    // struct rand_pool_info { int entropy_count; int buf_size; u32 buf[]; }
+    let mut info = Vec::with_capacity(8 + entropy.len());
+    info.extend_from_slice(&((entropy.len() * 8) as i32).to_ne_bytes());
+    info.extend_from_slice(&(entropy.len() as i32).to_ne_bytes());
+    info.extend_from_slice(entropy);
+    // SAFETY: both ioctls on an open /dev/urandom; the buffer is the
+    // rand_pool_info the first expects, and outlives the call.
+    unsafe {
+        if libc::ioctl(device.as_raw_fd(), RNDADDENTROPY as _, info.as_ptr()) != 0 {
+            return Err(format!(
+                "RNDADDENTROPY: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if libc::ioctl(device.as_raw_fd(), RNDRESEEDCRNG as _) != 0 {
+            return Err(format!(
+                "RNDRESEEDCRNG: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn exec<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
@@ -342,7 +399,7 @@ where
             Event::Exit { code, signal } => {
                 return Ok(code.unwrap_or_else(|| 128 + signal.unwrap_or(0)));
             }
-            Event::Pong { .. } => {}
+            Event::Pong { .. } | Event::Reseeded => {}
         }
     }
     Err(io::Error::new(
@@ -358,6 +415,27 @@ pub async fn ping<S: AsyncRead + AsyncWrite + Unpin>(stream: S) -> io::Result<St
     match read_frame::<_, Event>(&mut reader).await? {
         Some(Event::Pong { protocol }) => Ok(protocol),
         _ => Err(io::Error::other("the guest did not answer a ping")),
+    }
+}
+
+/// Give the guest fresh entropy and have it reseed; an error says why it
+/// could not (an older agent does not understand the request).
+pub async fn reseed<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    entropy: &[u8],
+) -> io::Result<()> {
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    write_frame(
+        &mut writer,
+        &Request::Reseed {
+            entropy: entropy.to_vec(),
+        },
+    )
+    .await?;
+    match read_frame::<_, Event>(&mut reader).await {
+        Ok(Some(Event::Reseeded)) => Ok(()),
+        Ok(Some(Event::Error { message })) => Err(io::Error::other(message)),
+        _ => Err(io::Error::other("the guest did not reseed")),
     }
 }
 

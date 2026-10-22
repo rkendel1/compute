@@ -1944,6 +1944,22 @@ impl RemoteProvider {
         self.session_action(session_id, "destroy").await
     }
 
+    /// Fork a running session into `count` new sessions.
+    pub async fn fork_session(
+        &self,
+        session_id: &str,
+        count: u32,
+    ) -> Result<compute_core::SessionFork, ProviderError> {
+        let session_id = checked_session_id(session_id)?;
+        self.send(
+            "POST",
+            &format!("/compute/sessions/{session_id}/fork"),
+            Some(&compute_core::SessionForkRequest { count }),
+            None,
+        )
+        .await
+    }
+
     pub async fn claim_session(
         &self,
         session_id: &str,
@@ -2115,6 +2131,9 @@ pub enum ProviderOperation {
     SessionResume,
     SessionDestroy,
     SessionClaim,
+    /// Fork a running session into new sessions, each admitted as a
+    /// creation is.
+    SessionFork,
     /// Expose an endpoint of a session. Every requested endpoint is its own
     /// authorization decision.
     SessionExpose,
@@ -2135,6 +2154,7 @@ impl ProviderOperation {
                 | Self::SessionResume
                 | Self::SessionDestroy
                 | Self::SessionClaim
+                | Self::SessionFork
                 | Self::SessionExpose
         )
     }
@@ -2633,6 +2653,10 @@ impl RemoteService {
                 encode_result(sessions.destroy(&id(), &owner).await)
             }
             ProviderOperation::SessionClaim => encode_result(sessions.claim(&id(), &owner).await),
+            ProviderOperation::SessionFork => {
+                let fork: compute_core::SessionForkRequest = decode(body)?;
+                encode_result(sessions.fork(&id(), &owner, fork).await)
+            }
             _ => Err(ProviderError::new(
                 ProviderErrorKind::ProtocolUnsupported,
                 "unknown provider endpoint",
@@ -2708,6 +2732,7 @@ fn parse_route(method: &str, path: &str) -> Result<Option<Route>, ProviderError>
             ("POST", Some("resume")) => ProviderOperation::SessionResume,
             ("POST", Some("destroy")) => ProviderOperation::SessionDestroy,
             ("POST", Some("claim")) => ProviderOperation::SessionClaim,
+            ("POST", Some("fork")) => ProviderOperation::SessionFork,
             _ => return Ok(None),
         };
         return Ok(route(operation, None, Some(session_id)));

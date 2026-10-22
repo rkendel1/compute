@@ -26,7 +26,7 @@ substrate (fakes or skips). A skipped test is not verification.
 | `network` | host network or `none`* | engine network or `none` | **egress gateway only** (no NIC) | none |
 | `suspend` / `resume` (storage kept) | yes | yes (container stop/start) | yes | n/a |
 | `memory_suspend` (processes and memory kept) | **no** | **no** | yes, verified on KVM | n/a |
-| machine fork / branch | **no** | **no** | **no** | n/a |
+| `fork` (machine fork) | **no** | **no** | yes; KVM verification pending (see below) | n/a |
 | `process_tree_termination` | where an ownership scan is available | yes | yes (the VM ends) | n/a |
 | receipt `substrate` evidence | no | engine, OCI runtime, image, limits | VMM version, kernel and rootfs digests, vCPUs, memory, network | n/a |
 
@@ -103,9 +103,34 @@ debug build, a GitHub-hosted runner with nested KVM, 1 vCPU, 256 MiB):
 create and boot 3.26 s, first command 137 ms, stop (suspend) 1.76 s,
 resume to ready 136 ms.
 
+## Machine fork
+
+`compute session fork SESSION [--count N]` (`POST /compute/sessions/{id}/fork`,
+1 to 16 children) on a provider that declares `fork`; anywhere else it is
+refused with `operation_unsupported` and nothing is created.
+
+| Question | Answer |
+| --- | --- |
+| What is forked | The running machine at one instant: guest memory, vCPU and device state, and the disk, all taken while the VM is paused. |
+| The source | Must be running (`ready`/`running`); it is paused only for the checkpoint and continues, unchanged, afterwards. |
+| What a child shares | Nothing mutable. Its own disk (a copy of the checkpoint's), its own VMM, vsock socket, and egress forward. Guest memory is mapped copy-on-write from the checkpoint's file, so a child's writes are its own. |
+| Identity | Each child is a new session (new session, job, and VM identity) with its own owner-scoped authority. No execution, connection grant, or endpoint of the source is carried over. Processes inside the guest keep their PIDs: that is the point of a machine fork. |
+| Randomness | Before a child is reported ready, its kernel's random generator is reseeded with fresh host entropy (`RNDADDENTROPY`, `RNDRESEEDCRNG`) through the guest agent; siblings otherwise continue from the same generator state. A child whose agent cannot reseed is failed. |
+| Policy and admission | Every child is admitted under policy as a creation is, before the machine is touched; a refusal stops further children and is reported. Credentials are never in the guest (the egress gateway holds them), so nothing is copied that would need revoking. |
+| Network | A child's network is its source's; with `network`, its only route out is its own forward to the gateway, which enforces the allowlist per connection. |
+| Partial failure | Each child is provisioned on its own; one that cannot start is `failed` with its reason, and its siblings are unaffected. If the checkpoint cannot be taken, every child is failed with that reason and the source runs on. |
+| Durability and restarts | Children are durable before the checkpoint is taken and name it in their `lineage`. After a restart, a child whose checkpoint exists is provisioned from it; one whose fork ended before the checkpoint existed is failed ("the fork ended before its checkpoint was taken"). The checkpoint is released once no child still needs it. |
+| Evidence | A child's `lineage` names its parent session, the checkpoint, and the checkpoint's evidence (snapshot digest, sizes, VMM); its receipts' substrate names the checkpoint's snapshot digest (`artifacts.checkpoint`). |
+| Limits | Only VMs booted with relocatable device paths (every VM created since fork existed) can be forked; an older VM is refused with that reason. A child has its source's resources and network. The disk is copied while the source is paused, so the pause grows with the disk's size. |
+
+**Status:** implemented; the manager's semantics (lineage, partial failure,
+restart recovery, refusals, checkpoint release) are tested against a fake
+provider, and the Firecracker path by `crates/compute-cli/tests/microvm.rs`
+on KVM (the `microvm` CI job). Until that job passes, machine fork on
+Firecracker is not verified.
+
 ## Not implemented
 
-- Machine fork or branch (from memory or from a disk snapshot).
 - Interactive terminals: PTY allocation, resize, streaming stdin, signals
   other than cancellation, reattaching to a running command's stream.
 - Measured startup and lifecycle latency: the KVM test prints one run's

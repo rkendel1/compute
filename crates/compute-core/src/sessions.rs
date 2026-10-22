@@ -146,10 +146,17 @@ pub struct SessionCapabilities {
     /// record that does not depend on it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub memory_suspend: bool,
+    /// Machine fork: children continue from the running machine's memory,
+    /// processes, devices, and disk captured at one instant, each with its
+    /// own copy of everything mutable; the source keeps running. Not a copy
+    /// of files: a provider that can only copy a filesystem does not offer
+    /// it. Written only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fork: bool,
 }
 
 impl SessionCapabilities {
-    pub const NAMES: [&'static str; 11] = [
+    pub const NAMES: [&'static str; 12] = [
         "exec",
         "terminal",
         "filesystem",
@@ -161,6 +168,7 @@ impl SessionCapabilities {
         "claim",
         "process_tree_termination",
         "memory_suspend",
+        "fork",
     ];
 
     /// Whether the named capability is present; `None` for an unknown name.
@@ -177,6 +185,7 @@ impl SessionCapabilities {
             "claim" => self.claim,
             "process_tree_termination" => self.process_tree_termination,
             "memory_suspend" => self.memory_suspend,
+            "fork" => self.fork,
             _ => return None,
         })
     }
@@ -455,6 +464,58 @@ pub struct ComputeSession {
     pub failure: Option<SessionFailure>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub executions: Vec<SessionExecution>,
+    /// Where a forked session came from. Absent for one that was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<SessionLineage>,
+}
+
+/// A forked session's origin: the session it was forked from and the
+/// machine checkpoint it continues from. Durable with the session, and the
+/// checkpoint's evidence also appears in its receipts' substrate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionLineage {
+    pub parent_session_id: SessionId,
+    /// The checkpoint every child of one fork shares.
+    pub checkpoint: String,
+    /// What the checkpoint consists of (digests, sizes, backend), once it
+    /// exists.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub evidence: BTreeMap<String, String>,
+    pub forked_at: DateTime<Utc>,
+}
+
+/// A running machine captured at one instant, from which children are
+/// provisioned. Immutable; released once no child needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineCheckpoint {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub evidence: BTreeMap<String, String>,
+}
+
+/// A request to fork a running session into `count` children.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionForkRequest {
+    pub count: u32,
+}
+
+/// The most children one fork may create.
+pub const MAX_FORK_CHILDREN: u32 = 16;
+
+/// What a fork did: the checkpoint, and every child it created, each in the
+/// state it reached (ready, or failed with its reason). Children the policy
+/// refused were not created; `refused` says why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionFork {
+    pub source_session_id: SessionId,
+    pub checkpoint: MachineCheckpoint,
+    pub children: Vec<ComputeSession>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
 impl ComputeSession {

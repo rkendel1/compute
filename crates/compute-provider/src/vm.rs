@@ -30,6 +30,17 @@
 //! and the page cache continue where they were. Connections over vsock (a
 //! command's own stream) do not survive; the commands started over them do.
 //!
+//! **Fork** (`fork`). A checkpoint pauses the running VM, writes a full
+//! snapshot and a copy of its disk (the two describe the same instant), and
+//! continues it. Each child gets its own copy of that disk and loads the
+//! snapshot in its own directory: devices are configured by paths relative
+//! to the VM's directory, so the same snapshot attaches each child to its
+//! own disk and vsock socket. Guest memory is mapped copy-on-write from the
+//! checkpoint's file, so a child's writes are its own. Before a child is
+//! reported ready, its kernel's random generator is reseeded with fresh
+//! host entropy: siblings otherwise continue from the same generator state.
+//! Every child is its own VM, VMM process, and egress forward.
+//!
 //! Nothing is substituted. A snapshot that cannot be written leaves the VM
 //! running, unchanged, and the stop fails. A VM without a valid suspension
 //! record (its VMM ended some other way, the snapshot is damaged, or another
@@ -64,6 +75,25 @@ const EGRESS_PORT: u32 = 3128;
 
 /// How long a VM may take to boot to a ping.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Where checkpoints live, beside the VMs.
+const CHECKPOINTS: &str = ".checkpoints";
+const CHECKPOINT_FORMAT: &str = "compute.vm-checkpoint@1";
+
+/// What a checkpoint consists of, written once all of it is on stable
+/// storage; a child is provisioned from it only if all of it matches.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointRecord {
+    format: String,
+    backend: String,
+    source: String,
+    snapshot_sha256: String,
+    snapshot_bytes: u64,
+    memory_bytes: u64,
+    disk_bytes: u64,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
 
 /// The record that a VM is suspended with its memory.
 const SUSPENSION: &str = "suspension.json";
@@ -212,6 +242,35 @@ impl VmSessionProvider {
 
     fn directory(&self, vm: &str) -> PathBuf {
         self.root.join(vm)
+    }
+
+    fn checkpoint_directory(checkpoint: &str) -> Result<PathBuf, ProviderError> {
+        let valid = checkpoint.strip_prefix("ckpt-").is_some_and(|digest| {
+            digest.len() == 24
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+        if valid {
+            Ok(PathBuf::from(CHECKPOINTS).join(checkpoint))
+        } else {
+            Err(ProviderError::new(
+                ProviderErrorKind::ArtifactInvalid,
+                "malformed checkpoint identity",
+            ))
+        }
+    }
+
+    /// Whether the VM's devices are configured relative to its directory,
+    /// so its snapshot can be loaded in another (a child's) directory.
+    fn relocatable(&self, vm: &str) -> bool {
+        std::fs::read(self.directory(vm).join("config.json"))
+            .ok()
+            .and_then(|config| serde_json::from_slice::<serde_json::Value>(&config).ok())
+            .is_some_and(|config| {
+                config["drives"][0]["path_on_host"] == "rootfs.ext4"
+                    && config["vsock"]["uds_path"] == "vsock.sock"
+            })
     }
 
     fn running_pid(&self, vm: &str) -> Option<i32> {
@@ -501,6 +560,13 @@ impl VmSessionProvider {
 
     /// Start a VMM and load the VM's snapshot into it, paused.
     async fn load(&self, vm: &str) -> Result<(), String> {
+        let directory = self.directory(vm);
+        self.load_from(vm, &directory.join("snapshot"), &directory.join("memory"))
+            .await
+    }
+
+    /// Start a VMM in `vm`'s directory and load a snapshot into it, paused.
+    async fn load_from(&self, vm: &str, snapshot: &Path, memory: &Path) -> Result<(), String> {
         self.launch(vm, None).map_err(|error| error.message)?;
         let socket = self.directory(vm).join("api.sock");
         for _ in 0..250 {
@@ -510,18 +576,65 @@ impl VmSessionProvider {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let body = serde_json::json!({
-            "snapshot_path": self.directory(vm).join("snapshot").display().to_string(),
+            "snapshot_path": snapshot.display().to_string(),
             "mem_backend": {
                 "backend_type": "File",
-                "backend_path": self.directory(vm).join("memory").display().to_string(),
+                "backend_path": memory.display().to_string(),
             },
             "resume_vm": false,
         });
         api(&socket, "PUT", "/snapshot/load", &body.to_string()).await
     }
 
+    /// Give the guest fresh host entropy and have its kernel reseed.
+    async fn reseed(&self, vm: &str) -> Result<(), String> {
+        let mut entropy = [0_u8; 64];
+        std::io::Read::read_exact(
+            &mut std::fs::File::open("/dev/urandom").map_err(|error| error.to_string())?,
+            &mut entropy,
+        )
+        .map_err(|error| error.to_string())?;
+        let stream = compute_guest::connect_firecracker(
+            &self.directory(vm).join("vsock.sock"),
+            compute_guest::GUEST_PORT,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        compute_guest::reseed(stream, &entropy)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// A checkpoint's record, if it is whole and loadable by this VMM.
+    fn checkpoint_record(&self, checkpoint: &str) -> Result<CheckpointRecord, String> {
+        let directory = self
+            .root
+            .join(Self::checkpoint_directory(checkpoint).map_err(|error| error.message)?);
+        let record: CheckpointRecord = serde_json::from_slice(
+            &std::fs::read(directory.join("checkpoint.json"))
+                .map_err(|error| format!("checkpoint {checkpoint} is not available: {error}"))?,
+        )
+        .map_err(|error| format!("checkpoint {checkpoint}'s record is not valid: {error}"))?;
+        if record.format != CHECKPOINT_FORMAT || record.backend != self.identity.backend {
+            return Err(format!(
+                "checkpoint {checkpoint} was written by {} ({}); this node runs {}",
+                record.backend, record.format, self.identity.backend
+            ));
+        }
+        let size = |name: &str| std::fs::metadata(directory.join(name)).map(|meta| meta.len());
+        if size("memory").ok() != Some(record.memory_bytes)
+            || size("rootfs.ext4").ok() != Some(record.disk_bytes)
+            || size("snapshot").ok() != Some(record.snapshot_bytes)
+            || file_sha256(&directory.join("snapshot")).ok().as_deref()
+                != Some(record.snapshot_sha256.as_str())
+        {
+            return Err(format!("checkpoint {checkpoint} is damaged"));
+        }
+        Ok(record)
+    }
+
     fn boot_config(&self, vm: &str, request: &ProvisionRequest) -> serde_json::Value {
-        let directory = self.directory(vm);
+        let _ = vm;
         let mut boot_args =
             "console=ttyS0 reboot=k panic=1 pci=off quiet init=/sbin/compute-guest".to_owned();
         if request.network != NetworkPolicy::None {
@@ -534,7 +647,9 @@ impl VmSessionProvider {
             },
             "drives": [{
                 "drive_id": "rootfs",
-                "path_on_host": directory.join("rootfs.ext4").display().to_string(),
+                // Relative to the VM's directory (the VMM's working
+                // directory), so a snapshot of it loads in a child's.
+                "path_on_host": "rootfs.ext4",
                 "is_root_device": true,
                 "is_read_only": false,
             }],
@@ -548,7 +663,7 @@ impl VmSessionProvider {
             },
             "vsock": {
                 "guest_cid": 3,
-                "uds_path": directory.join("vsock.sock").display().to_string(),
+                "uds_path": "vsock.sock",
             },
         })
     }
@@ -643,6 +758,7 @@ impl SessionProvider for VmSessionProvider {
             // Ending the VM ends every process in it.
             process_tree_termination: true,
             memory_suspend: true,
+            fork: true,
         }
     }
 
@@ -889,6 +1005,242 @@ impl SessionProvider for VmSessionProvider {
         Ok(())
     }
 
+    async fn checkpoint(
+        &self,
+        provider_session_id: &str,
+        checkpoint: &str,
+    ) -> Result<compute_core::MachineCheckpoint, ProviderError> {
+        let vm = Self::vm(provider_session_id)?;
+        let relative = Self::checkpoint_directory(checkpoint)?;
+        let _exclusive = self.exclusive(vm).await;
+        if self.running_pid(vm).is_none() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::SessionConflict,
+                "the VM is not running; only a running VM is forked",
+            ));
+        }
+        if !self.relocatable(vm) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::OperationUnsupported,
+                "this VM was booted before forkable snapshots (its devices have absolute paths); \
+                 fork a session created since",
+            ));
+        }
+        let source = self.directory(vm);
+        let target = self.root.join(&relative);
+        let staging = self.root.join(CHECKPOINTS).join(format!(".{checkpoint}"));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).map_err(crate::transport_error)?;
+        let socket = source.join("api.sock");
+        if let Err(error) = api(&socket, "PATCH", "/vm", r#"{"state":"Paused"}"#).await {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProviderUnavailable,
+                format!("the VM could not be paused: {error}"),
+            ));
+        }
+        // Memory, devices, and disk at one instant: all taken while paused.
+        let taken = async {
+            let body = serde_json::json!({
+                "snapshot_type": "Full",
+                "snapshot_path": staging.join("snapshot").display().to_string(),
+                "mem_file_path": staging.join("memory").display().to_string(),
+            });
+            api(&socket, "PUT", "/snapshot/create", &body.to_string()).await?;
+            std::fs::copy(source.join("rootfs.ext4"), staging.join("rootfs.ext4"))
+                .map_err(|error| format!("copying the disk: {error}"))?;
+            Ok::<_, String>(())
+        }
+        .await;
+        let continued = api(&socket, "PATCH", "/vm", r#"{"state":"Resumed"}"#).await;
+        let recorded = taken.and_then(|()| {
+            std::fs::copy(source.join("config.json"), staging.join("config.json"))
+                .map_err(|error| format!("copying the machine configuration: {error}"))?;
+            for name in ["snapshot", "memory", "rootfs.ext4", "config.json"] {
+                if !staging.join(name).is_file() {
+                    return Err(format!("the VMM did not write {name}"));
+                }
+                sync_path(&staging.join(name)).map_err(|error| format!("{name}: {error}"))?;
+            }
+            let size = |name: &str| {
+                std::fs::metadata(staging.join(name))
+                    .map(|meta| meta.len())
+                    .map_err(|error| format!("{name}: {error}"))
+            };
+            let record = CheckpointRecord {
+                format: CHECKPOINT_FORMAT.into(),
+                backend: self.identity.backend.clone(),
+                source: vm.to_owned(),
+                snapshot_sha256: file_sha256(&staging.join("snapshot"))
+                    .map_err(|error| error.to_string())?,
+                snapshot_bytes: size("snapshot")?,
+                memory_bytes: size("memory")?,
+                disk_bytes: size("rootfs.ext4")?,
+                created_at: chrono::Utc::now(),
+            };
+            std::fs::write(
+                staging.join("checkpoint.json"),
+                serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            sync_path(&staging.join("checkpoint.json")).map_err(|error| error.to_string())?;
+            let _ = std::fs::remove_dir_all(&target);
+            std::fs::rename(&staging, &target).map_err(|error| error.to_string())?;
+            sync_path(&self.root.join(CHECKPOINTS)).map_err(|error| error.to_string())?;
+            Ok(record)
+        });
+        let record = match (recorded, continued) {
+            (Ok(record), Ok(())) => record,
+            (taken, continued) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                let _ = std::fs::remove_dir_all(&target);
+                let mut message = match taken {
+                    Ok(_) => "the checkpoint was written".to_owned(),
+                    Err(error) => format!("the checkpoint could not be written: {error}"),
+                };
+                match continued {
+                    Ok(()) => message.push_str("; the VM continues, unchanged"),
+                    Err(error) => {
+                        message.push_str(&format!("; the VM could not be continued: {error}"))
+                    }
+                }
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProviderUnavailable,
+                    format!("{message} (VMM log: {})", self.log_tail(vm)),
+                ));
+            }
+        };
+        Ok(compute_core::MachineCheckpoint {
+            id: checkpoint.to_owned(),
+            evidence: BTreeMap::from([
+                ("backend".into(), record.backend),
+                ("snapshot".into(), record.snapshot_sha256),
+                ("memory_bytes".into(), record.memory_bytes.to_string()),
+                ("disk_bytes".into(), record.disk_bytes.to_string()),
+                ("taken_at".into(), record.created_at.to_rfc3339()),
+            ]),
+        })
+    }
+
+    async fn provision_from(
+        &self,
+        request: &ProvisionRequest,
+        checkpoint: &str,
+    ) -> Result<ProvisionedSession, ProviderError> {
+        let relative = Self::checkpoint_directory(checkpoint)?;
+        if !request.endpoints.is_empty() {
+            return Err(crate::unsupported(&self.kind(), "endpoints"));
+        }
+        let vm = format!(
+            "compute-vm-{}",
+            &format!(
+                "{:x}",
+                Sha256::digest(format!("vm:{}", request.session_id).as_bytes())
+            )[..24]
+        );
+        let mut capabilities = self.capabilities();
+        capabilities.network = request.network != NetworkPolicy::None;
+        let _exclusive = self.exclusive(&vm).await;
+        // Idempotent per session: a VM that runs is this session's.
+        if self.running_pid(&vm).is_some() {
+            self.ensure_egress(&vm);
+            return Ok(provisioned(&vm, capabilities));
+        }
+        let record = self
+            .checkpoint_record(checkpoint)
+            .map_err(|why| ProviderError::new(ProviderErrorKind::ProviderUnavailable, why))?;
+        let source = self.root.join(&relative);
+        let machine: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(source.join("config.json")).map_err(crate::transport_error)?,
+        )
+        .map_err(crate::transport_error)?;
+        // A child is the checkpoint's machine: its resources and network
+        // are the ones the snapshot was taken with.
+        let expected = self.boot_config(&vm, request);
+        let forwards = |config: &serde_json::Value| {
+            config["boot-source"]["boot_args"]
+                .as_str()
+                .is_some_and(|args| args.contains("compute.forward="))
+        };
+        if expected["machine-config"] != machine["machine-config"]
+            || forwards(&expected) != forwards(&machine)
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::CapabilityMismatch,
+                "a child's resources and network must be its checkpoint's",
+            ));
+        }
+        if forwards(&machine) && self.egress.is_none() {
+            return Err(crate::unsupported(
+                &self.kind(),
+                "network without an egress gateway (a VM has no other route out)",
+            ));
+        }
+        let directory = self.directory(&vm);
+        std::fs::create_dir_all(&directory).map_err(crate::transport_error)?;
+        // Its own disk: everything a child writes is its own.
+        let staged = directory.join("rootfs.ext4.tmp");
+        std::fs::copy(source.join("rootfs.ext4"), &staged).map_err(crate::transport_error)?;
+        std::fs::rename(&staged, directory.join("rootfs.ext4")).map_err(crate::transport_error)?;
+        std::fs::copy(source.join("config.json"), directory.join("config.json"))
+            .map_err(crate::transport_error)?;
+        std::fs::write(
+            directory.join("lineage.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "checkpoint": checkpoint,
+                "snapshot": record.snapshot_sha256,
+                "source": record.source,
+            }))
+            .map_err(crate::transport_error)?,
+        )
+        .map_err(crate::transport_error)?;
+        self.ensure_egress(&vm);
+        let started = async {
+            self.load_from(&vm, &source.join("snapshot"), &source.join("memory"))
+                .await
+                .map_err(|error| format!("loading the checkpoint: {error}"))?;
+            api(
+                &directory.join("api.sock"),
+                "PATCH",
+                "/vm",
+                r#"{"state":"Resumed"}"#,
+            )
+            .await
+            .map_err(|error| format!("continuing the child: {error}"))?;
+            self.wait_until_answering(&vm)
+                .await
+                .map_err(|error| error.message)?;
+            // Not ready until its generator no longer matches its siblings'.
+            self.reseed(&vm)
+                .await
+                .map_err(|error| format!("reseeding the child's random generator: {error}"))
+        }
+        .await;
+        if let Err(error) = started {
+            let log = self.log_tail(&vm);
+            self.kill(&vm);
+            let _ = std::fs::remove_dir_all(&directory);
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProviderUnavailable,
+                format!(
+                    "the child could not be started from {checkpoint}: {error} (VMM log: {log})"
+                ),
+            ));
+        }
+        Ok(provisioned(&vm, capabilities))
+    }
+
+    async fn release_checkpoint(&self, checkpoint: &str) -> Result<(), ProviderError> {
+        let relative = Self::checkpoint_directory(checkpoint)?;
+        // A running child keeps its mapping of the memory file; removing the
+        // name frees the space when the last child ends.
+        match std::fs::remove_dir_all(self.root.join(relative)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(crate::transport_error(error)),
+        }
+    }
+
     async fn destroy(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         let vm = Self::vm(provider_session_id)?;
         let _exclusive = self.exclusive(vm).await;
@@ -925,6 +1277,15 @@ impl SessionProvider for VmSessionProvider {
             if let Some(digest) = digest {
                 evidence.artifacts.insert(name.into(), digest.clone());
             }
+        }
+        // A forked VM continues from a checkpoint: name it.
+        if let Ok(lineage) = std::fs::read(self.directory(vm).join("lineage.json"))
+            && let Ok(lineage) = serde_json::from_slice::<serde_json::Value>(&lineage)
+            && let Some(snapshot) = lineage["snapshot"].as_str()
+        {
+            evidence
+                .artifacts
+                .insert("checkpoint".into(), snapshot.to_owned());
         }
         // What this VM was booted with, read back from its own config.
         if let Ok(config) = std::fs::read(self.directory(vm).join("config.json"))
@@ -994,11 +1355,89 @@ mod tests {
         record
     }
 
+    fn child_request() -> ProvisionRequest {
+        ProvisionRequest {
+            session_id: compute_core::SessionId::generate(),
+            resources: Default::default(),
+            network: NetworkPolicy::None,
+            isolation: Default::default(),
+            endpoints: vec![],
+            expires_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_is_named_only_by_its_own_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = provider(root.path());
+        for name in ["../escape", "ckpt-../../x", "ckpt-XYZ", "ckpt-0123", ""] {
+            let error = provider
+                .provision_from(&child_request(), name)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, ProviderErrorKind::ArtifactInvalid, "{name}");
+            assert!(provider.release_checkpoint(name).await.is_err(), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_child_of_a_missing_checkpoint_is_refused_before_any_vmm_starts() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = provider(root.path());
+        let error = provider
+            .provision_from(&child_request(), "ckpt-0123456789abcdef01234567")
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("not available"), "{error:?}");
+        // No VM directory was made for it.
+        assert!(
+            std::fs::read_dir(root.path().join("vms"))
+                .map(|entries| entries.count())
+                .unwrap_or(0)
+                == 0
+        );
+        // Releasing what is not there is not an error.
+        provider
+            .release_checkpoint("ckpt-0123456789abcdef01234567")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_a_running_relocatable_vm_is_checkpointed() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = provider(root.path());
+        std::fs::create_dir_all(provider.directory(VM)).unwrap();
+        let error = provider
+            .checkpoint(VM, "ckpt-0123456789abcdef01234567")
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::SessionConflict, "{error:?}");
+        // New VMs are configured relative to their directory; older ones
+        // (absolute paths) are not, and cannot be forked.
+        let config = provider.boot_config(VM, &child_request());
+        std::fs::write(
+            provider.directory(VM).join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        assert!(provider.relocatable(VM));
+        let mut absolute = config;
+        absolute["drives"][0]["path_on_host"] = "/var/lib/vm/rootfs.ext4".into();
+        std::fs::write(
+            provider.directory(VM).join("config.json"),
+            serde_json::to_vec(&absolute).unwrap(),
+        )
+        .unwrap();
+        assert!(!provider.relocatable(VM));
+    }
+
     #[test]
     fn memory_suspend_is_declared() {
         let root = tempfile::tempdir().unwrap();
         let capabilities = provider(root.path()).capabilities();
         assert!(capabilities.memory_suspend && capabilities.suspend && capabilities.resume);
+        assert!(capabilities.fork);
     }
 
     #[test]

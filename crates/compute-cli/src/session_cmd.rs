@@ -60,6 +60,10 @@ enum SessionCommands {
     Resume(TargetArgs),
     /// Keep an ephemeral session until it is destroyed.
     Claim(TargetArgs),
+    /// Fork a running session's machine into new sessions: each continues
+    /// from the same instant (memory, processes, disk), with its own copy of
+    /// everything mutable. The source keeps running. Needs `fork`.
+    Fork(ForkArgs),
     /// Tear the environment down. The record remains as evidence.
     Destroy(TargetArgs),
     /// Start working, through the Compute daemon: enter an environment you
@@ -141,6 +145,15 @@ struct TargetArgs {
     provider: Option<String>,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args, Debug)]
+struct ForkArgs {
+    #[command(flatten)]
+    target: TargetArgs,
+    /// How many children.
+    #[arg(long, default_value_t = 1)]
+    count: u32,
 }
 
 #[derive(Args, Debug)]
@@ -310,6 +323,40 @@ pub async fn session(command: SessionCommand) -> compute_core::Result<()> {
                 remote.destroy_session(&id).await
             })
             .await
+        }
+        SessionCommands::Fork(args) => {
+            let (remote, provider, _) = locate(&location, &args.target).await?;
+            let fork = remote
+                .fork_session(&args.target.session_id, args.count)
+                .await
+                .map_err(session_error)?;
+            if args.target.json {
+                pool::print_json(&fork);
+            } else {
+                println!(
+                    "Forked {} at checkpoint {}",
+                    fork.source_session_id, fork.checkpoint.id
+                );
+                for child in &fork.children {
+                    print_session(&provider, child);
+                }
+                if let Some(refused) = &fork.refused {
+                    println!("Refused further children: {refused}");
+                }
+            }
+            // Every child was asked for, and each one is ready.
+            let ready = fork
+                .children
+                .iter()
+                .filter(|child| child.status.is_usable())
+                .count();
+            if ready < args.count as usize {
+                return Err(compute_core::ComputeError::Runtime(format!(
+                    "{ready} of {} children are ready",
+                    args.count
+                )));
+            }
+            Ok(())
         }
     }
 }

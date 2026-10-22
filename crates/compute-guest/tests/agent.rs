@@ -169,3 +169,25 @@ async fn a_command_that_leaves_a_process_behind_still_ends() {
         libc::kill(pid.trim().parse().unwrap(), libc::SIGKILL);
     }
 }
+
+#[tokio::test]
+async fn the_agent_reseeds_the_kernel_generator_or_says_why_not() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = start(directory.path());
+    let connect = || tokio::net::UnixStream::connect(&agent.1);
+
+    let reseeded = compute_guest::reseed(connect().await.unwrap(), &[7_u8; 64]).await;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        reseeded.expect("as root, the kernel takes the entropy and reseeds");
+    } else {
+        let error = reseeded.expect_err("only a privileged agent may credit entropy");
+        assert!(error.to_string().contains("RNDADDENTROPY"), "{error}");
+    }
+    for bounds in [vec![], vec![0_u8; compute_guest::MAX_RESEED_BYTES + 1]] {
+        let error = compute_guest::reseed(connect().await.unwrap(), &bounds)
+            .await
+            .expect_err("out of bounds");
+        assert!(error.to_string().contains("reseed takes"), "{error}");
+    }
+}

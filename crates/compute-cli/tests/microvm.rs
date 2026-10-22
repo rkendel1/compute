@@ -178,13 +178,13 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
     assert_eq!(session["capabilities"]["memory_suspend"], true, "{created}");
     let created_in = started.elapsed();
     let id = session["session_id"].as_str().unwrap().to_owned();
-    let exec = |script: &str| {
+    let exec_in = |session: &str, script: &str| {
         ok(
             &root,
             &[
                 "session",
                 "exec",
-                &id,
+                session,
                 "--timeout",
                 "60s",
                 "--",
@@ -193,6 +193,10 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
                 script,
             ],
         )
+    };
+    let exec = |script: &str| exec_in(&id, script);
+    let info = |session: &str| -> Value {
+        serde_json::from_str(&ok(&root, &["session", "info", session, "--json"])).unwrap()
     };
 
     // Its own kernel and init, its own workspace, no network interface.
@@ -270,12 +274,8 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
     let counter = exec("cat /tmp/counter").trim().to_owned();
     let counted: u64 = exec("cat /tmp/count").trim().parse().unwrap();
     assert!(counted > 0);
-    let vm_directory = std::fs::read_dir(root.join("sessions/microvms"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+    let vms = root.join("sessions/microvms");
+    let vm_directory = vms.join(info(&id)["provider_session_id"].as_str().unwrap());
 
     // Stop suspends the machine, and reports it only once the suspension is
     // on stable storage.
@@ -339,6 +339,157 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
         "lifecycle (1 vCPU, 256 MiB, one run, debug build): create+boot {created_in:?}, \
          first exec {first_exec_in:?}, stop {stopped_in:?}, resume {resumed_in:?}"
     );
+
+    // Fork: two children continue from one instant of the running machine,
+    // each with its own copy of everything mutable; the source keeps running.
+    let forking = Instant::now();
+    let fork: Value = serde_json::from_str(&ok(
+        &root,
+        &["session", "fork", &id, "--count", "2", "--json"],
+    ))
+    .unwrap();
+    let forked_in = forking.elapsed();
+    let digest = fork["checkpoint"]["evidence"]["snapshot"]
+        .as_str()
+        .expect("the checkpoint's evidence")
+        .to_owned();
+    let children = fork["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|child| child["session_id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 2, "{fork}");
+    assert!(!children.contains(&id));
+    let counted_at_fork: u64 = exec("cat /tmp/count").trim().parse().unwrap();
+    for child in &children {
+        let record = info(child);
+        assert_eq!(record["status"], "ready", "{record}");
+        assert_eq!(record["lineage"]["parent_session_id"], id.as_str());
+        assert_eq!(record["lineage"]["evidence"]["snapshot"], digest.as_str());
+        assert_ne!(
+            record["provider_session_id"],
+            info(&id)["provider_session_id"]
+        );
+        // The same instant: memory, the same processes, the disk.
+        assert_eq!(exec_in(child, "cat /tmp/nonce").trim(), nonce);
+        assert_eq!(
+            exec_in(child, &format!("kill -0 {sleeper} && echo alive")).trim(),
+            "alive",
+            "the source's process runs in the child, with its PID"
+        );
+        assert_eq!(exec_in(child, "cat /tmp/counter").trim(), counter);
+        assert_eq!(exec_in(child, "cat note").trim(), "kept");
+    }
+    std::thread::sleep(Duration::from_millis(2500));
+    for child in &children {
+        let count: u64 = exec_in(child, "cat /tmp/count").trim().parse().unwrap();
+        assert!(
+            count > counted,
+            "the counter continues in the child ({count})"
+        );
+    }
+    // Independent: one child's writes and kills reach neither the source nor
+    // its sibling.
+    let (first, second) = (&children[0], &children[1]);
+    exec_in(
+        first,
+        &format!("echo first > /tmp/branch && echo first > branch-note && kill {sleeper}"),
+    );
+    for other in [second.as_str(), id.as_str()] {
+        assert_eq!(
+            exec_in(other, "cat /tmp/branch branch-note 2>/dev/null; echo end").trim(),
+            "end",
+            "{other} sees nothing of the first child's writes"
+        );
+        assert_eq!(
+            exec_in(other, &format!("kill -0 {sleeper} && echo alive")).trim(),
+            "alive"
+        );
+    }
+    assert!(exec("cat /tmp/count").trim().parse::<u64>().unwrap() >= counted_at_fork);
+    // Each child's random generator was reseeded: siblings diverge.
+    let random = |session: &str| exec_in(session, "head -c 32 /dev/urandom | od -An -tx1");
+    assert_ne!(random(first), random(second));
+    // Each child's egress is its own forward through the gateway.
+    assert!(exec_in(second, "wget -q -T 20 -O - http://example.com/").contains("Example Domain"));
+    // A child's receipts name the checkpoint it continues from.
+    let child_receipt = root.join("child-receipt.json");
+    ok(
+        &root,
+        &[
+            "session",
+            "exec",
+            second,
+            "--receipt",
+            child_receipt.to_str().unwrap(),
+            "--",
+            "true",
+        ],
+    );
+    let receipt: Value = serde_json::from_slice(&std::fs::read(&child_receipt).unwrap()).unwrap();
+    assert_eq!(
+        receipt["substrate"]["artifacts"]["checkpoint"],
+        digest.as_str(),
+        "{receipt}"
+    );
+    ok(
+        &root,
+        &["receipt", "verify", child_receipt.to_str().unwrap()],
+    );
+    // The checkpoint is released once every child runs.
+    let checkpoints = || {
+        std::fs::read_dir(vms.join(".checkpoints"))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+    assert_eq!(checkpoints(), 0, "the checkpoint is released");
+    // Lineage and the children survive a controller restart.
+    drop(server);
+    server = serve();
+    wait_for(&listen);
+    assert_eq!(info(first)["lineage"]["parent_session_id"], id.as_str());
+    assert_eq!(exec_in(first, "cat /tmp/branch").trim(), "first");
+    // A checkpoint that cannot be written fails the fork's child, with its
+    // reason, and the source runs on.
+    let checkpoint_root = vms.join(".checkpoints");
+    std::fs::create_dir_all(&checkpoint_root).unwrap();
+    std::fs::set_permissions(
+        &checkpoint_root,
+        std::os::unix::fs::PermissionsExt::from_mode(0o555),
+    )
+    .unwrap();
+    let refused = compute(&root, &["session", "fork", &id, "--count", "1", "--json"]);
+    std::fs::set_permissions(
+        &checkpoint_root,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    assert!(!refused.status.success());
+    let listed: Value = serde_json::from_str(&ok(&root, &["session", "list", "--json"])).unwrap();
+    let failed = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| &entry["session"])
+        .filter(|session| session["lineage"].is_object() && session["status"] == "failed")
+        .collect::<Vec<_>>();
+    assert_eq!(failed.len(), 1, "{listed}");
+    assert!(
+        failed[0]["failure"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("checkpoint")
+    );
+    assert_eq!(
+        exec(&format!("kill -0 {sleeper} && echo alive")).trim(),
+        "alive",
+        "the source runs on"
+    );
+    for child in &children {
+        ok(&root, &["session", "destroy", child]);
+    }
+    eprintln!("fork (2 children, 1 vCPU, 256 MiB, one run, debug build): {forked_in:?}");
 
     // A snapshot that cannot be written fails the stop and loses nothing.
     std::fs::create_dir(vm_directory.join("snapshot")).unwrap();
@@ -441,13 +592,13 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
 
     ok(&root, &["session", "destroy", &id]);
     drop(server);
+    let left = std::fs::read_dir(&vms)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("compute-vm-"))
+        .collect::<Vec<_>>();
+    assert!(left.is_empty(), "every VM and its disk are gone: {left:?}");
+    assert_eq!(checkpoints(), 0, "no checkpoint is left");
     let _ = std::fs::remove_dir_all(&root);
-    assert!(
-        !root.join("sessions/microvms").exists()
-            || std::fs::read_dir(root.join("sessions/microvms"))
-                .unwrap()
-                .next()
-                .is_none(),
-        "the VM and its disk are gone"
-    );
 }
