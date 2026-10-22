@@ -92,6 +92,7 @@ fn everything() -> SessionCapabilities {
         resume: true,
         claim: true,
         process_tree_termination: true,
+        memory_suspend: false,
     }
 }
 
@@ -107,6 +108,7 @@ fn minimal() -> SessionCapabilities {
         resume: false,
         claim: false,
         process_tree_termination: true,
+        memory_suspend: false,
     }
 }
 

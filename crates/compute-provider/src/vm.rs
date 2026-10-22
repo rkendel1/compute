@@ -19,11 +19,23 @@
 //! adapter connects that to the gateway, which enforces its allowlist and
 //! adds credentials. Without a gateway, only `none` is offered.
 //!
-//! **Suspend.** Stopping a session pauses its VM and writes a full snapshot
-//! (memory and devices); resuming loads it, so processes, open files, and
-//! memory continue where they were. A snapshot that cannot be written or
-//! loaded falls back to a stop and a cold boot of the same disk, and the
-//! resume says nothing that is not true: the disk is kept either way.
+//! **Suspend** (`memory_suspend`). Stopping a session pauses its VM and
+//! writes a full snapshot: guest memory, vCPU and device state. The
+//! snapshot, the memory file, and the VM's disk are flushed to stable
+//! storage, then a suspension record naming them is written; only then is
+//! the VMM ended and the stop reported. Resuming loads that snapshot paused,
+//! retires the record (the guest is about to change its disk, so the
+//! snapshot must never be loaded again), and continues the guest; it is
+//! reported only once the guest agent answers. Processes, their PIDs, tmpfs,
+//! and the page cache continue where they were. Connections over vsock (a
+//! command's own stream) do not survive; the commands started over them do.
+//!
+//! Nothing is substituted. A snapshot that cannot be written leaves the VM
+//! running, unchanged, and the stop fails. A VM without a valid suspension
+//! record (its VMM ended some other way, the snapshot is damaged, or another
+//! VMM version wrote it) is not resumed and not cold-booted in its place:
+//! the resume fails and says why. A stop or resume interrupted part way is
+//! completed by the next attempt.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -52,6 +64,35 @@ const EGRESS_PORT: u32 = 3128;
 
 /// How long a VM may take to boot to a ping.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The record that a VM is suspended with its memory.
+const SUSPENSION: &str = "suspension.json";
+const SUSPENSION_FORMAT: &str = "compute.vm-suspension@1";
+
+/// What a suspension consists of, written once all of it is on stable
+/// storage. A resume loads the snapshot only if all of it still matches.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Suspension {
+    format: String,
+    /// The VMM that wrote the snapshot; another version may not load it.
+    backend: String,
+    snapshot_sha256: String,
+    snapshot_bytes: u64,
+    memory_bytes: u64,
+    suspended_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn sync_path(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+fn file_sha256(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
 
 /// What a microVM session is made from.
 #[derive(Debug, Clone)]
@@ -171,8 +212,22 @@ impl VmSessionProvider {
         for stale in ["api.sock", "vsock.sock"] {
             let _ = std::fs::remove_file(directory.join(stale));
         }
-        let log = std::fs::File::create(directory.join("firecracker.log"))
+        // Appended, never truncated: a failed snapshot's evidence survives
+        // the restore or boot that follows it.
+        let mut log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(directory.join("firecracker.log"))
             .map_err(crate::transport_error)?;
+        let _ = std::io::Write::write_all(
+            &mut log,
+            format!(
+                "== compute: {} at {}\n",
+                if config.is_some() { "boot" } else { "restore" },
+                chrono::Utc::now().to_rfc3339()
+            )
+            .as_bytes(),
+        );
         let mut command = std::process::Command::new(&self.image.firecracker);
         command
             .arg("--api-sock")
@@ -216,15 +271,12 @@ impl VmSessionProvider {
                 return Ok(());
             }
             if self.running_pid(vm).is_none() || tokio::time::Instant::now() > deadline {
-                let log = std::fs::read_to_string(self.directory(vm).join("firecracker.log"))
-                    .unwrap_or_default();
-                let tail = log.lines().rev().take(5).collect::<Vec<_>>();
                 return Err(ProviderError::new(
                     ProviderErrorKind::ProviderUnavailable,
                     format!(
                         "the VM did not answer within {}s: {}",
                         BOOT_TIMEOUT.as_secs(),
-                        tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
+                        self.log_tail(vm)
                     ),
                 ));
             }
@@ -279,23 +331,149 @@ impl VmSessionProvider {
         self.forget_egress(vm);
     }
 
-    /// Pause the VM and write a full snapshot of it.
-    async fn snapshot(&self, vm: &str) -> Result<(), String> {
-        let socket = self.directory(vm).join("api.sock");
-        api(&socket, "PATCH", "/vm", r#"{"state":"Paused"}"#).await?;
-        let body = serde_json::json!({
-            "snapshot_type": "Full",
-            "snapshot_path": self.directory(vm).join("snapshot").display().to_string(),
-            "mem_file_path": self.directory(vm).join("memory").display().to_string(),
-        });
-        api(&socket, "PUT", "/snapshot/create", &body.to_string()).await
+    /// The last lines the VMM wrote, for an error that names its cause.
+    fn log_tail(&self, vm: &str) -> String {
+        let log =
+            std::fs::read_to_string(self.directory(vm).join("firecracker.log")).unwrap_or_default();
+        let tail = log.lines().rev().take(5).collect::<Vec<_>>();
+        tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
     }
 
-    /// Restore a VM from its snapshot, running.
-    async fn restore(&self, vm: &str) -> Result<(), String> {
+    /// The VM's suspension record, if it is present and everything it names
+    /// is still intact and loadable by this VMM.
+    fn suspension(&self, vm: &str) -> Result<Suspension, String> {
+        let directory = self.directory(vm);
+        let bytes = std::fs::read(directory.join(SUSPENSION)).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "it was not suspended (no memory snapshot)".to_owned()
+            } else {
+                format!("its suspension record: {error}")
+            }
+        })?;
+        let record: Suspension = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("its suspension record is not valid: {error}"))?;
+        if record.format != SUSPENSION_FORMAT {
+            return Err(format!("its suspension record is {}", record.format));
+        }
+        if record.backend != self.identity.backend {
+            return Err(format!(
+                "it was suspended by {}, and this node runs {}",
+                record.backend, self.identity.backend
+            ));
+        }
+        let size = |name: &str| std::fs::metadata(directory.join(name)).map(|meta| meta.len());
+        if size("memory").ok() != Some(record.memory_bytes) {
+            return Err("its memory file is missing or not the size it was written".into());
+        }
+        if size("snapshot").ok() != Some(record.snapshot_bytes)
+            || file_sha256(&directory.join("snapshot")).ok().as_deref()
+                != Some(record.snapshot_sha256.as_str())
+        {
+            return Err("its device snapshot is missing or changed".into());
+        }
+        Ok(record)
+    }
+
+    fn write_suspension(&self, vm: &str, record: &Suspension) -> std::io::Result<()> {
+        let directory = self.directory(vm);
+        let staged = directory.join(format!("{SUSPENSION}.tmp"));
+        {
+            let mut file = std::fs::File::create(&staged)?;
+            std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(record)?)?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&staged, directory.join(SUSPENSION))?;
+        sync_path(&directory)
+    }
+
+    fn retire_suspension(&self, vm: &str) -> std::io::Result<()> {
+        let directory = self.directory(vm);
+        match std::fs::remove_file(directory.join(SUSPENSION)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        sync_path(&directory)
+    }
+
+    /// Pause the running VM, write a full snapshot, put it and the disk on
+    /// stable storage, record the suspension, and end the VMM. On any
+    /// failure before the record, the VM is continued and left running.
+    async fn suspend(&self, vm: &str) -> Result<(), ProviderError> {
+        let directory = self.directory(vm);
+        let socket = directory.join("api.sock");
+        for stale in ["snapshot", "memory"] {
+            let _ = std::fs::remove_file(directory.join(stale));
+        }
+        api(&socket, "PATCH", "/vm", r#"{"state":"Paused"}"#)
+            .await
+            .map_err(|error| {
+                ProviderError::new(
+                    ProviderErrorKind::ProviderUnavailable,
+                    format!("the VM could not be paused: {error}"),
+                )
+            })?;
+        let written = async {
+            let body = serde_json::json!({
+                "snapshot_type": "Full",
+                "snapshot_path": directory.join("snapshot").display().to_string(),
+                "mem_file_path": directory.join("memory").display().to_string(),
+            });
+            api(&socket, "PUT", "/snapshot/create", &body.to_string()).await?;
+            let stable = |name: &str| {
+                sync_path(&directory.join(name))
+                    .map_err(|error| format!("flushing {name}: {error}"))
+            };
+            for name in ["snapshot", "memory", "rootfs.ext4"] {
+                stable(name)?;
+            }
+            let size = |name: &str| {
+                std::fs::metadata(directory.join(name))
+                    .map(|meta| meta.len())
+                    .map_err(|error| format!("{name}: {error}"))
+            };
+            let record = Suspension {
+                format: SUSPENSION_FORMAT.into(),
+                backend: self.identity.backend.clone(),
+                snapshot_sha256: file_sha256(&directory.join("snapshot"))
+                    .map_err(|error| format!("snapshot: {error}"))?,
+                snapshot_bytes: size("snapshot")?,
+                memory_bytes: size("memory")?,
+                suspended_at: chrono::Utc::now(),
+            };
+            self.write_suspension(vm, &record)
+                .map_err(|error| format!("recording the suspension: {error}"))
+        }
+        .await;
+        if let Err(error) = written {
+            let _ = self.retire_suspension(vm);
+            for partial in ["snapshot", "memory"] {
+                let _ = std::fs::remove_file(directory.join(partial));
+            }
+            // Nothing was lost yet: the VM continues as it was.
+            let continued = api(&socket, "PATCH", "/vm", r#"{"state":"Resumed"}"#).await;
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProviderUnavailable,
+                match continued {
+                    Ok(()) => format!(
+                        "the VM could not be suspended: {error}; it is still running, unchanged"
+                    ),
+                    Err(again) => format!(
+                        "the VM could not be suspended: {error}; and it could not be continued: \
+                         {again} (it is paused)"
+                    ),
+                },
+            ));
+        }
+        self.kill(vm);
+        Ok(())
+    }
+
+    /// Start a VMM and load the VM's snapshot into it, paused.
+    async fn load(&self, vm: &str) -> Result<(), String> {
         self.launch(vm, None).map_err(|error| error.message)?;
         let socket = self.directory(vm).join("api.sock");
-        for _ in 0..100 {
+        for _ in 0..250 {
             if socket.exists() {
                 break;
             }
@@ -307,7 +485,7 @@ impl VmSessionProvider {
                 "backend_type": "File",
                 "backend_path": self.directory(vm).join("memory").display().to_string(),
             },
-            "resume_vm": true,
+            "resume_vm": false,
         });
         api(&socket, "PUT", "/snapshot/load", &body.to_string()).await
     }
@@ -361,26 +539,44 @@ async fn api(socket: &Path, method: &str, path: &str, body: &str) -> Result<(), 
         .map_err(|error| error.to_string())?;
     let mut answer = Vec::new();
     let mut chunk = [0_u8; 4096];
+    // The head, then as much body as it declares.
+    let complete = |answer: &[u8]| -> bool {
+        let Some(end) = answer.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let head = String::from_utf8_lossy(&answer[..end]).to_ascii_lowercase();
+        let length = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        answer.len() >= end + 4 + length
+    };
     loop {
-        let read = tokio::time::timeout(Duration::from_secs(60), stream.read(&mut chunk))
+        let read = tokio::time::timeout(Duration::from_secs(120), stream.read(&mut chunk))
             .await
             .map_err(|_| format!("{method} {path}: no answer"))?
             .map_err(|error| error.to_string())?;
         answer.extend_from_slice(&chunk[..read]);
-        if read == 0 || answer.windows(4).any(|window| window == b"\r\n\r\n") {
+        if read == 0 || complete(&answer) {
             break;
         }
     }
     let text = String::from_utf8_lossy(&answer);
     let status = text.split(' ').nth(1).unwrap_or_default();
     if status.starts_with('2') {
-        Ok(())
-    } else {
-        Err(format!(
-            "{method} {path}: {}",
-            text.lines().next().unwrap_or("no answer")
-        ))
+        return Ok(());
     }
+    // Firecracker explains a refusal in the body's `fault_message`.
+    let fault = text
+        .split_once("\r\n\r\n")
+        .and_then(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
+        .and_then(|body| body["fault_message"].as_str().map(str::to_owned));
+    Err(format!(
+        "{method} {path}: {}{}",
+        text.lines().next().unwrap_or("no answer"),
+        fault.map(|fault| format!(": {fault}")).unwrap_or_default()
+    ))
 }
 
 fn provisioned(vm: &str, capabilities: SessionCapabilities) -> ProvisionedSession {
@@ -416,6 +612,7 @@ impl SessionProvider for VmSessionProvider {
             claim: true,
             // Ending the VM ends every process in it.
             process_tree_termination: true,
+            memory_suspend: true,
         }
     }
 
@@ -560,14 +757,18 @@ impl SessionProvider for VmSessionProvider {
 
     async fn stop(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         let vm = Self::vm(provider_session_id)?;
-        if self.running_pid(vm).is_some() {
-            let snapshotted = self.snapshot(vm).await;
-            if snapshotted.is_err() {
-                // A snapshot that failed must not be loaded later.
-                let _ = std::fs::remove_file(self.directory(vm).join("snapshot"));
-                let _ = std::fs::remove_file(self.directory(vm).join("memory"));
-            }
+        if self.suspension(vm).is_ok() {
+            // Already suspended: a repeated stop, or one interrupted after
+            // its record was written (the VM has been paused since).
             self.kill(vm);
+        } else if self.running_pid(vm).is_some() {
+            self.suspend(vm).await?;
+        } else {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProviderUnavailable,
+                "the VM is not running and was not suspended: its memory is gone, so there is \
+                 nothing to suspend (its disk is kept until the session is destroyed)",
+            ));
         }
         if self.running_pid(vm).is_some() {
             return Err(ProviderError::new(
@@ -588,24 +789,71 @@ impl SessionProvider for VmSessionProvider {
             ));
         }
         if self.running_pid(vm).is_some() {
-            return Ok(());
-        }
-        self.ensure_egress(vm);
-        let restored = if directory.join("snapshot").exists() {
-            let restored = self.restore(vm).await;
-            if restored.is_err() {
+            if directory.join(SUSPENSION).exists() {
+                // Paused since its snapshot and never continued (a stop or a
+                // resume that was interrupted): load it again.
                 self.kill(vm);
+            } else {
+                // A resume interrupted after the record was retired: the
+                // loaded VM only needs to be continued.
+                let _ = api(
+                    &directory.join("api.sock"),
+                    "PATCH",
+                    "/vm",
+                    r#"{"state":"Resumed"}"#,
+                )
+                .await;
                 self.ensure_egress(vm);
+                return self.wait_until_answering(vm).await;
             }
-            restored.is_ok()
-        } else {
-            false
-        };
-        if !restored {
-            // The disk is kept; memory is not: a cold boot of the same disk.
-            self.launch(vm, Some(&directory.join("config.json")))?;
         }
-        self.wait_until_answering(vm).await
+        let record = self.suspension(vm).map_err(|why| {
+            ProviderError::new(
+                ProviderErrorKind::ProviderUnavailable,
+                format!(
+                    "the VM cannot be resumed with its memory: {why}; it is not cold-booted in \
+                     its place"
+                ),
+            )
+        })?;
+        self.ensure_egress(vm);
+        if let Err(error) = self.load(vm).await {
+            self.kill(vm);
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProviderUnavailable,
+                format!(
+                    "the VM's snapshot could not be loaded: {error} ({})",
+                    self.log_tail(vm)
+                ),
+            ));
+        }
+        // From here the guest runs and changes its disk: the snapshot must
+        // never be loaded again.
+        if let Err(error) = self.retire_suspension(vm) {
+            self.kill(vm);
+            return Err(crate::transport_error(error));
+        }
+        if let Err(error) = api(
+            &directory.join("api.sock"),
+            "PATCH",
+            "/vm",
+            r#"{"state":"Resumed"}"#,
+        )
+        .await
+        {
+            // The guest never ran: the suspension is still whole.
+            self.kill(vm);
+            let _ = self.write_suspension(vm, &record);
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProviderUnavailable,
+                format!("the restored VM could not be continued: {error}"),
+            ));
+        }
+        self.wait_until_answering(vm).await?;
+        for spent in ["snapshot", "memory"] {
+            let _ = std::fs::remove_file(directory.join(spent));
+        }
+        Ok(())
     }
 
     async fn destroy(&self, provider_session_id: &str) -> Result<(), ProviderError> {
@@ -671,5 +919,133 @@ impl SessionProvider for VmSessionProvider {
             );
         }
         Some(evidence)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VM: &str = "compute-vm-0123456789abcdef01234567";
+
+    /// A provider whose VMM does not exist: nothing here may launch one.
+    fn provider(root: &Path) -> VmSessionProvider {
+        VmSessionProvider::new(
+            VmImage {
+                firecracker: root.join("no-firecracker"),
+                kernel: root.join("no-kernel"),
+                rootfs: root.join("no-rootfs"),
+            },
+            root.join("vms"),
+            root.join("compute"),
+        )
+    }
+
+    /// A suspended VM's files, as `suspend` leaves them.
+    fn suspended(provider: &VmSessionProvider) -> Suspension {
+        let directory = provider.directory(VM);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("rootfs.ext4"), b"disk").unwrap();
+        std::fs::write(directory.join("snapshot"), b"vcpu and device state").unwrap();
+        std::fs::write(directory.join("memory"), vec![7_u8; 4096]).unwrap();
+        let record = Suspension {
+            format: SUSPENSION_FORMAT.into(),
+            backend: provider.identity.backend.clone(),
+            snapshot_sha256: file_sha256(&directory.join("snapshot")).unwrap(),
+            snapshot_bytes: 21,
+            memory_bytes: 4096,
+            suspended_at: chrono::Utc::now(),
+        };
+        provider.write_suspension(VM, &record).unwrap();
+        record
+    }
+
+    #[test]
+    fn memory_suspend_is_declared() {
+        let root = tempfile::tempdir().unwrap();
+        let capabilities = provider(root.path()).capabilities();
+        assert!(capabilities.memory_suspend && capabilities.suspend && capabilities.resume);
+    }
+
+    #[test]
+    fn a_whole_suspension_is_loadable() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = provider(root.path());
+        let record = suspended(&provider);
+        assert_eq!(provider.suspension(VM), Ok(record));
+    }
+
+    #[test]
+    fn a_damaged_or_foreign_suspension_is_not() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = provider(root.path());
+        let directory = provider.directory(VM);
+
+        suspended(&provider);
+        std::fs::write(directory.join("memory"), vec![7_u8; 100]).unwrap();
+        assert!(provider.suspension(VM).unwrap_err().contains("memory file"));
+
+        suspended(&provider);
+        std::fs::write(directory.join("snapshot"), b"vcpu and device stat!").unwrap();
+        assert!(
+            provider
+                .suspension(VM)
+                .unwrap_err()
+                .contains("device snapshot")
+        );
+
+        let mut record = suspended(&provider);
+        record.backend = "Firecracker v0.0.1".into();
+        provider.write_suspension(VM, &record).unwrap();
+        assert!(
+            provider
+                .suspension(VM)
+                .unwrap_err()
+                .contains("suspended by")
+        );
+
+        suspended(&provider);
+        provider.retire_suspension(VM).unwrap();
+        assert!(
+            provider
+                .suspension(VM)
+                .unwrap_err()
+                .contains("not suspended")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_vm_without_its_memory_is_neither_resumed_nor_cold_booted() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = provider(root.path());
+        suspended(&provider);
+        provider.retire_suspension(VM).unwrap();
+        let error = provider.resume(VM).await.unwrap_err();
+        assert!(
+            error.message.contains("not cold-booted in its place"),
+            "{error:?}"
+        );
+        // Nothing was launched: the VMM does not even exist.
+        assert!(provider.running_pid(VM).is_none());
+        assert!(!provider.directory(VM).join("pid").exists());
+    }
+
+    #[tokio::test]
+    async fn a_vm_that_ended_without_suspension_cannot_be_stopped_as_suspended() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = provider(root.path());
+        std::fs::create_dir_all(provider.directory(VM)).unwrap();
+        let error = provider.stop(VM).await.unwrap_err();
+        assert!(error.message.contains("memory is gone"), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_repeated_stop_of_a_suspended_vm_succeeds() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = provider(root.path());
+        let record = suspended(&provider);
+        provider.stop(VM).await.unwrap();
+        provider.stop(VM).await.unwrap();
+        assert_eq!(provider.suspension(VM), Ok(record));
     }
 }
