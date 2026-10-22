@@ -23,6 +23,7 @@ mod direct;
 mod distribution;
 mod egress_cmd;
 mod environment_cmd;
+mod guest_cmd;
 mod launch_cmd;
 mod managed;
 mod network_cmd;
@@ -109,6 +110,9 @@ enum Commands {
     /// Run the egress gateway: allowlisted, DNS-pinned outbound access,
     /// with credentials added outside the session.
     Egress(egress_cmd::EgressCommand),
+    /// Enter a microVM session: the client its jobs run on the host.
+    #[command(name = "guest-exec", hide = true)]
+    GuestExec(guest_cmd::GuestExecCommand),
     /// Inspect, validate, and check execution policy. Never executes.
     Policy(policy_cmd::PolicyCommand),
     /// Show the full decision chain for a workload: requirements,
@@ -190,7 +194,8 @@ struct ServeCommand {
     #[arg(long = "target-feature")]
     target_features: Vec<String>,
     /// The environments sessions run in: `workspace` (a directory per
-    /// session) or `container` (a container per session).
+    /// session), `container` (a container per session), or `microvm` (a
+    /// Firecracker microVM per session).
     #[arg(long, default_value = "workspace")]
     session_provider: String,
     /// The container runtime for `--session-provider container`.
@@ -203,6 +208,20 @@ struct ServeCommand {
     /// (gVisor). The engine's default when unset.
     #[arg(long)]
     container_oci_runtime: Option<String>,
+    /// The `firecracker` executable for `--session-provider microvm`.
+    #[arg(long, default_value = "firecracker")]
+    vm_firecracker: String,
+    /// The guest kernel (an uncompressed vmlinux).
+    #[arg(long)]
+    vm_kernel: Option<PathBuf>,
+    /// The guest root filesystem (ext4, with /sbin/compute-guest); each
+    /// session boots its own copy.
+    #[arg(long)]
+    vm_rootfs: Option<PathBuf>,
+    /// An egress gateway (`compute egress serve`) that is a microVM's only
+    /// route out; without one, microVM sessions have no network.
+    #[arg(long)]
+    vm_egress: Option<std::net::SocketAddr>,
     #[arg(long, default_value = "7d", value_parser = parse_retention)]
     job_retention: Duration,
     #[arg(long, default_value_t = 4)]
@@ -1704,9 +1723,46 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     }
                     Some(Arc::new(provider))
                 }
+                "microvm" => {
+                    let (Some(kernel), Some(rootfs)) = (&command.vm_kernel, &command.vm_rootfs)
+                    else {
+                        return Err(compute_core::ComputeError::InvalidWorkload(
+                            "--session-provider microvm needs --vm-kernel and --vm-rootfs".into(),
+                        ));
+                    };
+                    if !std::path::Path::new("/dev/kvm").exists() {
+                        return Err(compute_core::ComputeError::InvalidWorkload(
+                            "--session-provider microvm needs /dev/kvm on this node".into(),
+                        ));
+                    }
+                    let firecracker = which::which(&command.vm_firecracker).map_err(|_| {
+                        compute_core::ComputeError::InvalidWorkload(format!(
+                            "{} is not installed",
+                            command.vm_firecracker
+                        ))
+                    })?;
+                    let mut provider = compute_provider::VmSessionProvider::new(
+                        compute_provider::VmImage {
+                            firecracker,
+                            kernel: std::fs::canonicalize(kernel)?,
+                            rootfs: std::fs::canonicalize(rootfs)?,
+                        },
+                        command.session_store.join("microvms"),
+                        std::env::current_exe()?,
+                    );
+                    if let Some(gateway) = command.vm_egress {
+                        provider = provider.with_egress(gateway);
+                    }
+                    for feature in ["kvm", "firecracker"] {
+                        if !features.iter().any(|known| known == feature) {
+                            features.push(feature.into());
+                        }
+                    }
+                    Some(Arc::new(provider))
+                }
                 other => {
                     return Err(compute_core::ComputeError::InvalidWorkload(format!(
-                        "unknown session provider `{other}`: expected workspace or container"
+                        "unknown session provider `{other}`: expected workspace, container, or microvm"
                     )));
                 }
             };
@@ -1727,6 +1783,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Cloudflare(command) => cloudflare_cmd::cloudflare(command).await?,
         Commands::Session(command) => session_cmd::session(*command).await?,
         Commands::Egress(command) => egress_cmd::egress(command).await?,
+        Commands::GuestExec(command) => guest_cmd::guest_exec(command).await?,
         Commands::Target(command) => computer_cmd::target(command).await?,
         Commands::Policy(command) => policy_cmd::policy(command).await?,
         Commands::Explain(command) => policy_cmd::explain(command).await?,

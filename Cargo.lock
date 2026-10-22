@@ -696,6 +696,7 @@ dependencies = [
  "compute-core",
  "compute-egress",
  "compute-environment",
+ "compute-guest",
  "compute-network",
  "compute-placement",
  "compute-policy",
@@ -719,6 +720,7 @@ dependencies = [
  "toml",
  "walkdir",
  "wat",
+ "which",
 ]
 
 [[package]]
@@ -872,6 +874,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "compute-core",
+ "compute-guest",
  "compute-policy",
  "compute-runtime",
  "libc",

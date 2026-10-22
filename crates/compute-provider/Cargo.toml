@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+compute-guest = { path = "../compute-guest" }
 async-trait.workspace = true
 chrono.workspace = true
 compute-core = { path = "../compute-core" }

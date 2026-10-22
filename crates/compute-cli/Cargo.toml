@@ -10,10 +10,12 @@ name = "compute"
 path = "src/main.rs"
 
 [dependencies]
+which.workspace = true
 base64 = "0.22"
 async-trait.workspace = true
 compute-core = { path = "../compute-core" }
 compute-egress = { path = "../compute-egress" }
+compute-guest = { path = "../compute-guest" }
 compute-project = { path = "../compute-project" }
 compute-worker-github = { path = "../compute-worker-github" }
 compute-environment = { path = "../compute-environment" }

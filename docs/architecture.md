@@ -310,7 +310,8 @@ the target, the supervisor, an upgraded controller, or the packaged binary
 for read-only version and starter-catalog verification), a tool (curl, npm,
 compilers, the FeltDB verifier, the read-only `pax` project observer,
 runtime acquisition, container engines behind a target's container
-sessions, the guest agent inside a microVM session, which runs the
+sessions, Firecracker behind a target's microVM sessions, the guest agent
+inside a microVM session, which runs the
 command of a session job the target admitted, `compute stack`'s git, npm and recorded test-suite tooling), or — only in a configured installation, and only an executable
 the installed distribution itself ships — a **managed service** declared in
 the distribution profile; none runs a workload.

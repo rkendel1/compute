@@ -512,9 +512,9 @@ fn loopback_up() {
         for (at, byte) in b"lo".iter().enumerate() {
             request.ifr_name[at] = *byte as libc::c_char;
         }
-        if libc::ioctl(socket, libc::SIOCGIFFLAGS, &mut request) == 0 {
+        if libc::ioctl(socket, libc::SIOCGIFFLAGS as _, &mut request) == 0 {
             request.ifr_ifru.ifru_flags |= libc::IFF_UP as libc::c_short;
-            libc::ioctl(socket, libc::SIOCSIFFLAGS, &request);
+            libc::ioctl(socket, libc::SIOCSIFFLAGS as _, &request);
         }
         libc::close(socket);
     }

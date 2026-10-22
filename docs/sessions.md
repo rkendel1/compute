@@ -329,6 +329,21 @@ the engine knows) for a user-space kernel boundary. A command's environment
 values reach the container by name (`--env NAME`), copied from the job's own
 sealed environment, never on the `docker exec` command line.
 
+`--session-provider microvm` hosts each session in its own Firecracker
+microVM (`--vm-kernel`, `--vm-rootfs` built by
+`distribution/microvm/build-rootfs.sh`, `--vm-firecracker`; the node needs
+`/dev/kvm`). Each VM boots its own kernel and its own copy of the root
+filesystem, with the guest agent (`compute-guest`) as PID 1; commands are
+jobs on the node that enter the VM over vsock (`compute guest-exec`), so
+they keep their job, execution, and receipt. The VM has no network
+interface: with `--vm-egress ADDR` (a `compute egress serve` gateway), a
+session that asks for `network` gets exactly one route out, through the
+gateway's allowlist and credential brokering ([egress.md](egress.md));
+without it, microVM sessions offer only `none`. `stop` pauses the VM and
+writes a full snapshot, and `resume` loads it: processes, memory, and open
+files continue. A snapshot that cannot be written or loaded falls back to a
+cold boot of the same disk. Verified on KVM in CI (`.github/workflows/microvm.yml`).
+
 Two session fields exist for environment computers
 ([computers.md](computers.md)): `persistent` (created claimed, with no
 TTL; requires the `claim` capability) and `reference`, an idempotency key
