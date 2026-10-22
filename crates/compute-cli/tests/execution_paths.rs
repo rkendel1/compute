@@ -208,8 +208,8 @@ fn every_execution_site_is_classified() {
             },
             Allowed {
                 file: "crates/compute-provider/src/vm.rs",
-                count: 1,
-                why: "the microVM session substrate of a target (Firecracker), inside a Computer",
+                count: 2,
+                why: "the microVM session substrate of a target (Firecracker, and its --version for receipt evidence), inside a Computer",
             },
             Allowed {
                 file: "crates/compute-guest/src/lib.rs",

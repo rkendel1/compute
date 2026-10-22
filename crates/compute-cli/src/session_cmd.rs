@@ -187,7 +187,8 @@ enum FileCommands {
 #[derive(Args, Debug)]
 struct FileArgs {
     session_id: String,
-    /// The path, relative to the session's workspace unless absolute.
+    /// The path, relative to the session's workspace (no `..`; a link that
+    /// resolves outside it is refused).
     path: String,
     #[arg(long)]
     provider: Option<String>,
@@ -585,19 +586,20 @@ async fn file(location: &PoolLocation, command: FileCommands) -> compute_core::R
         provider: args.provider.clone(),
         json: false,
     };
+    workspace_relative(&args.path)?;
     let (remote, _, _) = locate(location, &target).await?;
     let script = |body: &str| {
         compute_core::SessionCommand::new(vec![
             "sh".into(),
             "-c".into(),
-            body.into(),
+            format!("set -eu\n{CONFINE}{body}"),
             "sh".into(),
             args.path.clone(),
         ])
     };
     match operation {
         "read" => {
-            let mut command = script("base64 < \"$1\"");
+            let mut command = script("confine \"$1\"\nbase64 < \"$1\"");
             command.output_bytes = Some(1024 * 1024 * 1024);
             let result = file_command(&remote, &args.session_id, command).await?;
             if result.stdout.truncated {
@@ -628,17 +630,60 @@ async fn file(location: &PoolLocation, command: FileCommands) -> compute_core::R
                     bytes
                 }
             };
+            // The deepest directory that exists must be inside; what is
+            // created under it is. The bytes land in a fresh file (never one
+            // a link names) and replace the target, never what it links to.
             let mut command = script(
-                "mkdir -p \"$(dirname \"$1\")\" && base64 -d > \"$1.compute-write\" && mv -f \"$1.compute-write\" \"$1\"",
+                "dir=$(dirname \"$1\")\nexisting=$dir\nwhile [ ! -e \"$existing\" ]; do existing=$(dirname \"$existing\"); done\nconfine \"$existing\"\nmkdir -p \"$dir\"\nconfine \"$dir\"\ntmp=$(mktemp \"$dir/.compute-write.XXXXXX\")\ntrap 'rm -f \"$tmp\"' EXIT\nbase64 -d > \"$tmp\"\nmv -f \"$tmp\" \"$1\"",
             );
             command.stdin = Some(engine.encode(bytes));
             file_command(&remote, &args.session_id, command).await?;
         }
         _ => {
-            let result =
-                file_command(&remote, &args.session_id, script("ls -la -- \"$1\"")).await?;
+            let result = file_command(
+                &remote,
+                &args.session_id,
+                script("confine \"$1\"\nls -la -- \"$1\""),
+            )
+            .await?;
             print!("{}", result.stdout.text);
         }
+    }
+    Ok(())
+}
+
+/// Shell that refuses a path whose resolution (links included) leaves the
+/// workspace, the directory every session command starts in.
+const CONFINE: &str = r#"root=$(pwd -P)
+confine() {
+  real=$(readlink -f -- "$1") || { echo "compute: $1 cannot be resolved" >&2; exit 3; }
+  case "$real" in
+    "$root"|"$root"/*) ;;
+    *) echo "compute: $1 resolves outside the workspace" >&2; exit 3 ;;
+  esac
+}
+"#;
+
+/// A file operation's path: relative to the workspace, with no parent
+/// steps. (Links are checked where they are, inside the session.)
+fn workspace_relative(path: &str) -> compute_core::Result<()> {
+    let invalid = |why: &str| {
+        Err(ComputeError::InvalidWorkload(format!(
+            "{path:?} {why}: a path is relative to the session's workspace"
+        )))
+    };
+    let candidate = std::path::Path::new(path);
+    if path.is_empty() || path.contains('\0') {
+        return invalid("is not a path");
+    }
+    if candidate.is_absolute() {
+        return invalid("is absolute");
+    }
+    if candidate
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return invalid("leaves the workspace");
     }
     Ok(())
 }

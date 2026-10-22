@@ -464,6 +464,15 @@ pub trait SessionProvider: Send + Sync {
         let _ = provider_session_id;
         Err(unsupported(&self.kind(), "claim"))
     }
+
+    /// What an environment's commands run in, for their receipts: kind,
+    /// backend, start artifacts, configured limits. Only what the provider
+    /// knows; `None` when it adds nothing to what the job's own receipt
+    /// already says.
+    fn substrate(&self, provider_session_id: &str) -> Option<compute_core::SubstrateEvidence> {
+        let _ = provider_session_id;
+        None
+    }
 }
 
 /// The explicit error for an operation a provider does not offer.
@@ -638,6 +647,12 @@ impl SessionProvider for WorkspaceSessionProvider {
     async fn claim(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         self.directory(provider_session_id)?;
         Ok(())
+    }
+
+    fn substrate(&self, _provider_session_id: &str) -> Option<compute_core::SubstrateEvidence> {
+        // A directory on the target, its commands host processes: the job's
+        // own receipt (runtime, host profile) is the whole story.
+        Some(compute_core::SubstrateEvidence::new("workspace"))
     }
 }
 
@@ -1721,6 +1736,10 @@ impl SessionManager {
                     job_id: execution.job_id.clone(),
                     execution_id: execution.execution_id.clone(),
                     session_id: Some(session.session_id.clone()),
+                    substrate: session
+                        .provider_session_id
+                        .as_deref()
+                        .and_then(|id| self.provider.substrate(id)),
                 }),
             })
             .await?;

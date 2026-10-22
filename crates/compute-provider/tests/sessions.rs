@@ -1350,6 +1350,18 @@ fn the_workspace_provider_runs_commands_in_a_private_persistent_directory() {
                 );
             }
         }
+        // The receipt says what the command ran in, as the provider reports
+        // it; the substrate is part of what was signed.
+        let substrate = fed
+            .result
+            .receipt
+            .as_ref()
+            .unwrap()
+            .substrate
+            .clone()
+            .unwrap();
+        assert_eq!(substrate.kind, "workspace");
+        assert_eq!(substrate.version, compute_core::SUBSTRATE_EVIDENCE_VERSION);
         // The target signs what it ran, with the key it publishes.
         let key_id = std::fs::read_to_string(stores.jobs.join("receipt-key.id")).unwrap();
         fed.result
@@ -1583,6 +1595,21 @@ fn the_container_adapter_translates_the_session_contract() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         assert_eq!(carried.result.stdout.text, "s3cret-value\n", "{carried:?}");
+        let substrate = carried
+            .result
+            .receipt
+            .as_ref()
+            .unwrap()
+            .substrate
+            .clone()
+            .unwrap();
+        assert_eq!(substrate.kind, "container");
+        assert_eq!(
+            substrate.backend.as_deref(),
+            Some("fake-docker (OCI runtime runsc)")
+        );
+        assert_eq!(substrate.artifacts["image_reference"], "debian:stable-slim");
+        assert_eq!(substrate.limits["pids"], "4096");
         assert_eq!(
             std::fs::read_to_string(state.join("by-name")).unwrap(),
             "API_TOKEN\n"

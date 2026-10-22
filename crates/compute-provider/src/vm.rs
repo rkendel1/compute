@@ -73,11 +73,50 @@ pub struct VmSessionProvider {
     client: PathBuf,
     egress: Option<SocketAddr>,
     forwarding: Mutex<BTreeSet<String>>,
+    /// The VMM and what every VM boots from, measured once.
+    identity: VmIdentity,
+}
+
+#[derive(Debug, Clone, Default)]
+struct VmIdentity {
+    backend: String,
+    kernel: Option<String>,
+    rootfs: Option<String>,
+}
+
+impl VmIdentity {
+    fn measure(image: &VmImage) -> Self {
+        let digest = |path: &Path| -> Option<String> {
+            let mut file = std::fs::File::open(path).ok()?;
+            let mut hasher = Sha256::new();
+            std::io::copy(&mut file, &mut hasher).ok()?;
+            Some(format!("sha256:{:x}", hasher.finalize()))
+        };
+        let version = std::process::Command::new(&image.firecracker)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()
+            .and_then(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .map(|line| line.trim().to_owned())
+            })
+            .filter(|line| !line.is_empty())
+            .unwrap_or_else(|| "Firecracker (version unknown)".into());
+        Self {
+            backend: version,
+            kernel: digest(&image.kernel),
+            rootfs: digest(&image.rootfs),
+        }
+    }
 }
 
 impl VmSessionProvider {
     pub fn new(image: VmImage, root: impl Into<PathBuf>, client: impl Into<PathBuf>) -> Self {
         Self {
+            identity: VmIdentity::measure(&image),
             image,
             root: root.into(),
             client: client.into(),
@@ -587,5 +626,46 @@ impl SessionProvider for VmSessionProvider {
 
     async fn claim(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         Self::vm(provider_session_id).map(|_| ())
+    }
+
+    fn substrate(&self, provider_session_id: &str) -> Option<compute_core::SubstrateEvidence> {
+        let vm = Self::vm(provider_session_id).ok()?;
+        let mut evidence = compute_core::SubstrateEvidence::new("microvm");
+        evidence.backend = Some(self.identity.backend.clone());
+        for (name, digest) in [
+            ("kernel", &self.identity.kernel),
+            ("rootfs", &self.identity.rootfs),
+        ] {
+            if let Some(digest) = digest {
+                evidence.artifacts.insert(name.into(), digest.clone());
+            }
+        }
+        // What this VM was booted with, read back from its own config.
+        if let Ok(config) = std::fs::read(self.directory(vm).join("config.json"))
+            && let Ok(config) = serde_json::from_slice::<serde_json::Value>(&config)
+        {
+            let machine = &config["machine-config"];
+            if let Some(vcpus) = machine["vcpu_count"].as_u64() {
+                evidence.limits.insert("vcpus".into(), vcpus.to_string());
+            }
+            if let Some(mib) = machine["mem_size_mib"].as_u64() {
+                evidence
+                    .limits
+                    .insert("memory_bytes".into(), (mib * 1024 * 1024).to_string());
+            }
+            let forwarded = config["boot-source"]["boot_args"]
+                .as_str()
+                .is_some_and(|args| args.contains("compute.forward="));
+            evidence.limits.insert(
+                "network".into(),
+                if forwarded {
+                    "egress-gateway-only"
+                } else {
+                    "none"
+                }
+                .into(),
+            );
+        }
+        Some(evidence)
     }
 }

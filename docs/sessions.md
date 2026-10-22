@@ -142,8 +142,10 @@ the identities and returns; follow the job with `compute remote status` or
   command's.
 - `--follow` prints the output as the command writes it.
 
-`file read|write|list` move bytes in and out of the session's workspace
-(paths are relative to it unless absolute). Each is an ordinary durable
+`file read|write|list` move bytes in and out of the session's workspace.
+Paths are relative to the workspace: an absolute path or a `..` step is
+refused before anything runs, and inside the session a path whose
+resolution (links included) leaves the workspace is refused. Each is an ordinary durable
 command with its own job and receipt, so it works the same on every
 provider: a workspace, a container, a VM. A write replaces the file
 atomically and creates its directories.

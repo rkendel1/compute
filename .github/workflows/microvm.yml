@@ -29,6 +29,7 @@ env:
 jobs:
   microvm:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -68,7 +69,7 @@ jobs:
           COMPUTE_FIRECRACKER: ${{ runner.temp }}/vm/firecracker
           COMPUTE_VM_KERNEL: ${{ runner.temp }}/vm/vmlinux
           COMPUTE_VM_ROOTFS: ${{ runner.temp }}/vm/rootfs.ext4
-        run: cargo test --locked -p compute-cli --test microvm -- --nocapture
+        run: timeout 900 cargo test --locked -p compute-cli --test microvm -- --nocapture
       - name: Guest agent and egress gateway
         run: cargo test --locked -p compute-guest -p compute-egress
       - name: VM logs

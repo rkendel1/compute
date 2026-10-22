@@ -35,6 +35,7 @@ credential.
 | --- | --- |
 | **Allowlist** | A host is reached only when a rule names it exactly, or `*.suffix` for its subdomains (never the apex), on an allowed port (443 unless `ports` says otherwise). Everything else is `403`. |
 | **DNS pinning** | The gateway resolves the name once and connects to that address. Every answer must be a public address unless `allow_private` is set, so an allowed name cannot be pointed at the node, its metadata service, or the private network. |
+| **Name binding** | A tunnel carries only what it was opened for: a TLS ClientHello must name the `CONNECT` host (no domain fronting to another tenant at the same address), a tunnel on 443 must be TLS, and a plain-HTTP request's `Host` must be the host in its URL. |
 | **Credential brokering** | For a host with a credential, the gateway terminates TLS with a leaf from its own CA, requires the request's `Host` to be that host, replaces the header (a value the session sent is discarded), allows one request per connection, and re-encrypts to the upstream with full certificate verification. |
 | **A constrained CA** | The gateway's CA is generated at start, lives only in memory, and carries X.509 name constraints for the credentialed hosts: even trusted by a session, it cannot vouch for any other name. |
 | **No cleartext credentials** | Plain `http://` requests to allowed hosts are forwarded, but never with a credential. |

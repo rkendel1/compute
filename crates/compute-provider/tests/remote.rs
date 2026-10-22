@@ -285,10 +285,13 @@ async fn durable_jobs_are_idempotent_owned_verifiable_and_restart_safe() {
             .map(|reservation| reservation.state),
         Some(compute_core::ReservationState::Released)
     );
-    restarted_client
+    let receipt = restarted_client
         .job_receipt(&submitted.job_id.0)
         .await
         .unwrap();
+    // A job submitted directly is not a session's: no one can make its
+    // receipt claim a substrate.
+    assert!(receipt.receipt.substrate.is_none());
 
     let request_path = store.path().join(&submitted.job_id.0).join("request.json");
     let original_request = fs::read(&request_path).unwrap();

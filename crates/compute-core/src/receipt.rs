@@ -249,11 +249,55 @@ pub struct ExecutionReceipt {
     pub finished_at: Option<DateTime<Utc>>,
     pub provenance: ExecutionProvenance,
     pub receipt_hash: ReceiptHash,
+    /// What the execution ran *in*, when that is not the process this
+    /// receipt otherwise describes: a container, a virtual machine. Reported
+    /// by the session provider that owns the environment; part of the
+    /// hashed body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substrate: Option<SubstrateEvidence>,
     /// The target's Ed25519 signature over `receipt_hash`, when the target
     /// signs. Not part of the hashed body; resealing a receipt drops it,
     /// because the signer never saw what changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<ReceiptSignature>,
+}
+
+/// The environment an execution ran in, as the provider that runs it reports
+/// it. Backend-neutral: `kind` and `backend` are names, and every
+/// backend-specific fact is a named entry, so a new backend adds entries, not
+/// fields. It is evidence of what was configured and started, not proof
+/// that the boundary held.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubstrateEvidence {
+    /// `compute.substrate@1`.
+    pub version: String,
+    /// `workspace`, `container`, `microvm`.
+    pub kind: String,
+    /// The software that provides it, with its version when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Identities of what it started from (`kernel`, `rootfs`, `image`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artifacts: BTreeMap<String, String>,
+    /// Limits the substrate was configured to enforce (`vcpus`,
+    /// `memory_bytes`, `pids`, `network`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub limits: BTreeMap<String, String>,
+}
+
+pub const SUBSTRATE_EVIDENCE_VERSION: &str = "compute.substrate@1";
+
+impl SubstrateEvidence {
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            version: SUBSTRATE_EVIDENCE_VERSION.into(),
+            kind: kind.into(),
+            backend: None,
+            artifacts: BTreeMap::new(),
+            limits: BTreeMap::new(),
+        }
+    }
 }
 
 /// A detached statement by the target that ran an execution: "this is the
@@ -568,6 +612,8 @@ struct ReceiptBody<'a> {
     started_at: &'a Option<DateTime<Utc>>,
     finished_at: &'a Option<DateTime<Utc>>,
     provenance: &'a ExecutionProvenance,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    substrate: &'a Option<SubstrateEvidence>,
 }
 
 impl ExecutionReceipt {
@@ -911,6 +957,7 @@ impl ExecutionReceipt {
             started_at: &self.started_at,
             finished_at: &self.finished_at,
             provenance: &self.provenance,
+            substrate: &self.substrate,
         }
     }
 
@@ -1080,6 +1127,7 @@ pub fn create_execution_receipt(
             manifest_id: environment.manifest_id,
         },
         receipt_hash: ReceiptHash(String::new()),
+        substrate: None,
         signature: None,
     };
     receipt.seal()?;

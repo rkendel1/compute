@@ -223,7 +223,30 @@ async fn a_bound_credential_reaches_the_upstream_and_never_the_session() {
         "an unbound host is never terminated by the gateway"
     );
 
+    // A tunnel opened to one host cannot carry TLS for another (domain
+    // fronting): the server name must be the host that was admitted.
+    let (line, tunnel) = connect(gateway.address(), &format!("open.test:{}", open.port())).await;
+    assert!(line.contains(" 200 "), "{line}");
+    assert!(
+        get(
+            tunnel.unwrap(),
+            "fronted.test",
+            gateway.ca_der(),
+            "fronted.test",
+            None
+        )
+        .await
+        .is_err(),
+        "a fronted server name is refused"
+    );
+
     let decisions = gateway.decisions();
+    assert!(
+        decisions
+            .iter()
+            .any(|d| !d.allowed && d.reason.contains("fronted.test")),
+        "{decisions:?}"
+    );
     assert!(decisions.iter().any(|d| d.host == "api.test" && d.brokered));
     assert!(
         decisions
@@ -244,7 +267,11 @@ async fn destinations_outside_the_policy_or_on_private_addresses_are_refused() {
         "127.0.0.1:0".parse().unwrap(),
         GatewayConfig {
             policy: EgressPolicy {
-                allow: vec![rule("api.test", api.port()), rule("*.example.com", 443)],
+                allow: vec![
+                    rule("api.test", api.port()),
+                    rule("*.example.com", 443),
+                    rule("www.example.com", 80),
+                ],
                 allow_private: false,
             },
             resolve: BTreeMap::from([("api.test".to_owned(), vec![api])]),
@@ -264,7 +291,18 @@ async fn destinations_outside_the_policy_or_on_private_addresses_are_refused() {
     // The apex is not a subdomain.
     let (line, _) = connect(gateway.address(), "example.com:443").await;
     assert!(line.contains("403"), "{line}");
+    // Plain HTTP: the Host a server routes on must be the admitted host.
+    let mut plain = TcpStream::connect(gateway.address()).await.unwrap();
+    plain
+        .write_all(b"GET http://www.example.com/ HTTP/1.1\r\nHost: internal.test\r\n\r\n")
+        .await
+        .unwrap();
+    let mut answer = String::new();
+    let _ = plain.read_to_string(&mut answer).await;
+    assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
     let decisions = gateway.decisions();
+    assert!(decisions[4].reason.contains("Host"), "{:?}", decisions[4]);
+    let decisions = &decisions[..4];
     assert_eq!(decisions.len(), 4);
     assert!(decisions.iter().all(|decision| !decision.allowed));
     assert!(

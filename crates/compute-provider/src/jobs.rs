@@ -33,6 +33,9 @@ struct StoredRequest {
     /// policy changes later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     admission: Option<Admission>,
+    /// The session substrate the receipt records (see [`ReservedJob`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    substrate: Option<compute_core::SubstrateEvidence>,
     /// The request's bundle bytes, sealed at rest (see [`RequestSeal`]): the
     /// bundle carries the command and its environment, which may hold a
     /// computer's configuration values. On disk the request's own bundle is
@@ -152,6 +155,9 @@ pub(crate) struct ReservedJob {
     pub job_id: JobId,
     pub execution_id: String,
     pub session_id: Option<compute_core::SessionId>,
+    /// What the session's environment is, as its provider reports it. Only
+    /// a session sets it: a job submitted directly cannot claim one.
+    pub substrate: Option<compute_core::SubstrateEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,13 +439,14 @@ impl JobManager {
                 status: job.status,
             });
         }
-        let (job_id, execution_id, session_id) = match reserved {
+        let (job_id, execution_id, session_id, substrate) = match reserved {
             Some(reserved) => (
                 reserved.job_id,
                 Some(reserved.execution_id),
                 reserved.session_id,
+                reserved.substrate,
             ),
-            None => (JobId::generate(), None, None),
+            None => (JobId::generate(), None, None, None),
         };
         let directory = self.directory(&job_id);
         let dependency_id = bundle
@@ -522,6 +529,7 @@ impl JobManager {
                 idempotency_key_hash: key_hash,
                 request,
                 admission: None,
+                substrate,
                 sealed_artifact: None,
             },
         )?;
@@ -692,6 +700,7 @@ impl JobManager {
             let _ = self.release(&job_id).await;
             return;
         }
+        let substrate = stored.substrate.clone();
         let execution_request = stored.request;
         let reservation_evidence = self.read_job(&job_id).ok().and_then(|job| {
             let reservation = job.reservation?;
@@ -722,6 +731,7 @@ impl JobManager {
             Ok(mut response) => {
                 if let Some(receipt) = response.result.receipt.as_mut() {
                     receipt.reservation = Some(reservation_evidence.clone());
+                    receipt.substrate = substrate;
                     if let Some(placement) = receipt.placement.as_mut() {
                         placement.reservation = Some(reservation_evidence);
                     }

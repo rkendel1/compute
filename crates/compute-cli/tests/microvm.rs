@@ -167,7 +167,22 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
     assert_eq!(session["status"], "ready", "{created}");
     assert_eq!(session["provider_kind"], "microvm");
     let id = session["session_id"].as_str().unwrap().to_owned();
-    let exec = |script: &str| ok(&root, &["session", "exec", &id, "--", "sh", "-c", script]);
+    let exec = |script: &str| {
+        ok(
+            &root,
+            &[
+                "session",
+                "exec",
+                &id,
+                "--timeout",
+                "60s",
+                "--",
+                "sh",
+                "-c",
+                script,
+            ],
+        )
+    };
 
     // Its own kernel and init, its own workspace, no network interface.
     let host_kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap();
@@ -181,7 +196,7 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
     assert_eq!(exec("ls /sys/class/net").trim(), "lo");
 
     // Egress goes through the gateway, and only where it allows.
-    let allowed = exec("wget -q -O - http://example.com/");
+    let allowed = exec("wget -q -T 20 -O - http://example.com/");
     assert!(allowed.contains("Example Domain"), "{allowed}");
     let refused = compute(
         &root,
@@ -189,10 +204,12 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
             "session",
             "exec",
             &id,
+            "--timeout",
+            "60s",
             "--",
             "sh",
             "-c",
-            "wget -q -O - http://github.com/",
+            "wget -q -T 20 -O - http://github.com/",
         ],
     );
     assert!(
@@ -207,6 +224,8 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
             "session",
             "exec",
             &id,
+            "--timeout",
+            "60s",
             "--stdin",
             "--",
             "sh",
@@ -231,6 +250,54 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
         exec("kill -0 \"$(cat sleeper)\" && echo alive").trim(),
         "alive",
         "the process survived suspension"
+    );
+
+    // The receipt says the command ran in this VM: the VMM, what it booted,
+    // and the limits it was booted with.
+    let receipt_path = root.join("vm-receipt.json");
+    ok(
+        &root,
+        &[
+            "session",
+            "exec",
+            &id,
+            "--receipt",
+            receipt_path.to_str().unwrap(),
+            "--",
+            "true",
+        ],
+    );
+    let receipt: Value = serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    let substrate = &receipt["substrate"];
+    assert_eq!(substrate["kind"], "microvm", "{receipt}");
+    assert!(
+        substrate["backend"]
+            .as_str()
+            .unwrap()
+            .starts_with("Firecracker"),
+        "{substrate}"
+    );
+    assert!(
+        substrate["artifacts"]["kernel"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert!(
+        substrate["artifacts"]["rootfs"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(substrate["limits"]["vcpus"], "1");
+    assert_eq!(
+        substrate["limits"]["memory_bytes"],
+        (256u64 * 1024 * 1024).to_string()
+    );
+    assert_eq!(substrate["limits"]["network"], "egress-gateway-only");
+    ok(
+        &root,
+        &["receipt", "verify", receipt_path.to_str().unwrap()],
     );
 
     ok(&root, &["session", "destroy", &id]);

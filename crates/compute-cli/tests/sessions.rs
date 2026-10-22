@@ -291,6 +291,73 @@ fn a_session_is_a_durable_computer_on_whatever_provider_placement_selects() {
             .status
             .success()
     );
+    // Only the workspace: no absolute paths, no parent steps, and no link
+    // that resolves outside it, for reads, listings, or writes.
+    std::fs::write(root.join("outside-target"), "host file").unwrap();
+    cli.ok(&[
+        "session",
+        "exec",
+        &id,
+        "--",
+        "sh",
+        "-c",
+        &format!(
+            "ln -s {} escape && mkdir -p inner && ln -s ../.. inner/up && ln -s / rootlink",
+            root.display()
+        ),
+    ]);
+    for (operation, path) in [
+        ("read", "/etc/passwd"),
+        ("read", "../outside-target"),
+        ("read", "escape/outside-target"),
+        ("list", "escape"),
+        ("read", "inner/up/../x"),
+        ("write", "escape/planted"),
+        ("write", "rootlink/tmp/planted"),
+        ("write", "inner/up/up-planted"),
+    ] {
+        let mut refused = std::process::Command::new(env!("CARGO_BIN_EXE_compute"));
+        runtimes::with_fixture_runtimes(&mut refused);
+        let refused = refused
+            .current_dir(&root)
+            .env_remove("COMPUTE_POOL_CONFIG")
+            .env_remove("COMPUTE_CAPABILITY_CACHE")
+            .args(["session", "file", operation, &id, path, "--input"])
+            .arg(&local)
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&refused.stderr);
+        assert!(!refused.status.success(), "{operation} {path} was allowed");
+        assert!(said.contains("workspace"), "{operation} {path}: {said}");
+    }
+    assert!(!root.join("planted").exists());
+    assert!(!std::path::Path::new("/tmp/planted").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("outside-target")).unwrap(),
+        "host file"
+    );
+    // A link that stays inside is followed.
+    cli.ok(&[
+        "session",
+        "exec",
+        &id,
+        "--",
+        "ln",
+        "-s",
+        "deep/dir/blob.bin",
+        "alias",
+    ]);
+    let aliased = root.join("aliased.bin");
+    cli.ok(&[
+        "session",
+        "file",
+        "read",
+        &id,
+        "alias",
+        "--output",
+        aliased.to_str().unwrap(),
+    ]);
+    assert_eq!(std::fs::read(&aliased).unwrap(), bytes);
     // Standard input reaches a command.
     let mut piped = std::process::Command::new(env!("CARGO_BIN_EXE_compute"));
     runtimes::with_fixture_runtimes(&mut piped);

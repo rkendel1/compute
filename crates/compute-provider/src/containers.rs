@@ -393,6 +393,33 @@ impl SessionProvider for ContainerSessionProvider {
     async fn claim(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         Self::container(provider_session_id).map(|_| ())
     }
+
+    fn substrate(&self, provider_session_id: &str) -> Option<compute_core::SubstrateEvidence> {
+        Self::container(provider_session_id).ok()?;
+        let mut evidence = compute_core::SubstrateEvidence::new("container");
+        let engine = Path::new(&self.runtime)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.runtime.clone());
+        evidence.backend = Some(match &self.oci_runtime {
+            Some(runtime) => format!("{engine} (OCI runtime {runtime})"),
+            None => engine,
+        });
+        // A reference, not a digest: the engine resolves it.
+        evidence
+            .artifacts
+            .insert("image_reference".into(), self.image.clone());
+        evidence
+            .limits
+            .insert("pids".into(), CONTAINER_PIDS_LIMIT.to_string());
+        evidence
+            .limits
+            .insert("capabilities".into(), CONTAINER_CAPABILITIES.join(","));
+        evidence
+            .limits
+            .insert("no_new_privileges".into(), "true".into());
+        Some(evidence)
+    }
 }
 
 fn remove_workspace(path: &Path) -> Result<(), ProviderError> {

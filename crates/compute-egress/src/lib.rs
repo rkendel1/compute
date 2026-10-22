@@ -50,6 +50,106 @@ use tokio::net::{TcpListener, TcpStream};
 /// The largest request head the gateway reads.
 const MAX_HEAD: usize = 32 * 1024;
 
+/// The most of a ClientHello the gateway reads to find its server name (one
+/// TLS record).
+const MAX_HELLO: usize = 5 + 16 * 1024;
+
+/// What the first bytes of a tunnel say about the server it is for.
+#[derive(Debug, PartialEq, Eq)]
+enum Hello {
+    Name(String),
+    NoName,
+    NotTls,
+    Incomplete,
+    Malformed,
+}
+
+/// The SNI host name of a TLS ClientHello at the start of `bytes`.
+fn tls_server_name(bytes: &[u8]) -> Hello {
+    if bytes.is_empty() {
+        return Hello::Incomplete;
+    }
+    if bytes[0] != 0x16 {
+        return Hello::NotTls;
+    }
+    if bytes.len() < 5 {
+        return Hello::Incomplete;
+    }
+    let record = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+    if bytes.len() < 5 + record {
+        return Hello::Incomplete;
+    }
+    let at = Reader(&bytes[5..5 + record]);
+    let parse = || -> Option<Hello> {
+        let mut hello = at;
+        if hello.u8()? != 0x01 {
+            return None;
+        }
+        let length = hello.u24()?;
+        let mut hello = Reader(hello.take(length)?);
+        hello.take(2 + 32)?; // version, random
+        let session = hello.u8()? as usize;
+        hello.take(session)?;
+        let suites = hello.u16()? as usize;
+        hello.take(suites)?;
+        let compression = hello.u8()? as usize;
+        hello.take(compression)?;
+        if hello.0.is_empty() {
+            return Some(Hello::NoName);
+        }
+        let extensions = hello.u16()? as usize;
+        let mut extensions = Reader(hello.take(extensions)?);
+        while !extensions.0.is_empty() {
+            let kind = extensions.u16()?;
+            let length = extensions.u16()? as usize;
+            let mut body = Reader(extensions.take(length)?);
+            if kind == 0 {
+                let list = body.u16()? as usize;
+                let mut list = Reader(body.take(list)?);
+                while !list.0.is_empty() {
+                    let name_type = list.u8()?;
+                    let length = list.u16()? as usize;
+                    let name = list.take(length)?;
+                    if name_type == 0 {
+                        return std::str::from_utf8(name)
+                            .ok()
+                            .filter(|name| valid_host(&name.to_ascii_lowercase()))
+                            .map(|name| Hello::Name(name.to_ascii_lowercase()));
+                    }
+                }
+                return None;
+            }
+        }
+        Some(Hello::NoName)
+    };
+    parse().unwrap_or(Hello::Malformed)
+}
+
+#[derive(Clone, Copy)]
+struct Reader<'a>(&'a [u8]);
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, count: usize) -> Option<&'a [u8]> {
+        if self.0.len() < count {
+            return None;
+        }
+        let (head, rest) = self.0.split_at(count);
+        self.0 = rest;
+        Some(head)
+    }
+    fn u8(&mut self) -> Option<u8> {
+        self.take(1).map(|bytes| bytes[0])
+    }
+    fn u16(&mut self) -> Option<u16> {
+        self.take(2)
+            .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+    fn u24(&mut self) -> Option<usize> {
+        self.take(3)
+            .map(|bytes| (bytes[0] as usize) << 16 | (bytes[1] as usize) << 8 | bytes[2] as usize)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EgressError {
     #[error("invalid egress configuration: {0}")]
@@ -577,8 +677,40 @@ async fn connection(mut client: TcpStream, state: &State) -> std::io::Result<()>
             .await?;
         match binding {
             None => {
+                // What the client sends first decides whether the tunnel is
+                // the one it asked for: TLS must name the host it opened.
+                let mut first = rest;
+                let verdict = loop {
+                    match tls_server_name(&first) {
+                        Hello::Incomplete if first.len() < MAX_HELLO => {
+                            let mut chunk = [0_u8; 4096];
+                            match client.read(&mut chunk).await? {
+                                0 => return Ok(()),
+                                read => first.extend_from_slice(&chunk[..read]),
+                            }
+                        }
+                        other => break other,
+                    }
+                };
+                let refusal = match verdict {
+                    Hello::Name(name) if name.eq_ignore_ascii_case(&host) => None,
+                    Hello::Name(name) => Some(format!(
+                        "the TLS server name {name} is not {host}, the host the tunnel was opened to"
+                    )),
+                    Hello::NoName if host.parse::<IpAddr>().is_ok() => None,
+                    Hello::NoName => Some(format!("a TLS connection to {host} names no server")),
+                    Hello::NotTls if port != 443 => None,
+                    Hello::NotTls => Some(format!("{host}:443 is opened for TLS only")),
+                    Hello::Incomplete | Hello::Malformed => {
+                        Some("an unreadable TLS ClientHello".into())
+                    }
+                };
+                if let Some(reason) = refusal {
+                    state.record(&host, port, false, false, &reason);
+                    return Ok(());
+                }
                 state.record(&host, port, true, false, "tunnelled");
-                upstream.write_all(&rest).await?;
+                upstream.write_all(&first).await?;
                 tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
             }
             Some(binding) => {
@@ -609,6 +741,17 @@ async fn connection(mut client: TcpStream, state: &State) -> std::io::Result<()>
         refuse(&mut client, "400 Bad Request", "unreadable destination").await;
         return Ok(());
     };
+    // The Host a server routes on must be the host that was admitted.
+    let named = head
+        .header("host")
+        .and_then(|value| split_authority(value, 80))
+        .map(|(named, _)| named);
+    if named.as_deref().is_some_and(|named| named != host) {
+        let reason = format!("the request's Host is not {host}, the host it was sent to");
+        state.record(&host, port, false, false, &reason);
+        refuse(&mut client, "403 Forbidden", &reason).await;
+        return Ok(());
+    }
     let address = match state.admit(&host, port).await {
         Ok(address) => address,
         Err(reason) => {
@@ -680,4 +823,53 @@ async fn brokered(
     outer.write_all(&rest).await?;
     tokio::io::copy_bidirectional(&mut inner, &mut outer).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A real ClientHello, as rustls writes it for `name`.
+    fn client_hello(name: &str) -> Vec<u8> {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let config = rustls::ClientConfig::builder_with_provider(provider())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let mut connection = rustls::ClientConnection::new(
+            Arc::new(config),
+            ServerName::try_from(name.to_owned()).unwrap(),
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        connection.write_tls(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn the_server_name_is_read_from_a_real_client_hello() {
+        let hello = client_hello("API.Example.com");
+        assert_eq!(
+            tls_server_name(&hello),
+            Hello::Name("api.example.com".into())
+        );
+        // Split anywhere, it is incomplete until the record is whole.
+        for cut in [0, 1, 4, 5, hello.len() / 2, hello.len() - 1] {
+            assert_eq!(
+                tls_server_name(&hello[..cut]),
+                Hello::Incomplete,
+                "cut at {cut}"
+            );
+        }
+        assert_eq!(tls_server_name(b"SSH-2.0-OpenSSH\r\n"), Hello::NotTls);
+        // A record that claims a ClientHello but is not one.
+        let mut broken = hello.clone();
+        broken[5] = 0x02;
+        assert_eq!(tls_server_name(&broken), Hello::Malformed);
+        let mut truncated_inside = hello.clone();
+        truncated_inside[8] = 0xff;
+        assert_eq!(tls_server_name(&truncated_inside), Hello::Malformed);
+    }
 }
