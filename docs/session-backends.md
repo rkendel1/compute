@@ -101,7 +101,8 @@ cause of every earlier failure of this job.
 One run's timings, for orientation only (not a benchmark: one sample, a
 debug build, a GitHub-hosted runner with nested KVM, 1 vCPU, 256 MiB):
 create and boot 3.26 s, first command 137 ms, stop (suspend) 1.76 s,
-resume to ready 136 ms.
+resume to ready 136 ms. Distributions over repeated runs on a release build
+are in [microVM lifecycle latency](#microvm-lifecycle-latency).
 
 ## Machine fork
 
@@ -177,9 +178,59 @@ and the environment's job routes ([api.md](api.md)). Not yet exercised: a microV
 `restricted` or `isolated` host profile (the job's client process must be
 able to create its attach socket), and interactive commands in containers.
 
+## microVM lifecycle latency
+
+Measured by `crates/compute-cli/tests/microvm_bench.rs` (the `Lifecycle
+latency` step of the `microvm` CI job, which keeps the JSON as the
+`microvm-bench` artifact). CI run 39752786248:
+
+- **Run:** 20 runs. The first run is reported as cold (the VMM binary, kernel
+  and rootfs not yet in the page cache); runs 2 to 20 are warm (n = 19). The
+  p95 is reported only for n ≥ 20, so it appears only for operations sampled
+  more than once per run.
+- **Host:** GitHub-hosted runner, AMD EPYC 9V45 with 4 vCPUs, host kernel
+  6.17 (Azure), nested KVM.
+- **Guest:** Firecracker v1.11.0, guest kernel 6.1.102, 1 vCPU, 256 MiB,
+  512 MiB rootfs, network through the egress gateway only.
+- **Build:** release.
+
+End to end through the CLI (milliseconds). This includes the CLI process,
+HTTP, authorization, the durable job, and admission.
+
+| Operation | Cold | Median (warm) | p95 | Max (warm) | n |
+| --- | --- | --- | --- | --- | --- |
+| create → ready | 702 | 468 | – | 602 | 19 |
+| first exec | 112 | 111 | – | 119 | 19 |
+| exec | 111 | 111 | 115 | 131 | 95 |
+| suspend (memory kept) | 4044 | 3032 | – | 3875 | 19 |
+| resume → ready | 46 | 45 | – | 78 | 19 |
+| exec after resume | 111 | 111 | – | 113 | 19 |
+| fork, one child → ready | 4444 | 3826 | – | 4497 | 19 |
+| exec in the child | 111 | 111 | – | 128 | 19 |
+| destroy | 95 | 116 | 122 | 123 | 38 |
+
+The provider's own phases (warm medians, from each VM's `lifecycle.jsonl`):
+
+- **Boot:** guest ready in 102 ms (VMM spawn 0.4 ms).
+- **Resume:** snapshot load 24 ms, guest ready at 37 ms.
+- **Suspend:** 2992 ms, almost all of it writing the snapshot (memory to
+  disk). Flushing takes 0.6 ms.
+- **Fork:** the source's checkpoint takes 3486 ms in total (snapshot
+  1108 ms, then a disk copy finishing at 1237 ms while paused). The child
+  then copies the disk (127 ms), loads (150 ms), is guest-ready at 165 ms
+  and reseeded at 168 ms.
+
+Reading it:
+
+- Exec, resume and a child's own start are each around 0.1 s.
+- Suspend and fork are dominated by writing a full memory snapshot and
+  copying the rootfs on this runner's disk. That cost scales with memory and
+  disk size; diff snapshots and copy-on-write disks would reduce it, and
+  neither is implemented.
+- These are numbers from one runner type under nested virtualization, not a
+  claim about other hosts.
+
 ## Not implemented
 
 - Interactive commands in process and container sessions.
-- Measured startup and lifecycle latency: the KVM test prints one run's
-  timings; there is no benchmark (distributions over repeated runs) yet.
 - A VM backend on macOS.
