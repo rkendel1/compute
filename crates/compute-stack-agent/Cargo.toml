@@ -11,9 +11,9 @@ description = "Run stack-agent as a Compute workload: one isolated Compute sessi
 # nothing here. It is the only agent the configured distribution ships.
 [dependencies]
 async-trait.workspace = true
-chip-cli = { package = "stack-agent", git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
-chip-core = { git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
-chip-remote-env = { git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
+chip-cli = { package = "stack-agent", git = "https://github.com/rkendel1/stack-agent", rev = "e73e74a72b42a40ff20ceef02805c99c6ef83d9e" }
+chip-core = { git = "https://github.com/rkendel1/stack-agent", rev = "e73e74a72b42a40ff20ceef02805c99c6ef83d9e" }
+chip-remote-env = { git = "https://github.com/rkendel1/stack-agent", rev = "e73e74a72b42a40ff20ceef02805c99c6ef83d9e" }
 compute-agent = { path = "../compute-agent" }
 compute-core = { path = "../compute-core" }
 compute-provider = { path = "../compute-provider" }
@@ -22,8 +22,8 @@ sha2.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-chip-pax = { git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
-chip-inference = { git = "https://github.com/rkendel1/stack-agent", rev = "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14" }
+chip-pax = { git = "https://github.com/rkendel1/stack-agent", rev = "e73e74a72b42a40ff20ceef02805c99c6ef83d9e" }
+chip-inference = { git = "https://github.com/rkendel1/stack-agent", rev = "e73e74a72b42a40ff20ceef02805c99c6ef83d9e" }
 serde_json.workspace = true
 async-trait.workspace = true
 tempfile.workspace = true
