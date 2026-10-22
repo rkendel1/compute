@@ -7,6 +7,10 @@ name: microvm
 # only through the gateway, stdin and files, and a stop/resume that keeps a
 # running process alive (a memory snapshot). Required here: a missing KVM or
 # Firecracker fails instead of skipping (COMPUTE_REQUIRE_MICROVM).
+#
+# `container-engine` runs the container session contract against the
+# runner's real Docker engine and reads the hardening back from inside the
+# container (capability set, no-new-privileges, pids limit, `none` network).
 
 on:
   workflow_dispatch:
@@ -15,6 +19,8 @@ on:
       - "crates/compute-guest/**"
       - "crates/compute-egress/**"
       - "crates/compute-provider/src/vm.rs"
+      - "crates/compute-provider/src/containers.rs"
+      - "crates/compute-provider/tests/sessions.rs"
       - "crates/compute-provider/src/sessions.rs"
       - "crates/compute-cli/src/guest_cmd.rs"
       - "crates/compute-cli/tests/microvm.rs"
@@ -75,3 +81,18 @@ jobs:
       - name: VM logs
         if: failure()
         run: find /tmp -name firecracker.log -exec sh -c 'echo "== $1"; tail -n 50 "$1"' _ {} \; 2>/dev/null || true
+
+  container-engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Container sessions on a real engine
+        env:
+          COMPUTE_CONTAINER_ENGINE: docker
+          COMPUTE_REQUIRE_CONTAINER_ENGINE: "1"
+        run: |
+          docker version
+          docker pull debian:stable-slim
+          timeout 900 cargo test --locked -p compute-provider --test sessions a_real_container_engine -- --nocapture

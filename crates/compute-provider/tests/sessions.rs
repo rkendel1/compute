@@ -1818,3 +1818,117 @@ fn a_server_without_an_authority_fails_closed() {
     });
     runtime.shutdown_background();
 }
+
+/// The container adapter against a real engine (COMPUTE_CONTAINER_ENGINE,
+/// e.g. `docker` or `podman`): the hardening is read back from inside the
+/// container, not from the command line that asked for it. Skipped without
+/// an engine, unless COMPUTE_REQUIRE_CONTAINER_ENGINE is set (CI).
+#[test]
+fn a_real_container_engine_enforces_the_hardened_session() {
+    let Ok(engine) = std::env::var("COMPUTE_CONTAINER_ENGINE") else {
+        assert!(
+            std::env::var_os("COMPUTE_REQUIRE_CONTAINER_ENGINE").is_none(),
+            "COMPUTE_CONTAINER_ENGINE is required"
+        );
+        eprintln!("skipping: no COMPUTE_CONTAINER_ENGINE");
+        return;
+    };
+    let stores = Stores::new();
+    let provider = Arc::new(compute_provider::ContainerSessionProvider::new(
+        engine,
+        "debian:stable-slim",
+        stores.environments.join("volumes"),
+    ));
+    let server = Server::start(&stores, provider, Arc::new(Tokens::default()));
+    let client = server.client("alice");
+    client_runtime().block_on(async {
+        let created = client
+            .create_session(&request(NetworkPolicy::None, ttl(3600)))
+            .await
+            .unwrap();
+        let id = created.session_id.0.clone();
+        let session = ready(&client, &id).await;
+        assert_eq!(
+            session.status,
+            compute_core::SessionStatus::Ready,
+            "{session:?}"
+        );
+        let sh = |script: &str| {
+            let client = client.clone();
+            let id = id.clone();
+            let script = script.to_owned();
+            async move {
+                let mut command =
+                    SessionCommand::new(vec!["sh".into(), "-c".into(), script.clone()]);
+                command
+                    .env
+                    .insert("API_TOKEN".into(), "zq-engine-secret".into());
+                command.timeout = Some(Duration::from_secs(60));
+                let submission = client.session_exec(&id, &command).await.unwrap();
+                loop {
+                    let job = client.job_status(&submission.job_id.0).await.unwrap();
+                    if job.status.is_terminal() {
+                        let result = client.job_result(&submission.job_id.0).await.unwrap();
+                        assert_eq!(result.status, JobStatus::Succeeded, "{script}: {result:?}");
+                        break result;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+        // Read back from inside: the capability set, no new privileges, the
+        // process limit, and no network but loopback.
+        let status = sh("grep -E '^(CapEff|NoNewPrivs)' /proc/self/status").await;
+        assert!(
+            status
+                .result
+                .stdout
+                .text
+                .contains("CapEff:\t00000000000000eb"),
+            "{}",
+            status.result.stdout.text
+        );
+        assert!(status.result.stdout.text.contains("NoNewPrivs:\t1"));
+        let pids =
+            sh("cat /sys/fs/cgroup/pids.max 2>/dev/null || cat /sys/fs/cgroup/pids/pids.max").await;
+        assert_eq!(pids.result.stdout.text.trim(), "4096");
+        let net = sh("ls /sys/class/net").await;
+        assert_eq!(net.result.stdout.text.trim(), "lo");
+        // A value reaches the command by name, and nothing Compute itself
+        // persists (requests, status, events) holds a readable copy. (The
+        // command printing it puts it in its own output, which is the
+        // workload's to keep.)
+        let token = sh("printf %s \"$API_TOKEN\"").await;
+        assert_eq!(token.result.stdout.text, "zq-engine-secret");
+        for entry in walkdir::WalkDir::new(&stores.jobs) {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.file_type().is_file()
+                && ["request.json", "status.json", "events.json"].contains(&name.as_str())
+            {
+                let bytes = std::fs::read(entry.path()).unwrap();
+                assert!(
+                    !bytes
+                        .windows(16)
+                        .any(|window| window == b"zq-engine-secret"),
+                    "{} holds the value",
+                    entry.path().display()
+                );
+            }
+        }
+        // The workspace survives stop and resume; destroy removes it all.
+        sh("echo kept > note").await;
+        client.stop_session(&id).await.unwrap();
+        client.resume_session(&id).await.unwrap();
+        assert_eq!(sh("cat note").await.result.stdout.text, "kept\n");
+        let container = session.provider_session_id.clone().unwrap();
+        client.destroy_session(&id).await.unwrap();
+        let inspect =
+            std::process::Command::new(std::env::var("COMPUTE_CONTAINER_ENGINE").unwrap())
+                .args(["inspect", &container])
+                .output()
+                .unwrap();
+        assert!(!inspect.status.success(), "the container is gone");
+    });
+    server.kill();
+}

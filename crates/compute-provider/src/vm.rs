@@ -628,6 +628,10 @@ impl SessionProvider for VmSessionProvider {
         Self::vm(provider_session_id).map(|_| ())
     }
 
+    fn contains_network(&self) -> bool {
+        true
+    }
+
     fn substrate(&self, provider_session_id: &str) -> Option<compute_core::SubstrateEvidence> {
         let vm = Self::vm(provider_session_id).ok()?;
         let mut evidence = compute_core::SubstrateEvidence::new("microvm");

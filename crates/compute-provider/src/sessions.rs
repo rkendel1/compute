@@ -51,6 +51,21 @@ pub const DEFAULT_SESSION_SWEEP: Duration = Duration::from_secs(1);
 /// path in the target's verified host runtime store.
 pub const RUNTIME_STORE_SESSION_FEATURE: &str = "runtime_store_visible";
 
+/// The host-side client of an environment that contains its own network:
+/// the same contract with the network its client needs.
+fn client_request(request: &ProviderRequest) -> Result<ProviderRequest, ProviderError> {
+    let mut bundle = request.artifact.bundle()?;
+    bundle.workload.network = NetworkPolicy::Network;
+    bundle.validate().map_err(artifact_error)?;
+    let mut client = request.clone();
+    client.artifact = crate::ArtifactTransport::Bundle {
+        data: bundle.to_bytes().map_err(artifact_error)?,
+    };
+    client.expected.workload_id = Some(bundle.workload_id().map_err(artifact_error)?);
+    client.expected.bundle_id = Some(bundle.bundle_id().map_err(artifact_error)?);
+    Ok(client)
+}
+
 /// What a caller sends to create a session: the environment's execution
 /// contract as an ordinary provider request, and the session's own terms.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +480,15 @@ pub trait SessionProvider: Send + Sync {
         Err(unsupported(&self.kind(), "claim"))
     }
 
+    /// Whether this provider's environments enforce their own network
+    /// policy (a container's `--network`, a VM without a NIC), so the job
+    /// on this node is only their client. Then the host is asked whether it
+    /// can run that client (with the network the client needs), and the
+    /// environment, not a host process, enforces what the session declared.
+    fn contains_network(&self) -> bool {
+        false
+    }
+
     /// What an environment's commands run in, for their receipts: kind,
     /// backend, start artifacts, configured limits. Only what the provider
     /// knows; `None` when it adds nothing to what the job's own receipt
@@ -805,8 +829,19 @@ impl SessionManager {
             None => DEFAULT_SESSION_TTL.as_secs(),
         };
         // Policy decides whether this environment may exist here, before
-        // anything is provisioned. Admission fails closed.
-        let admission = self.compute.admit(request.clone()).await?;
+        // anything is provisioned. Admission fails closed. Where the
+        // environment contains its own network, what runs on this node is
+        // its client: that is admitted, with the least restrictive network,
+        // so a policy can only refuse more than the declared network would,
+        // never admit something looser than what the environment enforces.
+        let admitted = if self.provider.contains_network()
+            && bundle.workload.network != NetworkPolicy::Network
+        {
+            client_request(&request)?
+        } else {
+            request.clone()
+        };
+        let admission = self.compute.admit(admitted).await?;
         if !admission.decision.admitted {
             return Err(ProviderError::denied(admission.decision));
         }

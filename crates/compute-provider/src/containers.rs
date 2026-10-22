@@ -328,7 +328,12 @@ impl SessionProvider for ContainerSessionProvider {
         direct.env = carried;
         direct.stdin = command.stdin.clone();
         direct.output_bytes = command.output_bytes;
-        shell_request(environment, &direct)
+        // The job on this node is the engine's client, which needs the
+        // engine, not the session's network; the container's own `--network`
+        // is the boundary (and a host process cannot enforce `none`).
+        let mut client = environment.clone();
+        client.network = NetworkPolicy::Network;
+        shell_request(&client, &direct)
     }
 
     async fn connect(
@@ -392,6 +397,10 @@ impl SessionProvider for ContainerSessionProvider {
 
     async fn claim(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         Self::container(provider_session_id).map(|_| ())
+    }
+
+    fn contains_network(&self) -> bool {
+        true
     }
 
     fn substrate(&self, provider_session_id: &str) -> Option<compute_core::SubstrateEvidence> {
