@@ -254,6 +254,26 @@ pub struct ComputerSpec {
     /// environment's record stays as evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destroy_requested_at: Option<DateTime<Utc>>,
+    /// This computer's first machine is a fork of another environment's
+    /// running machine (its memory and disk), not a fresh provisioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<MachineFork>,
+}
+
+/// Where a forked computer's machine comes from: a running session on a
+/// target. It applies to one spec generation only; a replacement is a fresh
+/// machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineFork {
+    /// The environment whose computer was forked.
+    pub source_environment_id: String,
+    /// The target holding the source's machine; a fork runs there.
+    pub target: String,
+    /// The source's session on that target.
+    pub session_id: String,
+    /// The spec generation this fork makes the machine for.
+    pub generation: u64,
 }
 
 fn network_by_default() -> NetworkPolicy {

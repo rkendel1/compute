@@ -1950,11 +1950,28 @@ impl RemoteProvider {
         session_id: &str,
         count: u32,
     ) -> Result<compute_core::SessionFork, ProviderError> {
+        self.fork_session_with(
+            session_id,
+            &compute_core::SessionForkRequest {
+                count,
+                references: vec![],
+            },
+        )
+        .await
+    }
+
+    /// Fork with the caller's reference for each child: repeating it with
+    /// the same references returns the same children.
+    pub async fn fork_session_with(
+        &self,
+        session_id: &str,
+        request: &compute_core::SessionForkRequest,
+    ) -> Result<compute_core::SessionFork, ProviderError> {
         let session_id = checked_session_id(session_id)?;
         self.send(
             "POST",
             &format!("/compute/sessions/{session_id}/fork"),
-            Some(&compute_core::SessionForkRequest { count }),
+            Some(request),
             None,
         )
         .await

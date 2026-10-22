@@ -500,6 +500,12 @@ pub struct MachineCheckpoint {
 #[serde(deny_unknown_fields)]
 pub struct SessionForkRequest {
     pub count: u32,
+    /// The caller's reference for each child, one per child, as a creation
+    /// takes one: a fork repeated with the same references (after the
+    /// caller restarted) returns the children it already made instead of
+    /// making more, and a caller can recognise its own children.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<String>,
 }
 
 /// The most children one fork may create.

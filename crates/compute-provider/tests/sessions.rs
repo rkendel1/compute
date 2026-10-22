@@ -2292,6 +2292,61 @@ fn fork_is_refused_where_it_cannot_mean_what_it_says() {
     server.kill();
 }
 
+/// A caller that names each child (a controller, by its computer's
+/// reference) can repeat a fork after a restart and gets the children it
+/// already has: never a second set, never a second checkpoint.
+#[test]
+fn a_fork_repeated_with_its_references_returns_the_same_children() {
+    let stores = Stores::new();
+    let fake = Fake::new(&stores.environments, everything());
+    let tokens: Arc<Tokens> = Arc::new(Tokens::default());
+    let client_runtime = client_runtime();
+    let server = Server::start(&stores, fake.clone(), tokens);
+    let client = server.client("alice");
+    client_runtime.block_on(async {
+        let source = running_source(&client).await;
+        let request = |references: &[&str]| compute_core::SessionForkRequest {
+            count: references.len() as u32,
+            references: references
+                .iter()
+                .map(|reference| reference.to_string())
+                .collect(),
+        };
+        let first = client
+            .fork_session_with(&source, &request(&["cmp_child:1"]))
+            .await
+            .unwrap();
+        assert_eq!(first.children[0].reference.as_deref(), Some("cmp_child:1"));
+        let again = client
+            .fork_session_with(&source, &request(&["cmp_child:1"]))
+            .await
+            .unwrap();
+        assert_eq!(again.children[0].session_id, first.children[0].session_id);
+        assert_eq!(again.checkpoint.id, first.checkpoint.id);
+        assert_eq!(client.sessions().await.unwrap().len(), 2);
+
+        // A reference per child, each distinct; and not one already used
+        // for something else.
+        let mut uneven = request(&["cmp_a:1"]);
+        uneven.count = 2;
+        for refused in [uneven, request(&["cmp_a:1", "cmp_a:1"])] {
+            let error = client
+                .fork_session_with(&source, &refused)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, ProviderErrorKind::PolicyRejected, "{error:?}");
+        }
+        let error = client
+            .fork_session_with(&source, &request(&["cmp_child:1", "cmp_other:1"]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::SessionConflict, "{error:?}");
+        assert_eq!(client.sessions().await.unwrap().len(), 2);
+    });
+    assert_eq!(fake.calls("checkpoint"), 1);
+    server.kill();
+}
+
 #[test]
 fn a_jobs_output_is_read_from_an_offset_while_it_runs() {
     let stores = Stores::new();

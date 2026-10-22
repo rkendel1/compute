@@ -1063,6 +1063,7 @@ impl Daemon {
             }),
             generation: 1,
             destroy_requested_at: None,
+            fork: None,
         };
         let mut contents = definition.contents.clone();
         contents.generation = 1;

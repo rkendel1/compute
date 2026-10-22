@@ -575,6 +575,7 @@ async fn round_trip_every_record(state: &ControlState, run: &str) {
                 expires_at: None,
                 generation: 1,
                 destroy_requested_at: None,
+                fork: None,
             }),
             contents: Some(contents.clone()),
             ..environment(&format!("computer{run}"))

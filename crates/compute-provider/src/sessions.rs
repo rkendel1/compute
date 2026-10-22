@@ -1015,6 +1015,9 @@ impl SessionManager {
         if !source.capabilities.fork {
             return Err(unsupported(&source.provider_kind, "fork"));
         }
+        if let Some(repeated) = self.forked_before(source_id, owner, &fork)? {
+            return Ok(repeated);
+        }
         if !matches!(source.status, SessionStatus::Ready | SessionStatus::Running) {
             return Err(conflict(format!(
                 "a {} session cannot be forked; only a running one can",
@@ -1051,11 +1054,11 @@ impl SessionManager {
         // already admitted go on.
         let mut children = vec![];
         let mut refused = None;
-        for _ in 0..fork.count {
+        for index in 0..fork.count as usize {
             let create = SessionCreateRequest {
                 request: stored.request.clone(),
                 spec: SessionSpec {
-                    reference: None,
+                    reference: fork.references.get(index).cloned(),
                     ..stored.spec.clone()
                 },
             };
@@ -1249,6 +1252,76 @@ impl SessionManager {
     }
 
     /// The owner's live session with this reference.
+    /// A fork repeated with the references of one already made: its
+    /// children, as they are now, and nothing new. References that name
+    /// only some sessions, or another session's children, are refused.
+    fn forked_before(
+        &self,
+        source_id: &SessionId,
+        owner: &str,
+        fork: &SessionForkRequest,
+    ) -> Result<Option<SessionFork>, ProviderError> {
+        if fork.references.is_empty() {
+            return Ok(None);
+        }
+        let distinct = fork
+            .references
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if fork.references.len() != fork.count as usize || distinct.len() != fork.references.len() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::PolicyRejected,
+                "a fork takes one distinct reference per child",
+            ));
+        }
+        if let Some(invalid) = fork
+            .references
+            .iter()
+            .find(|reference| !compute_core::valid_session_reference(reference))
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::PolicyRejected,
+                format!("{invalid:?}: a session reference is 1-128 letters, digits, and .:_-"),
+            ));
+        }
+        let mut children = vec![];
+        for reference in &fork.references {
+            if let Some(child) = self.find_reference(owner, reference)? {
+                children.push(child);
+            }
+        }
+        if children.is_empty() {
+            return Ok(None);
+        }
+        let lineage = children
+            .iter()
+            .map(|child| child.lineage.clone())
+            .collect::<Option<Vec<_>>>()
+            .filter(|lineages| {
+                lineages
+                    .iter()
+                    .all(|lineage| &lineage.parent_session_id == source_id)
+            });
+        match lineage {
+            Some(lineages) if children.len() == fork.references.len() => {
+                let first = &lineages[0];
+                Ok(Some(SessionFork {
+                    source_session_id: source_id.clone(),
+                    checkpoint: compute_core::MachineCheckpoint {
+                        id: first.checkpoint.clone(),
+                        evidence: first.evidence.clone(),
+                    },
+                    children,
+                    refused: None,
+                }))
+            }
+            _ => Err(conflict(
+                "these references already name sessions that are not this fork's children"
+                    .to_string(),
+            )),
+        }
+    }
+
     fn find_reference(
         &self,
         owner: &str,

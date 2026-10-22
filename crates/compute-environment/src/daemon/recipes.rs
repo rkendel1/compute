@@ -221,6 +221,7 @@ impl Daemon {
             expires_at: None,
             generation: 1,
             destroy_requested_at: None,
+            fork: None,
         };
         // The environment the placement is evaluated for: transient, never
         // written. It carries what admission reads (the policy).
