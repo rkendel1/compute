@@ -1173,6 +1173,59 @@ function temporaryDialog() {
   ]);
 }
 
+// ---- The agent -------------------------------------------------------------------
+//
+// The agent is a service the operator runs beside this controller
+// (`compute-configured-stack-agent serve`). It owns its work records; this
+// page submits a goal through `/agent/work`, shows what the service reports,
+// and can cancel. Nothing about the work is kept here beyond which one is open.
+
+const AGENT = { work: null, goal: '' };
+
+async function agentPanel() {
+  const status = await api('GET', '/agent').catch((error) => ({ reachable: false, error: error.message }));
+  if (!status.reachable) {
+    return h('div', { class: 'panel', 'data-agent': 'unreachable' },
+      h('div', {}, state('failed', 'Agent service not reachable')),
+      h('div', { class: 'meta' }, status.error || 'The agent service did not answer.'),
+      h('div', { class: 'meta' }, `Looked at ${status.url || 'the configured address'}. Set COMPUTE_STACK_AGENT_URL if it listens elsewhere.`));
+  }
+  const goal = h('input', { id: 'agent-goal', placeholder: 'What should the agent do?', autocomplete: 'off', value: AGENT.goal, 'aria-label': 'Goal for the agent',
+    oninput: (event) => { AGENT.goal = event.target.value; },
+    onkeydown: (event) => { if (event.key === 'Enter') submitGoal(); } });
+  const rows = [h('div', { class: 'add-row' }, goal, h('button', { class: 'primary', 'data-agent-run': 'true', onclick: submitGoal }, 'Run'))];
+  if (AGENT.work) {
+    const [work, events] = await Promise.all([
+      api('GET', `/agent/work/${enc(AGENT.work)}`).catch((error) => ({ status: 'unavailable', error: error.message })),
+      api('GET', `/agent/work/${enc(AGENT.work)}/events`).catch(() => ({ events: [] })),
+    ]);
+    const active = ['queued', 'running'].includes(work.status);
+    rows.push(h('div', { 'data-agent-work': AGENT.work, 'data-status': work.status },
+      h('div', { class: 'meta' }, `work ${AGENT.work} · `, state(work.status === 'succeeded' || work.status === 'completed' ? 'succeeded' : (active ? 'running' : work.status === 'failed' ? 'failed' : work.status)),
+        active ? [' ', h('button', { class: 'danger small', 'data-agent-cancel': 'true', onclick: cancelGoal }, 'Cancel')] : null),
+      work.error ? h('div', { class: 'error' }, work.error) : null,
+      h('pre', { class: 'mono', 'aria-live': 'polite' }, (events.events || []).map((event) => {
+        const { kind, ...rest } = event;
+        const detail = JSON.stringify(rest);
+        return `${kind}${detail === '{}' ? '' : ` ${detail.length > 400 ? `${detail.slice(0, 400)}…` : detail}`}`;
+      }).join('\n') || '(no events yet)')));
+    if (active) operationTimer = setTimeout(() => { if (!dialog.open && !document.activeElement.closest('.draft')) render(); }, 2000);
+  }
+  return h('div', { class: 'panel draft', 'data-agent': 'ready' }, rows,
+    h('div', { class: 'meta' }, 'The agent runs each goal in its own isolated computer; it is not this one.'));
+}
+
+async function submitGoal() {
+  const goal = AGENT.goal.trim();
+  if (!goal) { toast('Say what the agent should do', true); return; }
+  const work = await act('Goal sent to the agent', () => api('POST', '/agent/work', { goal }));
+  if (work && work.work_id) { AGENT.work = work.work_id; AGENT.goal = ''; await render(); }
+}
+
+async function cancelGoal() {
+  await act('Cancelling', () => api('POST', `/agent/work/${enc(AGENT.work)}/cancel`));
+}
+
 async function workView(name) {
   const environment = await api('GET', `/environments/${enc(name)}`);
   if (!environment.computer) {
@@ -1278,6 +1331,9 @@ async function workView(name) {
       stepList(reconcileProgress(computer))) : null,
     computer.failure ? h('div', { class: 'panel error' }, `${computer.failure.phase}: ${computer.failure.code} — ${computer.failure.message}`) : null,
 
+    h('h3', {}, 'Agent'),
+    await agentPanel(),
+
     h('h3', {}, 'Repositories'),
     table(['Repository', 'URL', 'Revision', 'Checked out', 'Last synced', ''], repositories, 'No repositories.'),
     live ? addRow(['name', 'url', 'revision'], 'Add repository', (value) => edit(name, draft, (next) => {
@@ -1293,6 +1349,27 @@ async function workView(name) {
 
     h('h3', {}, 'Applications'),
     table(processHeaders, processRows(byKind(['application'])), 'No applications.'),
+    // A project nothing runs has no URL. Compute could not find how to start it
+    // (no `start` script, Procfile or Makefile `run`), so ask, rather than leave
+    // it looking finished.
+    live ? contents.projects
+      .filter((project) => !contents.processes.some((process) => process.repository === project.repository && (process.kind || 'application') === 'application'))
+      .map((project) => h('div', { class: 'panel', 'data-unserved': project.name },
+        h('div', { class: 'meta' }, `${project.name} is not running, so it has no URL. Compute found no start command for it; say how to run it and on which port ($PORT is that port).`),
+        addRow(['name', 'command', 'port'], 'Run', (value) => {
+          const port = Number(value.port);
+          if (!value.command || !port) { toast('Run: a command and a port are required', true); return; }
+          edit(name, draft, (next) => {
+            next.contents.processes.push({
+              name: value.name,
+              kind: 'application',
+              command: ['sh', '-c', value.command],
+              repository: project.repository,
+              port,
+              desired: 'running',
+            });
+          });
+        }))) : null,
     h('h3', {}, 'Services'),
     table(processHeaders, processRows(byKind(['service'])), 'No services.'),
     h('h3', {}, 'Agents'),
@@ -1314,7 +1391,7 @@ async function workView(name) {
       Object.entries(TEMPLATES).map(([key, template]) => h('button', { 'data-template': key, onclick: () => edit(name, draft, (next) => {
         if (next.contents.processes.some((process) => process.name === template.name)) return;
         next.contents.processes.push({ ...structuredClone(template), desired: 'running' });
-      }) }, { database: 'Database (PostgreSQL)', redis: 'Redis', agent: 'Agent' }[key]))) : null,
+      }) }, { database: 'Database (PostgreSQL)', redis: 'Redis' }[key]))) : null,
     h('h3', {}, 'Packages'),
     table(['Package', 'Install', 'Repository', 'Installed', ''], packages, 'No packages.'),
     live ? addRow(['name', 'install', 'repository'], 'Add package', (value) => edit(name, draft, (next) => {
@@ -1574,7 +1651,7 @@ const ACTIONS = [
   ['deploy', 'Deploy', 'Put a version on a computer, in place.', '#/software'],
   ['promote', 'Move test → production', 'Review what changes, then promote the exact version.', '#/software'],
   ['rollback', 'Roll back', 'Choose an earlier version, review, GO.', '#/software'],
-  ['agent', 'Run an agent', 'Start an agent in a computer, beside your software.', '#/work'],
+  ['agent', 'Run an agent', 'Give the agent a goal, watch it work, cancel it.', '#/work'],
   ['try', 'Try software', 'A temporary computer that expires and keeps its evidence.', '#/run?try=1'],
   ['operate', 'Operate production', 'Health, logs, restarts, configuration, versions.', '#/environments'],
   ['computer', 'Create a computer', 'Say what it needs; Compute places it.', null],
@@ -2210,7 +2287,6 @@ async function viewFile(name, path) {
 const TEMPLATES = {
   database: { name: 'database', kind: 'service', command: ['sh', '-c', 'mkdir -p .compute/postgres && (test -f .compute/postgres/PG_VERSION || initdb -D .compute/postgres) && exec postgres -D .compute/postgres -p $PORT'], port: 5432 },
   redis: { name: 'redis', kind: 'service', command: ['sh', '-c', 'exec redis-server --port $PORT'], port: 6379 },
-  agent: { name: 'agent', kind: 'agent', command: ['sh', '-c', 'exec ./agent'] },
 };
 
 const TABS = ['Overview', 'Workloads', 'Deployments', 'Logs', 'Resources', 'Configuration', 'Receipts', 'Events'];

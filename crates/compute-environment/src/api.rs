@@ -756,6 +756,13 @@ fn parse<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, EnvironmentEr
     serde_json::from_value(value).map_err(|error| EnvironmentError::Invalid(error.to_string()))
 }
 
+/// The agent service's answer unchanged when it succeeded; its refusal in
+/// Compute's error shape.
+fn relay(answer: crate::agent_service::Answer) -> Result<Response, EnvironmentError> {
+    let answer = answer.checked()?;
+    Ok(Response::Remote(answer.status, answer.body))
+}
+
 async fn route(
     daemon: &Arc<Daemon>,
     principal: &Principal,
@@ -777,6 +784,17 @@ async fn route(
         ("GET", ["info"]) => ok(to_value(Box::pin(daemon.info()).await)?),
         ("GET", ["api"]) => ok(contract()),
         ("GET", ["status"]) => ok(to_value(Box::pin(daemon.status()).await)?),
+
+        // The agent service the operator runs beside this controller.
+        ("GET", ["agent"]) => ok(crate::agent_service::status().await),
+        ("POST", ["agent", "work"]) => relay(crate::agent_service::submit(parse(body)?).await?),
+        ("GET", ["agent", "work", work]) => relay(crate::agent_service::work(work).await?),
+        ("GET", ["agent", "work", work, "events"]) => {
+            relay(crate::agent_service::events(work).await?)
+        }
+        ("POST", ["agent", "work", work, "cancel"]) => {
+            relay(crate::agent_service::cancel(work).await?)
+        }
 
         // Operators.
         ("GET", ["auth", "whoami"]) => ok(to_value(principal)?),
