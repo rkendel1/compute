@@ -309,7 +309,7 @@ struct Command {
 /// A pseudo-terminal of `size`: (master, slave).
 fn open_pty(size: TerminalSize) -> io::Result<(OwnedFd, OwnedFd)> {
     let (mut master, mut slave) = (0, 0);
-    let mut window = libc::winsize {
+    let window = libc::winsize {
         ws_row: size.rows,
         ws_col: size.cols,
         ws_xpixel: 0,
@@ -323,7 +323,7 @@ fn open_pty(size: TerminalSize) -> io::Result<(OwnedFd, OwnedFd)> {
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut window,
+            &window,
         )
     };
     if opened != 0 {
@@ -397,7 +397,28 @@ async fn exec<W: AsyncWrite + Unpin>(
     let mut master = None;
     match terminal {
         Some(size) => {
-            let (pty, slave) = open_pty(size)?;
+            // Said, not dropped: a client that cannot get a terminal is
+            // told why, as for a program that cannot start.
+            let (pty, slave) = match open_pty(size) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    write_frame(
+                        writer,
+                        &Event::Error {
+                            message: format!("a terminal could not be opened: {error}"),
+                        },
+                    )
+                    .await?;
+                    return write_frame(
+                        writer,
+                        &Event::Exit {
+                            code: Some(127),
+                            signal: None,
+                        },
+                    )
+                    .await;
+                }
+            };
             command
                 .env(
                     "TERM",
@@ -888,10 +909,10 @@ pub async fn forward_to_host(listen: u16, port: u32) -> io::Result<()> {
 /// PID 1 duties in a VM with nothing else in it: kernel filesystems, a
 /// loopback interface, and a workspace.
 pub fn init_guest() {
-    let mount = |source: &str, target: &str, kind: &str| {
+    let mount = |source: &str, target: &str, kind: &str, options: &str| {
         let _ = std::fs::create_dir_all(target);
         let c = |text: &str| std::ffi::CString::new(text).expect("no NUL");
-        let (source, target, kind) = (c(source), c(target), c(kind));
+        let (source, target, kind, options) = (c(source), c(target), c(kind), c(options));
         // SAFETY: mount(2) with valid C strings; failure is tolerated (the
         // filesystem may already be mounted).
         unsafe {
@@ -900,15 +921,18 @@ pub fn init_guest() {
                 target.as_ptr(),
                 kind.as_ptr(),
                 0,
-                std::ptr::null(),
+                options.as_ptr().cast(),
             );
         }
     };
-    mount("proc", "/proc", "proc");
-    mount("sysfs", "/sys", "sysfs");
-    mount("devtmpfs", "/dev", "devtmpfs");
-    mount("tmpfs", "/tmp", "tmpfs");
-    mount("tmpfs", "/run", "tmpfs");
+    mount("proc", "/proc", "proc", "");
+    mount("sysfs", "/sys", "sysfs", "");
+    mount("devtmpfs", "/dev", "devtmpfs", "");
+    // Terminals: devtmpfs's /dev/ptmx opens a pseudo-terminal in the
+    // devpts mounted beside it.
+    mount("devpts", "/dev/pts", "devpts", "ptmxmode=0666,mode=0620");
+    mount("tmpfs", "/tmp", "tmpfs", "");
+    mount("tmpfs", "/run", "tmpfs", "");
     let _ = std::fs::create_dir_all("/workspace");
     loopback_up();
 }
