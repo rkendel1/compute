@@ -168,6 +168,14 @@ pub struct ComputerRequirements {
     pub network: NetworkPolicy,
     #[serde(default)]
     pub isolation: IsolationProfile,
+    /// The operating-system boundary every command in the computer runs
+    /// under, on targets that run commands as host processes: `restricted`
+    /// writes only the computer's workspace and enforces its CPU and memory
+    /// in cgroups; `isolated` also reads only the system and the workspace.
+    /// `trusted` (the default) is the operator's own account. A target that
+    /// cannot enforce the profile is not placed on, never weakened.
+    #[serde(default, skip_serializing_if = "crate::HostProfile::is_trusted")]
+    pub host: crate::HostProfile,
     /// Session capabilities the computer must offer (`persistent_storage`,
     /// `public_endpoint`, `terminal`, ...).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -191,6 +199,7 @@ impl Default for ComputerRequirements {
             architecture: None,
             network: NetworkPolicy::Network,
             isolation: Default::default(),
+            host: Default::default(),
             capabilities: vec![],
             features: vec![],
             runtimes: vec![],

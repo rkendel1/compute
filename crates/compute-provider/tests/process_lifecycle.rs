@@ -202,6 +202,7 @@ fn spec() -> SessionCreateRequest {
             },
             network: NetworkPolicy::Network,
             isolation: Default::default(),
+            host: Default::default(),
             architecture: None,
         },
         SessionSpec {

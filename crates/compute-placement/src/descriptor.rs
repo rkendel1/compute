@@ -962,6 +962,7 @@ pub(crate) fn probe_on_host(
         resources,
         isolation,
         host_isolation,
+        host_writable: vec![],
         dependencies: None,
     }
 }

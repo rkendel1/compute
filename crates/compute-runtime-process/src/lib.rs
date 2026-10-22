@@ -833,17 +833,20 @@ impl ProcessRuntime {
         let (mut stdout_log, mut stderr_log) = open_logs(control).await?;
         let mut stdout_buffer = Vec::new();
         let mut stderr_buffer = Vec::new();
+        let (mut stdout_total, mut stderr_total) = (0_u64, 0_u64);
         let read_output = async {
             let stdout_read = read_teed(
                 &mut stdout,
                 stdout_limit,
                 &mut stdout_buffer,
+                &mut stdout_total,
                 stdout_log.as_mut(),
             );
             let stderr_read = read_teed(
                 &mut stderr,
                 stderr_limit,
                 &mut stderr_buffer,
+                &mut stderr_total,
                 stderr_log.as_mut(),
             );
             let (stdout, stderr, status) = tokio::join!(stdout_read, stderr_read, child.wait());
@@ -883,12 +886,14 @@ impl ProcessRuntime {
                         &mut stdout,
                         stdout_limit,
                         &mut stdout_buffer,
+                        &mut stdout_total,
                         stdout_log.as_mut()
                     ),
                     read_teed(
                         &mut stderr,
                         stderr_limit,
                         &mut stderr_buffer,
+                        &mut stderr_total,
                         stderr_log.as_mut()
                     )
                 );
@@ -938,8 +943,10 @@ impl ProcessRuntime {
             exit_code: process_status
                 .as_ref()
                 .and_then(std::process::ExitStatus::code),
-            stdout: Output::from_bytes(stdout, workload.resources.stdout_bytes),
-            stderr: Output::from_bytes(stderr, workload.resources.stderr_bytes),
+            stdout: Output::from_bytes(stdout, workload.resources.stdout_bytes)
+                .with_total(stdout_total),
+            stderr: Output::from_bytes(stderr, workload.resources.stderr_bytes)
+                .with_total(stderr_total),
             duration: started.elapsed(),
             resource_usage: ResourceUsage::default(),
             artifacts: collect_artifacts(&staged.output_dir)?,
@@ -1063,10 +1070,13 @@ async fn open_logs(
 
 /// Read to end, keeping at most `limit + 1` bytes in memory and appending
 /// every byte to `log` as it arrives.
+/// Read a stream to its end, keeping at most `limit` + 1 bytes (enough to
+/// know it was exceeded) and counting all of them in `total`.
 async fn read_teed<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
     limit: Option<u64>,
     output: &mut Vec<u8>,
+    total: &mut u64,
     mut log: Option<&mut tokio::fs::File>,
 ) -> std::io::Result<()> {
     let max = limit.and_then(|value| usize::try_from(value).ok());
@@ -1076,6 +1086,7 @@ async fn read_teed<R: tokio::io::AsyncRead + Unpin>(
         if count == 0 {
             return Ok(());
         }
+        *total += count as u64;
         if let Some(log) = log.as_deref_mut() {
             log.write_all(&buffer[..count]).await?;
             log.flush().await?;

@@ -21,6 +21,7 @@ mod contract;
 mod control_state;
 mod direct;
 mod distribution;
+mod egress_cmd;
 mod environment_cmd;
 mod launch_cmd;
 mod managed;
@@ -105,6 +106,9 @@ enum Commands {
     /// Temporary, authorized, durable computers: create one, run commands
     /// in it, and destroy it, on whichever provider placement selects.
     Session(Box<session_cmd::SessionCommand>),
+    /// Run the egress gateway: allowlisted, DNS-pinned outbound access,
+    /// with credentials added outside the session.
+    Egress(egress_cmd::EgressCommand),
     /// Inspect, validate, and check execution policy. Never executes.
     Policy(policy_cmd::PolicyCommand),
     /// Show the full decision chain for a workload: requirements,
@@ -195,6 +199,10 @@ struct ServeCommand {
     /// The image containers start from.
     #[arg(long, default_value = "debian:stable-slim")]
     container_image: String,
+    /// The OCI runtime session containers run under, such as `runsc`
+    /// (gVisor). The engine's default when unset.
+    #[arg(long)]
+    container_oci_runtime: Option<String>,
     #[arg(long, default_value = "7d", value_parser = parse_retention)]
     job_retention: Duration,
     #[arg(long, default_value_t = 4)]
@@ -462,6 +470,10 @@ enum ReceiptCommands {
         distribution: Option<PathBuf>,
         #[arg(long)]
         artifacts: Option<PathBuf>,
+        /// Require the target's signature by this key (`sha256:…`, which
+        /// `compute serve` writes to `receipt-key.id` in its job store).
+        #[arg(long)]
+        signed_by: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -1585,9 +1597,16 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                 receipt: path,
                 distribution,
                 artifacts,
+                signed_by,
                 json,
             } => {
-                receipt::verify(&path, distribution.as_deref(), artifacts.as_deref(), json)?;
+                receipt::verify(
+                    &path,
+                    distribution.as_deref(),
+                    artifacts.as_deref(),
+                    signed_by.as_deref(),
+                    json,
+                )?;
             }
         },
         Commands::Serve(command) => {
@@ -1675,11 +1694,15 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
                     if !features.iter().any(|feature| feature == "containers") {
                         features.push("containers".into());
                     }
-                    Some(Arc::new(compute_provider::ContainerSessionProvider::new(
+                    let mut provider = compute_provider::ContainerSessionProvider::new(
                         command.container_runtime.clone(),
                         command.container_image.clone(),
                         command.session_store.join("containers"),
-                    )))
+                    );
+                    if let Some(runtime) = &command.container_oci_runtime {
+                        provider = provider.with_oci_runtime(runtime.clone());
+                    }
+                    Some(Arc::new(provider))
                 }
                 other => {
                     return Err(compute_core::ComputeError::InvalidWorkload(format!(
@@ -1703,6 +1726,7 @@ async fn run(cli: Cli, compute: Compute) -> compute_core::Result<()> {
         Commands::Pool(command) => pool::pool(command).await?,
         Commands::Cloudflare(command) => cloudflare_cmd::cloudflare(command).await?,
         Commands::Session(command) => session_cmd::session(*command).await?,
+        Commands::Egress(command) => egress_cmd::egress(command).await?,
         Commands::Target(command) => computer_cmd::target(command).await?,
         Commands::Policy(command) => policy_cmd::policy(command).await?,
         Commands::Explain(command) => policy_cmd::explain(command).await?,
@@ -2681,9 +2705,19 @@ fn parse_runtime_spec(value: Option<String>) -> compute_core::Result<Option<Runt
     }
 }
 
+/// `KEY=VALUE`, or `KEY` alone to take the value from this process's own
+/// environment, so a secret need not appear on a command line.
 fn parse_env(value: &str) -> Result<EnvironmentVariable, String> {
     let Some((key, val)) = value.split_once('=') else {
-        return Err("expected KEY=VALUE".to_string());
+        if value.is_empty() {
+            return Err("expected KEY=VALUE or KEY".to_string());
+        }
+        let val =
+            std::env::var(value).map_err(|_| format!("{value} is not set in this environment"))?;
+        return Ok(EnvironmentVariable {
+            key: value.to_string(),
+            value: val,
+        });
     };
     Ok(EnvironmentVariable {
         key: key.to_string(),
@@ -2739,6 +2773,12 @@ fn parse_dependency_entry(value: &str) -> Result<DependencyEntry, String> {
         sha256: compute_core::sha256_identity(value.as_bytes()),
         license: None,
     })
+}
+
+fn parse_host_profile(value: &str) -> Result<compute_core::HostProfile, String> {
+    value
+        .parse()
+        .map_err(|error: compute_core::ComputeError| error.to_string())
 }
 
 fn parse_isolation(value: &str) -> Result<IsolationProfile, String> {

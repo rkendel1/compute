@@ -42,11 +42,61 @@ impl DaemonLocation {
 
     pub(crate) fn client(&self) -> compute_core::Result<DaemonClient> {
         let mut client = DaemonClient::new(&self.endpoint()).map_err(error)?;
-        if let Ok(token) = std::env::var(&self.token_env) {
+        if let Some(token) = daemon_token(&self.token_env) {
             client = client.with_bearer_token(token);
         }
         Ok(client)
     }
+}
+
+/// The token a local client presents: the named variable, else the local
+/// daemon's own token file (written by `compute up`).
+pub(crate) fn daemon_token(variable: &str) -> Option<String> {
+    std::env::var(variable).ok().or_else(|| {
+        let path = compute_core::paths::state_root()
+            .ok()?
+            .join(LOCAL_TOKEN_FILE);
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|token| token.trim().to_owned())
+            .filter(|token| !token.is_empty())
+    })
+}
+
+/// Where `compute up` keeps the local daemon's token, under `$COMPUTE_HOME`.
+pub(crate) const LOCAL_TOKEN_FILE: &str = "daemon.token";
+
+/// The token in `path`, or a fresh one written there first, readable only
+/// by its owner.
+pub(crate) fn local_token(path: &std::path::Path) -> compute_core::Result<String> {
+    if let Ok(token) = std::fs::read_to_string(path) {
+        let token = token.trim();
+        if token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(token.to_owned());
+        }
+    }
+    let mut bytes = [0_u8; 32];
+    std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom")?, &mut bytes)?;
+    let token = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let staged = path.with_extension("token.tmp");
+    {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&staged)?;
+        file.write_all(token.as_bytes())?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&staged, path)?;
+    Ok(token)
 }
 
 /// An environment error keeps its stable kind (`not_found`, `conflict`,
@@ -101,6 +151,13 @@ pub struct StartCommand {
     /// (`compute auth create`) instead and refuses this.
     #[arg(long)]
     pub require_token_env: Option<String>,
+    /// Require a token on every request, kept in this private file (created
+    /// with a fresh token when missing). Local clients read it from
+    /// `$COMPUTE_HOME/daemon.token`; nothing else on the machine (another
+    /// user, a sandboxed workload with loopback network, a web page) can call
+    /// the API without it.
+    #[arg(long, conflicts_with_all = ["require_token_env", "insecure"])]
+    pub local_token: Option<PathBuf>,
     /// Explicit development mode: plaintext HTTP, and requests without a
     /// credential are admitted as the `development` operator.
     #[arg(long, conflicts_with = "production")]
@@ -542,14 +599,17 @@ pub async fn start(command: StartCommand) -> compute_core::Result<()> {
         mode,
         reason,
         tls: tls.is_some(),
-        legacy_token: command
-            .require_token_env
-            .as_deref()
-            .map(|name| {
-                std::env::var(name)
-                    .map_err(|_| ComputeError::InvalidWorkload(format!("{name} is not set")))
-            })
-            .transpose()?,
+        legacy_token: match &command.local_token {
+            Some(path) => Some(local_token(path)?),
+            None => command
+                .require_token_env
+                .as_deref()
+                .map(|name| {
+                    std::env::var(name)
+                        .map_err(|_| ComputeError::InvalidWorkload(format!("{name} is not set")))
+                })
+                .transpose()?,
+        },
     };
     config.api_tls = tls.clone();
     // Headless is one switch, and it only affects the UI: the API and
@@ -740,6 +800,9 @@ fn detach(command: &StartCommand) -> compute_core::Result<()> {
     }
     if let Some(name) = &command.require_token_env {
         child.arg("--require-token-env").arg(name);
+    }
+    if let Some(path) = &command.local_token {
+        child.arg("--local-token").arg(path);
     }
     if command.insecure {
         child.arg("--insecure");

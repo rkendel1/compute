@@ -1026,6 +1026,7 @@ impl CloudflareProvider {
                 manifest_id: plan.manifest_id(),
             },
             receipt_hash: ReceiptHash(String::new()),
+            signature: None,
         };
         receipt.project = request
             .execution

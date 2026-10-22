@@ -483,7 +483,16 @@ fn ruleset(
     ] {
         add(Path::new(device), devices)?;
     }
-    // The workspace: its own, fully.
+    // The workspace: its own, fully; and what the request names as also
+    // writable (a session's workspace, for the commands run in it). Only an
+    // absolute directory counts: a relative one would be resolved against
+    // wherever the process happens to start.
     add(workspace, handled)?;
+    for writable in &workload.host_writable {
+        let path = Path::new(writable);
+        if path.is_absolute() {
+            add(path, handled)?;
+        }
+    }
     Ok(ruleset)
 }

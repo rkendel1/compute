@@ -207,6 +207,11 @@ fn every_execution_site_is_classified() {
                 why: "the container session substrate of a target (docker/podman), inside a Computer",
             },
             Allowed {
+                file: "crates/compute-guest/src/lib.rs",
+                count: 1,
+                why: "the microVM guest agent: inside the VM it is PID 1 of, it runs the command of a session job the target already admitted and records",
+            },
+            Allowed {
                 file: "crates/compute-provider/src/runtime.rs",
                 count: 3,
                 why: "runtime acquisition and verification (curl, archive tools, the runtime's own --version)",

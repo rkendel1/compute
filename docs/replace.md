@@ -94,10 +94,9 @@ extract, measure). The jobs' own receipts are the target's.
 - **Not preserved:** memory, processes' state, connections, endpoints,
   terminals. Declared repositories are re-derived from their declared
   revision (`repos/` is not workspace state).
-- **Bounded transport.** The workspace travels through job output and
-  environments: `WORKSPACE_ARCHIVE_LIMIT` (8 MiB). A larger workspace makes
-  the replacement fail at the export, before anything is created. This is a
-  documented limit, not a reason to build streaming here.
+- **Bounded transport.** The workspace travels in chunks through job output
+  and input: `WORKSPACE_ARCHIVE_LIMIT` (256 MiB). A larger workspace makes
+  the replacement fail at the export, before anything is created.
 - **A computer that cannot be exported from** (lost, unreachable, failed,
   stopped) is replaced the older way, from declared contents alone.
 - **Not a deployment command.** There are no strategy, force, or zero-downtime

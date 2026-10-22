@@ -48,6 +48,10 @@ enum SessionCommands {
     Connect(TargetArgs),
     /// Run a command in a session as a durable job.
     Exec(ExecArgs),
+    /// Read, write, or list files in a session's workspace. Each operation
+    /// is a durable command with its own receipt.
+    #[command(subcommand)]
+    File(FileCommands),
     /// Show the output of every execution in a session.
     Logs(TargetArgs),
     /// Stop active executions, keeping the environment and the record.
@@ -88,6 +92,9 @@ struct CreateArgs {
     network: NetworkPolicy,
     #[arg(long, value_parser = crate::parse_isolation)]
     isolation: Option<IsolationProfile>,
+    /// The operating-system boundary every command in the session runs under.
+    #[arg(long = "host-profile", value_parser = crate::parse_host_profile)]
+    host_profile: Option<compute_core::HostProfile>,
     /// A capability the environment must offer (repeatable): exec,
     /// terminal, filesystem, network, public_endpoint, persistent_storage,
     /// suspend, resume, claim.
@@ -152,10 +159,44 @@ struct ExecArgs {
     /// Write the execution receipt here.
     #[arg(long)]
     receipt: Option<std::path::PathBuf>,
+    /// Send this process's standard input to the command.
+    #[arg(long)]
+    stdin: bool,
+    /// The most output kept of each of stdout and stderr (16Mi when unset).
+    #[arg(long, value_parser = crate::parse_memory)]
+    output_bytes: Option<u64>,
+    /// Print the command's output as it runs.
+    #[arg(long, conflicts_with_all = ["detach", "json"])]
+    follow: bool,
     #[arg(long)]
     json: bool,
     #[arg(last = true, required = true)]
     command: Vec<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum FileCommands {
+    /// Print a file's bytes (or write them to --output).
+    Read(FileArgs),
+    /// Replace a file with this process's standard input (or --input).
+    Write(FileArgs),
+    /// List a directory.
+    List(FileArgs),
+}
+
+#[derive(Args, Debug)]
+struct FileArgs {
+    session_id: String,
+    /// The path, relative to the session's workspace unless absolute.
+    path: String,
+    #[arg(long)]
+    provider: Option<String>,
+    /// Read: write the file's bytes here instead of stdout.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+    /// Write: take the bytes from here instead of stdin.
+    #[arg(long)]
+    input: Option<std::path::PathBuf>,
 }
 
 fn parse_endpoint(value: &str) -> Result<SessionEndpointRequest, String> {
@@ -231,6 +272,7 @@ pub async fn session(command: SessionCommand) -> compute_core::Result<()> {
             Ok(())
         }
         SessionCommands::Exec(args) => exec(&location, args).await,
+        SessionCommands::File(command) => file(&location, command).await,
         SessionCommands::Logs(args) => {
             let (remote, _, _) = locate(&location, &args).await?;
             let logs = remote
@@ -284,6 +326,7 @@ async fn create(
         },
         network: args.network.clone(),
         isolation: args.isolation.unwrap_or_default(),
+        host: args.host_profile.unwrap_or_default(),
         architecture: None,
     };
     let spec = SessionSpec {
@@ -443,6 +486,12 @@ async fn exec(location: &PoolLocation, args: ExecArgs) -> compute_core::Result<(
         .map(|pair| (pair.key.clone(), pair.value.clone()))
         .collect();
     command.timeout = args.timeout;
+    command.output_bytes = args.output_bytes;
+    if args.stdin {
+        let mut input = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)?;
+        command.stdin = Some(input);
+    }
     let submission = remote
         .session_exec(&args.session_id, &command)
         .await
@@ -450,6 +499,21 @@ async fn exec(location: &PoolLocation, args: ExecArgs) -> compute_core::Result<(
     if args.detach {
         pool::print_json(&submission);
         return Ok(());
+    }
+    if args.follow {
+        follow(&remote, &submission.job_id.0).await?;
+        // The output was printed as it ran; report only the evidence.
+        let mut result = crate::wait_for_remote_result(&remote, &submission.job_id.0)
+            .await?
+            .result;
+        result.stdout.text.clear();
+        result.stderr.text.clear();
+        return crate::print_remote_execution_result(
+            &submission.job_id,
+            result,
+            false,
+            args.receipt.as_deref(),
+        );
     }
     // The same durable-job wait and evidence handling as `remote run`.
     crate::finish_remote_job(
@@ -459,6 +523,124 @@ async fn exec(location: &PoolLocation, args: ExecArgs) -> compute_core::Result<(
         args.receipt.as_deref(),
     )
     .await
+}
+
+/// Print a running job's output as it is written, until it is complete.
+async fn follow(remote: &RemoteProvider, job_id: &str) -> compute_core::Result<()> {
+    use std::io::Write;
+    let (mut stdout, mut stderr) = (0usize, 0usize);
+    loop {
+        let logs = remote.job_logs(job_id).await.map_err(session_error)?;
+        if let Some(fresh) = logs.stdout.get(stdout..) {
+            print!("{fresh}");
+            stdout = logs.stdout.len();
+        }
+        if let Some(fresh) = logs.stderr.get(stderr..) {
+            eprint!("{fresh}");
+            stderr = logs.stderr.len();
+        }
+        let _ = std::io::stdout().flush();
+        if logs.complete {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Run one file operation as a session command and wait for it.
+async fn file_command(
+    remote: &RemoteProvider,
+    session_id: &str,
+    command: Command,
+) -> compute_core::Result<compute_core::ExecutionResult> {
+    let submission = remote
+        .session_exec(session_id, &command)
+        .await
+        .map_err(session_error)?;
+    let result = crate::wait_for_remote_result(remote, &submission.job_id.0)
+        .await?
+        .result;
+    if result.exit_code != Some(0) {
+        return Err(ComputeError::Runtime(format!(
+            "the file operation failed (job {}): {}",
+            submission.job_id.0,
+            result.stderr.text.trim()
+        )));
+    }
+    Ok(result)
+}
+
+/// File operations are portable shell, so every provider (a workspace, a
+/// container, a VM) serves them the same way, as durable commands.
+async fn file(location: &PoolLocation, command: FileCommands) -> compute_core::Result<()> {
+    use base64::Engine;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let (operation, args) = match command {
+        FileCommands::Read(args) => ("read", args),
+        FileCommands::Write(args) => ("write", args),
+        FileCommands::List(args) => ("list", args),
+    };
+    let target = TargetArgs {
+        session_id: args.session_id.clone(),
+        provider: args.provider.clone(),
+        json: false,
+    };
+    let (remote, _, _) = locate(location, &target).await?;
+    let script = |body: &str| {
+        compute_core::SessionCommand::new(vec![
+            "sh".into(),
+            "-c".into(),
+            body.into(),
+            "sh".into(),
+            args.path.clone(),
+        ])
+    };
+    match operation {
+        "read" => {
+            let mut command = script("base64 < \"$1\"");
+            command.output_bytes = Some(1024 * 1024 * 1024);
+            let result = file_command(&remote, &args.session_id, command).await?;
+            if result.stdout.truncated {
+                return Err(ComputeError::Runtime(
+                    "the file is larger than a session command returns".into(),
+                ));
+            }
+            let encoded: String = result
+                .stdout
+                .text
+                .chars()
+                .filter(|c| !c.is_ascii_whitespace())
+                .collect();
+            let bytes = engine
+                .decode(encoded)
+                .map_err(|error| ComputeError::Runtime(format!("unreadable file data: {error}")))?;
+            match &args.output {
+                Some(path) => std::fs::write(path, bytes)?,
+                None => std::io::Write::write_all(&mut std::io::stdout(), &bytes)?,
+            }
+        }
+        "write" => {
+            let bytes = match &args.input {
+                Some(path) => std::fs::read(path)?,
+                None => {
+                    let mut bytes = Vec::new();
+                    std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)?;
+                    bytes
+                }
+            };
+            let mut command = script(
+                "mkdir -p \"$(dirname \"$1\")\" && base64 -d > \"$1.compute-write\" && mv -f \"$1.compute-write\" \"$1\"",
+            );
+            command.stdin = Some(engine.encode(bytes));
+            file_command(&remote, &args.session_id, command).await?;
+        }
+        _ => {
+            let result =
+                file_command(&remote, &args.session_id, script("ls -la -- \"$1\"")).await?;
+            print!("{}", result.stdout.text);
+        }
+    }
+    Ok(())
 }
 
 async fn lifecycle<F, Fut>(

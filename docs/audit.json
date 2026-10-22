@@ -2474,6 +2474,45 @@
    ]
   },
   {
+   "command": "compute session file list",
+   "about": "List a directory",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target job store",
+   "authority": "target: target credential",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/sessions.rs",
+    "packages/compute-appport/src/sessions.ts"
+   ]
+  },
+  {
+   "command": "compute session file read",
+   "about": "Print a file's bytes (or write them to --output)",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target job store",
+   "authority": "target: target credential",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/sessions.rs",
+    "packages/compute-appport/src/sessions.ts"
+   ]
+  },
+  {
+   "command": "compute session file write",
+   "about": "Replace a file with this process's standard input (or --input)",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target job store",
+   "authority": "target: target credential",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/sessions.rs",
+    "packages/compute-appport/src/sessions.ts"
+   ]
+  },
+  {
    "command": "compute session logs",
    "about": "Show the output of every execution in a session",
    "help_defect": null,
@@ -2505,6 +2544,18 @@
    "authority": "target: target credential",
    "ui": "none",
    "tests": []
+  },
+  {
+   "command": "compute egress serve",
+   "about": "Serve an egress gateway: sessions reach the network only through it",
+   "help_defect": null,
+   "interface": "local process",
+   "state": "none",
+   "authority": "local operator",
+   "ui": "none",
+   "tests": [
+    "crates/compute-egress/tests/gateway.rs"
+   ]
   },
   {
    "command": "compute session claim",

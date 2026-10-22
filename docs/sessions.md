@@ -105,8 +105,12 @@ compute session create [--cpu N] [--memory SIZE] [--disk SIZE] [--ttl DURATION]
 compute session list    [--provider ID] [--json]
 compute session info    <session-id> [--json]          # alias: inspect
 compute session connect <session-id> [--json]
-compute session exec    <session-id> [--env K=V]... [--timeout D] [--detach]
+compute session exec    <session-id> [--env K=V | --env K]... [--timeout D] [--detach]
+                        [--stdin] [--output-bytes SIZE] [--follow]
                         [--receipt FILE] [--json] -- <command>...
+compute session file read  <session-id> <path> [--output FILE]
+compute session file write <session-id> <path> [--input FILE]
+compute session file list  <session-id> <path>
 compute session logs    <session-id> [--json]
 compute session stop    <session-id>
 compute session resume  <session-id>
@@ -126,6 +130,23 @@ command's output, its `job_id`, and its `execution_id`, and exiting with the
 command's exit code — exactly like `compute remote run`. `--detach` prints
 the identities and returns; follow the job with `compute remote status` or
 `compute remote wait`, and fetch its receipt with `compute remote receipt`.
+
+- `--env K` (no `=`) takes the value from the caller's own environment, so a
+  secret never appears on a command line. Values travel inside the job's
+  request, which the target seals at rest.
+- `--stdin` sends the caller's standard input to the command (otherwise it
+  reads an immediate end of file).
+- Each output stream keeps 16 MiB unless `--output-bytes` says otherwise;
+  what exceeds it is dropped and the result says `truncated`, with the full
+  byte count. Truncation is never an error: the exit code is still the
+  command's.
+- `--follow` prints the output as the command writes it.
+
+`file read|write|list` move bytes in and out of the session's workspace
+(paths are relative to it unless absolute). Each is an ordinary durable
+command with its own job and receipt, so it works the same on every
+provider: a workspace, a container, a VM. A write replaces the file
+atomically and creates its directories.
 
 `info` shows the whole lifecycle in one place:
 
@@ -298,6 +319,15 @@ default `debian:stable-slim`): the workspace directory is mounted at
 limits, commands run through `docker exec`, `stop` and `resume` stop and
 start the same container, and destroy removes it and its workspace. A
 container that vanished is reported lost, never silently recreated.
+
+Every session container starts hardened: all capabilities dropped except
+`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID` and `KILL` (enough for
+a package manager running as root), `no-new-privileges`, at most 4096
+processes, and an init that reaps what each `exec` leaves behind.
+`--container-oci-runtime runsc` runs them under gVisor (or any OCI runtime
+the engine knows) for a user-space kernel boundary. A command's environment
+values reach the container by name (`--env NAME`), copied from the job's own
+sealed environment, never on the `docker exec` command line.
 
 Two session fields exist for environment computers
 ([computers.md](computers.md)): `persistent` (created claimed, with no

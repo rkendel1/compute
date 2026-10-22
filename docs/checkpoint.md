@@ -75,8 +75,8 @@ its digest.
 
 Unchanged and shared: the workspace module (`read_workspace`) is the authority,
 and a checkpoint is built from an archive it validated; `validate` runs the
-files back through it. Symbolic and hard links, devices and pipes, absolute or
-escaping paths, control characters and backslashes, controller or re-derived
+files back through it. Devices and pipes, paths under a symbolic link
+(links themselves are kept, path and target), absolute or escaping paths, control characters and backslashes, controller or re-derived
 state, a path given twice, and a path that is both a file and a directory are
 all refused, in the live workspace (`workspace_check`, tar link entries) and in
 crafted archives (unit tests). The executable bit and empty directories are
@@ -153,8 +153,8 @@ authority. Nothing sets a parent automatically until restore exists.
 Memory, processes, PIDs, sockets, kernel or machine state, `repos/` (re-derived
 from declared revisions), controller state, configuration values, sessions and
 connections, provider identity. Not built: restore, retention and deletion,
-quiescing, VM or provider snapshots, streaming (the 8 MiB workspace bound
-applies to what can be captured), secret scanning, and any change to
+quiescing, VM or provider snapshots, captures over the 256 MiB workspace
+bound, secret scanning, and any change to
 [fork](fork.md), which keeps its direct export/seed path.
 
 ## Restore

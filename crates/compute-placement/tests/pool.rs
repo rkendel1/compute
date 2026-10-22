@@ -185,6 +185,7 @@ fn wasm_bundle(isolation: IsolationProfile) -> WorkloadBundle {
         isolation: IsolationRequirement {
             profile: isolation,
             host: Default::default(),
+            writable: vec![],
         },
         dependencies: None,
     };

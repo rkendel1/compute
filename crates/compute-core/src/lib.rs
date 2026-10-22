@@ -314,6 +314,11 @@ pub struct IsolationRequirement {
     /// `trusted`, and keeps existing workload identities unchanged.
     #[serde(default, skip_serializing_if = "HostProfile::is_trusted")]
     pub host: HostProfile,
+    /// Absolute directories a confined workload may also write, besides its
+    /// own workspace: a session's workspace, for the commands run in it.
+    /// Omitted when empty, so existing workload identities are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable: Vec<String>,
 }
 
 impl IsolationRequirement {
@@ -545,6 +550,10 @@ pub struct ExecutionRequest {
     /// The operating-system boundary a process runtime runs under.
     #[serde(default, skip_serializing_if = "HostProfile::is_trusted")]
     pub host_isolation: HostProfile,
+    /// Absolute directories a confined process may also write, besides its
+    /// workspace (a session's workspace, for the commands run in it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_writable: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<DependencyCapsule>,
 }
@@ -794,6 +803,7 @@ impl WorkloadSpec {
             resources: self.resources.clone(),
             isolation: self.isolation.profile,
             host_isolation: self.isolation.host,
+            host_writable: self.isolation.writable.clone(),
             dependencies: None,
         })
     }
@@ -1330,6 +1340,7 @@ impl WorkloadBundle {
                 resources: self.workload.resources.clone(),
                 isolation: self.workload.isolation.profile,
                 host_isolation: self.workload.isolation.host,
+                host_writable: self.workload.isolation.writable.clone(),
                 dependencies: self.dependency_capsule.clone(),
             },
             _source: source,
@@ -1516,6 +1527,13 @@ pub struct Output {
 }
 
 impl Output {
+    /// What the stream produced in all, when the reader counted past what
+    /// it kept.
+    pub fn with_total(mut self, total: u64) -> Self {
+        self.bytes = self.bytes.max(total);
+        self
+    }
+
     pub fn from_bytes(bytes: Vec<u8>, limit: Option<u64>) -> Self {
         let original_len = bytes.len() as u64;
         let (slice, truncated) = match limit {
@@ -3098,6 +3116,7 @@ mod tests {
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
             host_isolation: HostProfile::Trusted,
+            host_writable: vec![],
             dependencies: None,
         })
         .unwrap();
@@ -3133,6 +3152,7 @@ mod tests {
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
             host_isolation: HostProfile::Trusted,
+            host_writable: vec![],
             dependencies: None,
         };
 
@@ -3173,6 +3193,7 @@ mod tests {
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
             host_isolation: HostProfile::Trusted,
+            host_writable: vec![],
             dependencies: None,
         };
 
@@ -3220,6 +3241,7 @@ mod tests {
             },
             isolation: IsolationProfile::Strict,
             host_isolation: HostProfile::Trusted,
+            host_writable: vec![],
             dependencies: None,
         };
         let strict = RuntimeCapabilities::wasm()
@@ -3904,6 +3926,7 @@ mod tests {
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
             host_isolation: HostProfile::Trusted,
+            host_writable: vec![],
             dependencies: None,
         };
         let first = stage_workload(&request).unwrap();

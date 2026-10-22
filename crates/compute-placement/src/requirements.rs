@@ -203,6 +203,7 @@ impl PlacementRequirements {
                 },
                 network: requirements.network.clone(),
                 isolation: requirements.isolation,
+                host: requirements.host,
                 architecture: requirements.architecture.clone(),
             },
             compute_core::SessionSpec {

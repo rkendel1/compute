@@ -126,6 +126,9 @@ pub struct SessionCapabilities {
     pub network: bool,
     pub public_endpoint: bool,
     pub persistent_storage: bool,
+    /// The provider can stop the environment's machine and later resume it
+    /// with its storage kept: everything running in it is ended on stop. It
+    /// does not mean memory or process state is kept.
     pub suspend: bool,
     pub resume: bool,
     pub claim: bool,
@@ -511,7 +514,19 @@ pub struct SessionCommand {
         with = "crate::duration_option_millis"
     )]
     pub timeout: Option<std::time::Duration>,
+    /// Written to the command's standard input, which is then closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdin: Option<String>,
+    /// The most bytes kept of each of stdout and stderr; the rest is
+    /// dropped and the result says it was truncated. Defaults to
+    /// [`SESSION_OUTPUT_BYTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<u64>,
 }
+
+/// What a session command keeps of each output stream unless it asks for
+/// another bound.
+pub const SESSION_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 
 impl SessionCommand {
     pub fn new(command: Vec<String>) -> Self {
@@ -520,7 +535,14 @@ impl SessionCommand {
             runtime: None,
             env: BTreeMap::new(),
             timeout: None,
+            stdin: None,
+            output_bytes: None,
         }
+    }
+
+    /// The bound kept of each output stream.
+    pub fn output_limit(&self) -> u64 {
+        self.output_bytes.unwrap_or(SESSION_OUTPUT_BYTES)
     }
 
     pub fn validate(&self) -> crate::Result<()> {
@@ -535,6 +557,9 @@ impl SessionCommand {
             if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
                 return invalid(format!("invalid environment variable {key:?}"));
             }
+        }
+        if self.output_bytes == Some(0) {
+            return invalid("a session command must keep some output".into());
         }
         Ok(())
     }

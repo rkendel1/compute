@@ -1,0 +1,17 @@
+[package]
+name = "compute-guest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Compute's guest agent: runs inside a microVM and serves commands over vsock"
+
+[dependencies]
+base64 = "0.22"
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -18,13 +18,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use compute_core::{
-    BundleInput, ComputeSession, ExecutionJob, IsolationProfile, IsolationRequirement, JobId,
-    JobStatus, NetworkPolicy, ResourceLimits, RuntimeKind, SESSION_VERSION, SessionCapabilities,
-    SessionCommand, SessionConnection, SessionConnectionGrant, SessionConnectionMode,
-    SessionEndpoint, SessionEndpointRequest, SessionEvent, SessionExecSubmission, SessionExecution,
-    SessionExecutionLogs, SessionFailure, SessionId, SessionLogs, SessionOwnership, SessionPhase,
-    SessionResources, SessionSpec, SessionStatus, WORKLOAD_SPEC_VERSION, WorkloadBundle,
-    WorkloadSpec,
+    BundleInput, ComputeSession, ExecutionJob, HostProfile, IsolationProfile, IsolationRequirement,
+    JobId, JobStatus, NetworkPolicy, ResourceLimits, RuntimeKind, SESSION_VERSION,
+    SessionCapabilities, SessionCommand, SessionConnection, SessionConnectionGrant,
+    SessionConnectionMode, SessionEndpoint, SessionEndpointRequest, SessionEvent,
+    SessionExecSubmission, SessionExecution, SessionExecutionLogs, SessionFailure, SessionId,
+    SessionLogs, SessionOwnership, SessionPhase, SessionResources, SessionSpec, SessionStatus,
+    WORKLOAD_SPEC_VERSION, WorkloadBundle, WorkloadSpec,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -67,6 +67,9 @@ pub struct SessionEnvironmentSpec {
     pub resources: SessionResources,
     pub network: NetworkPolicy,
     pub isolation: IsolationProfile,
+    /// The operating-system boundary every command in the session runs
+    /// under, on a provider that runs commands as host processes.
+    pub host: HostProfile,
     /// Required architecture (`x86_64`, `arm64`), when it matters.
     pub architecture: Option<String>,
 }
@@ -94,6 +97,14 @@ impl SessionCreateRequest {
     }
 }
 
+/// Where a session command's standard input is staged.
+const SESSION_STDIN: &str = "session-stdin";
+
+/// How long the environment's readiness check may take. It is declared, so an
+/// environment policy that bounds every execution's time can admit the
+/// environment itself (a check with no bound would be refused as unbounded).
+pub const SESSION_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// The canonical contract bundle of a session environment.
 pub fn environment_bundle(
     environment: &SessionEnvironmentSpec,
@@ -103,9 +114,17 @@ pub fn environment_bundle(
         SESSION_READINESS_SCRIPT,
         vec![],
         BTreeMap::new(),
-        session_limits(&environment.resources, None),
+        session_limits(
+            &environment.resources,
+            Some(SESSION_READINESS_TIMEOUT),
+            environment.host,
+        ),
         environment.network.clone(),
-        environment.isolation,
+        IsolationRequirement {
+            profile: environment.isolation,
+            host: environment.host,
+            writable: vec![],
+        },
     )?;
     if let Some(architecture) = &environment.architecture {
         bundle.workload.architecture = Some(architecture.clone());
@@ -114,10 +133,18 @@ pub fn environment_bundle(
     Ok(bundle)
 }
 
-fn session_limits(resources: &SessionResources, timeout: Option<Duration>) -> ResourceLimits {
+/// A session's resources as a workload's limits. Under a confined host
+/// profile the memory is a limit the target enforces (a cgroup), not only a
+/// figure placement admits against.
+fn session_limits(
+    resources: &SessionResources,
+    timeout: Option<Duration>,
+    host: HostProfile,
+) -> ResourceLimits {
     ResourceLimits {
         cpu_count: resources.cpu_count,
         memory_required_bytes: resources.memory_bytes,
+        memory_bytes: resources.memory_bytes.filter(|_| !host.is_trusted()),
         disk_bytes: resources.disk_bytes,
         wall_time: timeout,
         ..ResourceLimits::default()
@@ -131,7 +158,7 @@ fn shell_bundle(
     env: BTreeMap<String, String>,
     resources: ResourceLimits,
     network: NetworkPolicy,
-    isolation: IsolationProfile,
+    isolation: IsolationRequirement,
 ) -> Result<WorkloadBundle, ProviderError> {
     let bundle = WorkloadBundle {
         version: compute_core::WORKLOAD_BUNDLE_VERSION,
@@ -147,10 +174,7 @@ fn shell_bundle(
             outputs: vec![],
             resources,
             network,
-            isolation: IsolationRequirement {
-                profile: isolation,
-                ..IsolationRequirement::default()
-            },
+            isolation,
             dependencies: None,
         },
         entrypoint: BundleInput {
@@ -175,18 +199,32 @@ pub fn command_in_directory(
 ) -> Result<ProviderRequest, ProviderError> {
     const SCRIPT: &str = "cd \"$COMPUTE_SESSION_WORKSPACE\" || {\n  printf 'compute: the session workspace is unavailable\\n' >&2\n  exit 125\n}\nexec \"$@\"\n";
     let directory = directory.display().to_string();
+    let mut extra = vec![
+        ("HOME".to_owned(), directory.clone()),
+        ("COMPUTE_SESSION_WORKSPACE".to_owned(), directory.clone()),
+        (
+            "PATH".to_owned(),
+            node_path(std::env::var("PATH").ok().as_deref()),
+        ),
+    ];
+    // A confined command writes only its workspace: temporary files go there too.
+    if !environment.host.is_trusted() {
+        extra.push(("TMPDIR".to_owned(), directory.clone()));
+    }
     session_request(
         environment,
         command,
         SCRIPT,
-        [
-            ("HOME".to_owned(), directory.clone()),
-            ("COMPUTE_SESSION_WORKSPACE".to_owned(), directory),
-            (
-                "PATH".to_owned(),
-                node_path(std::env::var("PATH").ok().as_deref()),
-            ),
-        ],
+        extra,
+        IsolationRequirement {
+            profile: environment.isolation,
+            host: environment.host,
+            writable: if environment.host.is_trusted() {
+                vec![]
+            } else {
+                vec![directory]
+            },
+        },
     )
 }
 
@@ -223,7 +261,19 @@ pub fn shell_request(
     environment: &SessionEnvironment,
     command: &SessionCommand,
 ) -> Result<ProviderRequest, ProviderError> {
-    session_request(environment, command, "exec \"$@\"\n", [])
+    // The boundary is the environment the command enters (a container, a VM);
+    // the process on this node is only the client that enters it.
+    session_request(
+        environment,
+        command,
+        "exec \"$@\"\n",
+        [],
+        IsolationRequirement {
+            profile: environment.isolation,
+            host: HostProfile::Trusted,
+            writable: vec![],
+        },
+    )
 }
 
 fn session_request(
@@ -231,6 +281,7 @@ fn session_request(
     command: &SessionCommand,
     script: &str,
     extra: impl IntoIterator<Item = (String, String)>,
+    isolation: IsolationRequirement,
 ) -> Result<ProviderRequest, ProviderError> {
     command.validate().map_err(|error| {
         ProviderError::new(ProviderErrorKind::ArtifactInvalid, error.to_string())
@@ -252,15 +303,32 @@ fn session_request(
         }
         env.insert(key.clone(), value.clone());
     }
-    let bundle = shell_bundle(
+    let mut limits = session_limits(&environment.resources, command.timeout, isolation.host);
+    // Output is bounded: what exceeds the bound is dropped and the result
+    // says so, rather than a command's output growing without limit.
+    limits.stdout_bytes = Some(command.output_limit());
+    limits.stderr_bytes = Some(command.output_limit());
+    let mut bundle = shell_bundle(
         "session-exec.sh",
         script,
         command.command.clone(),
         env,
-        session_limits(&environment.resources, command.timeout),
+        limits,
         environment.network.clone(),
-        environment.isolation,
+        isolation,
     )?;
+    if let Some(stdin) = &command.stdin {
+        // Standard input travels inside the (sealed) bundle and is
+        // attached before the command enters its workspace.
+        bundle.workload.inputs.push(compute_core::WorkloadInput {
+            path: SESSION_STDIN.into(),
+            source: compute_core::InputSource::Inline {
+                data: stdin.as_bytes().to_vec(),
+            },
+        });
+        bundle.entrypoint.data = format!("exec < {SESSION_STDIN}\n{script}").into_bytes();
+        bundle.validate().map_err(artifact_error)?;
+    }
     let mut request = ProviderRequest::bundle(bundle.to_bytes().map_err(artifact_error)?);
     request.expected.workload_id = Some(bundle.workload_id().map_err(artifact_error)?);
     request.expected.bundle_id = Some(bundle.bundle_id().map_err(artifact_error)?);
@@ -314,6 +382,9 @@ pub struct SessionEnvironment {
     pub resources: SessionResources,
     pub network: NetworkPolicy,
     pub isolation: IsolationProfile,
+    /// The host profile the session was created with (its environment
+    /// bundle's), which every command in it runs under.
+    pub host: HostProfile,
 }
 
 /// Connection material a provider issues for one connection.
@@ -954,11 +1025,22 @@ impl SessionManager {
             return Err(unsupported(&session.provider_kind, "exec"));
         }
         let environment = self.environment(&session)?;
-        let request = self
+        let mut request = self
             .provider
             .exec(&environment, &command)
             .await
             .map_err(|error| self.provider_error(error))?;
+        // The policy the session was admitted under (the caller's
+        // environment policy, sent when it was placed) admits every command
+        // in it too, intersected with this target's own: a computer's
+        // commands never escape the policy its environment declares.
+        if request.execution.policy.is_none() {
+            request.execution.policy = self
+                .read_request(&session.session_id)?
+                .request
+                .execution
+                .policy;
+        }
         let execution = SessionExecution {
             job_id: JobId::generate(),
             execution_id: compute_core::new_execution_id(),
@@ -1799,6 +1881,7 @@ impl SessionManager {
                 .execution
                 .isolation
                 .unwrap_or(bundle.workload.isolation.profile),
+            host: bundle.workload.isolation.host,
         })
     }
 

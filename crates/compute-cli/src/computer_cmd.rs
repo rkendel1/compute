@@ -68,6 +68,12 @@ pub struct ComputerArgs {
     pub network: Option<NetworkPolicy>,
     #[arg(long, value_parser = crate::parse_isolation)]
     pub isolation: Option<IsolationProfile>,
+    /// The operating-system boundary every command in the computer runs
+    /// under: `trusted` (the operator's account; the default), `restricted`
+    /// (writes only its workspace; CPU and memory enforced) or `isolated`
+    /// (also reads only the system and its workspace).
+    #[arg(long = "host-profile", value_parser = crate::parse_host_profile)]
+    pub host_profile: Option<compute_core::HostProfile>,
     /// A capability the computer must offer (repeatable): terminal,
     /// persistent_storage, public_endpoint, ...
     #[arg(long = "require")]
@@ -97,7 +103,7 @@ pub struct ComputerArgs {
     #[arg(
         long,
         conflicts_with_all = [
-            "cpu", "memory", "disk", "architecture", "network", "isolation", "require",
+            "cpu", "memory", "disk", "architecture", "network", "isolation", "host_profile", "require",
             "features", "persistent", "ephemeral", "ttl"
         ]
     )]
@@ -110,6 +116,7 @@ impl ComputerArgs {
             || self.memory.is_some()
             || self.disk.is_some()
             || self.architecture.is_some()
+            || self.host_profile.is_some()
             || !self.require.is_empty()
             || !self.features.is_empty()
             || self.persistent
@@ -129,6 +136,7 @@ impl ComputerArgs {
             // unless asked not to.
             network: self.network.clone().unwrap_or(NetworkPolicy::Network),
             isolation: self.isolation.unwrap_or_default(),
+            host: self.host_profile.unwrap_or_default(),
             capabilities: self.require.clone(),
             features: self.features.clone(),
             runtimes: vec![],

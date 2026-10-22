@@ -1074,6 +1074,7 @@ async fn provisioning_survives_a_controller_restart_and_orphans_are_torn_down() 
                     resources: Default::default(),
                     network: NetworkPolicy::Network,
                     isolation: Default::default(),
+                    host: Default::default(),
                     architecture: None,
                 },
                 compute_core::SessionSpec {
@@ -3253,11 +3254,11 @@ async fn workspace_state_is_exported_seeded_and_verified_without_fork() {
     );
 
     // Unsupported entries are refused, by export and by verify.
-    sh(&daemon, "origin", "ln -s /etc/passwd link").await;
-    let linked = daemon.export_workspace("origin", "alice").await;
+    sh(&daemon, "origin", "mkfifo pipe").await;
+    let piped = daemon.export_workspace("origin", "alice").await;
     assert!(
-        matches!(&linked, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("unsupported entry")),
-        "{linked:?}"
+        matches!(&piped, Err(EnvironmentError::RuntimeUnavailable(reason)) if reason.contains("unsupported entry")),
+        "{piped:?}"
     );
     assert!(
         daemon
@@ -3265,8 +3266,39 @@ async fn workspace_state_is_exported_seeded_and_verified_without_fork() {
             .await
             .is_err()
     );
-    sh(&daemon, "origin", "rm link").await;
+    sh(&daemon, "origin", "rm pipe").await;
     assert!(daemon.export_workspace("origin", "alice").await.is_ok());
+
+    // Links are workspace content: the computer and the archive agree on
+    // them, and they land in a seeded workspace with the same digest.
+    sh(
+        &daemon,
+        "origin",
+        "ln -s data/notes.txt link && ln -s /etc/hostname outside && ln data/notes.txt data/twin",
+    )
+    .await;
+    let linked = daemon.export_workspace("origin", "alice").await.unwrap();
+    assert_ne!(linked.digest, export.digest);
+    create("linked", empty_contents()).await;
+    let seeded = daemon
+        .seed_workspace(
+            "linked",
+            "alice",
+            WorkspaceSeedRequest {
+                archive: linked.archive.clone(),
+                digest: Some(linked.digest.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(seeded.verified);
+    assert_eq!(
+        sh(&daemon, "linked", "readlink link && cat link")
+            .await
+            .trim(),
+        "data/notes.txt\nhello"
+    );
+    sh(&daemon, "origin", "rm link outside data/twin").await;
 
     // Each operation is evidenced.
     let recorded = events(&daemon, "dest").await;
@@ -4018,7 +4050,7 @@ async fn a_failed_fork_creates_nothing_and_poisons_no_name() {
             .await,
         Err(EnvironmentError::Invalid(_))
     ));
-    sh(&daemon, "origin", "ln -s /etc/passwd link").await;
+    sh(&daemon, "origin", "mkfifo link").await;
     let refused = daemon
         .fork_environment("origin", "alice", fork_of("linked"))
         .await;
@@ -4424,8 +4456,6 @@ async fn a_checkpoint_of_an_unsafe_workspace_is_refused_and_nothing_is_recorded(
     let (daemon, _artifacts, _state, _target, _workspaces, _node, _steered) =
         checkpoint_world(&source).await;
     for (what, make, remove) in [
-        ("a symbolic link", "ln -s /etc/passwd link", "rm link"),
-        ("a hard link", "ln data/notes.txt data/twin", "rm data/twin"),
         ("a special file", "mkfifo pipe", "rm pipe"),
         (
             "a control character",
@@ -4451,7 +4481,14 @@ async fn a_checkpoint_of_an_unsafe_workspace_is_refused_and_nothing_is_recorded(
         assert_eq!(failure.1["published"], false, "{what}");
         sh(&daemon, "origin", remove).await;
     }
-    // The environment is not poisoned: the next capture succeeds.
+    // The environment is not poisoned: the next capture succeeds, links
+    // included.
+    sh(
+        &daemon,
+        "origin",
+        "ln -s /etc/passwd link && ln data/notes.txt data/twin",
+    )
+    .await;
     let report = daemon
         .checkpoint_environment("origin", "alice", no_parent())
         .await

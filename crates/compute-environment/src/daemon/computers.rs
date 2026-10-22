@@ -806,16 +806,12 @@ pub(crate) fn imported_source(repository: &str) -> String {
     format!("{}{repository}", compute_core::IMPORTED_SOURCES)
 }
 
-/// Append base64 chunks (`COMPUTE_IMPORT_0`, `_1`, …, in the environment)
-/// of a source archive to an import. Arguments: import ID, chunk count.
+/// Append a base64 chunk of a source archive, given on standard input, to
+/// an import. Argument: import ID.
 const IMPORT_CHUNK: &str = r#"set -eu
 dir=".compute/imports/$1"
 mkdir -p "$dir"
-i=0
-while [ "$i" -lt "$2" ]; do
-  eval "printf '%s' \"\$COMPUTE_IMPORT_$i\"" >>"$dir/source.b64"
-  i=$((i + 1))
-done
+cat >>"$dir/source.b64"
 "#;
 
 /// Commit an import as the next revision of a workspace repository, and
@@ -847,10 +843,8 @@ fi
 git rev-parse HEAD
 "#;
 
-/// Largest base64 value one environment variable carries (under the
-/// kernel's per-string limit), and how many one job carries.
-const IMPORT_VALUE: usize = 96 * 1024;
-const IMPORT_VALUES: usize = 8;
+/// The base64 one import job carries on its standard input.
+const IMPORT_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
 const REMOVE_REPOSITORY: &str = r#"rm -rf "repos/$1""#;
 
@@ -2152,18 +2146,9 @@ impl Daemon {
         let digest = compute_core::sha256_identity(archive);
         let encoded = base64::engine::general_purpose::STANDARD.encode(archive);
         let mut jobs = vec![];
-        let values = encoded
-            .as_bytes()
-            .chunks(IMPORT_VALUE)
-            .map(|chunk| String::from_utf8(chunk.to_vec()).expect("base64 is ASCII"))
-            .collect::<Vec<_>>();
-        for batch in values.chunks(IMPORT_VALUES) {
-            let mut command = script(IMPORT_CHUNK, [import.clone(), batch.len().to_string()]);
-            for (index, value) in batch.iter().enumerate() {
-                command
-                    .env
-                    .insert(format!("COMPUTE_IMPORT_{index}"), value.clone());
-            }
+        for chunk in encoded.as_bytes().chunks(IMPORT_CHUNK_BYTES) {
+            let mut command = script(IMPORT_CHUNK, [import.clone()]);
+            command.stdin = Some(String::from_utf8(chunk.to_vec()).expect("base64 is ASCII"));
             let (evidence, _) = self
                 .run_in_computer_command(client, session_id, command, Duration::from_secs(300))
                 .await;

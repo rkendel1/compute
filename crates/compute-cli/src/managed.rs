@@ -335,7 +335,7 @@ async fn register(
 
     let mut client = compute_environment::client::DaemonClient::new(control_plane)
         .map_err(crate::environment_cmd::error)?;
-    if let Ok(token) = std::env::var(daemon_token_env) {
+    if let Some(token) = crate::environment_cmd::daemon_token(daemon_token_env) {
         client = client.with_bearer_token(token);
     }
     let definition = Definition {

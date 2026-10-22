@@ -258,6 +258,56 @@ fn a_session_is_a_durable_computer_on_whatever_provider_placement_selects() {
         "the same environment after the restart"
     );
 
+    // Files: bytes in and out unchanged, each operation a durable command.
+    let bytes: Vec<u8> = (0..=255u8).cycle().take(70_000).collect();
+    let local = root.join("blob.bin");
+    std::fs::write(&local, &bytes).unwrap();
+    cli.ok(&[
+        "session",
+        "file",
+        "write",
+        &id,
+        "deep/dir/blob.bin",
+        "--input",
+        local.to_str().unwrap(),
+    ]);
+    let back = root.join("back.bin");
+    cli.ok(&[
+        "session",
+        "file",
+        "read",
+        &id,
+        "deep/dir/blob.bin",
+        "--output",
+        back.to_str().unwrap(),
+    ]);
+    assert_eq!(std::fs::read(&back).unwrap(), bytes);
+    assert!(
+        cli.ok(&["session", "file", "list", &id, "deep/dir"])
+            .contains("blob.bin")
+    );
+    assert!(
+        !cli.run(&["session", "file", "read", &id, "missing"])
+            .status
+            .success()
+    );
+    // Standard input reaches a command.
+    let mut piped = std::process::Command::new(env!("CARGO_BIN_EXE_compute"));
+    runtimes::with_fixture_runtimes(&mut piped);
+    let mut child = piped
+        .current_dir(&root)
+        .env_remove("COMPUTE_POOL_CONFIG")
+        .env_remove("COMPUTE_CAPABILITY_CACHE")
+        .args(["session", "exec", &id, "--stdin", "--", "tr", "a-z", "A-Z"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(child.stdin.as_mut().unwrap(), b"shout\n").unwrap();
+    drop(child.stdin.take());
+    let shouted = child.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&shouted.stdout), "SHOUT\n");
+
     // One-shot remote execution is unchanged and uses the same jobs.
     let one_shot = cli.run(&[
         "remote",

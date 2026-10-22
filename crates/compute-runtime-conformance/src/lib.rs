@@ -564,6 +564,7 @@ fn workload(
         resources: ResourceLimits::default(),
         isolation: compute_core::IsolationProfile::Process,
         host_isolation: compute_core::HostProfile::Trusted,
+        host_writable: vec![],
         dependencies: None,
     }
 }
