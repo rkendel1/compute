@@ -298,7 +298,11 @@ async fn discovery_follows_the_current_registration() {
 
 #[test]
 fn the_route_is_listed() {
-    assert!(api::ROUTES.contains(&("GET", "/services/{service}/ui")));
+    assert!(
+        api::ROUTES
+            .iter()
+            .any(|route| route.method == "GET" && route.path == "/services/{service}/ui")
+    );
 }
 
 #[test]

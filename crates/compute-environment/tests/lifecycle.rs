@@ -437,6 +437,7 @@ async fn a_fork_has_a_lifecycle_of_its_own() {
                 name: "beta".into(),
                 target: None,
                 copy_config: false,
+                state: Default::default(),
             },
         )
         .await
@@ -474,6 +475,7 @@ async fn a_fork_has_a_lifecycle_of_its_own() {
                 name: "gamma".into(),
                 target: None,
                 copy_config: false,
+                state: Default::default(),
             },
         )
         .await

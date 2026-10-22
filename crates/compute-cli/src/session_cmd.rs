@@ -48,6 +48,13 @@ enum SessionCommands {
     Connect(TargetArgs),
     /// Run a command in a session as a durable job.
     Exec(ExecArgs),
+    /// Attach this terminal to a running interactive execution (from
+    /// `exec --tty` or `--interactive`): input goes to it, its output comes
+    /// back. Ctrl-] detaches and leaves it running.
+    Attach(AttachArgs),
+    /// Send input, a resize, a signal, or the end of input to a running
+    /// interactive execution.
+    Input(InputArgs),
     /// Read, write, or list files in a session's workspace. Each operation
     /// is a durable command with its own receipt.
     #[command(subcommand)]
@@ -60,6 +67,10 @@ enum SessionCommands {
     Resume(TargetArgs),
     /// Keep an ephemeral session until it is destroyed.
     Claim(TargetArgs),
+    /// Fork a running session's machine into new sessions: each continues
+    /// from the same instant (memory, processes, disk), with its own copy of
+    /// everything mutable. The source keeps running. Needs `fork`.
+    Fork(ForkArgs),
     /// Tear the environment down. The record remains as evidence.
     Destroy(TargetArgs),
     /// Start working, through the Compute daemon: enter an environment you
@@ -144,6 +155,50 @@ struct TargetArgs {
 }
 
 #[derive(Args, Debug)]
+struct AttachArgs {
+    session_id: String,
+    job_id: String,
+    #[arg(long)]
+    provider: Option<String>,
+    /// Replay its output from the start, not only what comes next.
+    #[arg(long)]
+    from_start: bool,
+    /// Drive it from this terminal: raw input, Ctrl-] detaches, and size
+    /// changes are forwarded.
+    #[arg(long)]
+    tty: bool,
+}
+
+#[derive(Args, Debug)]
+struct InputArgs {
+    session_id: String,
+    job_id: String,
+    #[arg(long)]
+    provider: Option<String>,
+    /// Text to send, as is (use $'...' for control characters).
+    #[arg(long)]
+    data: Option<String>,
+    /// The terminal's new size, ROWSxCOLS.
+    #[arg(long, value_parser = crate::guest_cmd::parse_size)]
+    resize: Option<compute_guest::TerminalSize>,
+    /// A signal for its process group (number, e.g. 2 for SIGINT).
+    #[arg(long)]
+    signal: Option<i32>,
+    /// The end of its input.
+    #[arg(long)]
+    close: bool,
+}
+
+#[derive(Args, Debug)]
+struct ForkArgs {
+    #[command(flatten)]
+    target: TargetArgs,
+    /// How many children.
+    #[arg(long, default_value_t = 1)]
+    count: u32,
+}
+
+#[derive(Args, Debug)]
 struct ExecArgs {
     session_id: String,
     #[arg(long)]
@@ -168,6 +223,13 @@ struct ExecArgs {
     /// Print the command's output as it runs.
     #[arg(long, conflicts_with_all = ["detach", "json"])]
     follow: bool,
+    /// Run it on a terminal (the size of this one, or 24x80) and attach to
+    /// it: what you type goes to it. Needs the session's `terminal`.
+    #[arg(long, conflicts_with_all = ["follow", "json"])]
+    tty: bool,
+    /// Keep its standard input open and stream this one to it.
+    #[arg(long, conflicts_with_all = ["follow", "json", "stdin"])]
+    interactive: bool,
     #[arg(long)]
     json: bool,
     #[arg(last = true, required = true)]
@@ -273,6 +335,45 @@ pub async fn session(command: SessionCommand) -> compute_core::Result<()> {
             Ok(())
         }
         SessionCommands::Exec(args) => exec(&location, args).await,
+        SessionCommands::Attach(args) => {
+            let target = TargetArgs {
+                session_id: args.session_id.clone(),
+                provider: args.provider.clone(),
+                json: false,
+            };
+            let (remote, _, _) = locate(&location, &target).await?;
+            let offset = if args.from_start { 0 } else { u64::MAX };
+            match crate::attach::attach(remote, &args.session_id, &args.job_id, offset, args.tty)
+                .await?
+            {
+                crate::attach::Attached::Ended(code) => std::process::exit(code),
+                crate::attach::Attached::Detached => Ok(()),
+            }
+        }
+        SessionCommands::Input(args) => {
+            let target = TargetArgs {
+                session_id: args.session_id.clone(),
+                provider: args.provider.clone(),
+                json: false,
+            };
+            let (remote, _, _) = locate(&location, &target).await?;
+            remote
+                .session_input(
+                    &args.session_id,
+                    &compute_core::SessionInput {
+                        job_id: compute_core::JobId(args.job_id.clone()),
+                        data: args.data.map(String::into_bytes).unwrap_or_default(),
+                        resize: args.resize.map(|size| compute_core::TerminalSize {
+                            rows: size.rows,
+                            cols: size.cols,
+                        }),
+                        signal: args.signal,
+                        close: args.close,
+                    },
+                )
+                .await
+                .map_err(session_error)
+        }
         SessionCommands::File(command) => file(&location, command).await,
         SessionCommands::Logs(args) => {
             let (remote, _, _) = locate(&location, &args).await?;
@@ -310,6 +411,40 @@ pub async fn session(command: SessionCommand) -> compute_core::Result<()> {
                 remote.destroy_session(&id).await
             })
             .await
+        }
+        SessionCommands::Fork(args) => {
+            let (remote, provider, _) = locate(&location, &args.target).await?;
+            let fork = remote
+                .fork_session(&args.target.session_id, args.count)
+                .await
+                .map_err(session_error)?;
+            if args.target.json {
+                pool::print_json(&fork);
+            } else {
+                println!(
+                    "Forked {} at checkpoint {}",
+                    fork.source_session_id, fork.checkpoint.id
+                );
+                for child in &fork.children {
+                    print_session(&provider, child);
+                }
+                if let Some(refused) = &fork.refused {
+                    println!("Refused further children: {refused}");
+                }
+            }
+            // Every child was asked for, and each one is ready.
+            let ready = fork
+                .children
+                .iter()
+                .filter(|child| child.status.is_usable())
+                .count();
+            if ready < args.count as usize {
+                return Err(compute_core::ComputeError::Runtime(format!(
+                    "{ready} of {} children are ready",
+                    args.count
+                )));
+            }
+            Ok(())
         }
     }
 }
@@ -493,6 +628,13 @@ async fn exec(location: &PoolLocation, args: ExecArgs) -> compute_core::Result<(
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)?;
         command.stdin = Some(input);
     }
+    if args.tty {
+        command.terminal = Some(
+            crate::attach::terminal_size()
+                .unwrap_or(compute_core::TerminalSize { rows: 24, cols: 80 }),
+        );
+    }
+    command.interactive = args.interactive;
     let submission = remote
         .session_exec(&args.session_id, &command)
         .await
@@ -500,6 +642,27 @@ async fn exec(location: &PoolLocation, args: ExecArgs) -> compute_core::Result<(
     if args.detach {
         pool::print_json(&submission);
         return Ok(());
+    }
+    if args.tty || args.interactive {
+        let job = submission.job_id.0.clone();
+        return match crate::attach::attach(remote.clone(), &args.session_id, &job, 0, args.tty)
+            .await?
+        {
+            crate::attach::Attached::Detached => Ok(()),
+            crate::attach::Attached::Ended(code) => {
+                if let Some(path) = &args.receipt {
+                    // The same receipt, written the same way, as any exec.
+                    let result = crate::wait_for_remote_result(&remote, &job).await?;
+                    let receipt = result.result.receipt.as_ref().ok_or_else(|| {
+                        compute_core::ComputeError::InvalidReceipt(
+                            "execution did not produce a receipt".into(),
+                        )
+                    })?;
+                    std::fs::write(path, receipt.encoded_bytes()?)?;
+                }
+                std::process::exit(code)
+            }
+        };
     }
     if args.follow {
         follow(&remote, &submission.job_id.0).await?;
@@ -760,7 +923,7 @@ async fn locate(
     }
 }
 
-fn session_error(error: compute_provider::ProviderError) -> ComputeError {
+pub(crate) fn session_error(error: compute_provider::ProviderError) -> ComputeError {
     let code = serde_json::to_value(error.kind)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))

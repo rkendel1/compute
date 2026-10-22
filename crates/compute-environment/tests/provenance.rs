@@ -114,6 +114,7 @@ fn fork_request(name: &str) -> ForkRequest {
         name: name.into(),
         target: None,
         copy_config: false,
+        state: Default::default(),
     }
 }
 

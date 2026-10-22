@@ -60,6 +60,14 @@ mod bytes {
     }
 }
 
+/// A terminal's size, in character cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalSize {
+    pub rows: u16,
+    pub cols: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
@@ -71,6 +79,37 @@ pub enum Request {
         cwd: String,
         #[serde(default, with = "bytes")]
         stdin: Vec<u8>,
+        /// Run the command on a terminal of this size (a PTY): its output
+        /// is the terminal's, and `Input`, `Resize`, `Signal`, and
+        /// `CloseInput` may follow on the same connection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal: Option<TerminalSize>,
+        /// Keep standard input open after `stdin`: `Input` and
+        /// `CloseInput` may follow on the same connection.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interactive: bool,
+    },
+    /// More input for an interactive command.
+    Input {
+        #[serde(with = "bytes")]
+        data: Vec<u8>,
+    },
+    /// The terminal changed size.
+    Resize {
+        size: TerminalSize,
+    },
+    /// Send a signal to the command's process group.
+    Signal {
+        signal: i32,
+    },
+    /// The end of the command's input (on a terminal: end-of-file, ^D).
+    CloseInput,
+    /// Mix the host's fresh entropy into the guest kernel's pool and force
+    /// its random number generator to reseed. A forked machine starts with
+    /// its siblings' generator state; this makes their output diverge.
+    Reseed {
+        #[serde(with = "bytes")]
+        entropy: Vec<u8>,
     },
 }
 
@@ -96,6 +135,8 @@ pub enum Event {
         code: Option<i32>,
         signal: Option<i32>,
     },
+    /// The kernel took the entropy and reseeded.
+    Reseeded,
 }
 
 pub async fn write_frame<W: AsyncWrite + Unpin, T: Serialize>(
@@ -133,7 +174,9 @@ pub async fn read_frame<R: AsyncRead + Unpin, T: for<'de> Deserialize<'de>>(
 }
 
 /// Serve one connection: one request, its answer.
-pub async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(stream: S) -> io::Result<()> {
+pub async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    stream: S,
+) -> io::Result<()> {
     let (mut reader, mut writer) = tokio::io::split(stream);
     let Some(request) = read_frame::<_, Request>(&mut reader).await? else {
         return Ok(());
@@ -153,18 +196,178 @@ pub async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(stream: S) -> i
             env,
             cwd,
             stdin,
-        } => exec(argv, env, cwd, stdin, &mut reader, &mut writer).await,
+            terminal,
+            interactive,
+        } => {
+            // Whatever the client sends next, read whole frames on their
+            // own task (a frame read is not safe to abandon half way).
+            let (sender, controls) = tokio::sync::mpsc::channel(64);
+            let reading = tokio::spawn(async move {
+                loop {
+                    match read_frame::<_, Request>(&mut reader).await {
+                        Ok(Some(request)) => {
+                            if sender.send(Some(request)).await.is_err() {
+                                break;
+                            }
+                        }
+                        // The client closed, or broke the protocol.
+                        _ => {
+                            let _ = sender.send(None).await;
+                            break;
+                        }
+                    }
+                }
+            });
+            let ran = exec(
+                Command {
+                    argv,
+                    env,
+                    cwd,
+                    stdin,
+                    terminal,
+                    interactive,
+                },
+                controls,
+                &mut writer,
+            )
+            .await;
+            reading.abort();
+            ran
+        }
+        Request::Input { .. }
+        | Request::Resize { .. }
+        | Request::Signal { .. }
+        | Request::CloseInput => {
+            write_frame(
+                &mut writer,
+                &Event::Error {
+                    message: "control for a command that is not running".into(),
+                },
+            )
+            .await
+        }
+        Request::Reseed { entropy } => {
+            let answer = match reseed_kernel(&entropy) {
+                Ok(()) => Event::Reseeded,
+                Err(message) => Event::Error { message },
+            };
+            write_frame(&mut writer, &answer).await
+        }
     }
 }
 
-async fn exec<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+/// The most entropy one reseed carries.
+pub const MAX_RESEED_BYTES: usize = 512;
+
+/// `RNDADDENTROPY` (credit the entropy) then `RNDRESEEDCRNG` on
+/// `/dev/urandom`. Needs CAP_SYS_ADMIN, which the agent has as PID 1.
+fn reseed_kernel(entropy: &[u8]) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    if entropy.is_empty() || entropy.len() > MAX_RESEED_BYTES {
+        return Err(format!("reseed takes 1 to {MAX_RESEED_BYTES} bytes"));
+    }
+    // _IOW('R', 0x03, int[2]) and _IO('R', 0x07).
+    const RNDADDENTROPY: libc::c_ulong = 0x4008_5203;
+    const RNDRESEEDCRNG: libc::c_ulong = 0x5207;
+    let device = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/urandom")
+        .map_err(|error| format!("/dev/urandom: {error}"))?;
+    // struct rand_pool_info { int entropy_count; int buf_size; u32 buf[]; }
+    let mut info = Vec::with_capacity(8 + entropy.len());
+    info.extend_from_slice(&((entropy.len() * 8) as i32).to_ne_bytes());
+    info.extend_from_slice(&(entropy.len() as i32).to_ne_bytes());
+    info.extend_from_slice(entropy);
+    // SAFETY: both ioctls on an open /dev/urandom; the buffer is the
+    // rand_pool_info the first expects, and outlives the call.
+    unsafe {
+        if libc::ioctl(device.as_raw_fd(), RNDADDENTROPY as _, info.as_ptr()) != 0 {
+            return Err(format!(
+                "RNDADDENTROPY: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if libc::ioctl(device.as_raw_fd(), RNDRESEEDCRNG as _) != 0 {
+            return Err(format!(
+                "RNDRESEEDCRNG: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    Ok(())
+}
+
+struct Command {
     argv: Vec<String>,
     env: BTreeMap<String, String>,
     cwd: String,
     stdin: Vec<u8>,
-    reader: &mut R,
+    terminal: Option<TerminalSize>,
+    interactive: bool,
+}
+
+/// A pseudo-terminal of `size`: (master, slave).
+fn open_pty(size: TerminalSize) -> io::Result<(OwnedFd, OwnedFd)> {
+    let (mut master, mut slave) = (0, 0);
+    let window = libc::winsize {
+        ws_row: size.rows,
+        ws_col: size.cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: openpty(3) with valid out-pointers and a winsize; no name or
+    // termios.
+    let opened = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &window,
+        )
+    };
+    if opened != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: both descriptors were just opened and are owned here.
+    Ok(unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) })
+}
+
+fn resize_pty(master: &OwnedFd, size: TerminalSize) {
+    use std::os::fd::AsRawFd;
+    let window = libc::winsize {
+        ws_row: size.rows,
+        ws_col: size.cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCSWINSZ on the master of a PTY this process opened; the
+    // kernel signals the terminal's foreground group (SIGWINCH).
+    unsafe {
+        libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &window);
+    }
+}
+
+/// Where an interactive command's further input goes.
+enum Input {
+    None,
+    Pipe(Option<tokio::process::ChildStdin>),
+    Terminal(std::fs::File),
+}
+
+async fn exec<W: AsyncWrite + Unpin>(
+    request: Command,
+    mut controls: tokio::sync::mpsc::Receiver<Option<Request>>,
     writer: &mut W,
 ) -> io::Result<()> {
+    let Command {
+        argv,
+        env,
+        cwd,
+        stdin,
+        terminal,
+        interactive,
+    } = request;
     let Some((program, arguments)) = argv.split_first() else {
         write_frame(
             writer,
@@ -190,13 +393,67 @@ async fn exec<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         .env("HOME", &cwd)
         .envs(&env)
         .current_dir(&cwd)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        // Its own process group, so ending it ends what it started.
-        .process_group(0)
         .kill_on_drop(true);
-    let mut child = match command.spawn() {
+    let mut master = None;
+    match terminal {
+        Some(size) => {
+            // Said, not dropped: a client that cannot get a terminal is
+            // told why, as for a program that cannot start.
+            let (pty, slave) = match open_pty(size) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    write_frame(
+                        writer,
+                        &Event::Error {
+                            message: format!("a terminal could not be opened: {error}"),
+                        },
+                    )
+                    .await?;
+                    return write_frame(
+                        writer,
+                        &Event::Exit {
+                            code: Some(127),
+                            signal: None,
+                        },
+                    )
+                    .await;
+                }
+            };
+            command
+                .env(
+                    "TERM",
+                    env.get("TERM").map_or("xterm-256color", String::as_str),
+                )
+                .stdin(std::process::Stdio::from(slave.try_clone()?))
+                .stdout(std::process::Stdio::from(slave.try_clone()?))
+                .stderr(std::process::Stdio::from(slave));
+            // SAFETY: only async-signal-safe calls between fork and exec:
+            // a new session (so ending it ends what it started), with the
+            // terminal as its controlling terminal.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            master = Some(pty);
+        }
+        None => {
+            command
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                // Its own process group, so ending it ends what it started.
+                .process_group(0);
+        }
+    }
+    let spawned = command.spawn();
+    // The parent's copies of the terminal's slave end go with the command,
+    // so the terminal reports its end when the command's processes close it.
+    drop(command);
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
             write_frame(
@@ -216,50 +473,89 @@ async fn exec<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             .await;
         }
     };
-    let mut input = child.stdin.take().expect("piped stdin");
-    tokio::spawn(async move {
-        let _ = input.write_all(&stdin).await;
-        let _ = input.shutdown().await;
-    });
     let (sender, mut events) = tokio::sync::mpsc::channel::<Event>(16);
-    let pump = |mut source: Box<dyn AsyncRead + Unpin + Send>, stdout: bool| {
-        let sender = sender.clone();
-        tokio::spawn(async move {
-            let mut buffer = vec![0_u8; 64 * 1024];
-            loop {
-                match source.read(&mut buffer).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => {
-                        let data = buffer[..read].to_vec();
-                        let event = if stdout {
-                            Event::Stdout { data }
-                        } else {
-                            Event::Stderr { data }
-                        };
-                        if sender.send(event).await.is_err() {
-                            break;
+    let mut pumps = vec![];
+    let mut input = Input::None;
+    match &master {
+        Some(master) => {
+            // A terminal is one stream; read it on a thread (its reads
+            // block), until the last process closes its side.
+            let mut reading = std::fs::File::from(master.try_clone()?);
+            let sender = sender.clone();
+            std::thread::spawn(move || {
+                let mut buffer = vec![0_u8; 64 * 1024];
+                loop {
+                    match std::io::Read::read(&mut reading, &mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => {
+                            let data = buffer[..read].to_vec();
+                            if sender.blocking_send(Event::Stdout { data }).is_err() {
+                                break;
+                            }
                         }
                     }
                 }
+            });
+            let mut terminal = std::fs::File::from(master.try_clone()?);
+            if !stdin.is_empty() {
+                let _ = std::io::Write::write_all(&mut terminal, &stdin);
             }
-        })
-    };
-    let out = pump(Box::new(child.stdout.take().expect("piped stdout")), true);
-    let err = pump(Box::new(child.stderr.take().expect("piped stderr")), false);
+            input = Input::Terminal(terminal);
+        }
+        None => {
+            let pump = |mut source: Box<dyn AsyncRead + Unpin + Send>, stdout: bool| {
+                let sender = sender.clone();
+                tokio::spawn(async move {
+                    let mut buffer = vec![0_u8; 64 * 1024];
+                    loop {
+                        match source.read(&mut buffer).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => {
+                                let data = buffer[..read].to_vec();
+                                let event = if stdout {
+                                    Event::Stdout { data }
+                                } else {
+                                    Event::Stderr { data }
+                                };
+                                if sender.send(event).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                })
+            };
+            pumps.push(pump(
+                Box::new(child.stdout.take().expect("piped stdout")),
+                true,
+            ));
+            pumps.push(pump(
+                Box::new(child.stderr.take().expect("piped stderr")),
+                false,
+            ));
+            let mut pipe = child.stdin.take().expect("piped stdin");
+            if interactive {
+                pipe.write_all(&stdin).await.ok();
+                input = Input::Pipe(Some(pipe));
+            } else {
+                tokio::spawn(async move {
+                    let _ = pipe.write_all(&stdin).await;
+                    let _ = pipe.shutdown().await;
+                });
+            }
+        }
+    }
     drop(sender);
+    let controllable = terminal.is_some() || interactive;
     let group = child.id().map(|pid| pid as i32);
-    let end_group = || {
+    let signal_group = |signal: i32| {
         if let Some(group) = group {
             // SAFETY: kill(2) of the command's own process group.
             unsafe {
-                libc::kill(-group, libc::SIGKILL);
+                libc::kill(-group, signal);
             }
         }
     };
-    // Output is forwarded as it arrives; the exit follows the last of it.
-    // The client sends nothing after its request, so anything it does now
-    // (it closed, or it broke the protocol) ends the command.
-    let mut probe = [0_u8; 1];
     // Output is forwarded until the command exits and its streams end. A
     // process it left running may hold its streams open (a shell's forked
     // in-process applet keeps a copy of them), so once the command has
@@ -272,7 +568,7 @@ async fn exec<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             event = events.recv() => match event {
                 Some(event) => {
                     if let Err(error) = write_frame(writer, &event).await {
-                        end_group();
+                        signal_group(libc::SIGKILL);
                         return Err(error);
                     }
                 }
@@ -285,14 +581,48 @@ async fn exec<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                     .reset(tokio::time::Instant::now() + EXIT_DRAIN);
             }
             () = &mut drained => break,
-            _ = reader.read(&mut probe) => {
-                end_group();
-                return Ok(());
-            }
+            control = controls.recv() => match control {
+                Some(Some(Request::Input { data })) if controllable => match &mut input {
+                    Input::Terminal(terminal) => {
+                        let _ = std::io::Write::write_all(terminal, &data);
+                    }
+                    Input::Pipe(Some(pipe)) => {
+                        let _ = pipe.write_all(&data).await;
+                    }
+                    Input::Pipe(None) | Input::None => {}
+                },
+                Some(Some(Request::CloseInput)) if controllable => match &mut input {
+                    // End-of-file on a terminal is its EOF character.
+                    Input::Terminal(terminal) => {
+                        let _ = std::io::Write::write_all(terminal, &[0x04]);
+                    }
+                    Input::Pipe(pipe) => {
+                        if let Some(mut pipe) = pipe.take() {
+                            let _ = pipe.shutdown().await;
+                        }
+                    }
+                    Input::None => {}
+                },
+                Some(Some(Request::Resize { size })) if terminal.is_some() => {
+                    if let Some(master) = &master {
+                        resize_pty(master, size);
+                    }
+                }
+                Some(Some(Request::Signal { signal })) if controllable && (1..=64).contains(&signal) => {
+                    signal_group(signal);
+                }
+                // The client is gone, or sent what this command does not
+                // take: either ends the command.
+                _ => {
+                    signal_group(libc::SIGKILL);
+                    return Ok(());
+                }
+            },
         }
     }
-    out.abort();
-    err.abort();
+    for pump in pumps {
+        pump.abort();
+    }
     let status = match status {
         Some(status) => status,
         None => child.wait().await?,
@@ -342,7 +672,7 @@ where
             Event::Exit { code, signal } => {
                 return Ok(code.unwrap_or_else(|| 128 + signal.unwrap_or(0)));
             }
-            Event::Pong { .. } => {}
+            Event::Pong { .. } | Event::Reseeded => {}
         }
     }
     Err(io::Error::new(
@@ -358,6 +688,86 @@ pub async fn ping<S: AsyncRead + AsyncWrite + Unpin>(stream: S) -> io::Result<St
     match read_frame::<_, Event>(&mut reader).await? {
         Some(Event::Pong { protocol }) => Ok(protocol),
         _ => Err(io::Error::other("the guest did not answer a ping")),
+    }
+}
+
+/// [`exec_client`] for an interactive command: frames from `controls`
+/// (`Input`, `Resize`, `Signal`, `CloseInput`) are forwarded to the guest
+/// while the command runs.
+pub async fn exec_client_controlled<S, O, E>(
+    stream: S,
+    request: &Request,
+    stdout: &mut O,
+    stderr: &mut E,
+    mut controls: tokio::sync::mpsc::Receiver<Request>,
+) -> io::Result<i32>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    O: AsyncWrite + Unpin,
+    E: AsyncWrite + Unpin,
+{
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    write_frame(&mut writer, request).await?;
+    // Writes on their own task: the event reads below are never abandoned.
+    let forwarding = tokio::spawn(async move {
+        while let Some(control) = controls.recv().await {
+            if write_frame(&mut writer, &control).await.is_err() {
+                break;
+            }
+        }
+        // Held until the command ends: closing it would end the command.
+        writer
+    });
+    let ended = async {
+        while let Some(event) = read_frame::<_, Event>(&mut reader).await? {
+            match event {
+                Event::Stdout { data } => {
+                    stdout.write_all(&data).await?;
+                    stdout.flush().await?;
+                }
+                Event::Stderr { data } => {
+                    stderr.write_all(&data).await?;
+                    stderr.flush().await?;
+                }
+                Event::Error { message } => {
+                    stderr
+                        .write_all(format!("compute-guest: {message}\n").as_bytes())
+                        .await?;
+                }
+                Event::Exit { code, signal } => {
+                    return Ok(code.unwrap_or_else(|| 128 + signal.unwrap_or(0)));
+                }
+                Event::Pong { .. } | Event::Reseeded => {}
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "the guest ended the connection before the command exited",
+        ))
+    }
+    .await;
+    forwarding.abort();
+    ended
+}
+
+/// Give the guest fresh entropy and have it reseed; an error says why it
+/// could not (an older agent does not understand the request).
+pub async fn reseed<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    entropy: &[u8],
+) -> io::Result<()> {
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    write_frame(
+        &mut writer,
+        &Request::Reseed {
+            entropy: entropy.to_vec(),
+        },
+    )
+    .await?;
+    match read_frame::<_, Event>(&mut reader).await {
+        Ok(Some(Event::Reseeded)) => Ok(()),
+        Ok(Some(Event::Error { message })) => Err(io::Error::other(message)),
+        _ => Err(io::Error::other("the guest did not reseed")),
     }
 }
 
@@ -499,10 +909,10 @@ pub async fn forward_to_host(listen: u16, port: u32) -> io::Result<()> {
 /// PID 1 duties in a VM with nothing else in it: kernel filesystems, a
 /// loopback interface, and a workspace.
 pub fn init_guest() {
-    let mount = |source: &str, target: &str, kind: &str| {
+    let mount = |source: &str, target: &str, kind: &str, options: &str| {
         let _ = std::fs::create_dir_all(target);
         let c = |text: &str| std::ffi::CString::new(text).expect("no NUL");
-        let (source, target, kind) = (c(source), c(target), c(kind));
+        let (source, target, kind, options) = (c(source), c(target), c(kind), c(options));
         // SAFETY: mount(2) with valid C strings; failure is tolerated (the
         // filesystem may already be mounted).
         unsafe {
@@ -511,15 +921,18 @@ pub fn init_guest() {
                 target.as_ptr(),
                 kind.as_ptr(),
                 0,
-                std::ptr::null(),
+                options.as_ptr().cast(),
             );
         }
     };
-    mount("proc", "/proc", "proc");
-    mount("sysfs", "/sys", "sysfs");
-    mount("devtmpfs", "/dev", "devtmpfs");
-    mount("tmpfs", "/tmp", "tmpfs");
-    mount("tmpfs", "/run", "tmpfs");
+    mount("proc", "/proc", "proc", "");
+    mount("sysfs", "/sys", "sysfs", "");
+    mount("devtmpfs", "/dev", "devtmpfs", "");
+    // Terminals: devtmpfs's /dev/ptmx opens a pseudo-terminal in the
+    // devpts mounted beside it.
+    mount("devpts", "/dev/pts", "devpts", "ptmxmode=0666,mode=0620");
+    mount("tmpfs", "/tmp", "tmpfs", "");
+    mount("tmpfs", "/run", "tmpfs", "");
     let _ = std::fs::create_dir_all("/workspace");
     loopback_up();
 }

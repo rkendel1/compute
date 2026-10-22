@@ -996,6 +996,18 @@ impl Daemon {
         definition: ComputerEnvironmentDefinition,
         operator: &str,
     ) -> Result<EnvironmentView, EnvironmentError> {
+        self.create_computer_environment_with(definition, operator, None)
+            .await
+    }
+
+    /// Create an environment on a computer whose first machine is, with
+    /// `fork`, a fork of another computer's running machine.
+    pub(crate) async fn create_computer_environment_with(
+        self: &Arc<Self>,
+        definition: ComputerEnvironmentDefinition,
+        operator: &str,
+        fork: Option<compute_core::MachineFork>,
+    ) -> Result<EnvironmentView, EnvironmentError> {
         validate_name("environment", &definition.name)?;
         validate_env("environment", &definition.env)?;
         if let Some(policy) = &definition.policy {
@@ -1063,6 +1075,7 @@ impl Daemon {
             }),
             generation: 1,
             destroy_requested_at: None,
+            fork,
         };
         let mut contents = definition.contents.clone();
         contents.generation = 1;
@@ -2258,6 +2271,25 @@ impl Daemon {
         operator: &str,
         job_id: &str,
     ) -> Result<ComputerJob, EnvironmentError> {
+        let (client, job) = self.environment_job(environment, operator, job_id).await?;
+        let result = if job.status.is_terminal() {
+            client.job_result(job_id).await.ok()
+        } else {
+            None
+        };
+        Ok(ComputerJob { job, result })
+    }
+
+    /// A job this environment's computer ran, in its current session or a
+    /// retired one, and the target holding it. Any other job, on any
+    /// target, is not found: an environment's owner reaches only its
+    /// environment's work.
+    async fn environment_job(
+        &self,
+        environment: &str,
+        operator: &str,
+        job_id: &str,
+    ) -> Result<(Arc<RemoteProvider>, compute_core::ExecutionJob), EnvironmentError> {
         let record = self.owned_environment(environment, operator).await?;
         let computer = self
             .stored_computer(&record.id)
@@ -2284,12 +2316,74 @@ impl Daemon {
                 "job {job_id} in environment {environment}"
             )));
         }
-        let result = if job.status.is_terminal() {
-            client.job_result(job_id).await.ok()
-        } else {
-            None
-        };
-        Ok(ComputerJob { job, result })
+        Ok((client, job))
+    }
+
+    /// A job's output from a byte offset, waiting a bounded time for more:
+    /// how an interactive command's output reaches a control plane.
+    pub async fn computer_job_output(
+        &self,
+        environment: &str,
+        operator: &str,
+        job_id: &str,
+        request: compute_core::JobOutputRequest,
+    ) -> Result<compute_core::JobOutput, EnvironmentError> {
+        let (client, _) = self.environment_job(environment, operator, job_id).await?;
+        client
+            .job_output(
+                job_id,
+                &request.stream,
+                request.offset,
+                request.wait_ms.min(MAX_OUTPUT_WAIT_MS),
+            )
+            .await
+            .map_err(target_error)
+    }
+
+    /// Input, a resize, a signal, or the end of input for a running
+    /// interactive job of this environment. The target refuses a job that
+    /// is not interactive or no longer running.
+    pub async fn computer_job_input(
+        &self,
+        environment: &str,
+        operator: &str,
+        job_id: &str,
+        mut input: serde_json::Value,
+    ) -> Result<serde_json::Value, EnvironmentError> {
+        let (client, job) = self.environment_job(environment, operator, job_id).await?;
+        // The job is the one in the path; a body naming another is refused
+        // rather than redirected.
+        if let Some(named) = input.get("job_id")
+            && named.as_str() != Some(job_id)
+        {
+            return Err(EnvironmentError::Invalid(format!(
+                "the input names job {named}, not {job_id}"
+            )));
+        }
+        if let Some(fields) = input.as_object_mut() {
+            fields.insert("job_id".into(), json!(job_id));
+        }
+        let input: compute_core::SessionInput = serde_json::from_value(input)
+            .map_err(|error| EnvironmentError::Invalid(format!("input: {error}")))?;
+        let session = job.session_id.ok_or_else(|| {
+            EnvironmentError::Invalid(format!("job {job_id} is not a session's job"))
+        })?;
+        client
+            .session_input(&session.0, &input)
+            .await
+            .map_err(target_error)?;
+        Ok(json!({ "job_id": job_id, "accepted": true }))
+    }
+
+    /// Cancel a job of this environment.
+    pub async fn computer_job_cancel(
+        &self,
+        environment: &str,
+        operator: &str,
+        job_id: &str,
+    ) -> Result<compute_core::ExecutionJob, EnvironmentError> {
+        let (client, _) = self.environment_job(environment, operator, job_id).await?;
+        client.cancel_job(job_id).await.map_err(target_error)
     }
 
     /// The computer's output: every job it ran, or one process's log.
@@ -2502,7 +2596,10 @@ impl Daemon {
     // ---- The controller ----------------------------------------------------
 
     /// The computer record after reading back this controller's writes.
-    async fn fresh_computer(&self, environment_id: &str) -> Option<Stored<ComputerRecord>> {
+    pub(crate) async fn fresh_computer(
+        &self,
+        environment_id: &str,
+    ) -> Option<Stored<ComputerRecord>> {
         let _ = self.refresh_targeted().await;
         self.stored_computer(environment_id).await
     }
@@ -3177,6 +3274,14 @@ impl Daemon {
             .clone()
             .expect("provisioning computers are placed");
         let client = self.target_client(&target)?;
+        if computer.session_id.is_none()
+            && let Some(fork) = spec
+                .fork
+                .as_ref()
+                .filter(|fork| fork.generation == spec.generation)
+        {
+            return self.fork_step(record, stored, fork, &client, &target).await;
+        }
         let Some(session_id) = computer.session_id.clone() else {
             // Keyed by the computer's reference, so repeating this after a
             // restart finds the same session instead of making another.
@@ -3307,6 +3412,104 @@ impl Daemon {
                 _ => Ok(Step::Wait(POLL)),
             },
             Err(error) => self.target_unreachable(stored, name, &target, error).await,
+        }
+    }
+
+    /// The first machine of a forked computer: a child of the source's
+    /// running session, on the source's target, named by this computer's
+    /// reference so that repeating the step after a restart returns the
+    /// same child. Readiness, the lifetime claim and the contents are then
+    /// the ordinary provisioning steps.
+    async fn fork_step(
+        &self,
+        record: &Stored<EnvironmentRecord>,
+        stored: &Stored<ComputerRecord>,
+        fork: &compute_core::MachineFork,
+        client: &RemoteProvider,
+        target: &str,
+    ) -> Result<Step, EnvironmentError> {
+        let name = &record.value.name;
+        let computer = &stored.value;
+        let refuse = |code: &'static str, message: String, retryable: bool| async move {
+            self.record_failure(
+                stored,
+                name,
+                "provisioning",
+                code,
+                &message,
+                retryable,
+                Some(target),
+            )
+            .await?;
+            if retryable {
+                return Ok(Step::Wait(BACKOFF));
+            }
+            let refreshed = self.fresh_computer(&record.id).await;
+            self.fail_computer(refreshed.as_ref().unwrap_or(stored), name)
+                .await
+        };
+        if target != fork.target {
+            return refuse(
+                "fork_target",
+                format!(
+                    "a machine fork runs where its source is ({}), not on {target}",
+                    fork.target
+                ),
+                false,
+            )
+            .await;
+        }
+        let reference = computer
+            .reference
+            .clone()
+            .expect("placed computers have a reference");
+        let request = compute_core::SessionForkRequest {
+            count: 1,
+            references: vec![reference],
+        };
+        match client.fork_session_with(&fork.session_id, &request).await {
+            Ok(forked) => {
+                let Some(child) = forked.children.into_iter().next() else {
+                    return refuse(
+                        "fork_refused",
+                        forked
+                            .refused
+                            .unwrap_or_else(|| "the target made no child".into()),
+                        false,
+                    )
+                    .await;
+                };
+                let mut value = computer.clone();
+                value.session_id = Some(child.session_id.0.clone());
+                value.provider_kind = Some(child.provider_kind.clone());
+                value.provider_resource = child.provider_session_id.clone();
+                value.failure = None;
+                self.advance(
+                    stored,
+                    name,
+                    value,
+                    Some((
+                        events::COMPUTER_PROVISIONED,
+                        format!("{name}'s computer is a fork of a running machine on {target}"),
+                        json!({
+                            "environment_id": record.id,
+                            "target": target,
+                            "session_id": child.session_id,
+                            "forked_from": {
+                                "environment_id": fork.source_environment_id,
+                                "session_id": fork.session_id,
+                            },
+                            "checkpoint": forked.checkpoint,
+                        }),
+                    )),
+                )
+                .await?;
+                Ok(Step::Continue)
+            }
+            Err(error) => {
+                let retryable = error.kind == ProviderErrorKind::ProviderUnavailable;
+                refuse("fork_refused", error.to_string(), retryable).await
+            }
         }
     }
 
@@ -4811,7 +5014,11 @@ impl Daemon {
                 if !computer_id.starts_with("cmp_") {
                     continue;
                 }
-                let owned = computers.get(computer_id).is_some_and(|computer| {
+                // Owned by whichever computer holds it. A derived
+                // environment (fork, restore, replace) runs on the machine
+                // its candidate provisioned, so the reference can name a
+                // computer that no longer exists while the session is live.
+                let owned = computers.values().any(|computer| {
                     !computer.status.is_terminal()
                         && (computer.reference.as_ref() == Some(reference)
                             || computer.session_id.as_ref() == Some(&session.session_id.0)
@@ -4915,6 +5122,10 @@ fn remove<T>(items: &mut Vec<T>, wanted: &str, name: impl Fn(&T) -> &String) -> 
     items.retain(|item| name(item) != wanted);
     items.len() != before
 }
+
+/// The longest a controller waits on a target for output past an offset;
+/// a caller polls again for more.
+const MAX_OUTPUT_WAIT_MS: u64 = 10_000;
 
 fn target_error(error: compute_provider::ProviderError) -> EnvironmentError {
     match error.kind {

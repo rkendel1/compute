@@ -79,7 +79,7 @@ fn ui_operations() -> BTreeSet<(String, String)> {
 fn every_ui_operation_is_an_api_operation() {
     let api = ROUTES
         .iter()
-        .map(|(method, path)| (method.to_string(), normalize(path)))
+        .map(|route| (route.method.to_string(), normalize(route.path)))
         .collect::<BTreeSet<_>>();
     let ui = ui_operations();
     assert!(ui.len() > 20, "the UI's operations were found: {ui:?}");
@@ -131,7 +131,8 @@ async fn every_api_route_is_served() {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(api::serve(listener, daemon.clone(), None));
     let client = client::DaemonClient::new(&endpoint).unwrap();
-    for (method, path) in ROUTES {
+    for route in ROUTES {
+        let (method, path) = (&route.method, &route.path);
         if *path == "/shutdown" || *path == "/events/stream" {
             continue;
         }
@@ -144,7 +145,9 @@ async fn every_api_route_is_served() {
             .replace("{receipt}", "sha256:none")
             .replace("{service}", "none")
             .replace("{domain}", "none.example.com")
-            .replace("{credential}", "cred_none");
+            .replace("{credential}", "cred_none")
+            .replace("{session}", "ses_none")
+            .replace("{job}", "job_none");
         let result = match *method {
             "GET" => client.get::<serde_json::Value>(&concrete).await.map(|_| ()),
             "POST" => client

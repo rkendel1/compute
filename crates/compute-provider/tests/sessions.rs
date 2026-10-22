@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpListener as StdTcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -40,6 +40,9 @@ struct Fake {
     fail_provision: AtomicBool,
     fail_destroy: AtomicBool,
     lose_environment_on_resume: AtomicBool,
+    /// Fail the nth child provisioned from a checkpoint (1-based; 0: none).
+    fail_fork_child: AtomicUsize,
+    forked: AtomicUsize,
 }
 
 impl Fake {
@@ -53,6 +56,8 @@ impl Fake {
             fail_provision: AtomicBool::new(false),
             fail_destroy: AtomicBool::new(false),
             lose_environment_on_resume: AtomicBool::new(false),
+            fail_fork_child: AtomicUsize::new(0),
+            forked: AtomicUsize::new(0),
         })
     }
 
@@ -78,6 +83,28 @@ impl Fake {
     fn call(&self, name: &str) {
         self.calls.lock().unwrap().push(name.into());
     }
+
+    fn checkpoints(&self) -> Vec<String> {
+        std::fs::read_dir(self.root.join(".checkpoints"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &to.join(entry.file_name()));
+        } else {
+            std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+        }
+    }
 }
 
 fn everything() -> SessionCapabilities {
@@ -93,6 +120,7 @@ fn everything() -> SessionCapabilities {
         claim: true,
         process_tree_termination: true,
         memory_suspend: false,
+        fork: true,
     }
 }
 
@@ -109,6 +137,7 @@ fn minimal() -> SessionCapabilities {
         claim: false,
         process_tree_termination: true,
         memory_suspend: false,
+        fork: false,
     }
 }
 
@@ -242,6 +271,72 @@ impl SessionProvider for Fake {
         if !self.capabilities.claim {
             return Err(compute_provider::unsupported("fake", "claim"));
         }
+        Ok(())
+    }
+
+    // The fake's "machine" is its directory: enough to exercise the
+    // manager's fork semantics, which are what these tests are about.
+    async fn checkpoint(
+        &self,
+        id: &str,
+        checkpoint: &str,
+    ) -> Result<compute_core::MachineCheckpoint, ProviderError> {
+        self.call("checkpoint");
+        copy_tree(
+            &self.root.join(id),
+            &self.root.join(".checkpoints").join(checkpoint),
+        );
+        Ok(compute_core::MachineCheckpoint {
+            id: checkpoint.into(),
+            evidence: BTreeMap::from([("snapshot".into(), format!("fake:{checkpoint}"))]),
+        })
+    }
+
+    async fn provision_from(
+        &self,
+        request: &ProvisionRequest,
+        checkpoint: &str,
+    ) -> Result<ProvisionedSession, ProviderError> {
+        self.call("provision_from");
+        if let Some(gate) = &self.gate {
+            gate.acquire().await.unwrap().forget();
+        }
+        let nth = self.forked.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_fork_child.load(Ordering::SeqCst) == nth {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProviderUnavailable,
+                "fake child could not start",
+            ));
+        }
+        let source = self.root.join(".checkpoints").join(checkpoint);
+        if !source.is_dir() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ProviderUnavailable,
+                format!("checkpoint {checkpoint} is not available"),
+            ));
+        }
+        let id = format!("fake-{}", &request.session_id.0[4..20]);
+        copy_tree(&source, &self.root.join(&id));
+        self.environments
+            .lock()
+            .unwrap()
+            .insert(id.clone(), EnvironmentState::Ready);
+        Ok(ProvisionedSession {
+            provider_session_id: id,
+            connection: SessionConnection {
+                mode: SessionConnectionMode::Exec,
+                address: Some("fake.invalid".into()),
+                port: None,
+                details: BTreeMap::new(),
+            },
+            endpoints: vec![],
+            capabilities: self.capabilities,
+        })
+    }
+
+    async fn release_checkpoint(&self, checkpoint: &str) -> Result<(), ProviderError> {
+        self.call("release_checkpoint");
+        let _ = std::fs::remove_dir_all(self.root.join(".checkpoints").join(checkpoint));
         Ok(())
     }
 }
@@ -1931,6 +2026,434 @@ fn a_real_container_engine_enforces_the_hardened_session() {
                 .output()
                 .unwrap();
         assert!(!inspect.status.success(), "the container is gone");
+    });
+    server.kill();
+}
+
+async fn read(client: &RemoteProvider, session_id: &str, file: &str) -> String {
+    let (_, result) = run(
+        client,
+        session_id,
+        &["sh", "-c", &format!("cat {file} || true")],
+    )
+    .await;
+    result.result.stdout.text
+}
+
+async fn running_source(client: &RemoteProvider) -> String {
+    let source = client
+        .create_session(&request(NetworkPolicy::Network, ttl(3600)))
+        .await
+        .unwrap()
+        .session_id
+        .0;
+    ready(client, &source).await;
+    run(client, &source, &["sh", "-c", "echo before > state"]).await;
+    source
+}
+
+#[test]
+fn a_session_forks_into_independent_children_that_record_their_lineage() {
+    let stores = Stores::new();
+    let fake = Fake::new(&stores.environments, everything());
+    let tokens: Arc<Tokens> = Arc::new(Tokens::default());
+    let client_runtime = client_runtime();
+    let server = Server::start(&stores, fake.clone(), tokens);
+    let client = server.client("alice");
+    client_runtime.block_on(async {
+        let source = running_source(&client).await;
+        let fork = client.fork_session(&source, 2).await.unwrap();
+        assert_eq!(fork.source_session_id.0, source);
+        assert_eq!(fork.children.len(), 2);
+        assert!(fork.refused.is_none());
+        let children = fork
+            .children
+            .iter()
+            .map(|child| child.session_id.0.clone())
+            .collect::<Vec<_>>();
+        assert_ne!(children[0], children[1]);
+        assert!(!children.contains(&source));
+        for child in &fork.children {
+            assert_eq!(child.status, SessionStatus::Ready, "{child:#?}");
+            assert!(child.admission.is_some(), "each child is admitted");
+            // Only its own readiness: no execution of the source's.
+            assert!(
+                child
+                    .executions
+                    .iter()
+                    .all(|execution| execution.job_id == child.job_id),
+                "{:#?}",
+                child.executions
+            );
+            let lineage = child.lineage.as_ref().expect("lineage");
+            assert_eq!(lineage.parent_session_id.0, source);
+            assert_eq!(lineage.checkpoint, fork.checkpoint.id);
+            assert_eq!(lineage.evidence, fork.checkpoint.evidence);
+            assert_eq!(
+                read(&client, &child.session_id.0, "state").await,
+                "before\n"
+            );
+        }
+        // Independent: a child's writes are its own.
+        run(&client, &children[0], &["sh", "-c", "echo mine > state"]).await;
+        assert_eq!(read(&client, &children[0], "state").await, "mine\n");
+        assert_eq!(read(&client, &children[1], "state").await, "before\n");
+        assert_eq!(read(&client, &source, "state").await, "before\n");
+        // The source keeps running, and the checkpoint is released.
+        assert!(client.session(&source).await.unwrap().status.is_usable());
+        assert!(fake.checkpoints().is_empty(), "{:?}", fake.checkpoints());
+        // Lineage is durable: every read of the child carries it.
+        assert_eq!(
+            client.session(&children[1]).await.unwrap().lineage,
+            fork.children[1].lineage
+        );
+    });
+    assert_eq!(fake.calls("checkpoint"), 1);
+    assert_eq!(fake.calls("provision_from"), 2);
+    server.kill();
+}
+
+#[test]
+fn a_child_that_cannot_start_is_failed_and_its_siblings_are_not() {
+    let stores = Stores::new();
+    let fake = Fake::new(&stores.environments, everything());
+    fake.fail_fork_child.store(2, Ordering::SeqCst);
+    let tokens: Arc<Tokens> = Arc::new(Tokens::default());
+    let client_runtime = client_runtime();
+    let server = Server::start(&stores, fake.clone(), tokens);
+    let client = server.client("alice");
+    client_runtime.block_on(async {
+        let source = running_source(&client).await;
+        let fork = client.fork_session(&source, 3).await.unwrap();
+        let statuses = fork
+            .children
+            .iter()
+            .map(|child| child.status)
+            .collect::<Vec<_>>();
+        assert_eq!(statuses.len(), 3);
+        let failed = fork
+            .children
+            .iter()
+            .filter(|child| child.status == SessionStatus::Failed)
+            .collect::<Vec<_>>();
+        assert_eq!(failed.len(), 1, "{statuses:?}");
+        let failure = failed[0].failure.as_ref().expect("its reason");
+        assert!(
+            failure.message.contains("fake child could not start"),
+            "{failure:?}"
+        );
+        assert!(
+            failed[0].lineage.is_some(),
+            "a failed child keeps its lineage"
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == SessionStatus::Ready)
+                .count(),
+            2
+        );
+        assert!(fake.checkpoints().is_empty());
+        assert_eq!(
+            client.session(&source).await.unwrap().status,
+            SessionStatus::Ready
+        );
+    });
+    server.kill();
+}
+
+#[test]
+fn a_fork_interrupted_by_a_restart_completes_from_its_checkpoint() {
+    let stores = Stores::new();
+    // One permit: the source provisions; both children then wait.
+    let gate = Arc::new(Semaphore::new(1));
+    let fake = Fake::gated(&stores.environments, gate.clone());
+    let tokens: Arc<Tokens> = Arc::new(Tokens::default());
+    let client_runtime = client_runtime();
+    let server = Server::start(&stores, fake.clone(), tokens.clone());
+    let client = server.client("alice");
+    let source = client_runtime.block_on(async {
+        let source = running_source(&client).await;
+        let forking = server.client("alice");
+        let id = source.clone();
+        tokio::spawn(async move { forking.fork_session(&id, 2).await });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while fake.calls("provision_from") < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "children never started"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        source
+    });
+    assert_eq!(fake.checkpoints().len(), 1);
+    server.kill();
+
+    gate.add_permits(16);
+    let server = Server::start(&stores, fake.clone(), tokens);
+    let client = server.client("alice");
+    client_runtime.block_on(async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let children = loop {
+            let children = client
+                .sessions()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|session| session.lineage.is_some())
+                .collect::<Vec<_>>();
+            if children.len() == 2
+                && children
+                    .iter()
+                    .all(|child| child.status == SessionStatus::Ready)
+            {
+                break children;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "children never recovered: {children:#?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        for child in &children {
+            assert_eq!(child.lineage.as_ref().unwrap().parent_session_id.0, source);
+            assert_eq!(
+                read(&client, &child.session_id.0, "state").await,
+                "before\n"
+            );
+        }
+        // The last child to finish released the checkpoint.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !fake.checkpoints().is_empty() {
+            assert!(tokio::time::Instant::now() < deadline, "checkpoint leaked");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    server.kill();
+}
+
+#[test]
+fn fork_is_refused_where_it_cannot_mean_what_it_says() {
+    let tokens: Arc<Tokens> = Arc::new(Tokens::default());
+    let client_runtime = client_runtime();
+
+    // A provider without the capability: refused, nothing created.
+    let stores = Stores::new();
+    let fake = Fake::new(&stores.environments, minimal());
+    let server = Server::start(&stores, fake.clone(), tokens.clone());
+    let client = server.client("alice");
+    client_runtime.block_on(async {
+        let source = running_source(&client).await;
+        let refused = client.fork_session(&source, 1).await.unwrap_err();
+        assert_eq!(
+            refused.kind,
+            ProviderErrorKind::OperationUnsupported,
+            "{refused:?}"
+        );
+        assert_eq!(client.sessions().await.unwrap().len(), 1);
+    });
+    assert_eq!(fake.calls("checkpoint"), 0);
+    server.kill();
+
+    let stores = Stores::new();
+    let fake = Fake::new(&stores.environments, everything());
+    let server = Server::start(&stores, fake.clone(), tokens);
+    let client = server.client("alice");
+    client_runtime.block_on(async {
+        let source = running_source(&client).await;
+        for count in [0, compute_core::MAX_FORK_CHILDREN + 1] {
+            let refused = client.fork_session(&source, count).await.unwrap_err();
+            assert_eq!(
+                refused.kind,
+                ProviderErrorKind::PolicyRejected,
+                "{refused:?}"
+            );
+        }
+        // Another owner cannot fork it.
+        assert!(
+            server
+                .client("mallory")
+                .fork_session(&source, 1)
+                .await
+                .is_err()
+        );
+        // Only a running session is forked.
+        client.stop_session(&source).await.unwrap();
+        let refused = client.fork_session(&source, 1).await.unwrap_err();
+        assert_eq!(
+            refused.kind,
+            ProviderErrorKind::SessionConflict,
+            "{refused:?}"
+        );
+        assert_eq!(client.sessions().await.unwrap().len(), 1);
+    });
+    assert_eq!(fake.calls("checkpoint"), 0);
+    server.kill();
+}
+
+/// A caller that names each child (a controller, by its computer's
+/// reference) can repeat a fork after a restart and gets the children it
+/// already has: never a second set, never a second checkpoint.
+#[test]
+fn a_fork_repeated_with_its_references_returns_the_same_children() {
+    let stores = Stores::new();
+    let fake = Fake::new(&stores.environments, everything());
+    let tokens: Arc<Tokens> = Arc::new(Tokens::default());
+    let client_runtime = client_runtime();
+    let server = Server::start(&stores, fake.clone(), tokens);
+    let client = server.client("alice");
+    client_runtime.block_on(async {
+        let source = running_source(&client).await;
+        let request = |references: &[&str]| compute_core::SessionForkRequest {
+            count: references.len() as u32,
+            references: references
+                .iter()
+                .map(|reference| reference.to_string())
+                .collect(),
+        };
+        let first = client
+            .fork_session_with(&source, &request(&["cmp_child:1"]))
+            .await
+            .unwrap();
+        assert_eq!(first.children[0].reference.as_deref(), Some("cmp_child:1"));
+        let again = client
+            .fork_session_with(&source, &request(&["cmp_child:1"]))
+            .await
+            .unwrap();
+        assert_eq!(again.children[0].session_id, first.children[0].session_id);
+        assert_eq!(again.checkpoint.id, first.checkpoint.id);
+        assert_eq!(client.sessions().await.unwrap().len(), 2);
+
+        // A reference per child, each distinct; and not one already used
+        // for something else.
+        let mut uneven = request(&["cmp_a:1"]);
+        uneven.count = 2;
+        for refused in [uneven, request(&["cmp_a:1", "cmp_a:1"])] {
+            let error = client
+                .fork_session_with(&source, &refused)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, ProviderErrorKind::PolicyRejected, "{error:?}");
+        }
+        let error = client
+            .fork_session_with(&source, &request(&["cmp_child:1", "cmp_other:1"]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::SessionConflict, "{error:?}");
+        assert_eq!(client.sessions().await.unwrap().len(), 2);
+    });
+    assert_eq!(fake.calls("checkpoint"), 1);
+    server.kill();
+}
+
+#[test]
+fn a_jobs_output_is_read_from_an_offset_while_it_runs() {
+    let stores = Stores::new();
+    let fake = Fake::new(&stores.environments, everything());
+    let tokens: Arc<Tokens> = Arc::new(Tokens::default());
+    let client_runtime = client_runtime();
+    let server = Server::start(&stores, fake.clone(), tokens);
+    let client = server.client("alice");
+    client_runtime.block_on(async {
+        let source = running_source(&client).await;
+        let submission = client
+            .session_exec(
+                &source,
+                &SessionCommand::new(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "printf 'hello '; sleep 1; printf world".into(),
+                ]),
+            )
+            .await
+            .unwrap();
+        let job = submission.job_id.0.clone();
+        // A long poll returns what is there, before the job ends.
+        let first = client.job_output(&job, "stdout", 0, 5000).await.unwrap();
+        assert_eq!(first.offset, 0);
+        assert!(first.data.starts_with(b"hello"), "{first:?}");
+        assert!(!first.complete);
+        // Reading on from where it was, until the job ends.
+        let mut text = first.data.clone();
+        let mut at = first.next_offset;
+        loop {
+            let chunk = client.job_output(&job, "stdout", at, 5000).await.unwrap();
+            assert_eq!(chunk.offset, at);
+            text.extend_from_slice(&chunk.data);
+            at = chunk.next_offset;
+            if chunk.complete {
+                break;
+            }
+        }
+        assert_eq!(text, b"hello world");
+        // From the middle; and past the end, which is the end.
+        let middle = client.job_output(&job, "stdout", 6, 0).await.unwrap();
+        assert_eq!(middle.data, b"world");
+        let past = client.job_output(&job, "stdout", 1 << 40, 0).await.unwrap();
+        assert_eq!((past.offset, past.data.len()), (11, 0));
+        assert!(past.complete);
+        assert!(client.job_output(&job, "stdin", 0, 0).await.is_err());
+        // Another owner reads nothing.
+        assert!(
+            server
+                .client("mallory")
+                .job_output(&job, "stdout", 0, 0)
+                .await
+                .is_err()
+        );
+    });
+    server.kill();
+}
+
+#[test]
+fn interactive_commands_need_a_terminal_and_input_needs_a_running_one() {
+    let tokens: Arc<Tokens> = Arc::new(Tokens::default());
+    let client_runtime = client_runtime();
+    let stores = Stores::new();
+    let fake = Fake::new(&stores.environments, minimal());
+    let server = Server::start(&stores, fake.clone(), tokens.clone());
+    let client = server.client("alice");
+    client_runtime.block_on(async {
+        let source = running_source(&client).await;
+        for interactive in [false, true] {
+            let mut command = SessionCommand::new(vec!["sh".into()]);
+            if interactive {
+                command.interactive = true;
+            } else {
+                command.terminal = Some(compute_core::TerminalSize { rows: 24, cols: 80 });
+            }
+            let refused = client.session_exec(&source, &command).await.unwrap_err();
+            assert_eq!(
+                refused.kind,
+                ProviderErrorKind::OperationUnsupported,
+                "{refused:?}"
+            );
+        }
+        let input = |job: &str| compute_core::SessionInput {
+            job_id: compute_core::JobId(job.into()),
+            data: b"x".to_vec(),
+            resize: None,
+            signal: None,
+            close: false,
+        };
+        // No such execution in this session.
+        let unknown = client
+            .session_input(&source, &input("job_0000000000000000"))
+            .await
+            .unwrap_err();
+        assert_eq!(unknown.kind, ProviderErrorKind::UnknownJob, "{unknown:?}");
+        // An execution that has ended takes no input.
+        let (submission, _) = run(&client, &source, &["true"]).await;
+        wait_for(&client, &source, |session| {
+            session.active_executions().next().is_none()
+        })
+        .await;
+        let ended = client
+            .session_input(&source, &input(&submission.job_id.0))
+            .await
+            .unwrap_err();
+        assert_eq!(ended.kind, ProviderErrorKind::SessionConflict, "{ended:?}");
     });
     server.kill();
 }

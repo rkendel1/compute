@@ -152,6 +152,55 @@ impl SessionProvider for Steered {
     async fn claim(&self, id: &str) -> Result<(), ProviderError> {
         self.inner.claim(id).await
     }
+
+    // With the `fork` capability, a machine is its workspace directory: a
+    // checkpoint copies it and a child starts from the copy.
+    async fn checkpoint(
+        &self,
+        id: &str,
+        checkpoint: &str,
+    ) -> Result<compute_core::MachineCheckpoint, ProviderError> {
+        if !self.capabilities.fork {
+            return Err(compute_provider::unsupported("steered", "fork"));
+        }
+        copy_tree(
+            &self.root.join(id),
+            &self.root.join(".checkpoints").join(checkpoint),
+        );
+        Ok(compute_core::MachineCheckpoint {
+            id: checkpoint.into(),
+            evidence: BTreeMap::from([("snapshot".into(), format!("steered:{checkpoint}"))]),
+        })
+    }
+    async fn provision_from(
+        &self,
+        request: &ProvisionRequest,
+        checkpoint: &str,
+    ) -> Result<ProvisionedSession, ProviderError> {
+        let provisioned = self.provision(request).await?;
+        copy_tree(
+            &self.root.join(".checkpoints").join(checkpoint),
+            &self.root.join(&provisioned.provider_session_id),
+        );
+        Ok(provisioned)
+    }
+    async fn release_checkpoint(&self, checkpoint: &str) -> Result<(), ProviderError> {
+        let _ = std::fs::remove_dir_all(self.root.join(".checkpoints").join(checkpoint));
+        Ok(())
+    }
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let path = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &path);
+        } else if entry.file_type().unwrap().is_file() {
+            std::fs::copy(entry.path(), path).unwrap();
+        }
+    }
 }
 
 /// A target: a server hosting sessions, in a runtime of its own. It can be
@@ -805,6 +854,33 @@ async fn only_the_owner_changes_or_uses_a_computer() {
     forbidden(
         daemon
             .computer_job("owned", "mallory", "job_x")
+            .await
+            .map(|_| ()),
+    );
+    forbidden(
+        daemon
+            .computer_job_output(
+                "owned",
+                "mallory",
+                "job_x",
+                compute_core::JobOutputRequest {
+                    stream: "stdout".into(),
+                    offset: 0,
+                    wait_ms: 0,
+                },
+            )
+            .await
+            .map(|_| ()),
+    );
+    forbidden(
+        daemon
+            .computer_job_input("owned", "mallory", "job_x", serde_json::json!({}))
+            .await
+            .map(|_| ()),
+    );
+    forbidden(
+        daemon
+            .computer_job_cancel("owned", "mallory", "job_x")
             .await
             .map(|_| ()),
     );
@@ -3365,6 +3441,7 @@ async fn a_workspace_that_changes_while_it_is_captured_is_refused() {
                 name: "busy-copy".into(),
                 target: None,
                 copy_config: false,
+                state: Default::default(),
             },
         )
         .await;
@@ -3732,6 +3809,7 @@ fn fork_of(name: &str) -> ForkRequest {
         name: name.into(),
         target: None,
         copy_config: false,
+        state: Default::default(),
     }
 }
 
@@ -6332,4 +6410,310 @@ async fn configuration_works_over_http_and_never_returns_a_secret_or_crosses_own
         before
     );
     server.abort();
+}
+
+/// A command's output, its input and its cancellation reach a control plane
+/// through the environment that owns the computer, never the target, and
+/// only for that environment's own jobs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_jobs_are_read_driven_and_cancelled_through_it() {
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let (daemon, _node) =
+        start_daemon(Arc::new(MemoryState::new()), pool(&[("target-a", &target)])).await;
+    for name in ["mine", "other"] {
+        daemon
+            .create_computer_environment(
+                definition(
+                    name,
+                    ComputerLifecycle::Persistent,
+                    requirements(),
+                    EnvironmentContents::default(),
+                ),
+                "alice",
+            )
+            .await
+            .unwrap();
+        computer_where(&daemon, name, "the computer", |view| {
+            view.status == ComputerStatus::Running
+        })
+        .await;
+    }
+    let (_, job) = run(
+        &daemon,
+        "mine",
+        "alice",
+        &["sh", "-c", "printf hello-world"],
+    )
+    .await;
+    let job_id = job.job.job_id.0.clone();
+    let read = |offset| compute_core::JobOutputRequest {
+        stream: "stdout".into(),
+        offset,
+        wait_ms: 0,
+    };
+    let output = daemon
+        .computer_job_output("mine", "alice", &job_id, read(0))
+        .await
+        .unwrap();
+    assert_eq!(output.data, b"hello-world");
+    assert!(output.complete);
+    let rest = daemon
+        .computer_job_output("mine", "alice", &job_id, read(6))
+        .await
+        .unwrap();
+    assert_eq!(rest.data, b"world");
+
+    // Another environment of the same owner does not reach this job.
+    assert!(matches!(
+        daemon
+            .computer_job_output("other", "alice", &job_id, read(0))
+            .await,
+        Err(EnvironmentError::NotFound(_))
+    ));
+
+    // This target has no terminals: an interactive command is refused, not
+    // run without one, and a finished command takes no input.
+    let mut interactive = SessionCommand::new(vec!["cat".into()]);
+    interactive.interactive = true;
+    assert!(matches!(
+        daemon.computer_exec("mine", "alice", interactive).await,
+        Err(EnvironmentError::Invalid(_))
+    ));
+    let refused = daemon
+        .computer_job_input(
+            "mine",
+            "alice",
+            &job_id,
+            serde_json::json!({ "data": "aGk=" }),
+        )
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(matches!(
+        daemon
+            .computer_job_input(
+                "mine",
+                "alice",
+                &job_id,
+                serde_json::json!({ "job_id": "job_another" }),
+            )
+            .await,
+        Err(EnvironmentError::Invalid(_))
+    ));
+
+    // A running command is cancelled through its environment.
+    let sleeping = daemon
+        .computer_exec(
+            "mine",
+            "alice",
+            SessionCommand::new(vec!["sleep".into(), "60".into()]),
+        )
+        .await
+        .unwrap();
+    daemon
+        .computer_job_cancel("mine", "alice", &sleeping.job_id)
+        .await
+        .unwrap();
+    let ended = eventually("the cancelled command", async || {
+        daemon
+            .computer_job("mine", "alice", &sleeping.job_id)
+            .await
+            .ok()
+            .filter(|job| job.job.status.is_terminal())
+    })
+    .await;
+    assert_eq!(ended.job.status, compute_core::JobStatus::Cancelled);
+    daemon.shutdown().await;
+}
+
+/// A derived environment (fork, restore, replace) runs on the machine its
+/// candidate prepared, under the candidate's provisioning reference. The
+/// orphan sweep recognises that machine by the computer that holds it, not
+/// by the candidate the reference named, so it is never torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_orphan_sweep_keeps_a_derived_environments_machine() {
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (first, _node) = start_daemon(store.clone(), pool(&[("target-a", &target)])).await;
+    first
+        .create_computer_environment(
+            definition(
+                "origin",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                EnvironmentContents::default(),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    computer_where(&first, "origin", "the origin to run", |view| {
+        view.status == ComputerStatus::Running
+    })
+    .await;
+    first
+        .fork_environment("origin", "alice", fork_of("copy"))
+        .await
+        .unwrap();
+    let copy = running_computer(&first, "copy").await;
+    first.shutdown().await;
+    drop(first);
+
+    // A real orphan, so the sweep is seen to have run.
+    let orphan = target
+        .client()
+        .create_session(
+            &compute_provider::SessionCreateRequest::new(
+                &compute_provider::SessionEnvironmentSpec {
+                    resources: Default::default(),
+                    network: NetworkPolicy::Network,
+                    isolation: Default::default(),
+                    host: Default::default(),
+                    architecture: None,
+                },
+                compute_core::SessionSpec {
+                    reference: Some("cmp_000000000000000000000000:1".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (second, _node2) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    eventually("the orphan to go", async || {
+        let session = target.client().session(&orphan.session_id.0).await.ok()?;
+        session.status.is_terminal().then_some(())
+    })
+    .await;
+    let session = target
+        .client()
+        .session(copy.session_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        !session.status.is_terminal(),
+        "the fork's machine was swept: {:?}",
+        session.status
+    );
+    assert!(
+        !events(&second, "copy")
+            .await
+            .iter()
+            .any(|(kind, _)| kind == "computer.orphan_destroyed")
+    );
+    second.shutdown().await;
+}
+
+fn machine_fork(name: &str) -> ForkRequest {
+    ForkRequest {
+        name: name.into(),
+        target: None,
+        copy_config: false,
+        state: ForkState::Machine,
+    }
+}
+
+/// A machine fork is a new environment whose computer is a child of the
+/// source's running machine, on the source's target, made through the
+/// ordinary provisioning of a computer. Where it cannot mean that it is
+/// refused before anything is created, never turned into a workspace fork.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_machine_is_forked_into_a_new_environment_on_its_target() {
+    let forking = tempfile::tempdir().unwrap();
+    let plain = tempfile::tempdir().unwrap();
+    let forks = SessionCapabilities {
+        fork: true,
+        ..full()
+    };
+    let target_a = Target::start(Steered::new(forking.path(), forks, None), &[]);
+    let target_b = Target::start(Steered::new(plain.path(), full(), None), &[]);
+    let (daemon, _node) = start_daemon(
+        Arc::new(MemoryState::new()),
+        pool(&[("target-a", &target_a), ("target-b", &target_b)]),
+    )
+    .await;
+    for (name, target) in [("origin", "target-a"), ("plain", "target-b")] {
+        let mut origin = definition(
+            name,
+            ComputerLifecycle::Persistent,
+            requirements(),
+            EnvironmentContents::default(),
+        );
+        origin.computer.target = Some(target.into());
+        daemon
+            .create_computer_environment(origin, "alice")
+            .await
+            .unwrap();
+        running_computer(&daemon, name).await;
+    }
+    sh(&daemon, "origin", "echo before > marker").await;
+
+    let report = daemon
+        .fork_machine("origin", "alice", machine_fork("copy"))
+        .await
+        .unwrap();
+    let origin = running_computer(&daemon, "origin").await;
+    assert_eq!(report.state, ForkState::Machine);
+    assert_eq!(report.target, "target-a");
+    assert_eq!(Some(&report.source_session), origin.session_id.as_ref());
+    assert_ne!(report.session, report.source_session);
+    assert_eq!(report.omitted_config, vec!["APP_ENV".to_string()]);
+    let checkpoint = report.checkpoint.clone().expect("the target's checkpoint");
+    let child = target_a.client().session(&report.session).await.unwrap();
+    let lineage = child.lineage.expect("the child's lineage");
+    assert_eq!(lineage.parent_session_id.0, report.source_session);
+    assert_eq!(lineage.checkpoint, checkpoint.id);
+    assert!(
+        child
+            .reference
+            .as_deref()
+            .is_some_and(|reference| reference.starts_with("cmp_")),
+        "the child carries its computer's reference: {:?}",
+        child.reference
+    );
+
+    // The fork holds what the source held, and from then on is its own.
+    assert_eq!(sh(&daemon, "copy", "cat marker").await, "before\n");
+    sh(&daemon, "copy", "echo after > marker").await;
+    assert_eq!(sh(&daemon, "origin", "cat marker").await, "before\n");
+    assert!(
+        events(&daemon, "copy")
+            .await
+            .iter()
+            .any(|(kind, data)| { kind == "environment.command" && data["state"] == "machine" })
+    );
+
+    // Refused, with nothing created: a name in use, another target, a
+    // computer that cannot fork its machine, and anyone but the owner.
+    assert!(matches!(
+        daemon
+            .fork_machine("origin", "alice", machine_fork("copy"))
+            .await,
+        Err(EnvironmentError::Conflict(_))
+    ));
+    let mut elsewhere = machine_fork("elsewhere");
+    elsewhere.target = Some("target-b".into());
+    assert!(matches!(
+        daemon.fork_machine("origin", "alice", elsewhere).await,
+        Err(EnvironmentError::Invalid(_))
+    ));
+    let refused = daemon
+        .fork_machine("plain", "alice", machine_fork("plain-copy"))
+        .await;
+    assert!(
+        matches!(&refused, Err(EnvironmentError::Invalid(message)) if message.contains("workspace")),
+        "{refused:?}"
+    );
+    assert!(matches!(
+        daemon
+            .fork_machine("origin", "mallory", machine_fork("stolen"))
+            .await,
+        Err(EnvironmentError::Forbidden(_))
+    ));
+    for name in ["elsewhere", "plain-copy", "stolen"] {
+        assert!(daemon.computer(name).await.is_err(), "{name} was created");
+    }
+    daemon.shutdown().await;
 }

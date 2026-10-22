@@ -14,6 +14,7 @@ use compute_runtime::Compute;
 
 mod admission;
 mod application;
+mod attach;
 mod certification;
 mod cloudflare_cmd;
 mod computer_cmd;

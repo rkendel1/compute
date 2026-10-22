@@ -233,6 +233,7 @@ from the provider's name.
 | `resume` | A stopped session can be resumed. |
 | `claim` | The session can be claimed (kept beyond its TTL). |
 | `memory_suspend` | `stop` keeps memory, processes, and devices, and `resume` continues them or fails; never a cold start in their place. |
+| `fork` | `compute session fork` continues new sessions from the running machine at one instant, each with its own copy of everything mutable ([session-backends.md](session-backends.md#machine-fork)). |
 | `process_tree_termination` | `stop` and `destroy` succeed only once every process the environment owns is confirmed gone, else they fail `termination_failed` ([lifecycle.md](lifecycle.md)). |
 
 An operation the session's capabilities do not include fails with

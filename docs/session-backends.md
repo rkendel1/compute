@@ -18,15 +18,15 @@ substrate (fakes or skips). A skipped test is not verification.
 | Hosts sessions | yes | yes | yes | **no** (`sessions_unsupported`) |
 | `exec` | yes | yes | yes | n/a |
 | bounded stdin (`--stdin`) | yes | yes | yes | stdin per invocation |
-| streaming stdin | **no** | **no** | **no** | no |
-| output streamed while running | polling (`--follow`) | polling | polling | no |
-| `terminal` (PTY, resize) | **no** | **no** | **no** | no |
-| signals to a running command | cancel only | cancel only | cancel only | no |
+| streaming stdin (`exec --interactive`) | **no** | **no** | yes, verified on KVM | no |
+| output while running, from an offset (`attach`, `POST /compute/jobs/{id}/output`) | yes | yes | yes | no |
+| `terminal`: PTY, resize (`exec --tty`, `attach`) | **no** | **no** | yes, verified on KVM | no |
+| signals to a running command | cancel only | cancel only | any signal to its process group (`session input --signal`); cancel | no |
 | workspace files (`session file`) | yes | yes | yes | n/a |
 | `network` | host network or `none`* | engine network or `none` | **egress gateway only** (no NIC) | none |
 | `suspend` / `resume` (storage kept) | yes | yes (container stop/start) | yes | n/a |
 | `memory_suspend` (processes and memory kept) | **no** | **no** | yes, verified on KVM | n/a |
-| machine fork / branch | **no** | **no** | **no** | n/a |
+| `fork` (machine fork) | **no** | **no** | yes, verified on KVM | n/a |
 | `process_tree_termination` | where an ownership scan is available | yes | yes (the VM ends) | n/a |
 | receipt `substrate` evidence | no | engine, OCI runtime, image, limits | VMM version, kernel and rootfs digests, vCPUs, memory, network | n/a |
 
@@ -101,13 +101,136 @@ cause of every earlier failure of this job.
 One run's timings, for orientation only (not a benchmark: one sample, a
 debug build, a GitHub-hosted runner with nested KVM, 1 vCPU, 256 MiB):
 create and boot 3.26 s, first command 137 ms, stop (suspend) 1.76 s,
-resume to ready 136 ms.
+resume to ready 136 ms. Distributions over repeated runs on a release build
+are in [microVM lifecycle latency](#microvm-lifecycle-latency).
+
+## Machine fork
+
+`compute session fork SESSION [--count N]` (`POST /compute/sessions/{id}/fork`,
+1 to 16 children) on a provider that declares `fork`; anywhere else it is
+refused with `operation_unsupported` and nothing is created. That is the
+target protocol. A control plane forks through the controller instead:
+`compute environment fork SOURCE NAME --machine`, which makes NAME's computer
+a child of SOURCE's machine ([fork.md](fork.md#machine-fork-state-machine)).
+
+| Question | Answer |
+| --- | --- |
+| What is forked | The running machine at one instant: guest memory, vCPU and device state, and the disk, all taken while the VM is paused. |
+| The source | Must be running (`ready`/`running`); it is paused only for the checkpoint and continues, unchanged, afterwards. |
+| What a child shares | Nothing mutable. Its own disk (a copy of the checkpoint's), its own VMM, vsock socket, and egress forward. Guest memory is mapped copy-on-write from the checkpoint's file, so a child's writes are its own. |
+| Identity | Each child is a new session (new session, job, and VM identity) with its own owner-scoped authority. No execution, connection grant, or endpoint of the source is carried over. Processes inside the guest keep their PIDs: that is the point of a machine fork. |
+| Randomness | Before a child is reported ready, its kernel's random generator is reseeded with fresh host entropy (`RNDADDENTROPY`, `RNDRESEEDCRNG`) through the guest agent; siblings otherwise continue from the same generator state. A child whose agent cannot reseed is failed. |
+| Policy and admission | Every child is admitted under policy as a creation is, before the machine is touched; a refusal stops further children and is reported. Credentials are never in the guest (the egress gateway holds them), so nothing is copied that would need revoking. |
+| Network | A child's network is its source's; with `network`, its only route out is its own forward to the gateway, which enforces the allowlist per connection. |
+| Partial failure | Each child is provisioned on its own; one that cannot start is `failed` with its reason, and its siblings are unaffected. If the checkpoint cannot be taken, every child is failed with that reason and the source runs on. |
+| Durability and restarts | Children are durable before the checkpoint is taken and name it in their `lineage`. After a restart, a child whose checkpoint exists is provisioned from it; one whose fork ended before the checkpoint existed is failed ("the fork ended before its checkpoint was taken"). The checkpoint is released once no child still needs it. |
+| Evidence | A child's `lineage` names its parent session, the checkpoint, and the checkpoint's evidence (snapshot digest, sizes, VMM); its receipts' substrate names the checkpoint's snapshot digest (`artifacts.checkpoint`). |
+| Limits | Only VMs booted with relocatable device paths (every VM created since fork existed) can be forked; an older VM is refused with that reason. A child has its source's resources and network. The disk is copied while the source is paused, so the pause grows with the disk's size. |
+
+**Status:** verified. The manager's semantics (lineage, partial failure,
+restart recovery, refusals, checkpoint release) are tested against a fake
+provider; the Firecracker path by `crates/compute-cli/tests/microvm.rs` on
+KVM, first passing in
+[run 39741122138](https://github.com/rkendel1/compute/actions/runs/39741122138):
+two children of a live machine with its memory, PIDs, counter, and disk;
+one child's writes and kills reaching neither the source nor its sibling;
+diverging `/dev/urandom`; egress per child; a receipt naming the checkpoint
+that verifies; lineage across a controller restart; an unwritable
+checkpoint failing the child with its reason while the source runs on; the
+checkpoint released; nothing left after destroy. One sample (debug build,
+nested KVM): two children ready in 6.8 s.
+
+## Interactive commands
+
+`compute session exec --tty` runs a command on a terminal (a PTY in the
+guest) and attaches to it; `--interactive` keeps its standard input open
+without a terminal. `--detach` returns the job, and `compute session attach
+SESSION JOB` attaches; with `--tty` it drives the command from this
+terminal (raw input, size changes forwarded, Ctrl-] detaches and leaves it
+running). Terminal handling is always that explicit flag, never inferred
+from whether standard input is a terminal;
+`compute session input` sends data, a resize, a signal, or the end of input.
+
+- **The job stays authoritative.** An interactive command is a durable job
+  like any other: its output is the job's log (bounded as any output is),
+  its receipt is the same, and cancellation and timeouts apply.
+- **Output** is read from the job's log from a byte offset, with a long
+  poll (`POST /compute/jobs/{id}/output`): a client that reconnects reads
+  from where it was, `--from-start` replays from the beginning, and nothing
+  is lost while no one is attached. Polling (`--follow`, `logs`) still works.
+- **Input** (`POST /compute/sessions/{id}/input`, owner-scoped) goes to the
+  running command over a node-local, owner-only socket the job's process
+  listens on; it never starts a command, so attaching again reaches the
+  same one. Input for an ended execution is refused.
+- **Advertised only where implemented:** microVM sessions declare
+  `terminal`; process and container sessions do not, and refuse `--tty` and
+  `--interactive` before anything runs.
+
+Tested: the guest agent with real PTYs (input, resize, end of input,
+signals, a plain command taking no control); `compute guest-exec` with its
+attach socket against the real agent (`tests/guest_terminal.rs`); the
+output API and refusals on the session server; and through the CLI on KVM
+(`microvm.rs`: a PTY in the guest, typed input, exit codes, a resize, a
+detached command reattached with its earlier output, a signal, a receipt
+that verifies), passing in CI run 39745416297. Through the controller, a
+control plane reaches the same command with `POST /environments/{e}/exec`
+and the environment's job routes ([api.md](api.md)). Not yet exercised: a microVM session created with a
+`restricted` or `isolated` host profile (the job's client process must be
+able to create its attach socket), and interactive commands in containers.
+
+## microVM lifecycle latency
+
+Measured by `crates/compute-cli/tests/microvm_bench.rs` (the `Lifecycle
+latency` step of the `microvm` CI job, which keeps the JSON as the
+`microvm-bench` artifact). CI run 39752786248:
+
+- **Run:** 20 runs. The first run is reported as cold (the VMM binary, kernel
+  and rootfs not yet in the page cache); runs 2 to 20 are warm (n = 19). The
+  p95 is reported only for n ≥ 20, so it appears only for operations sampled
+  more than once per run.
+- **Host:** GitHub-hosted runner, AMD EPYC 9V45 with 4 vCPUs, host kernel
+  6.17 (Azure), nested KVM.
+- **Guest:** Firecracker v1.11.0, guest kernel 6.1.102, 1 vCPU, 256 MiB,
+  512 MiB rootfs, network through the egress gateway only.
+- **Build:** release.
+
+End to end through the CLI (milliseconds). This includes the CLI process,
+HTTP, authorization, the durable job, and admission.
+
+| Operation | Cold | Median (warm) | p95 | Max (warm) | n |
+| --- | --- | --- | --- | --- | --- |
+| create → ready | 702 | 468 | – | 602 | 19 |
+| first exec | 112 | 111 | – | 119 | 19 |
+| exec | 111 | 111 | 115 | 131 | 95 |
+| suspend (memory kept) | 4044 | 3032 | – | 3875 | 19 |
+| resume → ready | 46 | 45 | – | 78 | 19 |
+| exec after resume | 111 | 111 | – | 113 | 19 |
+| fork, one child → ready | 4444 | 3826 | – | 4497 | 19 |
+| exec in the child | 111 | 111 | – | 128 | 19 |
+| destroy | 95 | 116 | 122 | 123 | 38 |
+
+The provider's own phases (warm medians, from each VM's `lifecycle.jsonl`):
+
+- **Boot:** guest ready in 102 ms (VMM spawn 0.4 ms).
+- **Resume:** snapshot load 24 ms, guest ready at 37 ms.
+- **Suspend:** 2992 ms, almost all of it writing the snapshot (memory to
+  disk). Flushing takes 0.6 ms.
+- **Fork:** the source's checkpoint takes 3486 ms in total (snapshot
+  1108 ms, then a disk copy finishing at 1237 ms while paused). The child
+  then copies the disk (127 ms), loads (150 ms), is guest-ready at 165 ms
+  and reseeded at 168 ms.
+
+Reading it:
+
+- Exec, resume and a child's own start are each around 0.1 s.
+- Suspend and fork are dominated by writing a full memory snapshot and
+  copying the rootfs on this runner's disk. That cost scales with memory and
+  disk size; diff snapshots and copy-on-write disks would reduce it, and
+  neither is implemented.
+- These are numbers from one runner type under nested virtualization, not a
+  claim about other hosts.
 
 ## Not implemented
 
-- Machine fork or branch (from memory or from a disk snapshot).
-- Interactive terminals: PTY allocation, resize, streaming stdin, signals
-  other than cancellation, reattaching to a running command's stream.
-- Measured startup and lifecycle latency: the KVM test prints one run's
-  timings; there is no benchmark (distributions over repeated runs) yet.
+- Interactive commands in process and container sessions.
 - A VM backend on macOS.

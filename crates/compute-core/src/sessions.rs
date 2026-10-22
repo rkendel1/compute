@@ -146,10 +146,17 @@ pub struct SessionCapabilities {
     /// record that does not depend on it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub memory_suspend: bool,
+    /// Machine fork: children continue from the running machine's memory,
+    /// processes, devices, and disk captured at one instant, each with its
+    /// own copy of everything mutable; the source keeps running. Not a copy
+    /// of files: a provider that can only copy a filesystem does not offer
+    /// it. Written only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fork: bool,
 }
 
 impl SessionCapabilities {
-    pub const NAMES: [&'static str; 11] = [
+    pub const NAMES: [&'static str; 12] = [
         "exec",
         "terminal",
         "filesystem",
@@ -161,6 +168,7 @@ impl SessionCapabilities {
         "claim",
         "process_tree_termination",
         "memory_suspend",
+        "fork",
     ];
 
     /// Whether the named capability is present; `None` for an unknown name.
@@ -177,6 +185,7 @@ impl SessionCapabilities {
             "claim" => self.claim,
             "process_tree_termination" => self.process_tree_termination,
             "memory_suspend" => self.memory_suspend,
+            "fork" => self.fork,
             _ => return None,
         })
     }
@@ -455,6 +464,64 @@ pub struct ComputeSession {
     pub failure: Option<SessionFailure>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub executions: Vec<SessionExecution>,
+    /// Where a forked session came from. Absent for one that was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<SessionLineage>,
+}
+
+/// A forked session's origin: the session it was forked from and the
+/// machine checkpoint it continues from. Durable with the session, and the
+/// checkpoint's evidence also appears in its receipts' substrate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionLineage {
+    pub parent_session_id: SessionId,
+    /// The checkpoint every child of one fork shares.
+    pub checkpoint: String,
+    /// What the checkpoint consists of (digests, sizes, backend), once it
+    /// exists.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub evidence: BTreeMap<String, String>,
+    pub forked_at: DateTime<Utc>,
+}
+
+/// A running machine captured at one instant, from which children are
+/// provisioned. Immutable; released once no child needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineCheckpoint {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub evidence: BTreeMap<String, String>,
+}
+
+/// A request to fork a running session into `count` children.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionForkRequest {
+    pub count: u32,
+    /// The caller's reference for each child, one per child, as a creation
+    /// takes one: a fork repeated with the same references (after the
+    /// caller restarted) returns the children it already made instead of
+    /// making more, and a caller can recognise its own children.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<String>,
+}
+
+/// The most children one fork may create.
+pub const MAX_FORK_CHILDREN: u32 = 16;
+
+/// What a fork did: the checkpoint, and every child it created, each in the
+/// state it reached (ready, or failed with its reason). Children the policy
+/// refused were not created; `refused` says why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionFork {
+    pub source_session_id: SessionId,
+    pub checkpoint: MachineCheckpoint,
+    pub children: Vec<ComputeSession>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
 impl ComputeSession {
@@ -531,6 +598,90 @@ pub struct SessionCommand {
     /// [`SESSION_OUTPUT_BYTES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_bytes: Option<u64>,
+    /// Run it on a terminal of this size: its output is the terminal's (one
+    /// stream), and input, resizes, and signals may be sent while it runs
+    /// (`POST /compute/sessions/{id}/input`). Needs `terminal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalSize>,
+    /// Keep its standard input open after `stdin`, for input sent while it
+    /// runs. Needs `terminal` (the provider's interactive channel).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interactive: bool,
+}
+
+/// A terminal's size, in character cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalSize {
+    pub rows: u16,
+    pub cols: u16,
+}
+
+/// Bytes on the wire as base64 text.
+pub mod base64_bytes {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Input for an interactive execution that is running: any of more bytes,
+/// a terminal resize, a signal to its process group, or the end of its
+/// input. Delivered to the running command; never starts one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionInput {
+    pub job_id: crate::JobId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "base64_bytes")]
+    pub data: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resize: Option<TerminalSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub close: bool,
+}
+
+/// The most input one [`SessionInput`] carries.
+pub const MAX_SESSION_INPUT_BYTES: usize = 64 * 1024;
+
+/// A read of a job's output from a byte offset: the durable log itself, so
+/// a client that reconnects reads from where it was, and nothing is lost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobOutputRequest {
+    /// `stdout` or `stderr`.
+    pub stream: String,
+    pub offset: u64,
+    /// Wait up to this long for output past `offset` (bounded by the
+    /// server).
+    #[serde(default)]
+    pub wait_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobOutput {
+    pub job_id: crate::JobId,
+    pub stream: String,
+    /// Where `data` starts: the requested offset, or the log's end if the
+    /// request was past it.
+    pub offset: u64,
+    #[serde(with = "base64_bytes")]
+    pub data: Vec<u8>,
+    /// Where the next read starts.
+    pub next_offset: u64,
+    /// The job has ended; with `data` empty, nothing more will come.
+    pub complete: bool,
 }
 
 /// What a session command keeps of each output stream unless it asks for
@@ -546,6 +697,8 @@ impl SessionCommand {
             timeout: None,
             stdin: None,
             output_bytes: None,
+            terminal: None,
+            interactive: false,
         }
     }
 

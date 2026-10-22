@@ -147,6 +147,193 @@ impl Daemon {
         })
     }
 
+    /// The candidate's definition: the source's requirements, lifecycle,
+    /// policy and (with `copy_config`) configuration, on the derivation's
+    /// target, holding `contents`.
+    async fn candidate_definition(
+        &self,
+        derivation: &Derivation<'_>,
+        candidate: &str,
+        contents: compute_core::EnvironmentContents,
+    ) -> Result<ComputerEnvironmentDefinition, EnvironmentError> {
+        let Derivation { label, source, .. } = derivation;
+        let spec = source.value.computer.clone().ok_or_else(|| {
+            EnvironmentError::Invalid(format!("{label} has no computer to derive from"))
+        })?;
+        let policy = source
+            .value
+            .policy
+            .clone()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| EnvironmentError::Invalid(format!("{label}'s policy: {error}")))?;
+        let config = if derivation.copy_config {
+            source.value.config.clone()
+        } else {
+            Default::default()
+        };
+        // Same configuration, so the same provenance: kept only while the
+        // source's recipe version still resolves to what is inherited.
+        let computer = ComputerRequest {
+            lifecycle: spec.lifecycle,
+            requirements: spec.requirements,
+            target: derivation.target.clone(),
+            ttl_seconds: None,
+        };
+        let recipe = self
+            .surviving_recipe(source.value.recipe.as_ref(), &computer, policy.as_ref())
+            .await;
+        Ok(ComputerEnvironmentDefinition {
+            name: candidate.to_owned(),
+            desired_state: DesiredState::Running,
+            env: config,
+            policy,
+            computer,
+            contents,
+            recipe,
+        })
+    }
+
+    /// Fork an environment's running machine, memory and disk, into a new
+    /// environment on the same target. Refused, with nothing created, where
+    /// the computer cannot fork its machine: a workspace fork is a different
+    /// operation, asked for by name, never substituted.
+    pub async fn fork_machine(
+        self: &Arc<Self>,
+        source: &str,
+        operator: &str,
+        request: ForkRequest,
+    ) -> Result<MachineForkReport, EnvironmentError> {
+        let name = request.name.clone();
+        validate_name("environment", &name)?;
+        if is_candidate(&name) {
+            return Err(EnvironmentError::Invalid(format!(
+                "names ending {:?} are reserved for candidates",
+                super::candidate::CANDIDATE_SUFFIX
+            )));
+        }
+        let record = self.owned_environment(source, operator).await?;
+        self.require_live(&record).await?;
+        if is_candidate(&record.value.name) {
+            return Err(EnvironmentError::Invalid(format!(
+                "{source} is a candidate, not an environment to fork"
+            )));
+        }
+        let computer = self
+            .fresh_computer(&record.id)
+            .await
+            .map(|stored| stored.value)
+            .filter(|computer| computer.status == compute_core::ComputerStatus::Running)
+            .ok_or_else(|| {
+                EnvironmentError::Conflict(format!(
+                    "{source}'s computer is not running; only a running machine is forked"
+                ))
+            })?;
+        let (Some(target), Some(session_id)) =
+            (computer.target.clone(), computer.session_id.clone())
+        else {
+            return Err(EnvironmentError::Conflict(format!(
+                "{source}'s computer has no machine to fork"
+            )));
+        };
+        if !computer
+            .capabilities
+            .is_some_and(|capabilities| capabilities.fork)
+        {
+            return Err(EnvironmentError::Invalid(format!(
+                "{source}'s computer ({} on {target}) cannot fork its running machine; \
+                 a workspace fork (state: workspace) copies its files into a new one",
+                computer.provider_kind.as_deref().unwrap_or("its provider"),
+            )));
+        }
+        if let Some(asked) = &request.target
+            && asked != &target
+        {
+            return Err(EnvironmentError::Invalid(format!(
+                "a machine fork runs where its source's memory is, on {target}, not {asked}"
+            )));
+        }
+        let derivation = Derivation {
+            composition: "fork",
+            label: source,
+            source: &record,
+            name: &name,
+            operator,
+            target: Some(target.clone()),
+            copy_config: request.copy_config,
+            provenance: json!({
+                "source": source,
+                "state": ForkState::Machine,
+                "source_session": session_id,
+            }),
+        };
+        let _claim = self.begin_derivation(&derivation).await?;
+        let candidate = candidate_name(&name)?;
+        // The fork holds what its source holds: the same declared contents,
+        // which the controller then finds already there.
+        let contents = record.value.contents.clone().unwrap_or_default();
+        let definition = self
+            .candidate_definition(&derivation, &candidate, contents)
+            .await?;
+        let fork = compute_core::MachineFork {
+            source_environment_id: record.id.clone(),
+            target: target.clone(),
+            session_id: session_id.clone(),
+            generation: 1,
+        };
+        self.create_computer_environment_with(definition, operator, Some(fork))
+            .await?;
+        let within = self.config.replacement_deadline;
+        for (phase, what) in [("forking", "run"), ("reconciling", "converge")] {
+            let reached = self
+                .await_computer_within(&candidate, what, within, |view| match what {
+                    "run" => view.status == compute_core::ComputerStatus::Running,
+                    _ => view.converged,
+                })
+                .await;
+            if let Err(error) = reached {
+                return Err(self
+                    .abandon_composition("fork", source, &candidate, operator, phase, &error)
+                    .await);
+            }
+        }
+        let computer = self
+            .hand_off_candidate(
+                &derivation,
+                &candidate,
+                json!({ "state": ForkState::Machine }),
+            )
+            .await?;
+        let session = computer.session_id.clone().unwrap_or_default();
+        let checkpoint = match self.target_client(&target) {
+            Ok(client) => client
+                .session(&session)
+                .await
+                .ok()
+                .and_then(|child| child.lineage)
+                .map(|lineage| compute_core::MachineCheckpoint {
+                    id: lineage.checkpoint,
+                    evidence: lineage.evidence,
+                }),
+            Err(_) => None,
+        };
+        Ok(MachineForkReport {
+            source: source.to_owned(),
+            environment: name,
+            state: ForkState::Machine,
+            target,
+            source_session: session_id,
+            session,
+            checkpoint,
+            omitted_config: if request.copy_config {
+                vec![]
+            } else {
+                record.value.config.keys().cloned().collect()
+            },
+            computer,
+        })
+    }
+
     /// Refuse a name in use, mark the derivation in progress, and clear the
     /// candidate an earlier failed attempt left. Nothing is created.
     pub(crate) async fn begin_derivation(
@@ -197,46 +384,12 @@ impl Daemon {
             ..
         } = derivation;
         let candidate = candidate_name(name)?;
-        let spec = source.value.computer.clone().ok_or_else(|| {
-            EnvironmentError::Invalid(format!("{label} has no computer to derive from"))
-        })?;
+        let definition = self
+            .candidate_definition(derivation, &candidate, Default::default())
+            .await?;
+        self.create_computer_environment_inner(definition, operator)
+            .await?;
         let contents = source.value.contents.clone().unwrap_or_default();
-        let policy = source
-            .value
-            .policy
-            .clone()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|error| EnvironmentError::Invalid(format!("{label}'s policy: {error}")))?;
-        let config = if derivation.copy_config {
-            source.value.config.clone()
-        } else {
-            Default::default()
-        };
-        // Same configuration, so the same provenance: kept only while the
-        // source's recipe version still resolves to what is inherited.
-        let computer = ComputerRequest {
-            lifecycle: spec.lifecycle,
-            requirements: spec.requirements,
-            target: derivation.target.clone(),
-            ttl_seconds: None,
-        };
-        let recipe = self
-            .surviving_recipe(source.value.recipe.as_ref(), &computer, policy.as_ref())
-            .await;
-        self.create_computer_environment_inner(
-            ComputerEnvironmentDefinition {
-                name: candidate.clone(),
-                desired_state: DesiredState::Running,
-                env: config,
-                policy,
-                computer,
-                contents: Default::default(),
-                recipe,
-            },
-            operator,
-        )
-        .await?;
         let composed = self
             .prepare_candidate(&candidate, operator, export, &contents, None)
             .await;
@@ -250,53 +403,66 @@ impl Daemon {
         };
         let mut jobs = prior_jobs;
         jobs.extend(seed.jobs.iter().cloned());
-        // The handoff is fenced on the candidate's records. A write that
-        // lost to another change is retried from a fresh read, which checks
-        // again that the candidate is still the verified, running machine.
-        let mut adopted = self
-            .adopt_candidate(derivation, &candidate, &export.digest, &jobs)
-            .await;
+        let computer = self
+            .hand_off_candidate(
+                derivation,
+                &candidate,
+                json!({
+                    "workspace": export.digest,
+                    "workspace_verified": true,
+                    "jobs": jobs,
+                }),
+            )
+            .await?;
+        Ok((seed, computer, jobs))
+    }
+
+    /// Hand a prepared candidate over as NAME. The handoff is fenced on the
+    /// candidate's records: a write that lost to another change is retried
+    /// from a fresh read, which checks again that the candidate is still the
+    /// running machine. A handoff that cannot happen abandons the candidate.
+    async fn hand_off_candidate(
+        self: &Arc<Self>,
+        derivation: &Derivation<'_>,
+        candidate: &str,
+        detail: serde_json::Value,
+    ) -> Result<ComputerView, EnvironmentError> {
+        let mut adopted = self.adopt_candidate(derivation, candidate, &detail).await;
         for _ in 0..HANDOFF_RETRIES {
             match &adopted {
                 Err(EnvironmentError::Conflict(message))
                     if message.contains("changed: expected version") =>
                 {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    adopted = self
-                        .adopt_candidate(derivation, &candidate, &export.digest, &jobs)
-                        .await;
+                    adopted = self.adopt_candidate(derivation, candidate, &detail).await;
                 }
                 _ => break,
             }
         }
-        let computer = match adopted {
-            Ok(computer) => computer,
-            Err(error) => {
-                return Err(self
-                    .abandon_composition(
-                        composition,
-                        label,
-                        &candidate,
-                        operator,
-                        "handing off",
-                        &error,
-                    )
-                    .await);
-            }
-        };
-        Ok((seed, computer, jobs))
+        match adopted {
+            Ok(computer) => Ok(computer),
+            Err(error) => Err(self
+                .abandon_composition(
+                    derivation.composition,
+                    derivation.label,
+                    candidate,
+                    derivation.operator,
+                    "handing off",
+                    &error,
+                )
+                .await),
+        }
     }
 
     /// The handoff: one fenced transaction. NAME's environment and computer
     /// records are created from the candidate's, machine and all, and the
     /// candidate's are deleted. Refused, with nothing changed, if NAME has
-    /// appeared or the candidate is no longer the verified, running machine.
+    /// appeared or the candidate is no longer the running machine.
     async fn adopt_candidate(
         self: &Arc<Self>,
         derivation: &Derivation<'_>,
         candidate: &str,
-        workspace: &str,
-        jobs: &[String],
+        detail: &serde_json::Value,
     ) -> Result<ComputerView, EnvironmentError> {
         let Derivation {
             composition,
@@ -344,12 +510,14 @@ impl Daemon {
         };
         let mut data = json!({
             "environment_id": id, "command": composition, "source": label,
-            "candidate": candidate, "workspace": workspace, "workspace_verified": true,
-            "session": computer.session_id, "jobs": jobs,
+            "candidate": candidate, "session": computer.session_id,
         });
-        if let (Some(data), Some(extra)) = (data.as_object_mut(), derivation.provenance.as_object())
-        {
-            data.extend(extra.clone());
+        if let Some(data) = data.as_object_mut() {
+            for extra in [detail, &derivation.provenance] {
+                if let Some(extra) = extra.as_object() {
+                    data.extend(extra.clone());
+                }
+            }
         }
         let scope = Scope::environment(name);
         let mut change = Change::new().with(|batch| {

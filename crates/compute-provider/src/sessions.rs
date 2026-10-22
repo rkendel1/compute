@@ -19,12 +19,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 use compute_core::{
     BundleInput, ComputeSession, ExecutionJob, HostProfile, IsolationProfile, IsolationRequirement,
-    JobId, JobStatus, NetworkPolicy, ResourceLimits, RuntimeKind, SESSION_VERSION,
-    SessionCapabilities, SessionCommand, SessionConnection, SessionConnectionGrant,
-    SessionConnectionMode, SessionEndpoint, SessionEndpointRequest, SessionEvent,
-    SessionExecSubmission, SessionExecution, SessionExecutionLogs, SessionFailure, SessionId,
-    SessionLogs, SessionOwnership, SessionPhase, SessionResources, SessionSpec, SessionStatus,
-    WORKLOAD_SPEC_VERSION, WorkloadBundle, WorkloadSpec,
+    JobId, JobStatus, MAX_FORK_CHILDREN, MachineCheckpoint, NetworkPolicy, ResourceLimits,
+    RuntimeKind, SESSION_VERSION, SessionCapabilities, SessionCommand, SessionConnection,
+    SessionConnectionGrant, SessionConnectionMode, SessionEndpoint, SessionEndpointRequest,
+    SessionEvent, SessionExecSubmission, SessionExecution, SessionExecutionLogs, SessionFailure,
+    SessionFork, SessionForkRequest, SessionId, SessionLineage, SessionLogs, SessionOwnership,
+    SessionPhase, SessionResources, SessionSpec, SessionStatus, WORKLOAD_SPEC_VERSION,
+    WorkloadBundle, WorkloadSpec,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -400,6 +401,10 @@ pub struct SessionEnvironment {
     /// The host profile the session was created with (its environment
     /// bundle's), which every command in it runs under.
     pub host: HostProfile,
+    /// For an interactive command (`terminal`, `interactive`): the node-local
+    /// socket on which the running command must accept control frames
+    /// (`compute_guest::Request::{Input, Resize, Signal, CloseInput}`).
+    pub attach: Option<std::path::PathBuf>,
 }
 
 /// Connection material a provider issues for one connection.
@@ -485,6 +490,37 @@ pub trait SessionProvider: Send + Sync {
         Err(unsupported(&self.kind(), "claim"))
     }
 
+    /// Capture the running environment's machine (memory, processes,
+    /// devices, disk) at one instant into an immutable checkpoint named
+    /// `checkpoint`, and keep the environment running. Offered with the
+    /// `fork` capability. Its children name it before it exists, so an
+    /// interrupted fork's checkpoint is found and released.
+    async fn checkpoint(
+        &self,
+        provider_session_id: &str,
+        checkpoint: &str,
+    ) -> Result<MachineCheckpoint, ProviderError> {
+        let _ = (provider_session_id, checkpoint);
+        Err(unsupported(&self.kind(), "fork"))
+    }
+
+    /// A new environment that continues from `checkpoint`, with its own copy
+    /// of everything mutable. Idempotent per session, like `provision`.
+    async fn provision_from(
+        &self,
+        request: &ProvisionRequest,
+        checkpoint: &str,
+    ) -> Result<ProvisionedSession, ProviderError> {
+        let _ = (request, checkpoint);
+        Err(unsupported(&self.kind(), "fork"))
+    }
+
+    /// Delete a checkpoint no child needs any longer. Idempotent.
+    async fn release_checkpoint(&self, checkpoint: &str) -> Result<(), ProviderError> {
+        let _ = checkpoint;
+        Ok(())
+    }
+
     /// Whether this provider's environments enforce their own network
     /// policy (a container's `--network`, a VM without a NIC), so the job
     /// on this node is only their client. Then the host is asked whether it
@@ -567,6 +603,7 @@ impl SessionProvider for WorkspaceSessionProvider {
             claim: true,
             process_tree_termination: crate::processes::ownership_scan_available(),
             memory_suspend: false,
+            fork: false,
         }
     }
 
@@ -768,6 +805,23 @@ impl SessionManager {
         create: SessionCreateRequest,
         owner: String,
     ) -> Result<ComputeSession, ProviderError> {
+        let (session, created) = self.create_record(create, owner, None).await?;
+        if created {
+            self.drive(session.session_id.clone());
+        }
+        Ok(session)
+    }
+
+    /// Validate, admit, and durably record a session, without driving it.
+    /// `true` when a new session was recorded; `false` when the caller's
+    /// reference named an existing one. A forked child carries its lineage,
+    /// and is held (marked as driven) until its fork drives it.
+    async fn create_record(
+        self: &Arc<Self>,
+        create: SessionCreateRequest,
+        owner: String,
+        lineage: Option<SessionLineage>,
+    ) -> Result<(ComputeSession, bool), ProviderError> {
         let SessionCreateRequest { request, spec } = create;
         request.validate()?;
         let bundle = request.artifact.bundle()?;
@@ -821,7 +875,7 @@ impl SessionManager {
             }
             // The same reference: the same session, never a second one.
             if let Some(existing) = self.find_reference(&owner, reference)? {
-                return Ok(existing);
+                return Ok((existing, false));
             }
         }
         let ttl_seconds = match spec.ttl_seconds {
@@ -907,6 +961,7 @@ impl SessionManager {
             generation: 1,
             failure: None,
             executions: vec![],
+            lineage,
         };
         // The session is durable before any provider is asked for anything.
         {
@@ -915,7 +970,7 @@ impl SessionManager {
             if let Some(reference) = &session.reference
                 && let Some(existing) = self.find_reference(&session.owner, reference)?
             {
-                return Ok(existing);
+                return Ok((existing, false));
             }
             let staging = tempfile::Builder::new()
                 .prefix(".compute-session-")
@@ -934,14 +989,339 @@ impl SessionManager {
                 &staging.path().join("events.json"),
                 &vec![event(&session, 1, "requested", None)],
             )?;
+            if session.lineage.is_some() {
+                // Held before the sweep can see it: a child is provisioned
+                // only once its checkpoint exists.
+                self.driving().insert(session_id.clone());
+            }
             fs::rename(staging.keep(), self.directory(&session_id)).map_err(transport_error)?;
         }
-        self.live().insert(session_id.clone());
-        self.drive(session_id);
-        Ok(session)
+        self.live().insert(session_id);
+        Ok((session, true))
+    }
+
+    /// Fork a running session into `count` children. Each child is a new
+    /// session, admitted under policy now as any creation is, recorded
+    /// before the machine is touched, then provisioned from one checkpoint
+    /// of the source; the source keeps running. A child that cannot be
+    /// provisioned is failed with its reason; the others are unaffected.
+    pub async fn fork(
+        self: &Arc<Self>,
+        source_id: &SessionId,
+        owner: &str,
+        fork: SessionForkRequest,
+    ) -> Result<SessionFork, ProviderError> {
+        let source = self.owned(source_id, owner)?;
+        if !source.capabilities.fork {
+            return Err(unsupported(&source.provider_kind, "fork"));
+        }
+        if let Some(repeated) = self.forked_before(source_id, owner, &fork)? {
+            return Ok(repeated);
+        }
+        if !matches!(source.status, SessionStatus::Ready | SessionStatus::Running) {
+            return Err(conflict(format!(
+                "a {} session cannot be forked; only a running one can",
+                source.status
+            )));
+        }
+        if fork.count == 0 || fork.count > MAX_FORK_CHILDREN {
+            return Err(ProviderError::new(
+                ProviderErrorKind::PolicyRejected,
+                format!("a fork creates 1 to {MAX_FORK_CHILDREN} children"),
+            ));
+        }
+        let provider_session_id = source.provider_session_id.clone().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::EvidenceInvalid,
+                "a running session has no environment",
+            )
+        })?;
+        let stored = self.read_request(source_id)?;
+        let checkpoint_id = format!(
+            "ckpt-{}",
+            &compute_core::sha256_identity(
+                format!(
+                    "{source_id}:{}",
+                    Utc::now().timestamp_nanos_opt().unwrap_or_default()
+                )
+                .as_bytes()
+            )
+            .trim_start_matches("sha256:")[..24]
+        );
+        let forked_at = Utc::now();
+        // Children first: each one durable and admitted before the source's
+        // machine is touched. A refusal stops further children; those
+        // already admitted go on.
+        let mut children = vec![];
+        let mut refused = None;
+        for index in 0..fork.count as usize {
+            let create = SessionCreateRequest {
+                request: stored.request.clone(),
+                spec: SessionSpec {
+                    reference: fork.references.get(index).cloned(),
+                    ..stored.spec.clone()
+                },
+            };
+            let lineage = SessionLineage {
+                parent_session_id: source_id.clone(),
+                checkpoint: checkpoint_id.clone(),
+                evidence: BTreeMap::new(),
+                forked_at,
+            };
+            match self
+                .create_record(create, owner.to_owned(), Some(lineage))
+                .await
+            {
+                Ok((child, _)) => children.push(child.session_id),
+                Err(error) => {
+                    refused = Some(error);
+                    break;
+                }
+            }
+        }
+        if children.is_empty() {
+            return Err(refused.expect("a refusal when nothing was created"));
+        }
+        let checkpoint = match self
+            .provider
+            .checkpoint(&provider_session_id, &checkpoint_id)
+            .await
+        {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                for child in &children {
+                    if let Ok(session) = self.read_session(child) {
+                        let failure = self.failure(SessionPhase::Provisioning, &error);
+                        let _ = self.fail(&session, failure).await;
+                    }
+                    self.driving().remove(child);
+                }
+                let _ = self.provider.release_checkpoint(&checkpoint_id).await;
+                return Err(error);
+            }
+        };
+        for child in &children {
+            let _ = self
+                .mutate(child, None, "checkpointed", |session| {
+                    if let Some(lineage) = &mut session.lineage {
+                        lineage.evidence = checkpoint.evidence.clone();
+                    }
+                    Ok(())
+                })
+                .await;
+        }
+        let mut provisioning = tokio::task::JoinSet::new();
+        for child in &children {
+            let manager = self.clone();
+            let child = child.clone();
+            provisioning.spawn(async move {
+                let _ = manager.advance_owned(&child).await;
+                manager.driving().remove(&child);
+            });
+        }
+        while provisioning.join_next().await.is_some() {}
+        self.settle_checkpoint(&checkpoint.id).await;
+        let children = children
+            .iter()
+            .filter_map(|child| self.read_session(child).ok())
+            .collect();
+        Ok(SessionFork {
+            source_session_id: source_id.clone(),
+            checkpoint,
+            children,
+            refused: refused.map(|error| error.message),
+        })
+    }
+
+    /// Deliver input to an interactive execution that is running: bytes, a
+    /// resize, a signal, or the end of its input. It goes to the running
+    /// command only; nothing is started, so a client that reconnects and
+    /// sends again reaches the same command.
+    pub async fn input(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        owner: &str,
+        input: compute_core::SessionInput,
+    ) -> Result<(), ProviderError> {
+        let session = self.owned(session_id, owner)?;
+        if input.data.len() > compute_core::MAX_SESSION_INPUT_BYTES {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ArtifactInvalid,
+                format!(
+                    "input is at most {} bytes at a time",
+                    compute_core::MAX_SESSION_INPUT_BYTES
+                ),
+            ));
+        }
+        let execution = session
+            .executions
+            .iter()
+            .find(|execution| execution.job_id == input.job_id)
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::UnknownJob,
+                    "no such execution in this session",
+                )
+            })?;
+        let ended = || {
+            conflict(format!(
+                "execution {} is not running an interactive command",
+                input.job_id
+            ))
+        };
+        if execution.status.is_terminal() {
+            return Err(ended());
+        }
+        // A command that has just been accepted may not be listening yet.
+        let path = self.attach_path(&input.job_id);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match tokio::net::UnixStream::connect(&path).await {
+                Ok(stream) => break stream,
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    if self
+                        .jobs
+                        .status(&input.job_id, &session.owner)
+                        .await
+                        .is_ok_and(|job| job.status.is_terminal())
+                    {
+                        return Err(ended());
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(_) => return Err(ended()),
+            }
+        };
+        let mut frames = vec![];
+        if let Some(size) = input.resize {
+            frames.push(compute_guest::Request::Resize {
+                size: compute_guest::TerminalSize {
+                    rows: size.rows,
+                    cols: size.cols,
+                },
+            });
+        }
+        if !input.data.is_empty() {
+            frames.push(compute_guest::Request::Input { data: input.data });
+        }
+        if let Some(signal) = input.signal {
+            if !(1..=64).contains(&signal) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ArtifactInvalid,
+                    "a signal is 1 to 64",
+                ));
+            }
+            frames.push(compute_guest::Request::Signal { signal });
+        }
+        if input.close {
+            frames.push(compute_guest::Request::CloseInput);
+        }
+        for frame in &frames {
+            compute_guest::write_frame(&mut stream, frame)
+                .await
+                .map_err(|_| ended())?;
+        }
+        Ok(())
+    }
+
+    /// Release a checkpoint once no session still needs it: none waiting to
+    /// be provisioned from it. Each child checks after its own outcome is
+    /// durable, so the last one to finish (or a restart) releases it.
+    async fn settle_checkpoint(&self, checkpoint: &str) {
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(session_id) = SessionId::parse(entry.file_name().to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            if let Ok(session) = self.read_session(&session_id)
+                && session
+                    .lineage
+                    .as_ref()
+                    .is_some_and(|lineage| lineage.checkpoint == checkpoint)
+                && (session.status == SessionStatus::Requested
+                    || (session.status == SessionStatus::Provisioning
+                        && session.provider_session_id.is_none()))
+            {
+                return;
+            }
+        }
+        let _ = self.provider.release_checkpoint(checkpoint).await;
     }
 
     /// The owner's live session with this reference.
+    /// A fork repeated with the references of one already made: its
+    /// children, as they are now, and nothing new. References that name
+    /// only some sessions, or another session's children, are refused.
+    fn forked_before(
+        &self,
+        source_id: &SessionId,
+        owner: &str,
+        fork: &SessionForkRequest,
+    ) -> Result<Option<SessionFork>, ProviderError> {
+        if fork.references.is_empty() {
+            return Ok(None);
+        }
+        let distinct = fork
+            .references
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if fork.references.len() != fork.count as usize || distinct.len() != fork.references.len() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::PolicyRejected,
+                "a fork takes one distinct reference per child",
+            ));
+        }
+        if let Some(invalid) = fork
+            .references
+            .iter()
+            .find(|reference| !compute_core::valid_session_reference(reference))
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::PolicyRejected,
+                format!("{invalid:?}: a session reference is 1-128 letters, digits, and .:_-"),
+            ));
+        }
+        let mut children = vec![];
+        for reference in &fork.references {
+            if let Some(child) = self.find_reference(owner, reference)? {
+                children.push(child);
+            }
+        }
+        if children.is_empty() {
+            return Ok(None);
+        }
+        let lineage = children
+            .iter()
+            .map(|child| child.lineage.clone())
+            .collect::<Option<Vec<_>>>()
+            .filter(|lineages| {
+                lineages
+                    .iter()
+                    .all(|lineage| &lineage.parent_session_id == source_id)
+            });
+        match lineage {
+            Some(lineages) if children.len() == fork.references.len() => {
+                let first = &lineages[0];
+                Ok(Some(SessionFork {
+                    source_session_id: source_id.clone(),
+                    checkpoint: compute_core::MachineCheckpoint {
+                        id: first.checkpoint.clone(),
+                        evidence: first.evidence.clone(),
+                    },
+                    children,
+                    refused: None,
+                }))
+            }
+            _ => Err(conflict(
+                "these references already name sessions that are not this fork's children"
+                    .to_string(),
+            )),
+        }
+    }
+
     fn find_reference(
         &self,
         owner: &str,
@@ -1080,7 +1460,33 @@ impl SessionManager {
         if !session.capabilities.exec {
             return Err(unsupported(&session.provider_kind, "exec"));
         }
-        let environment = self.environment(&session)?;
+        let interactive = command.terminal.is_some() || command.interactive;
+        if interactive && !session.capabilities.terminal {
+            return Err(unsupported(
+                &session.provider_kind,
+                "interactive commands (terminal)",
+            ));
+        }
+        if let Some(size) = command.terminal
+            && !((1..=1000).contains(&size.rows) && (1..=1000).contains(&size.cols))
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ArtifactInvalid,
+                "a terminal is 1 to 1000 rows and columns",
+            ));
+        }
+        let execution = SessionExecution {
+            job_id: JobId::generate(),
+            execution_id: compute_core::new_execution_id(),
+            purpose: "exec".into(),
+            command: command.command.clone(),
+            submitted_at: Utc::now(),
+            status: JobStatus::Queued,
+        };
+        let mut environment = self.environment(&session)?;
+        if interactive {
+            environment.attach = Some(self.attach_path(&execution.job_id));
+        }
         let mut request = self
             .provider
             .exec(&environment, &command)
@@ -1097,14 +1503,6 @@ impl SessionManager {
                 .execution
                 .policy;
         }
-        let execution = SessionExecution {
-            job_id: JobId::generate(),
-            execution_id: compute_core::new_execution_id(),
-            purpose: "exec".into(),
-            command: command.command.clone(),
-            submitted_at: Utc::now(),
-            status: JobStatus::Queued,
-        };
         // Record the intent first: a restart between here and acceptance
         // leaves an execution the session can account for.
         self.mutate(session_id, None, "exec_requested", |session| {
@@ -1489,11 +1887,28 @@ impl SessionManager {
                 endpoints: session.requested_endpoints.clone(),
                 expires_at: session.expires_at,
             };
-            let provisioned = match self.provider.provision(&request).await {
+            let outcome = match &session.lineage {
+                // A child whose fork ended before its checkpoint existed has
+                // nothing to continue from.
+                Some(lineage) if lineage.evidence.is_empty() => Err(ProviderError::new(
+                    ProviderErrorKind::ProviderInterrupted,
+                    "the fork ended before its checkpoint was taken",
+                )),
+                Some(lineage) => {
+                    self.provider
+                        .provision_from(&request, &lineage.checkpoint)
+                        .await
+                }
+                None => self.provider.provision(&request).await,
+            };
+            let provisioned = match outcome {
                 Ok(provisioned) => provisioned,
                 Err(error) => {
                     let failure = self.failure(SessionPhase::Provisioning, &error);
                     self.fail(&session, failure).await?;
+                    if let Some(lineage) = &session.lineage {
+                        self.settle_checkpoint(&lineage.checkpoint).await;
+                    }
                     return Ok(());
                 }
             };
@@ -1511,6 +1926,9 @@ impl SessionManager {
                     },
                 )
                 .await;
+            if let Some(lineage) = &session.lineage {
+                self.settle_checkpoint(&lineage.checkpoint).await;
+            }
             if applied.is_err() {
                 // The session moved on (it was destroyed, or expired) while
                 // the provider worked. The environment it built belongs to
@@ -1942,7 +2360,18 @@ impl SessionManager {
                 .isolation
                 .unwrap_or(bundle.workload.isolation.profile),
             host: bundle.workload.isolation.host,
+            attach: None,
         })
+    }
+
+    /// Where an interactive execution accepts control: derived from its job,
+    /// so input for a job always finds it, and nothing more is stored.
+    fn attach_path(&self, job_id: &JobId) -> std::path::PathBuf {
+        let digest = compute_core::sha256_identity(job_id.0.as_bytes());
+        self.root.join(".attach").join(format!(
+            "{}.sock",
+            &digest.trim_start_matches("sha256:")[..16]
+        ))
     }
 
     fn failure(&self, phase: SessionPhase, error: &ProviderError) -> SessionFailure {

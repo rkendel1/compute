@@ -24,6 +24,7 @@ on:
       - "crates/compute-provider/src/sessions.rs"
       - "crates/compute-cli/src/guest_cmd.rs"
       - "crates/compute-cli/tests/microvm.rs"
+      - "crates/compute-cli/tests/microvm_bench.rs"
       - "distribution/microvm/**"
       - ".github/workflows/microvm.yml"
   push:
@@ -35,7 +36,7 @@ env:
 jobs:
   microvm:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -78,6 +79,23 @@ jobs:
         run: timeout 900 cargo test --locked -p compute-cli --test microvm -- --nocapture
       - name: Guest agent and egress gateway
         run: cargo test --locked -p compute-guest -p compute-egress
+      # Lifecycle latency on this runner (nested KVM, release build): a
+      # measurement, not a gate. The JSON is kept as an artifact.
+      - name: Lifecycle latency
+        env:
+          COMPUTE_FIRECRACKER: ${{ runner.temp }}/vm/firecracker
+          COMPUTE_VM_KERNEL: ${{ runner.temp }}/vm/vmlinux
+          COMPUTE_VM_ROOTFS: ${{ runner.temp }}/vm/rootfs.ext4
+          COMPUTE_BENCH_RUNS: "20"
+          COMPUTE_BENCH_OUT: ${{ runner.temp }}/microvm-bench.json
+        run: timeout 1200 cargo test --release --locked -p compute-cli --test microvm_bench -- --ignored --nocapture
+      - name: Keep the measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: microvm-bench
+          path: ${{ runner.temp }}/microvm-bench.json
+          if-no-files-found: ignore
       - name: VM logs
         if: failure()
         run: find /tmp -name firecracker.log -exec sh -c 'echo "== $1"; tail -n 50 "$1"' _ {} \; 2>/dev/null || true

@@ -2546,6 +2546,45 @@
    "tests": []
   },
   {
+   "command": "compute session fork",
+   "about": "Fork a running session's machine into new sessions: each continues from the same instant (memory, processes, disk), with its own copy of everything mutable",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target session store",
+   "authority": "target: target credential",
+   "ui": "none",
+   "tests": [
+    "crates/compute-provider/tests/sessions.rs",
+    "crates/compute-cli/tests/microvm.rs"
+   ]
+  },
+  {
+   "command": "compute session attach",
+   "about": "Attach to a running interactive execution: input goes to it, its output comes back; with --tty, raw input and Ctrl-] detaches",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target session store",
+   "authority": "target: target credential",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/guest_terminal.rs",
+    "crates/compute-cli/tests/microvm.rs"
+   ]
+  },
+  {
+   "command": "compute session input",
+   "about": "Send input, a resize, a signal, or the end of input to a running interactive execution",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target session store",
+   "authority": "target: target credential",
+   "ui": "none",
+   "tests": [
+    "crates/compute-provider/tests/sessions.rs",
+    "crates/compute-cli/tests/microvm.rs"
+   ]
+  },
+  {
    "command": "compute egress serve",
    "about": "Serve an egress gateway: sessions reach the network only through it",
    "help_defect": null,
@@ -5445,6 +5484,195 @@
    "cli": true,
    "appport": false,
    "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/api",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "GET",
+   "path": "/compute/inspect",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/compute/jobs/{job}/artifacts",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/compute/jobs/{job}/events",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/compute/jobs/{job}/output",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/compute/sessions",
+   "scope": "Execute",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/compute/sessions",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/compute/sessions/{session}",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/compute/sessions/{session}/events",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "GET",
+   "path": "/compute/sessions/{session}/logs",
+   "scope": "Read",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/compute/sessions/{session}/connect",
+   "scope": "Execute",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/compute/sessions/{session}/exec",
+   "scope": "Execute",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/compute/sessions/{session}/input",
+   "scope": "Execute",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/compute/sessions/{session}/stop",
+   "scope": "Execute",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/compute/sessions/{session}/resume",
+   "scope": "Execute",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/compute/sessions/{session}/destroy",
+   "scope": "Execute",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/compute/sessions/{session}/claim",
+   "scope": "Execute",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/compute/sessions/{session}/fork",
+   "scope": "Execute",
+   "ui": false,
+   "cli": true,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/jobs/{job}/output",
+   "scope": "Read",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/jobs/{job}/input",
+   "scope": "Execute",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
+  },
+  {
+   "method": "POST",
+   "path": "/environments/{environment}/jobs/{job}/cancel",
+   "scope": "Execute",
+   "ui": false,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": true
   }
  ],
  "ui": {
