@@ -2,7 +2,7 @@
 //!
 //! It runs WASI commands as workloads. It is not a host for agent runtimes compiled to Wasm:
 //! running chip-rs's `chip-wasm-host` under it is unsupported (no host-supplied model provider
-//! exists here). See docs/rust-chip.md#limits.
+//! exists here). See docs/stack-agent.md#limits.
 
 use std::sync::{
     Arc,

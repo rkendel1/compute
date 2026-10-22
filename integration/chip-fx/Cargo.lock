@@ -31,7 +31,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 [[package]]
 name = "chip-core"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=2ea3ade3b0c824dc82a3f60962115ca6b05906b8#2ea3ade3b0c824dc82a3f60962115ca6b05906b8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "async-trait",
  "chip-inference",
@@ -41,7 +41,7 @@ dependencies = [
 [[package]]
 name = "chip-fx"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=2ea3ade3b0c824dc82a3f60962115ca6b05906b8#2ea3ade3b0c824dc82a3f60962115ca6b05906b8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "async-trait",
  "chip-inference",
@@ -53,7 +53,7 @@ dependencies = [
 [[package]]
 name = "chip-inference"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/chip-rs?rev=2ea3ade3b0c824dc82a3f60962115ca6b05906b8#2ea3ade3b0c824dc82a3f60962115ca6b05906b8"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "async-trait",
 ]
@@ -103,7 +103,7 @@ dependencies = [
 [[package]]
 name = "fx-core"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/fx?rev=72ef7a41c5f7b714774ec224c38aa23b53325759#72ef7a41c5f7b714774ec224c38aa23b53325759"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "serde",
  "serde_json",
@@ -112,7 +112,7 @@ dependencies = [
 [[package]]
 name = "fx-single-attempt"
 version = "0.1.0"
-source = "git+https://github.com/rkendel1/fx?rev=72ef7a41c5f7b714774ec224c38aa23b53325759#72ef7a41c5f7b714774ec224c38aa23b53325759"
+source = "git+https://github.com/rkendel1/stack-agent?rev=1cf91e63d2242f9aca4cbeb2d1d939b84a00be14#1cf91e63d2242f9aca4cbeb2d1d939b84a00be14"
 dependencies = [
  "fx-core",
 ]

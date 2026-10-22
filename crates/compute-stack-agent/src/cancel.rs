@@ -1,8 +1,8 @@
-//! Compute's side of cancelling a Rust Chip work (compute#90, G3).
+//! Compute's side of cancelling a stack-agent work (compute#90, G3).
 //!
 //! Cancellation is a request to stop work, and what is reported is what actually stopped:
 //!
-//! - **Chip's loop.** [`request`] calls Rust Chip's `POST /v1/work/{id}/cancel`. A queued work is
+//! - **Chip's loop.** [`request`] calls stack-agent's `POST /v1/work/{id}/cancel`. A queued work is
 //!   removed before it starts (`cancelled`: nothing ran). A running work is asked to stop
 //!   (`cancellation_requested`): Chip makes no further model call, but what is in flight is not
 //!   interrupted and the work ends however Chip establishes. Interrupting an FX call in progress
@@ -18,7 +18,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// What Rust Chip established about a cancellation request.
+/// What stack-agent established about a cancellation request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChipCancellation {
     /// Removed from the queue before it started: no model call, execution or observation.
@@ -34,7 +34,7 @@ pub enum ChipCancellation {
     Other { status: u16, body: String },
 }
 
-/// Asks the Rust Chip service at `service` (`host:port`) to cancel `work`. Idempotent: asking
+/// Asks the stack-agent service at `service` (`host:port`) to cancel `work`. Idempotent: asking
 /// again reports the work's current state and changes nothing that already ended.
 pub async fn request(service: &str, work: &str) -> Result<ChipCancellation, String> {
     if work.is_empty()

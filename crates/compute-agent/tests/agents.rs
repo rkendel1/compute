@@ -107,7 +107,7 @@ async fn an_agent_receives_nothing_of_another_agent_or_of_compute() {
     }
     // Compute's session execution contract gives a command its *own* session's identity and
     // workspace (COMPUTE_SESSION_ID / COMPUTE_SESSION_WORKSPACE). That is the agent's own
-    // computer, never another's; an agent that must not see it (Rust Chip's model never does)
+    // computer, never another's; an agent that must not see it (stack-agent's model never does)
     // simply does not forward it.
     assert!(seen.contains(&format!("COMPUTE_SESSION_ID={}", a.session_id())));
     assert!(seen.contains("MINE=a"));

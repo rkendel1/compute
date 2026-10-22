@@ -22,6 +22,7 @@ fn the_agent_boundary_depends_on_no_agent_runtime() {
         let name = line.split_whitespace().next().unwrap_or("");
         for agent in [
             "chip",
+            "stack-agent",
             "fx-",
             "pax",
             "claude",
@@ -38,7 +39,7 @@ fn the_agent_boundary_depends_on_no_agent_runtime() {
 }
 
 #[test]
-fn rust_chips_contract_crates_do_not_depend_on_compute() {
+fn stack_agents_contract_crates_do_not_depend_on_compute() {
     for package in ["chip-core", "chip-remote-env"] {
         for line in tree(package).lines() {
             let name = line.split_whitespace().next().unwrap_or("");

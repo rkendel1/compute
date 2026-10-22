@@ -3,7 +3,7 @@
 # set of the release tag's templates.
 #
 # v0.1.16 published a configured formula with correct URLs and correct checksums
-# and no `compute-configured-chip` launcher, because the sync fetched the release
+# and no agent launcher (then `compute-configured-chip`), because the sync fetched the release
 # tag's templates and then rendered the tap's own older copies. The tap looked
 # healthy in every dimension anyone had checked, and the installed product was
 # missing the entry point to the agent runtime its own profile declares.
@@ -64,19 +64,9 @@ require_same_launchers() {
 require_same_launchers "the configured formula" "$rendered_configured" "$template_configured"
 require_same_launchers "the base formula" "$rendered_base" "$template_base"
 
-# The one guarantee this guard was written for, stated so the failure reads as
-# itself rather than as a diff: a release that ships the Chip launcher must
-# produce a tap formula that ships it.
-if launchers "$template_configured" | grep -qx 'compute-configured-chip'; then
-  if ! launchers "$rendered_configured" | grep -qx 'compute-configured-chip'; then
-    fail "the release ships compute-configured-chip and the rendered formula dropped it"
-  fi
-fi
-
-# The Rust Chip workload and the agent entry are launchers like any other: a release that ships
-# them must render them, so the agent workload cannot be dropped silently between a release and
-# the tap.
-for launcher in compute-configured-rust-chip compute-configured-agent; do
+# The one guarantee this guard was written for, stated so the failure reads as itself rather than
+# as a diff: a release that ships the agent launchers must produce a tap formula that ships them.
+for launcher in compute-configured-stack-agent compute-configured-agent; do
   if launchers "$template_configured" | grep -qx "$launcher"; then
     if ! launchers "$rendered_configured" | grep -qx "$launcher"; then
       fail "the release ships $launcher and the rendered formula dropped it"
@@ -84,8 +74,8 @@ for launcher in compute-configured-rust-chip compute-configured-agent; do
   fi
 done
 
-# Chip is a configured component. The base artifact contains no Chip runtime for
-# such a wrapper to run, so base Compute must never grow a launcher for one.
+# The agent is a configured component. The base artifact contains no agent for such a
+# wrapper to run, so base Compute must never grow a launcher for one.
 if launchers "$rendered_base" | grep -qiE 'chip|agent'; then
   fail "the base formula ships an agent launcher; agents are configured components"
 fi

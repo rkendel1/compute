@@ -23,7 +23,7 @@
 #        own digest of the published artifact bytes
 #     -> expected formulas
 #     -> the live tap, pinned to its current commit, over the network
-#     -> Ruby validity, version, URLs, checksums, Chip payload invariants
+#     -> Ruby validity, version, URLs, checksums, agent payload invariants
 #     -> byte-for-byte comparison
 #     -> the installed consumer, where this host is one
 #
@@ -124,19 +124,27 @@ done
 mkdir -p "$work/tag"
 git -C "$repository" archive "$tag" distribution/homebrew | tar -x -C "$work/tag"
 
-# The Chip runtime the release's configured profile declares. The configured
-# distribution is Chip-capable by definition, so a release without one is not
-# a release this tap can publish.
+# The agent runtime the release's configured profile declares as its default. The configured
+# distribution ships an agent by definition, so a release without one is not a release this tap
+# can publish. Releases up to 0.1.20 declared the npm Chip (`chip`); later ones declare
+# stack-agent. Everything below is derived from the profile, so both are checked the same way.
 git -C "$repository" show "$tag:compatibility/published-stack/stack.json" > "$work/stack.json" 2>/dev/null \
-  || fail "CONFIGURED CHIP PAYLOAD MISSING: release tag $tag has no compatibility/published-stack/stack.json"
-chip() {
-  json "$work/stack.json" "(lambda r: $1)(next(r for r in d['agent']['runtimes'] if r['name'] == 'chip'))" 2>/dev/null \
-    || fail "CONFIGURED CHIP PAYLOAD MISSING: the $tag configured profile declares no chip agent runtime"
+  || fail "CONFIGURED AGENT PAYLOAD MISSING: release tag $tag has no compatibility/published-stack/stack.json"
+agent_name=$(json "$work/stack.json" "d['agent']['default']" 2>/dev/null) \
+  || fail "CONFIGURED AGENT PAYLOAD MISSING: the $tag configured profile declares no default agent runtime"
+agent() {
+  json "$work/stack.json" "(lambda r: $1)(next(r for r in d['agent']['runtimes'] if r['name'] == '$agent_name'))" 2>/dev/null \
+    || fail "CONFIGURED AGENT PAYLOAD MISSING: the $tag configured profile does not declare its default $agent_name"
 }
-chip_package=$(chip "r['package']")
-chip_version=$(chip "r['version']")
-chip_health=$(chip "' '.join(r['health']['command'])")
-chip_expect=$(chip "r['health']['expect']")
+agent_package=$(agent "r['package']")
+agent_version=$(agent "r['version']")
+agent_executable=$(agent "r['executable']")
+agent_health=$(agent "' '.join(r['health']['command'])")
+agent_expect=$(agent "r['health']['expect']")
+case "$agent_name" in
+  chip) agent_launcher_name=compute-configured-chip ;;
+  *) agent_launcher_name=compute-configured-$agent_name ;;
+esac
 
 # ---- the release's checksums, proved against GitHub's own digests -----------
 # Each `.sha256` sidecar is what the release declares; GitHub's asset digest is
@@ -240,17 +248,18 @@ PY
 message=$(check_artifacts compute "$macos_sha" "$linux_sha") || fail "$message"
 message=$(check_artifacts compute-configured "$macos_configured_sha" "$configured_linux_sha") || fail "$message"
 
-# ---- the Chip payload belongs to configured Compute, and only there ---------
-launcher='bin/"compute-configured-chip"'
+# ---- the agent payload belongs to configured Compute, and only there --------
+launcher="bin/\"$agent_launcher_name\""
 grep -qF "$launcher" "$work/expected/Formula/compute-configured.rb" \
-  || fail "CONFIGURED CHIP PAYLOAD MISSING: the $tag configured template ships no compute-configured-chip launcher"
+  || fail "CONFIGURED AGENT PAYLOAD MISSING: the $tag configured template ships no $agent_launcher_name launcher"
 grep -qF "$launcher" "$work/compute-configured.live.rb" \
-  || fail "CONFIGURED CHIP PAYLOAD MISSING: the live configured formula ships no compute-configured-chip launcher"
-grep -qF 'node_modules/.bin/chip' "$work/compute-configured.live.rb" \
-  || fail "CONFIGURED CHIP PAYLOAD MISSING: the live configured launcher does not execute the pinned chip runtime"
+  || fail "CONFIGURED AGENT PAYLOAD MISSING: the live configured formula ships no $agent_launcher_name launcher"
+grep -qF "$agent_executable" "$work/compute-configured.live.rb" \
+  || grep -qF "${agent_executable##*/}" "$work/compute-configured.live.rb" \
+  || fail "CONFIGURED AGENT PAYLOAD MISSING: the live configured launcher does not execute $agent_executable"
 for formula in "$work/expected/Formula/compute.rb" "$work/compute.live.rb"; do
-  if grep -qi 'chip' "$formula"; then
-    fail "BASE COMPUTE CONTAINS CHIP PAYLOAD: the $( [ "$formula" = "$work/compute.live.rb" ] && echo live || echo "$tag" ) base formula mentions chip"
+  if grep -qiE 'chip|stack-agent' "$formula"; then
+    fail "BASE COMPUTE CONTAINS AGENT PAYLOAD: the $( [ "$formula" = "$work/compute.live.rb" ] && echo live || echo "$tag" ) base formula mentions an agent"
   fi
 done
 
@@ -266,8 +275,8 @@ done
 
 printf 'release:   %s (tag %s, commit %s)\n' "$tag" "$published_tag" "$release_commit"
 printf 'live tap:  %s@%s (Formula/compute.rb, Formula/compute-configured.rb)\n' "$tap_repository" "$tap_commit"
-printf 'live tap validation: PASS -- both formulas are valid Ruby, byte-identical to the %s render, reference only %s artifacts with their published checksums; configured ships compute-configured-chip (%s@%s); base is Chip-free\n' \
-  "$tag" "$tag" "$chip_package" "$chip_version"
+printf 'live tap validation: PASS -- both formulas are valid Ruby, byte-identical to the %s render, reference only %s artifacts with their published checksums; configured ships %s (%s@%s); base ships no agent\n' \
+  "$tag" "$tag" "$agent_launcher_name" "$agent_package" "$agent_version"
 
 # ---- live consumer: the installed product, where this host is that consumer --
 # Formula verification above is mandatory everywhere. Consumer verification
@@ -296,58 +305,66 @@ installed=$("$base_keg/bin/compute" --version 2>/dev/null) \
   || fail "INSTALLED BASE FAILED: compute --version did not run from $base_keg"
 [ "$installed" = "compute $version" ] \
   || fail "INSTALLED VERSION MISMATCH: installed compute reports '$installed', expected 'compute $version' (brew upgrade)"
-chip_files=$(find "$base_keg" -iname '*chip*' | head -n 5)
-[ -z "$chip_files" ] \
-  || fail "BASE COMPUTE CONTAINS CHIP PAYLOAD: the installed base keg contains $chip_files"
-chip_refs=$(grep -rIlF -e '@appport/chip' -e 'compute-configured-chip' "$base_keg" | head -n 5 || true)
-[ -z "$chip_refs" ] \
-  || fail "BASE COMPUTE CONTAINS CHIP PAYLOAD: the installed base keg references Chip in $chip_refs"
+agent_files=$(find "$base_keg" \( -iname '*chip*' -o -iname '*stack-agent*' \) | head -n 5)
+[ -z "$agent_files" ] \
+  || fail "BASE COMPUTE CONTAINS AGENT PAYLOAD: the installed base keg contains $agent_files"
+agent_refs=$(grep -rIlF -e '@appport/chip' -e 'compute-configured-chip' -e 'compute-stack-agent' "$base_keg" | head -n 5 || true)
+[ -z "$agent_refs" ] \
+  || fail "BASE COMPUTE CONTAINS AGENT PAYLOAD: the installed base keg references an agent in $agent_refs"
 
 configured_installed=$("$configured_keg/bin/compute-configured" --version 2>/dev/null) \
   || fail "INSTALLED CONFIGURED FAILED: compute-configured --version did not run from $configured_keg"
 [ "$configured_installed" = "compute $version" ] \
   || fail "INSTALLED VERSION MISMATCH: installed compute-configured reports '$configured_installed', expected 'compute $version' (brew upgrade)"
-chip_launcher="$configured_keg/bin/compute-configured-chip"
-[ -x "$chip_launcher" ] \
-  || fail "CONFIGURED CHIP PAYLOAD MISSING: the installed configured keg has no executable compute-configured-chip"
-chip_manifest="$configured_keg/libexec/node_modules/$chip_package/package.json"
-[ -f "$chip_manifest" ] \
-  || fail "CONFIGURED CHIP PAYLOAD MISSING: the installed configured keg has no $chip_package"
-resolved_chip=$(json "$chip_manifest" 'd["name"] + "@" + d["version"]')
-[ "$resolved_chip" = "$chip_package@$chip_version" ] \
-  || fail "CONFIGURED CHIP RUNTIME FAILED: the installed launcher resolves $resolved_chip, the $tag profile declares $chip_package@$chip_version"
-# The profile's own health invocation is the execution proof: it runs Chip
-# through the launcher, the bundled Node and the pinned node_modules.
+agent_launcher="$configured_keg/bin/$agent_launcher_name"
+[ -x "$agent_launcher" ] \
+  || fail "CONFIGURED AGENT PAYLOAD MISSING: the installed configured keg has no executable $agent_launcher_name"
+case "$agent_executable" in
+  node_modules/*)
+    # An npm agent (releases up to 0.1.20): the installed package is the pinned one.
+    agent_manifest="$configured_keg/libexec/node_modules/$agent_package/package.json"
+    [ -f "$agent_manifest" ] \
+      || fail "CONFIGURED AGENT PAYLOAD MISSING: the installed configured keg has no $agent_package"
+    resolved_agent=$(json "$agent_manifest" 'd["name"] + "@" + d["version"]')
+    [ "$resolved_agent" = "$agent_package@$agent_version" ] \
+      || fail "CONFIGURED AGENT RUNTIME FAILED: the installed launcher resolves $resolved_agent, the $tag profile declares $agent_package@$agent_version" ;;
+  *)
+    [ -x "$configured_keg/libexec/$agent_executable" ] \
+      || fail "CONFIGURED AGENT PAYLOAD MISSING: the installed configured keg has no executable $agent_executable" ;;
+esac
+# The profile's own health invocation is the execution proof: it runs the agent through its
+# launcher. Its exit status is the agent's own (stack-agent answers its usage with 2); what it
+# must print is what the profile declares.
 # shellcheck disable=SC2086 # the declared health command is a word list
-actual_chip=$("$chip_launcher" $chip_health 2>"$work/chip.err") \
-  || fail "CONFIGURED CHIP RUNTIME FAILED: compute-configured-chip $chip_health exited non-zero: $(head -n 3 "$work/chip.err")"
-[ "$actual_chip" = "$chip_expect" ] \
-  || fail "CONFIGURED CHIP RUNTIME FAILED: compute-configured-chip $chip_health printed '$actual_chip', the $tag profile expects '$chip_expect'"
+actual_agent=$("$agent_launcher" $agent_health 2>&1 || true)
+case "$actual_agent" in
+  *"$agent_expect"*) ;;
+  *) fail "CONFIGURED AGENT RUNTIME FAILED: $agent_launcher_name $agent_health printed '$(printf '%s' "$actual_agent" | head -n 3)', the $tag profile expects '$agent_expect'" ;;
+esac
 "$configured_keg/bin/compute-configured-verify" > "$work/verify.json" 2>/dev/null \
   || fail "CONFIGURED VERIFY FAILED: compute-configured-verify exited non-zero"
 [ "$(json "$work/verify.json" 'd["result"]')" = pass ] \
   || fail "CONFIGURED VERIFY FAILED: compute-configured-verify did not report result pass"
-# A profile that declares Chip's model provider (FX, from 0.1.19) must install
-# exactly that package, keep it out of base Compute, and have proved the
-# Chip -> FX -> provider path and a served session in its verify run.
-fx_package=$(chip "(r.get('model_provider') or {}).get('package', '')")
+# A profile whose agent declares an npm model provider (FX, 0.1.19 to 0.1.20) must install
+# exactly that package, keep it out of base Compute, and have proved the agent -> FX -> provider
+# path and a served session in its verify run.
+fx_package=$(agent "(r.get('model_provider') or {}).get('package', '')")
 if [ -n "$fx_package" ]; then
-  fx_version=$(chip "r['model_provider']['version']")
+  fx_version=$(agent "r['model_provider']['version']")
   fx_manifest="$configured_keg/libexec/node_modules/$fx_package/package.json"
   [ -f "$fx_manifest" ] \
-    || fail "CONFIGURED CHIP RUNTIME FAILED: the installed configured keg has no $fx_package"
+    || fail "CONFIGURED AGENT RUNTIME FAILED: the installed configured keg has no $fx_package"
   resolved_fx=$(json "$fx_manifest" 'd["name"] + "@" + d["version"]')
   [ "$resolved_fx" = "$fx_package@$fx_version" ] \
-    || fail "CONFIGURED CHIP RUNTIME FAILED: the installed keg resolves $resolved_fx, the $tag profile declares $fx_package@$fx_version"
+    || fail "CONFIGURED AGENT RUNTIME FAILED: the installed keg resolves $resolved_fx, the $tag profile declares $fx_package@$fx_version"
   fx_refs=$(grep -rIlF -e "$fx_package" "$base_keg" | head -n 5 || true)
   [ -z "$fx_refs" ] \
-    || fail "BASE COMPUTE CONTAINS CHIP PAYLOAD: the installed base keg references $fx_package in $fx_refs"
+    || fail "BASE COMPUTE CONTAINS AGENT PAYLOAD: the installed base keg references $fx_package in $fx_refs"
   for check in model_provider agent_session; do
     [ "$(json "$work/verify.json" "next((c['result'] for c in d['checks'] if c['name'] == '$check'), 'missing')")" = pass ] \
       || fail "CONFIGURED VERIFY FAILED: compute-configured-verify did not pass $check"
   done
-  actual_chip="$actual_chip with $resolved_fx"
 fi
 
-printf 'live consumer validation: PASS -- %s and compute-configured %s installed from %s; compute-configured-chip executes %s@%s; configured verify passes; base keg is Chip-free\n' \
-  "$installed" "$version" "$tap_name" "$chip_package" "$actual_chip"
+printf 'live consumer validation: PASS -- %s and compute-configured %s installed from %s; %s runs %s@%s; configured verify passes; base keg ships no agent\n' \
+  "$installed" "$version" "$tap_name" "$agent_launcher_name" "$agent_package" "$agent_version"

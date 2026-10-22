@@ -1,5 +1,10 @@
 # Chip/EVE invocation outcomes: certification report
 
+> **Historical.** This page records the npm Chip/Eve agent and npm FX that `compute-configured`
+> shipped up to 0.1.20. They are retired: the configured agent is now
+> [stack-agent](stack-agent.md) (Chip + FX in one Rust executable), and nothing in the current
+> profile, formula or release pipeline refers to the npm agent.
+
 Date: 2026-10-12. Linux x86_64, Node 24.21.0 (compute stack), Bun 1.4.2 (Attn), Rust stable.
 **This certifies Attn's outcome and cancellation semantics against recorded real Chip behaviour. It does
 not certify the full Attn → … → PAX slice** (see Blocked).

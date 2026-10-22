@@ -1,5 +1,5 @@
-//! The `compute-rust-chip serve` launcher path, as Compute-configured runs it: a real Compute
-//! target, Rust Chip's real runtime service with its real model provider (Rust FX over HTTP),
+//! The `compute-stack-agent serve` launcher path, as Compute-configured runs it: a real Compute
+//! target, stack-agent's real runtime service with its real model provider (Rust FX over HTTP),
 //! two concurrent works with conflicting edits, real Git, real PAX, real Cargo.
 //!
 //! The model is a local mock HTTP endpoint answering with a fixed script per work (the mock is the
@@ -20,7 +20,7 @@ use support::*;
 
 type Script = HashMap<&'static str, Vec<String>>;
 
-/// The provider key the launcher gives Rust Chip. It must reach the model endpoint and nowhere else.
+/// The provider key the launcher gives stack-agent. It must reach the model endpoint and nowhere else.
 const SENTINEL_KEY: &str = "sk-never-shown-to-anyone";
 
 struct Mock {
@@ -40,7 +40,7 @@ fn marker_of(text: &str) -> Option<&'static str> {
 /// first answer for every marker is held that long, so the works stay in flight together long enough
 /// for the test to observe it. (It cannot wait for the other work's request instead: the service
 /// shares one model provider and FX holds it for the whole attempt, so two model calls are never in
-/// flight at once. That is a property of chip-rs at the pinned commit, not of the Compute adapter.)
+/// flight at once. That is a property of stack-agent at the pinned commit, not of the Compute adapter.)
 async fn mock(script: Script, hold_first: Option<Duration>) -> Mock {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!(
@@ -125,7 +125,7 @@ async fn mock(script: Script, hold_first: Option<Duration>) -> Mock {
                     "usage": {"prompt_tokens": 5, "completion_tokens": 3},
                 })
                 .to_string();
-                // Rust Chip's executor is FX, which asks for a stream; answer in the form that was
+                // stack-agent's executor is FX, which asks for a stream; answer in the form that was
                 // asked for, with the same scripted content and usage either way.
                 let response = if body["stream"] == json!(true) {
                     let events = event_stream(&id, &reply);
@@ -190,7 +190,7 @@ impl Drop for Service {
 
 fn token_file(target: &Target, tag: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!(
-        "compute-rust-chip-token-{}-{tag}",
+        "compute-stack-agent-token-{}-{tag}",
         std::process::id()
     ));
     std::fs::write(&path, &target.token).unwrap();
@@ -202,24 +202,25 @@ fn launcher(target: &Target, source: &std::path::Path, model: &str, tag: &str) -
     let mut c = Command::new(worker());
     c.arg("serve")
         // What Compute-configured supplies:
-        .env("COMPUTE_RUST_CHIP_TARGET", &target.endpoint)
+        .env("COMPUTE_STACK_AGENT_TARGET", &target.endpoint)
         .env(
-            "COMPUTE_RUST_CHIP_TARGET_TOKEN_FILE",
+            "COMPUTE_STACK_AGENT_TARGET_TOKEN_FILE",
             token_file(target, tag),
         )
-        .env("COMPUTE_RUST_CHIP_PROJECT", source)
-        .env("COMPUTE_RUST_CHIP_WORKER", worker())
+        .env("COMPUTE_STACK_AGENT_PROJECT", source)
+        .env("COMPUTE_STACK_AGENT_WORKER", worker())
         .env(
-            "COMPUTE_RUST_CHIP_SESSION_MEMORY",
+            "COMPUTE_STACK_AGENT_SESSION_MEMORY",
             TEST_SESSION_MEMORY.to_string(),
         )
         .env(
-            "COMPUTE_RUST_CHIP_COMMAND_PATH",
+            "COMPUTE_STACK_AGENT_COMMAND_PATH",
             format!("{home}/.cargo/bin:/usr/local/bin:/usr/bin:/bin"),
         )
-        .env("COMPUTE_RUST_CHIP_CARGO_HOME", format!("{home}/.cargo"))
-        .env("COMPUTE_RUST_CHIP_RUSTUP_HOME", format!("{home}/.rustup"))
-        // Rust Chip's own model configuration, untouched by Compute:
+        .env("COMPUTE_STACK_AGENT_CARGO_HOME", format!("{home}/.cargo"))
+        .env("COMPUTE_STACK_AGENT_RUSTUP_HOME", format!("{home}/.rustup"))
+        .env("COMPUTE_STACK_AGENT_STATE_DB", state_db())
+        // stack-agent's own model configuration, untouched by Compute:
         .env("CHIP_PROVIDER", "openai-compatible")
         .env("CHIP_MODEL", "mock-model")
         .env("CHIP_ENDPOINT", model)
@@ -343,7 +344,7 @@ fn kinds(addr: &str, id: &str) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn two_concurrent_rust_chip_works_edit_the_same_file_in_two_compute_environments() {
+async fn two_concurrent_stack_agent_works_edit_the_same_file_in_two_compute_environments() {
     if !pax_installed() {
         eprintln!("SKIPPED: PAX is not installed");
         return;
@@ -467,7 +468,7 @@ async fn two_concurrent_rust_chip_works_edit_the_same_file_in_two_compute_enviro
             "a Compute identity reached the model"
         );
         assert!(
-            !text.contains("compute-rust-chip"),
+            !text.contains("compute-stack-agent"),
             "the worker's location reached the model"
         );
     }
@@ -493,27 +494,28 @@ fn launcher_for(endpoint: &str, token: &str, source: &std::path::Path, model: &s
     // let concurrent tests overwrite each other's credential.
     static LAUNCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let token_path = std::env::temp_dir().join(format!(
-        "compute-rust-chip-token-{}-launch-{}",
+        "compute-stack-agent-token-{}-launch-{}",
         std::process::id(),
         LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     ));
     std::fs::write(&token_path, token).unwrap();
     let mut c = Command::new(worker());
     c.arg("serve")
-        .env("COMPUTE_RUST_CHIP_TARGET", endpoint)
-        .env("COMPUTE_RUST_CHIP_TARGET_TOKEN_FILE", token_path)
-        .env("COMPUTE_RUST_CHIP_PROJECT", source)
-        .env("COMPUTE_RUST_CHIP_WORKER", worker())
+        .env("COMPUTE_STACK_AGENT_TARGET", endpoint)
+        .env("COMPUTE_STACK_AGENT_TARGET_TOKEN_FILE", token_path)
+        .env("COMPUTE_STACK_AGENT_PROJECT", source)
+        .env("COMPUTE_STACK_AGENT_WORKER", worker())
         .env(
-            "COMPUTE_RUST_CHIP_SESSION_MEMORY",
+            "COMPUTE_STACK_AGENT_SESSION_MEMORY",
             TEST_SESSION_MEMORY.to_string(),
         )
         .env(
-            "COMPUTE_RUST_CHIP_COMMAND_PATH",
+            "COMPUTE_STACK_AGENT_COMMAND_PATH",
             format!("{home}/.cargo/bin:/usr/local/bin:/usr/bin:/bin"),
         )
-        .env("COMPUTE_RUST_CHIP_CARGO_HOME", format!("{home}/.cargo"))
-        .env("COMPUTE_RUST_CHIP_RUSTUP_HOME", format!("{home}/.rustup"))
+        .env("COMPUTE_STACK_AGENT_CARGO_HOME", format!("{home}/.cargo"))
+        .env("COMPUTE_STACK_AGENT_RUSTUP_HOME", format!("{home}/.rustup"))
+        .env("COMPUTE_STACK_AGENT_STATE_DB", state_db())
         .env("CHIP_PROVIDER", "openai-compatible")
         .env("CHIP_MODEL", "mock-model")
         .env("CHIP_ENDPOINT", model)
@@ -532,7 +534,7 @@ fn the_launcher_refuses_more_concurrency_than_the_provider_can_isolate_and_needs
     const UNREACHABLE_MODEL: &str = "http://127.0.0.1:1/v1/chat/completions";
     // More work at once than isolated Compute sessions the provider declared.
     let out = launcher(&target, &source, UNREACHABLE_MODEL, "limits")
-        .env("COMPUTE_RUST_CHIP_MAX_ENVIRONMENTS", "2")
+        .env("COMPUTE_STACK_AGENT_MAX_ENVIRONMENTS", "2")
         .args(["--port", "0", "--max-concurrent-work", "3"])
         .output()
         .unwrap();
@@ -546,12 +548,12 @@ fn the_launcher_refuses_more_concurrency_than_the_provider_can_isolate_and_needs
     assert!(out.stdout.is_empty());
     // No target configured: nothing is run, and nothing falls back to the local machine.
     let out = launcher(&target, &source, UNREACHABLE_MODEL, "limits2")
-        .env_remove("COMPUTE_RUST_CHIP_TARGET")
+        .env_remove("COMPUTE_STACK_AGENT_TARGET")
         .args(["--port", "0"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(3));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("COMPUTE_RUST_CHIP_TARGET is not set"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("COMPUTE_STACK_AGENT_TARGET is not set"));
     assert!(out.stdout.is_empty());
 }
 
@@ -601,7 +603,7 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
 const COMMAND_ENVIRONMENT_MARKER: &str = "/g8-command-environment-marker";
 
 /// A worker that records the environment it was started with in `dump`, then runs the real one.
-/// It stands where Rust Chip's worker stands inside each Compute session.
+/// It stands where stack-agent's worker stands inside each Compute session.
 fn recording_worker(dir: &std::path::Path, dump: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join("recording-worker");
@@ -618,8 +620,18 @@ fn recording_worker(dir: &std::path::Path, dump: &std::path::Path) -> std::path:
     path
 }
 
+/// A durable-state database of its own for each launch, so concurrent tests never share one.
+fn state_db() -> std::path::PathBuf {
+    static DATABASES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::env::temp_dir().join(format!(
+        "compute-stack-agent-state-{}-{}.feltdb",
+        std::process::id(),
+        DATABASES.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ))
+}
+
 /// G8 (compute#95): the provider key reaches the model endpoint and nowhere else. It runs on the
-/// real integration path (the launcher, Rust Chip's service, FX, Compute sessions and the worker)
+/// real integration path (the launcher, stack-agent's service, FX, Compute sessions and the worker)
 /// and needs no PAX: the work's verdict is irrelevant here, only where the key went.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_provider_key_reaches_the_model_and_nothing_compute_stores_or_the_service_reports() {
@@ -641,10 +653,10 @@ async fn the_provider_key_reaches_the_model_and_nothing_compute_stores_or_the_se
     );
     let (done, reported, log) = tokio::task::spawn_blocking(move || {
         let mut launch = launcher_for(&endpoint, &tgt_token, &src, &url);
-        launch.env("COMPUTE_RUST_CHIP_WORKER", &recorder);
+        launch.env("COMPUTE_STACK_AGENT_WORKER", &recorder);
         let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
         launch.env(
-            "COMPUTE_RUST_CHIP_COMMAND_PATH",
+            "COMPUTE_STACK_AGENT_COMMAND_PATH",
             format!("{home}/.cargo/bin:/usr/local/bin:/usr/bin:/bin:{COMMAND_ENVIRONMENT_MARKER}"),
         );
         let (service, log) = start_logged(launch, &["--port", "0"]);
@@ -690,10 +702,11 @@ async fn the_provider_key_reaches_the_model_and_nothing_compute_stores_or_the_se
         "the worker's environment was not recorded, so it cannot show the key was not forwarded"
     );
     assert!(!log.is_empty(), "the service wrote no log at all");
-    // compute#91: the no-persistence limitation is said where an operator sees it.
+    // compute#91: works are persisted, in the database the launcher chose, and the service says
+    // where.
     assert!(
-        contains(&log, "works are not persisted"),
-        "the service did not warn that works are not persisted"
+        contains(&log, "every work is also recorded in FeltDB at"),
+        "the service did not say where works are persisted"
     );
 
     // Absence: what the service reports, what it logged, what the model was shown, and everything
@@ -781,12 +794,12 @@ async fn a_models_own_claim_of_success_does_not_complete_a_work_without_the_requ
     );
 }
 
-/// G3 (compute#90): Compute asks Rust Chip to cancel through Chip's own endpoint, and reports
+/// G3 (compute#90): Compute asks stack-agent to cancel through Chip's own endpoint, and reports
 /// what Chip established: a queued work never ran; a running work is asked to stop (advisory: it
 /// is not reported cancelled); a finished work is unchanged; asking again changes nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn compute_cancels_through_chips_endpoint_and_reports_what_stopped() {
-    use compute_rust_chip::cancel::{ChipCancellation, request};
+    use compute_stack_agent::cancel::{ChipCancellation, request};
     if !pax_installed() {
         eprintln!("SKIPPED: PAX is not installed");
         return;
@@ -884,4 +897,22 @@ async fn compute_cancels_through_chips_endpoint_and_reports_what_stopped() {
         );
     }
     drop(service);
+}
+
+/// The service has no authentication of its own, so a listener off loopback is refused before
+/// anything is configured or started.
+#[test]
+fn serve_refuses_a_listener_off_loopback() {
+    for host in ["0.0.0.0", "192.168.1.10", "::"] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_compute-stack-agent"))
+            .args(["serve", "--host", host])
+            .env_clear()
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{host}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("loopback only"),
+            "{host}"
+        );
+    }
 }

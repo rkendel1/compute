@@ -18,7 +18,7 @@ members = [
   "crates/compute-project",
   "crates/compute-worker-github",
   "crates/compute-agent",
-  "crates/compute-rust-chip",
+  "crates/compute-stack-agent",
   "crates/compute-cli",
 ]
 resolver = "2"

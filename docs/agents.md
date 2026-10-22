@@ -38,13 +38,12 @@ the agent can say what they mean.
                        │
              agent-neutral runtime            crates/compute-agent
                        │
-        ┌──────────────┼──────────────┐
-        │              │              │
-     Chip/Eve       Rust Chip       Claude (future)
-        │              │              │
-       FX           Rust FX       provider/API
-        │              │              │
-        └──────────────┼──────────────┘
+               ┌───────┴────────┐
+               │                │
+          stack-agent      Claude (future)
+         (Chip + FX)        provider/API
+               │                │
+               └───────┬────────┘
                        │
                   Compute session
                        │
@@ -79,50 +78,45 @@ Compute documents the workspace substrate as *not a security boundary* beyond th
 requested ([isolation.md](isolation.md)); this contract adds no sandbox and claims none. One fact
 to know: Compute's session execution contract gives every command in a session *its own* session's
 `COMPUTE_SESSION_ID`, `COMPUTE_SESSION_WORKSPACE` and `HOME`. That is the agent's own computer,
-never another's. An agent that must keep it from a model (Rust Chip does) does not forward it.
+never another's. An agent that must keep it from a model (stack-agent does) does not forward it.
 
 ## Agents
 
 | Agent | Runtime | Status | Launcher |
 | --- | --- | --- | --- |
-| Chip/Eve | npm (`@appport/chip`, npm FX) | existing, unchanged | `compute-configured-chip` |
-| Rust Chip | Rust (`chip-rs`, Rust FX) | first new agent; **`--agent chip`** | `compute-configured-rust-chip` |
+| stack-agent | Rust (`github:rkendel1/stack-agent`: Chip + FX in one workspace) | the configured agent; **`--agent stack-agent`** (default) | `compute-configured-stack-agent` |
 | Claude | external | future, not integrated | none |
 | Codex | external | future, not integrated | none |
 
-Chip/Eve and Rust Chip are different products and never route through each other. In prose:
-*Chip/Eve* is the existing npm runtime; *Rust Chip* is the Rust implementation.
+The npm Chip/Eve agent and Rust Chip from `chip-rs` that earlier releases shipped are retired: both
+are stack-agent now.
 
 ### Selecting an agent
 
 ```sh
-compute-configured-agent [--agent NAME] ARGS...      # NAME defaults to `chip`
+compute-configured-agent [--agent NAME] ARGS...      # NAME defaults to `stack-agent`
 ```
 
-`chip` is Rust Chip: the entry runs `compute-configured-rust-chip ARGS...`. An unknown name is an
-error; there is no fallback to another agent, and in particular never to Chip/Eve, which keeps its
-own launcher and its own `agent` section in the distribution profile (`stack.json`), both
-unchanged. The name `chip` in `--agent chip` is this entry's namespace; the profile's
-`agent.runtimes[].name == "chip"` still means the npm runtime. Adding a name requires a concrete
-launcher; none is invented ahead of one.
+`stack-agent` runs `compute-configured-stack-agent ARGS...`. Any other name, `chip` included, is an
+error; there is no fallback. Adding a name requires a concrete launcher; none is invented ahead of
+one.
 
-### Rust Chip
+### stack-agent
 
-Rust Chip stays a separate runtime and owns its agent loop, model interaction, FX, capability
-semantics and validation, observations, evidence, goal satisfaction, recovery and work lifecycle.
-Compute only launches it and serves the environment contract it publishes. `chip-core` and
-`chip-remote-env` do not depend on Compute (checked by `cargo tree`; `tests/dependencies.rs`).
-Details: [rust-chip.md](rust-chip.md).
+stack-agent owns its agent loop, model interaction (FX), capability semantics and validation,
+observations, evidence, goal satisfaction, work records and lifecycle. Compute only launches it and
+serves the environment contract it publishes. `chip-core` and `chip-remote-env` do not depend on
+Compute (checked by `cargo tree`; `tests/dependencies.rs`). Details: [stack-agent.md](stack-agent.md).
 
 ## Dependency direction
 
 ```text
 Compute ───────▶ Agent executable          (compute-agent: argv/env only)
-Compute ─ adapter ─▶ Rust Chip's published environment contract (compute-rust-chip)
+Compute ─ adapter ─▶ stack-agent's published environment contract (compute-stack-agent)
 ```
 
-never `Compute ──▶ Chip internals`. `compute-rust-chip` is the thin adapter implementing Rust
-Chip's generic `EnvironmentProvider` on top of `compute-agent`; it imports no capability semantics.
-Rust Chip's `serve`/`work` path has no Cargo dependency on any Compute crate. (`chip-cli` links
-`chip-compute`, an unrelated demo executor in `work_demo.rs` that shells out to the `compute` CLI;
-it is not used by `serve`.)
+never `Compute ──▶ Chip internals`. `compute-stack-agent` is the thin adapter implementing
+stack-agent's generic `EnvironmentProvider` on top of `compute-agent`; it imports no capability
+semantics. stack-agent's `serve`/`work` path has no Cargo dependency on any Compute crate. (Its
+`chip-compute` crate is an unrelated demo executor that shells out to the `compute` CLI; `serve` does
+not use it.)

@@ -15,7 +15,7 @@
 //!   AgentSession               ── owns the computer: one session, one project, one cleanup
 //! ```
 //!
-//! This crate knows no agent. It has no dependency on Rust Chip, Chip/Eve, or any provider SDK,
+//! This crate knows no agent. It has no dependency on stack-agent or any provider SDK,
 //! and no code in it can tell which agent it is hosting. What Compute returns ([`Outcome`]) is
 //! what happened in the environment: an exit code, captured output and the receipt's job id. It
 //! is never read as the agent's success, a capability's success, or a goal's satisfaction; only
@@ -31,7 +31,7 @@
 //! cancelled only when Compute recorded it cancelled, and one cancelled after it started is never
 //! reported as not having run (what it did before termination may have happened). A command whose
 //! caller stops waiting (its future is dropped) is cancelled the same way, never left running.
-//! Stopping the agent's own loop is the agent's business (for Rust Chip, its cancel endpoint).
+//! Stopping the agent's own loop is the agent's business (for stack-agent, its cancel endpoint).
 //!
 //! **Failure.** Acquisition fails closed: a session that was created but not made usable
 //! (not ready, project not loaded) is destroyed and no agent runs. A failed destroy is counted in
@@ -50,7 +50,7 @@ use compute_provider::{RemoteProvider, SessionCreateRequest, SessionEnvironmentS
 use sha2::{Digest, Sha256};
 
 /// The agent a distribution launches when none is named.
-pub const DEFAULT_AGENT: &str = "chip";
+pub const DEFAULT_AGENT: &str = "stack-agent";
 
 /// Where a loaded project lives inside a session, relative to its workspace.
 pub const PROJECT_DIRECTORY: &str = "project";

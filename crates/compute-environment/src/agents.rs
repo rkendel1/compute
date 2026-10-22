@@ -3,7 +3,7 @@
 //!
 //! Compute itself is agent-runtime agnostic: it executes workloads and knows
 //! nothing about agents. A configured distribution (`compute-configured`)
-//! ships one — Chip — and declares it in its distribution profile
+//! ships one — stack-agent — and declares it in its distribution profile
 //! (`compute.distribution-profile@1`, the `agent` section), the same profile
 //! that already declares managed services.
 //!
@@ -13,11 +13,11 @@
 //!
 //! ```text
 //! OpenDots ──discovers──▶ GET /info ──▶ agents[]
-//!                                      └─ chip @appport/chip 0.54.3 (default)
+//!                                      └─ stack-agent github:rkendel1/stack-agent (default)
 //! ```
 //!
 //! The distinction is deliberate and load-bearing: an *agent runtime* is the
-//! capability that runs an agent (here, Chip). The *agent* — a Dot, its
+//! capability that runs an agent (here, stack-agent). The *agent* — a Dot, its
 //! context, its approvals — belongs to the control plane above and is never
 //! stored here.
 
@@ -98,9 +98,10 @@ pub fn configured() -> AgentCapabilities {
 mod tests {
     use super::*;
 
-    const CHIP: &str = r#"{"default":"chip","runtimes":[
-        {"name":"chip","package":"@appport/chip","version":"0.54.3",
-         "executable":"node_modules/.bin/chip","default":true}]}"#;
+    const STACK_AGENT: &str = r#"{"default":"stack-agent","runtimes":[
+        {"name":"stack-agent","package":"github:rkendel1/stack-agent",
+         "version":"1cf91e63d2242f9aca4cbeb2d1d939b84a00be14",
+         "executable":"stack-agent/bin/compute-stack-agent","default":true}]}"#;
 
     /// A profile directory that lives as long as the test.
     fn profile(agent: &str) -> PathBuf {
@@ -137,11 +138,13 @@ mod tests {
 
     #[test]
     fn a_declared_default_runtime_is_resolvable() {
-        let capabilities = declared(&profile(CHIP));
-        assert_eq!(capabilities.default.as_deref(), Some("chip"));
-        let runtime = capabilities.default_runtime().expect("chip is default");
-        assert_eq!(runtime.package, "@appport/chip");
-        assert_eq!(runtime.version, "0.54.3");
+        let capabilities = declared(&profile(STACK_AGENT));
+        assert_eq!(capabilities.default.as_deref(), Some("stack-agent"));
+        let runtime = capabilities
+            .default_runtime()
+            .expect("stack-agent is default");
+        assert_eq!(runtime.package, "github:rkendel1/stack-agent");
+        assert_eq!(runtime.version, "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14");
         assert!(runtime.default);
     }
 
@@ -149,8 +152,9 @@ mod tests {
     fn a_default_naming_an_undeclared_runtime_is_not_advertised() {
         let capabilities = declared(&profile(
             r#"{"default":"absent","runtimes":[
-                {"name":"chip","package":"@appport/chip","version":"0.54.3",
-                 "executable":"node_modules/.bin/chip"}]}"#,
+                {"name":"stack-agent","package":"github:rkendel1/stack-agent",
+                 "version":"1cf91e63d2242f9aca4cbeb2d1d939b84a00be14",
+                 "executable":"stack-agent/bin/compute-stack-agent"}]}"#,
         ));
         assert_eq!(capabilities.default, None);
         assert_eq!(capabilities.default_runtime(), None);
@@ -159,14 +163,13 @@ mod tests {
     }
 
     #[test]
-    fn the_package_identity_is_the_contract_not_the_entry_file_name() {
-        // Chip's published bin target is bin/eve.js. That filename is Chip's
-        // internal history; what callers depend on is the public package
-        // identity, so that is what this view carries.
-        let serialized = serde_json::to_string(&declared(&profile(CHIP))).expect("serialize");
-        assert!(serialized.contains("@appport/chip"));
-        assert!(!serialized.contains("chip-framework"));
-        assert!(!serialized.contains("node_modules/eve"));
+    fn the_package_identity_is_the_contract() {
+        // What callers depend on is the agent's public identity and pin, so that is what this
+        // view carries.
+        let serialized =
+            serde_json::to_string(&declared(&profile(STACK_AGENT))).expect("serialize");
+        assert!(serialized.contains("github:rkendel1/stack-agent"));
+        assert!(!serialized.contains("@appport/chip"));
     }
 
     #[test]

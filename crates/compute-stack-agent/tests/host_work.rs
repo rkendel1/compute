@@ -10,7 +10,7 @@ use chip_core::{
     ObservationPredicate, WorkGoal, WorkId, WorkLimits, WorkOutcome, WorkSpec,
 };
 use chip_inference::{FxError, ModelProvider, ModelRequest, ModelResponse, Usage};
-use compute_rust_chip::work::HostWork;
+use compute_stack_agent::work::HostWork;
 
 /// A model that claims success at every turn and asks for nothing.
 struct Claimer(AtomicUsize);

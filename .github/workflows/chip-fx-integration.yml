@@ -1,8 +1,8 @@
 name: chip-fx-integration
 
-# Preparation for wiring Rust Chip and the authoritative FX into Compute (docs/chip-fx-integration.md).
-# The harness is its own cargo workspace (integration/chip-fx) pinned to immutable chip-rs and fx
-# revisions; it uses fixtures only (no provider credentials, no network model, no production effect).
+# Contract harness for Compute -> Chip -> FX (docs/chip-fx-integration.md), at the stack-agent commit the product pins.
+# The harness is its own cargo workspace (integration/chip-fx) pinned to the immutable stack-agent
+# revision; it uses fixtures only (no provider credentials, no network model, no production effect).
 # The product workspace's own checks for this boundary (pins, no direct host access) run in `test`.
 
 on:
@@ -10,14 +10,14 @@ on:
   pull_request:
     paths:
       - "integration/chip-fx/**"
-      - "crates/compute-rust-chip/**"
+      - "crates/compute-stack-agent/**"
       - "docs/chip-fx-integration.md"
       - ".github/workflows/chip-fx-integration.yml"
   push:
     branches: [main]
     paths:
       - "integration/chip-fx/**"
-      - "crates/compute-rust-chip/**"
+      - "crates/compute-stack-agent/**"
       - "docs/chip-fx-integration.md"
       - ".github/workflows/chip-fx-integration.yml"
 

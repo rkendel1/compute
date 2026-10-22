@@ -1,5 +1,5 @@
 //! Preparation for the Chip + FX integration (docs/chip-fx-integration.md): the dependency on Rust
-//! Chip is an immutable revision, and Compute's Rust Chip adapter reaches effects only through the
+//! Chip is an immutable revision, and Compute's stack-agent adapter reaches effects only through the
 //! supported capability boundary. Source checks, no network, no Compute target.
 
 const MANIFEST: &str = include_str!("../Cargo.toml");
@@ -16,9 +16,12 @@ fn code(source: &str) -> String {
 
 /// A branch name moves, and this one no longer exists upstream. A full commit does not move.
 #[test]
-fn rust_chip_is_pinned_to_a_full_commit_never_a_branch_or_tag() {
+fn stack_agent_is_pinned_to_a_full_commit_never_a_branch_or_tag() {
     let mut pinned = 0;
-    for line in MANIFEST.lines().filter(|l| l.contains("rkendel1/chip-rs")) {
+    for line in MANIFEST
+        .lines()
+        .filter(|l| l.contains("rkendel1/stack-agent"))
+    {
         pinned += 1;
         assert!(
             !line.contains("branch") && !line.contains("tag"),
@@ -38,10 +41,10 @@ fn rust_chip_is_pinned_to_a_full_commit_never_a_branch_or_tag() {
 }
 
 #[test]
-fn every_rust_chip_crate_is_pinned_to_the_same_commit() {
+fn every_stack_agent_crate_is_pinned_to_the_same_commit() {
     let revs: std::collections::BTreeSet<&str> = MANIFEST
         .lines()
-        .filter(|l| l.contains("rkendel1/chip-rs"))
+        .filter(|l| l.contains("rkendel1/stack-agent"))
         .filter_map(|l| l.split("rev = \"").nth(1)?.split('"').next())
         .collect();
     assert_eq!(revs.len(), 1, "Chip crates must move together: {revs:?}");
@@ -80,11 +83,13 @@ fn the_adapter_reaches_effects_only_through_the_supported_boundary() {
             "main.rs bypasses the capability boundary: {forbidden}"
         );
     }
-    // The launcher's only filesystem access is reading the operator's token file.
+    // The launcher's only filesystem access: reading the operator's token file, and creating the
+    // directory that holds stack-agent's durable work database.
     assert_eq!(
         main.matches("std::fs::").count(),
-        1,
+        2,
         "unexpected filesystem access in main.rs"
     );
-    assert!(main.contains("read_to_string(&file)"));
+    assert!(main.contains("std::fs::read_to_string(&file)"));
+    assert!(main.contains("std::fs::create_dir_all(parent)"));
 }

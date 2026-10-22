@@ -1,7 +1,7 @@
-//! The Compute entry for running a Rust Chip work in process: a work cannot start without a
+//! The Compute entry for running a stack-agent work in process: a work cannot start without a
 //! host-owned definition of done.
 //!
-//! Rust Chip's bare work loop (`Agent::run_work`) accepts a model's claim of completion when the
+//! stack-agent's bare work loop (`Agent::run_work`) accepts a model's claim of completion when the
 //! work carries no requirement, even after the only effect failed. The shipped service paths avoid
 //! that with a typed completion contract per kind (`change`, `verify`, `inspect`: PAX observations
 //! and grounded answers, chosen by the host). Any other Compute path that submits work goes through

@@ -2796,18 +2796,18 @@ pub struct AgentHealth {
 /// probed or resolved at run time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRuntime {
-    /// Short, stable identifier an execution refers to (`chip`).
+    /// Short, stable identifier an execution refers to (`stack-agent`).
     pub name: String,
-    /// The public npm identity. This is what must be pinned: the package's
-    /// historical internal entry file name is an implementation detail and is
-    /// deliberately not part of this contract.
+    /// The public identity of what is pinned (`github:owner/repo` for a source
+    /// build, `@scope/name` for an npm package). An entry file name is an
+    /// implementation detail and is deliberately not part of this contract.
     pub package: String,
     pub version: String,
     /// Executable path relative to the installed distribution root.
     pub executable: String,
-    /// The runtime that executes it, relative to the distribution root. Chip
-    /// requires Node >= 24, so this is the bundled Node and never the host's:
-    /// a configured distribution ships the runtime its pinned packages declare.
+    /// The runtime that executes it, relative to the distribution root, when it
+    /// needs one (a script); a native executable names none. A configured
+    /// distribution ships the runtime its pinned packages declare, never the host's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
     /// Whether this is the distribution's default agent runtime.
@@ -2815,9 +2815,9 @@ pub struct AgentRuntime {
     pub default: bool,
     #[serde(default)]
     pub capabilities: Vec<String>,
-    /// `execution`: the runtime is invoked inside a Compute execution and does
-    /// not outlive it. Compute owns the execution lifecycle; the runtime owns
-    /// only the agent loop within it.
+    /// `execution`: invoked inside a Compute execution and does not outlive it.
+    /// `service`: a long-running process whose capabilities each run in a Compute
+    /// session (`environment: compute.session`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2849,45 +2849,6 @@ impl AgentCapabilities {
     pub fn is_empty(&self) -> bool {
         self.runtimes.is_empty()
     }
-}
-
-/// A request to execute an agent through a Compute agent capability.
-///
-/// The request is runtime-neutral: it does not name Chip or any specific agent
-/// implementation. The runtime/provider resolves the capability through its
-/// configured agent runtimes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentExecutionRequest {
-    /// The prompt or input for the agent.
-    pub prompt: String,
-    /// Optional agent runtime selector. If not specified, the default runtime
-    /// is used if available. The selector identifies a runtime by name
-    /// (e.g., "chip") without requiring knowledge of its implementation details.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    /// Optional execution context or metadata, as structured data.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context: Option<serde_json::Value>,
-}
-
-/// The result of an agent execution.
-///
-/// Agent executions produce normal Compute execution results and evidence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentExecutionResult {
-    /// The agent's output or response.
-    pub output: String,
-    /// Whether the agent execution succeeded.
-    pub success: bool,
-    /// Optional error message if execution failed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// The actual runtime that executed the agent (e.g., "chip").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<String>,
-    /// Execution metadata and lifecycle information.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Error)]

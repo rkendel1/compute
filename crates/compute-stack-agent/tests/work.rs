@@ -1,4 +1,4 @@
-//! Rust Chip's work loop over real Compute sessions: equivalence with the local environment,
+//! stack-agent's work loop over real Compute sessions: equivalence with the local environment,
 //! Git isolation, and failure isolation. Real Compute target, real Git, real PAX, real Cargo; the
 //! model is a scripted `ModelProvider` (there is no live model on the build machine).
 
@@ -17,7 +17,7 @@ use chip_core::{
 };
 use chip_inference::{FxError, ModelProvider, ModelRequest, ModelResponse, Usage};
 use compute_core::SessionStatus;
-use compute_rust_chip::ComputeSessionEnvironments;
+use compute_stack_agent::ComputeSessionEnvironments;
 use serde_json::json;
 use support::*;
 
@@ -150,7 +150,7 @@ fn shape(w: &SoftwareWork) -> Vec<String> {
 
 fn local_copy(source: &Path, tag: &str) -> LocalEnvironment {
     let root = std::env::temp_dir().join(format!(
-        "compute-rust-chip-local-{}-{tag}",
+        "compute-stack-agent-local-{}-{tag}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&root);
