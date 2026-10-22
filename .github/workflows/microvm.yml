@@ -49,7 +49,7 @@ jobs:
           ./firecracker --version
           # Firecracker's own CI kernels (with virtio-vsock), newest 6.1 build.
           ci="firecracker-ci/${FIRECRACKER_VERSION%.*}/x86_64"
-          key=$(curl -fsSL "https://spec.ccfc.min.s3.amazonaws.com/?prefix=${ci}/vmlinux-6.1&list-type=2" \
+          key=$(curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/?prefix=${ci}/vmlinux-6.1&list-type=2" \
             | grep -oP "(?<=<Key>)${ci}/vmlinux-6\.1\.[0-9]{1,3}(?=</Key>)" | sort -V | tail -1)
           test -n "$key"
           curl -fsSL -o vmlinux "https://s3.amazonaws.com/spec.ccfc.min/${key}"
@@ -73,4 +73,4 @@ jobs:
         run: cargo test --locked -p compute-guest -p compute-egress
       - name: VM logs
         if: failure()
-        run: find /tmp -name firecracker.log -exec sh -c 'echo "== $1"; tail -n 50 "$1"' _ {} \;
+        run: find /tmp -name firecracker.log -exec sh -c 'echo "== $1"; tail -n 50 "$1"' _ {} \; 2>/dev/null || true
