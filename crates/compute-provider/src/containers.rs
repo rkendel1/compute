@@ -385,13 +385,23 @@ impl SessionProvider for ContainerSessionProvider {
     async fn destroy(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         let container = Self::container(provider_session_id)?;
         if self.state(container).await?.is_some() {
-            self.checked(&["rm".into(), "--force".into(), container.into()])
-                .await?;
-            if self.state(container).await?.is_some() {
-                return Err(ProviderError::new(
-                    ProviderErrorKind::TerminationFailed,
-                    "the container still exists after it was removed",
-                ));
+            let removed = self
+                .checked(&["rm".into(), "--force".into(), container.into()])
+                .await;
+            // A removal another caller already began (a destroy racing the
+            // session sweep) ends in the same place: wait for it, and
+            // report a failure only if the container is still there.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            while self.state(container).await?.is_some() {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(removed.err().unwrap_or_else(|| {
+                        ProviderError::new(
+                            ProviderErrorKind::TerminationFailed,
+                            "the container still exists after it was removed",
+                        )
+                    }));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         }
         remove_workspace(&self.workspace(container))
