@@ -128,7 +128,10 @@ test('an application is a computer: deploy, status, logs, and rollback in the UI
     rmSync(root, { recursive: true, force: true });
   });
 
-  assert.match(run('up'), /Compute is running/);
+  const said = run('up');
+  assert.match(said, /Compute is running/);
+  // `up` prints the address to open: the local token rides in its fragment.
+  const opened = said.match(/Compute is running: (\S+)/)[1];
 
   // Deploy v1 from source, as a developer does.
   const source = join(root, 'hello');
@@ -154,6 +157,7 @@ test('an application is a computer: deploy, status, logs, and rollback in the UI
 
   // Status: the application's environment is a running computer, holding
   // its process and serving its endpoint.
+  await page.goto(opened);
   await page.goto(`${endpoint}/#/work/application-hello`);
   await page.waitForSelector('.title .state:has-text("Running")', { timeout: 60_000 });
   await page.waitForSelector('[data-process="hello"] .state:has-text("Running")', { timeout: 60_000 });

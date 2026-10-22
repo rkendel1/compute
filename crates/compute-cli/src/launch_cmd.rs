@@ -316,7 +316,12 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
              --headless to use the running controller."
         )));
     }
-    println!("Compute is running: {url}/");
+    // The address to open carries the local token in its fragment, which a
+    // browser never sends to a server: the UI keeps it for the tab.
+    match crate::environment_cmd::daemon_token("COMPUTE_DAEMON_TOKEN") {
+        Some(token) => println!("Compute is running: {url}/#token={token}"),
+        None => println!("Compute is running: {url}/"),
+    }
     println!(
         "  computers run on this machine's computer host ({})",
         target_listen
@@ -396,8 +401,6 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
         }
     }
     if !no_browser {
-        // The UI takes the local token from the fragment, which never
-        // reaches a server, and keeps it for the tab.
         let address = match crate::environment_cmd::daemon_token("COMPUTE_DAEMON_TOKEN") {
             Some(token) => format!("{url}/#token={token}"),
             None => format!("{url}/"),

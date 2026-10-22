@@ -303,14 +303,17 @@ test('a computer environment speaks the shared status language, running and unre
     spawnSync(compute, ['down'], { env });
     rmSync(root, { recursive: true, force: true });
   });
-  assert.match(run('up'), /Compute is running/);
+  const said = run('up');
+  assert.match(said, /Compute is running/);
+  // `up` prints the address to open: the local token rides in its fragment.
+  const opened = said.match(/Compute is running: (\S+)/)[1];
 
   const browser = await chromium.launch({ executablePath: chromiumPath });
   context.after(() => browser.close());
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  await page.goto(`${endpoint}/`);
+  await page.goto(opened);
   await page.waitForSelector('[data-action="computer"]');
   await page.click('[data-action="computer"]');
   await page.fill('#environment-name', 'desk');
@@ -341,6 +344,7 @@ test('a computer environment speaks the shared status language, running and unre
   }
   assert.deepEqual(await axe(page), [], 'axe (light, computer running)');
   const dark = await browser.newPage({ colorScheme: 'dark' });
+  await dark.goto(opened);
   await dark.goto(`${endpoint}/#/environments/desk`);
   await dark.waitForSelector(`${title}:has-text("Running")`, { timeout: 60_000 });
   assert.deepEqual(await axe(dark), [], 'axe (dark, computer running)');

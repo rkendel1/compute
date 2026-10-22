@@ -12,6 +12,8 @@ const { chromium } = await import(config.module);
 mkdirSync(config.shots, { recursive: true });
 const browser = await chromium.launch({ executablePath: config.chromium });
 const page = await browser.newPage({ viewport: { width: 1360, height: 900 } });
+// The address `compute up` printed: the local token rides in its fragment.
+await page.goto(config.open);
 const errors = [];
 page.on('pageerror', (error) => errors.push(error.message));
 page.setDefaultTimeout(120000);
@@ -25,7 +27,11 @@ async function shot(name) {
 }
 
 const api = (method, path, body) => page.evaluate(async ({ method, path, body }) => {
-  const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+  // The same credential the UI holds for this tab (from `compute up`'s address).
+  const headers = { 'Content-Type': 'application/json' };
+  const token = sessionStorage.getItem('compute.token');
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const text = await response.text();
   return { status: response.status, body: text ? JSON.parse(text) : null };
 }, { method, path, body });

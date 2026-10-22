@@ -118,8 +118,9 @@ test('the UI shows unreachable, lost, and recovered computers as they are', { ti
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
 
-  // Home, then create a computer from it.
-  await page.goto(`${endpoint}/`);
+  // Home, then create a computer from it. `up` printed the address to
+  // open: the local token rides in its fragment.
+  await page.goto(said.match(/Compute is running: (\S+)/)[1]);
   await page.waitForSelector('[data-action="computer"]');
   // The control plane says its state is local development, not production.
   await page.waitForSelector('#daemon [data-durability="local-development"]');
