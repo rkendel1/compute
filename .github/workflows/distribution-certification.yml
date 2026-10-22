@@ -154,27 +154,27 @@ jobs:
         shell: bash
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "compute-cli") | .version')
-          cp -R compatibility/published-stack configured-stack
+          cp -R compatibility/published-stack compatibility/configured-stack
           jq --arg version "$version" \
             '.compute=$version | .platform="macos-aarch64" | .distribution.identity=("compute-configured-"+$version+"-macos-aarch64") | .distribution.certification_status="preview" | .distribution.base_asset=("compute-"+$version+"-macos-aarch64.tar.gz") | .distribution.configured_asset=("compute-configured-"+$version+"-macos-aarch64.tar.gz") | .distribution.release=("https://github.com/rkendel1/compute/releases/tag/v"+$version)' \
-            configured-stack/stack.json > "$RUNNER_TEMP/stack.json"
-          mv "$RUNNER_TEMP/stack.json" configured-stack/stack.json
-          npm ci --ignore-scripts --prefix configured-stack
+            compatibility/configured-stack/stack.json > "$RUNNER_TEMP/stack.json"
+          mv "$RUNNER_TEMP/stack.json" compatibility/configured-stack/stack.json
+          npm ci --ignore-scripts --prefix compatibility/configured-stack
           SOURCE_DATE_EPOCH=0 COMPUTE_COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/configured-evidence.json" \
             COMPUTE_BIN="$PWD/target/release/compute" \
-            npm run verify --prefix configured-stack
+            npm run verify --prefix compatibility/configured-stack
           test "$(jq -r .status "$RUNNER_TEMP/configured-evidence.json")" = preview
           test "$(jq -r .platform "$RUNNER_TEMP/configured-evidence.json")" = macos-aarch64
           root=compute-configured
           mkdir -p "$root/stacks/configured"
-          cp configured-stack/package.json "$root/package.json"
-          cp configured-stack/package-lock.json "$root/package-lock.json"
-          cp configured-stack/stack.json "$root/stack.json"
-          cp configured-stack/verify.mjs "$root/verify.mjs"
-          cp configured-stack/stack.toml "$root/stacks/configured/stack.toml"
+          cp compatibility/configured-stack/package.json "$root/package.json"
+          cp compatibility/configured-stack/package-lock.json "$root/package-lock.json"
+          cp compatibility/configured-stack/stack.json "$root/stack.json"
+          cp compatibility/configured-stack/verify.mjs "$root/verify.mjs"
+          cp compatibility/configured-stack/stack.toml "$root/stacks/configured/stack.toml"
           cp "$RUNNER_TEMP/configured-evidence.json" "$root/evidence.json"
           cp -a compute-distribution/recipes "$root/recipes"
-          cp -a configured-stack/node_modules "$root/node_modules"
+          cp -a compatibility/configured-stack/node_modules "$root/node_modules"
           mkdir -p "$root/providers"
           cp -R examples/cloudflare-workers "$root/providers/cloudflare"
           mkdir -p "$root/stack-agent/bin"
