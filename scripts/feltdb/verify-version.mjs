@@ -1,6 +1,6 @@
 // Verify that Compute resolves exactly the certified @feltdb/core.
 //
-// The certified version is declared once, as `CERTIFIED_FELTDB_VERSION` in
+// The model compiler version is declared once, as `MODEL_COMPILER_VERSION` in
 // crates/compute-state-feltdb/src/lib.rs. This script checks what npm actually
 // resolved (node_modules and the lockfile), not only what package.json asks
 // for, and fails on any other @feltdb/core anywhere in the workspace's
@@ -13,10 +13,10 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const source = readFileSync(join(root, 'crates/compute-state-feltdb/src/lib.rs'), 'utf8');
-const certified = source.match(/pub const CERTIFIED_FELTDB_VERSION: &str = "([^"]+)";/)?.[1];
+const certified = source.match(/pub const MODEL_COMPILER_VERSION: &str = "([^"]+)";/)?.[1];
 const failures = [];
 const resolved = {};
-if (!certified) failures.push('CERTIFIED_FELTDB_VERSION is not declared in compute-state-feltdb');
+if (!certified) failures.push('MODEL_COMPILER_VERSION is not declared in compute-state-feltdb');
 
 // Every lockfile in packages/: whatever @feltdb/core it resolves must be the certified one.
 for (const name of readdirSync(join(root, 'packages'))) {

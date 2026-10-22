@@ -9,13 +9,16 @@ description = "Compute control state in Managed FeltDB"
 [dependencies]
 async-trait.workspace = true
 compute-state = { path = "../compute-state" }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# FeltDB's native client; exact, as CERTIFIED_FELTDB_VERSION says (a test
+# checks the lockfile). Its wire types are FeltDB's own.
+feltdb-client = "=0.2.0"
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 compute-state-memory = { path = "../compute-state-memory" }
 chrono.workspace = true
 tokio.workspace = true

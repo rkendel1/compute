@@ -15,7 +15,7 @@ reads filtered in Compute are prohibited on production controller paths.**
         │                       │
  ephemeral working state   durable authority
         │                       │
-     controller             FeltDB 0.11.9
+     controller          FeltDB 0.2.0 (crates)
         │                       │
         └───────────┬───────────┘
                     │
@@ -47,27 +47,43 @@ it is local development.
 This page is the contract between them. The most recent checked-in full
 certification evidence is the prior
 [FeltDB 0.11.8 report](feltdb-0.11.8-consumer-certification.md); CI runs the
-0.11.9 consumer suite against the server source shipped in that release.
+consumer suite against `feltdb-server` from crates.io at the certified
+version.
 
 ## Version
 
-Compute is certified against `@feltdb/core` **0.11.9**. The version is
-declared once, as `CERTIFIED_FELTDB_VERSION` in
+Compute is certified against the FeltDB crates **0.2.0**
+(`feltdb-client` and `feltdb-server` on crates.io). The version is declared
+once, as `CERTIFIED_FELTDB_VERSION` in
 `crates/compute-state-feltdb/src/lib.rs`, and:
 
-- `packages/compute-state-model` pins it exactly, and compiles
-  `compute.flow` with it;
-- `scripts/feltdb/verify-version.mjs` fails unless every lockfile and the
-  installed `node_modules` resolve exactly that version;
-- CI builds the `feltdb-server` the tests run from the source shipped inside
-  the resolved package, so the compiler, the tests, and the authority under
-  test are one release (`.github/workflows/feltdb-consumer.yml`);
+- `compute-state-feltdb` depends on `feltdb-client = "=0.2.0"`, and a test
+  fails unless `Cargo.lock` resolves exactly that version;
+- CI installs `feltdb-server` from crates.io at that version and runs every
+  FeltDB test against it (`.github/workflows/feltdb-consumer.yml`). State
+  written by the server Compute was certified against before the crates
+  (the one bundled in `@feltdb/core` 0.11.9) must open on it;
 - `/info` and `compute doctor` report it, with the server's own version.
+
+The model compiler is separate: `packages/compute-state-model` compiles
+`compute.flow` to the checked-in `compute.manifest.json` with npm
+`@feltdb/core` **0.11.9** (`MODEL_COMPILER_VERSION`), and
+`scripts/feltdb/verify-version.mjs` fails unless npm resolves exactly that.
+It is a development-time tool; nothing at run time uses npm.
+
+**Private CA.** `[state.feltdb] ca_file` is refused at start with its
+reason: feltdb-client 0.2.0 trusts only public roots. Support returns with
+a feltdb-client release that can add a root
+(`ClientBuilder::add_root_certificate_pem`).
 
 ## How Compute talks to FeltDB
 
 `compute-state-feltdb` is a Rust client of FeltDB's application-scoped
-Service API. It uses only public FeltDB endpoints, and adds none:
+Service API, built on the native `feltdb-client` crate: discovery and
+queries go through its `Application` handle, and queries, transactions and
+their results are FeltDB's own wire types (`feltdb_client::wire`), so
+Compute and the server serialize the same structs. It uses only public
+FeltDB endpoints, and adds none:
 
 | Endpoint | Use |
 | --- | --- |

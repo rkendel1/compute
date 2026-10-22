@@ -336,7 +336,7 @@ async fn online_backup(config: &FeltDbConfig, token: &str, output: &str) -> Resu
     .map_err(|error| error.to_string())?;
     backup
         .send(
-            reqwest::Method::POST,
+            feltdb_client::Method::POST,
             "/admin/backups",
             Some(&json!({ "output": output })),
         )
