@@ -1,0 +1,117 @@
+{
+ "consumer": "compute-environment service_ui::interpret",
+ "corpus": {
+  "name": "appport-ui-1",
+  "version": "1.1.0",
+  "source": "rkendel1/appport conformance/contracts/appport-ui-1 (branch closeout/protocol-contract-fixes, bd70edb)",
+  "casesSha256": "854846f5580bdfca0a5d2ca2d3cc1740c688ca355f8f6cf50f35e9f749d1089a",
+  "expectedSha256": "91d693180b684714f4f64844b0db655b530094b6574d0de4ce5f490a6b3fd4c6"
+ },
+ "comparison": "verdict",
+ "notApplicable": [
+  "ui1.filter-no-capabilities",
+  "ui1.filter-api-keys-only",
+  "ui1.filter-partial-api-keys-hides-the-surface",
+  "ui1.filter-everything",
+  "ui1.filter-unknown-extra-names",
+  "ui1.filter-invalid-document-is-rejected-before-filtering"
+ ],
+ "narrowings": [
+  {
+   "id": "ui1.all-composition-requirements",
+   "consumerVerdict": "reject",
+   "kind": "host-policy",
+   "rationale": "Compute supplies no identity/tenant/application/environment context, so a conforming host skips the contribution (protocol composeUi does the same)."
+  },
+  {
+   "id": "ui1.duplicate-composition-requirement-is-allowed",
+   "consumerVerdict": "reject",
+   "kind": "host-policy",
+   "rationale": "Same: requires tenant."
+  },
+  {
+   "id": "ui1.65-surfaces-over-compute-max-links",
+   "consumerVerdict": "reject",
+   "kind": "host-policy",
+   "rationale": "Compute caps links at 64 (host resource policy)."
+  },
+  {
+   "id": "ui1.1000-surfaces",
+   "consumerVerdict": "reject",
+   "kind": "host-policy",
+   "rationale": "Compute caps links at 64."
+  },
+  {
+   "id": "ui1.route-dot-segments",
+   "consumerVerdict": "reject",
+   "kind": "host-policy",
+   "rationale": "Host link safety: Compute builds links on the service origin and refuses dot segments the protocol grammar allows."
+  },
+  {
+   "id": "ui1.route-space",
+   "consumerVerdict": "reject",
+   "kind": "host-policy",
+   "rationale": "Host link safety: whitespace in a route."
+  },
+  {
+   "id": "ui1.route-backslash",
+   "consumerVerdict": "reject",
+   "kind": "host-policy",
+   "rationale": "Host link safety: browsers treat a backslash as a path separator."
+  },
+  {
+   "id": "ui1.route-query",
+   "consumerVerdict": "reject",
+   "kind": "host-policy",
+   "rationale": "Host link safety: a product cannot steer query parameters of a host-built link."
+  },
+  {
+   "id": "ui1.route-fragment",
+   "consumerVerdict": "reject",
+   "kind": "host-policy",
+   "rationale": "Host link safety: fragments are refused."
+  },
+  {
+   "id": "ui1.route-nul",
+   "consumerVerdict": "reject",
+   "kind": "host-policy",
+   "rationale": "Host link safety: control characters are refused."
+  },
+  {
+   "id": "ui1.order-1e21-is-an-integer",
+   "consumerVerdict": "reject",
+   "kind": "over-rejection",
+   "rationale": "Navigation order is kept as an i64 for sorting; 1e21 is integral in ECMAScript but outside i64. JSON.stringify never writes an i64-range integer this way."
+  },
+  {
+   "id": "ui1.raw-order-20-0-non-canonical-number",
+   "consumerVerdict": "reject",
+   "kind": "over-rejection",
+   "rationale": "serde_json reads 20.0 as a float and order is an i64. JSON.stringify writes integral numbers without a fraction, so AppPort producers never send this."
+  },
+  {
+   "id": "ui1.raw-order-2e1",
+   "consumerVerdict": "reject",
+   "kind": "over-rejection",
+   "rationale": "Same: exponent notation is read as a float; JSON.stringify writes 20."
+  },
+  {
+   "id": "ui1.raw-order-0",
+   "consumerVerdict": "reject",
+   "kind": "over-rejection",
+   "rationale": "Same: -0 is read as a float; JSON.stringify writes 0."
+  },
+  {
+   "id": "ui1.raw-numbers-inside-entities",
+   "consumerVerdict": "reject",
+   "kind": "over-rejection",
+   "rationale": "serde_json refuses numbers beyond f64 range (1e400), which JSON.stringify cannot produce (it writes null for Infinity)."
+  },
+  {
+   "id": "ui1.lone-surrogate-in-title",
+   "consumerVerdict": "reject",
+   "kind": "representation",
+   "rationale": "A UTF-8 JSON parser cannot hold a lone UTF-16 surrogate (representation limit)."
+  }
+ ]
+}

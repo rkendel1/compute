@@ -276,9 +276,12 @@ fn invalid<T>(reason: impl Into<String>) -> Result<T, Rejection> {
     Err(Rejection::Invalid(reason.into()))
 }
 
+/// `MAX_TEXT` is the protocol's limit, counted as `validateUiContribution`
+/// counts it: in UTF-16 code units (`String.prototype.length`), so a string
+/// of astral characters reaches it at half as many characters.
 fn text<'a>(value: &'a Value, field: &str) -> Result<&'a str, Rejection> {
     match value.as_str() {
-        Some(text) if !text.is_empty() && text.chars().count() <= MAX_TEXT => Ok(text),
+        Some(text) if !text.is_empty() && text.encode_utf16().count() <= MAX_TEXT => Ok(text),
         _ => invalid(format!("`{field}` must be a non-empty string")),
     }
 }
@@ -656,5 +659,95 @@ mod tests {
         }
         assert!(parse_base("http://127.0.0.1:4100").is_ok());
         assert!(parse_base("https://svc.example/base").is_ok());
+    }
+
+    /// AppPort's `appport-ui-1` conformance corpus (vendored, checksum-pinned)
+    /// run through this consumer at verdict level. Compute may only differ
+    /// where `narrowings.json` says so, with a reason, and it must never accept
+    /// what the protocol rejects.
+    #[test]
+    fn the_appport_ui_conformance_corpus_holds_with_only_declared_narrowings() {
+        use sha2::{Digest, Sha256};
+        use std::collections::BTreeMap;
+        const CASES: &str =
+            include_str!("../tests/fixtures/appport-conformance/appport-ui-1/cases.json");
+        const EXPECTED: &str =
+            include_str!("../tests/fixtures/appport-conformance/appport-ui-1/expected.json");
+        const PIN: &str =
+            include_str!("../tests/fixtures/appport-conformance/appport-ui-1/narrowings.json");
+        let hex = |text: &str| {
+            Sha256::digest(text.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let pin: Value = serde_json::from_str(PIN).unwrap();
+        assert_eq!(
+            pin["corpus"]["casesSha256"],
+            hex(CASES),
+            "re-pin deliberately"
+        );
+        assert_eq!(
+            pin["corpus"]["expectedSha256"],
+            hex(EXPECTED),
+            "re-pin deliberately"
+        );
+        let cases: Value = serde_json::from_str(CASES).unwrap();
+        let expected: Value = serde_json::from_str(EXPECTED).unwrap();
+        let not_applicable: BTreeSet<&str> = pin["notApplicable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let narrowings: BTreeMap<&str, &str> = pin["narrowings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| {
+                (
+                    n["id"].as_str().unwrap(),
+                    n["consumerVerdict"].as_str().unwrap(),
+                )
+            })
+            .collect();
+
+        let mut failures = vec![];
+        let mut seen = BTreeSet::new();
+        for case in cases["cases"].as_array().unwrap() {
+            let id = case["id"].as_str().unwrap();
+            seen.insert(id);
+            if not_applicable.contains(id) {
+                continue;
+            }
+            // What `discover` does with a body: parse it, then interpret it.
+            let verdict =
+                match serde_json::from_str::<Value>(case["input"]["json"].as_str().unwrap()) {
+                    Ok(value) if interpret("s", &base(), &value).is_ok() => "accept",
+                    _ => "reject",
+                };
+            let reference = expected["results"][id]["verdict"].as_str().unwrap();
+            match narrowings.get(id) {
+                Some(_) if verdict == reference => {
+                    failures.push(format!("{id}: declared narrowing no longer diverges"))
+                }
+                Some(declared) if verdict != *declared => {
+                    failures.push(format!("{id}: declared {declared}, got {verdict}"))
+                }
+                Some(_) if reference == "reject" => failures.push(format!(
+                    "{id}: a narrowing may not accept what the reference rejects"
+                )),
+                None if verdict != reference => {
+                    failures.push(format!("{id}: reference {reference}, Compute {verdict}"))
+                }
+                _ => {}
+            }
+        }
+        for id in narrowings.keys().chain(not_applicable.iter()) {
+            if !seen.contains(id) {
+                failures.push(format!("{id}: not in the corpus"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
