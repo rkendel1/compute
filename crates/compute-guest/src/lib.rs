@@ -309,7 +309,7 @@ struct Command {
 /// A pseudo-terminal of `size`: (master, slave).
 fn open_pty(size: TerminalSize) -> io::Result<(OwnedFd, OwnedFd)> {
     let (mut master, mut slave) = (0, 0);
-    let window = libc::winsize {
+    let mut window = libc::winsize {
         ws_row: size.rows,
         ws_col: size.cols,
         ws_xpixel: 0,
@@ -323,7 +323,7 @@ fn open_pty(size: TerminalSize) -> io::Result<(OwnedFd, OwnedFd)> {
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &window,
+            &mut window,
         )
     };
     if opened != 0 {
@@ -798,6 +798,40 @@ pub async fn connect_firecracker(
     Ok(stream)
 }
 
+/// `SOCK_CLOEXEC` where the kernel has it; elsewhere `set_cloexec` does the
+/// same after the fact. (The guest only runs on Linux, but the crate also
+/// builds on hosts that don't have these.)
+#[cfg(target_os = "linux")]
+const SOCK_CLOEXEC: libc::c_int = libc::SOCK_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const SOCK_CLOEXEC: libc::c_int = 0;
+
+#[cfg(target_os = "linux")]
+fn set_cloexec(_fd: libc::c_int) {}
+
+#[cfg(not(target_os = "linux"))]
+fn set_cloexec(fd: libc::c_int) {
+    // SAFETY: fcntl(2) on a descriptor the caller owns.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+}
+
+/// accept(2) with close-on-exec set on the new descriptor.
+fn accept_cloexec(listener: libc::c_int) -> libc::c_int {
+    // SAFETY: accept without an address; the result is checked by the caller.
+    #[cfg(target_os = "linux")]
+    return unsafe {
+        libc::accept4(listener, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_CLOEXEC)
+    };
+    #[cfg(not(target_os = "linux"))]
+    {
+        let fd = unsafe { libc::accept(listener, std::ptr::null_mut(), std::ptr::null_mut()) };
+        if fd >= 0 {
+            set_cloexec(fd);
+        }
+        fd
+    }
+}
+
 fn vsock_address(cid: u32, port: u32) -> libc::sockaddr_vm {
     // SAFETY: an all-zero sockaddr_vm is a valid starting value.
     let mut address: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
@@ -809,10 +843,11 @@ fn vsock_address(cid: u32, port: u32) -> libc::sockaddr_vm {
 
 fn vsock_socket() -> io::Result<OwnedFd> {
     // SAFETY: plain socket(2); the result is checked.
-    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
+    set_cloexec(fd);
     // SAFETY: fd is a new descriptor this function owns.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
@@ -850,15 +885,7 @@ where
     let runtime = tokio::runtime::Handle::current();
     std::thread::spawn(move || {
         loop {
-            // SAFETY: accept4(2) without an address; the result is checked.
-            let fd = unsafe {
-                libc::accept4(
-                    socket.as_raw_fd(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    libc::SOCK_CLOEXEC,
-                )
-            };
+            let fd = accept_cloexec(socket.as_raw_fd());
             if fd < 0 {
                 continue;
             }
@@ -915,6 +942,7 @@ pub fn init_guest() {
         let (source, target, kind, options) = (c(source), c(target), c(kind), c(options));
         // SAFETY: mount(2) with valid C strings; failure is tolerated (the
         // filesystem may already be mounted).
+        #[cfg(target_os = "linux")]
         unsafe {
             libc::mount(
                 source.as_ptr(),
@@ -924,6 +952,8 @@ pub fn init_guest() {
                 options.as_ptr().cast(),
             );
         }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (source, target, kind, options);
     };
     mount("proc", "/proc", "proc", "");
     mount("sysfs", "/sys", "sysfs", "");
@@ -940,10 +970,11 @@ pub fn init_guest() {
 fn loopback_up() {
     // SAFETY: an ioctl on a datagram socket with a zeroed, named ifreq.
     unsafe {
-        let socket = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+        let socket = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | SOCK_CLOEXEC, 0);
         if socket < 0 {
             return;
         }
+        set_cloexec(socket);
         let mut request: libc::ifreq = std::mem::zeroed();
         for (at, byte) in b"lo".iter().enumerate() {
             request.ifr_name[at] = *byte as libc::c_char;
