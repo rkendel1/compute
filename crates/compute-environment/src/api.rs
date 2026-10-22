@@ -150,6 +150,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/environments/{environment}/config/discover"),
     ("POST", "/environments/{environment}/lifecycle"),
     ("POST", "/environments/{environment}/propose"),
+    ("POST", "/environments/{environment}/sources"),
     (
         "POST",
         "/environments/{environment}/processes/{process}/restart",
@@ -1200,6 +1201,11 @@ async fn route(
         )?),
         ("POST", ["environments", id, "lifecycle"]) => ok(to_value(
             Box::pin(daemon.set_lifecycle(id, &principal.operator_id, parse(body)?)).await?,
+        )?),
+        // A provider-neutral Git source (`@appport/github`'s immutable result)
+        // loaded into the computer as a repository and its project.
+        ("POST", ["environments", id, "sources"]) => ok(to_value(
+            Box::pin(daemon.load_source(id, &principal.operator_id, parse(body)?)).await?,
         )?),
         ("POST", ["environments", id, "propose"]) => ok(to_value(
             Box::pin(daemon.propose_project(id, &principal.operator_id, parse(body)?)).await?,

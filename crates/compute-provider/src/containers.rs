@@ -29,6 +29,42 @@ pub struct ContainerSessionProvider {
     image: String,
     /// Host directories mounted as each container's workspace.
     root: PathBuf,
+    /// The OCI runtime containers run under (`runsc` for gVisor), when not
+    /// the engine's default.
+    oci_runtime: Option<String>,
+}
+
+/// The capabilities a session container keeps: enough for a package
+/// manager running as root to install and own files, nothing that reaches
+/// the network stack, devices, or the kernel.
+pub const CONTAINER_CAPABILITIES: &[&str] = &[
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL",
+];
+
+/// The most processes one session container may hold.
+pub const CONTAINER_PIDS_LIMIT: u32 = 4096;
+
+/// Variables the container client itself reads. Their values stay on its
+/// command line so a session cannot redirect the client that enters it.
+const CLIENT_VARIABLES: &[&str] = &[
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+];
+
+fn client_variable(key: &str) -> bool {
+    CLIENT_VARIABLES.contains(&key)
+        || key.starts_with("DOCKER_")
+        || key.starts_with("CONTAINER_")
+        || key.starts_with("CONTAINERS_")
+        || key.starts_with("PODMAN_")
 }
 
 impl ContainerSessionProvider {
@@ -47,7 +83,14 @@ impl ContainerSessionProvider {
             runtime,
             image: image.into(),
             root: root.into(),
+            oci_runtime: None,
         }
+    }
+
+    /// Runs every session container under `runtime` (for example `runsc`).
+    pub fn with_oci_runtime(mut self, runtime: impl Into<String>) -> Self {
+        self.oci_runtime = Some(runtime.into());
+        self
     }
 
     fn container(provider_session_id: &str) -> Result<&str, ProviderError> {
@@ -198,7 +241,21 @@ impl SessionProvider for ContainerSessionProvider {
             format!("{}:{CONTAINER_WORKSPACE}", workspace.display()),
             "--workdir".into(),
             CONTAINER_WORKSPACE.into(),
+            // An init reaps the processes every exec leaves behind.
+            "--init".into(),
+            "--cap-drop".into(),
+            "ALL".into(),
+            "--security-opt".into(),
+            "no-new-privileges".into(),
+            "--pids-limit".into(),
+            CONTAINER_PIDS_LIMIT.to_string(),
         ];
+        for capability in CONTAINER_CAPABILITIES {
+            arguments.extend(["--cap-add".into(), (*capability).into()]);
+        }
+        if let Some(runtime) = &self.oci_runtime {
+            arguments.extend(["--runtime".into(), runtime.clone()]);
+        }
         if let Some(cpu) = request.resources.cpu_count {
             arguments.extend(["--cpus".into(), cpu.to_string()]);
         }
@@ -242,6 +299,10 @@ impl SessionProvider for ContainerSessionProvider {
             "--env".into(),
             format!("COMPUTE_SESSION_ID={}", environment.session_id),
         ];
+        // Values travel in the job's own environment, which is sealed at
+        // rest, and the client copies them in by name: they never appear on
+        // a command line another process on this node can read.
+        let mut carried = BTreeMap::new();
         for (key, value) in &command.env {
             if key.starts_with("COMPUTE_SESSION_") {
                 return Err(ProviderError::new(
@@ -249,13 +310,30 @@ impl SessionProvider for ContainerSessionProvider {
                     format!("{key} is set by Compute"),
                 ));
             }
-            arguments.extend(["--env".into(), format!("{key}={value}")]);
+            if client_variable(key) {
+                arguments.extend(["--env".into(), format!("{key}={value}")]);
+            } else {
+                arguments.extend(["--env".into(), key.clone()]);
+                carried.insert(key.clone(), value.clone());
+            }
+        }
+        if command.stdin.is_some() {
+            // The client's standard input is the command's.
+            arguments.push("--interactive".into());
         }
         arguments.push(container.to_owned());
         arguments.extend(command.command.iter().cloned());
         let mut direct = SessionCommand::new(arguments);
         direct.timeout = command.timeout;
-        shell_request(environment, &direct)
+        direct.env = carried;
+        direct.stdin = command.stdin.clone();
+        direct.output_bytes = command.output_bytes;
+        // The job on this node is the engine's client, which needs the
+        // engine, not the session's network; the container's own `--network`
+        // is the boundary (and a host process cannot enforce `none`).
+        let mut client = environment.clone();
+        client.network = NetworkPolicy::Network;
+        shell_request(&client, &direct)
     }
 
     async fn connect(
@@ -319,6 +397,37 @@ impl SessionProvider for ContainerSessionProvider {
 
     async fn claim(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         Self::container(provider_session_id).map(|_| ())
+    }
+
+    fn contains_network(&self) -> bool {
+        true
+    }
+
+    fn substrate(&self, provider_session_id: &str) -> Option<compute_core::SubstrateEvidence> {
+        Self::container(provider_session_id).ok()?;
+        let mut evidence = compute_core::SubstrateEvidence::new("container");
+        let engine = Path::new(&self.runtime)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.runtime.clone());
+        evidence.backend = Some(match &self.oci_runtime {
+            Some(runtime) => format!("{engine} (OCI runtime {runtime})"),
+            None => engine,
+        });
+        // A reference, not a digest: the engine resolves it.
+        evidence
+            .artifacts
+            .insert("image_reference".into(), self.image.clone());
+        evidence
+            .limits
+            .insert("pids".into(), CONTAINER_PIDS_LIMIT.to_string());
+        evidence
+            .limits
+            .insert("capabilities".into(), CONTAINER_CAPABILITIES.join(","));
+        evidence
+            .limits
+            .insert("no_new_privileges".into(), "true".into());
+        Some(evidence)
     }
 }
 

@@ -1,0 +1,98 @@
+name: microvm
+
+# MicroVM sessions on a runner with KVM: Firecracker boots a guest kernel and
+# a rootfs whose init is compute-guest, and crates/compute-cli/tests/microvm.rs
+# drives the real `compute serve --session-provider microvm` and `compute
+# egress serve` through the CLI: its own kernel, no network interface, egress
+# only through the gateway, stdin and files, and a stop/resume that keeps a
+# running process alive (a memory snapshot). Required here: a missing KVM or
+# Firecracker fails instead of skipping (COMPUTE_REQUIRE_MICROVM).
+#
+# `container-engine` runs the container session contract against the
+# runner's real Docker engine and reads the hardening back from inside the
+# container (capability set, no-new-privileges, pids limit, `none` network).
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "crates/compute-guest/**"
+      - "crates/compute-egress/**"
+      - "crates/compute-provider/src/vm.rs"
+      - "crates/compute-provider/src/containers.rs"
+      - "crates/compute-provider/tests/sessions.rs"
+      - "crates/compute-provider/src/sessions.rs"
+      - "crates/compute-cli/src/guest_cmd.rs"
+      - "crates/compute-cli/tests/microvm.rs"
+      - "distribution/microvm/**"
+      - ".github/workflows/microvm.yml"
+  push:
+    branches: [main]
+
+env:
+  FIRECRACKER_VERSION: v1.11.0
+
+jobs:
+  microvm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: KVM
+        run: |
+          test -e /dev/kvm || { echo "this runner has no /dev/kvm" >&2; exit 1; }
+          sudo chmod 666 /dev/kvm
+      - name: Firecracker and a guest kernel
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/vm"
+          cd "$RUNNER_TEMP/vm"
+          curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-x86_64.tgz" | tar -xz
+          cp "release-${FIRECRACKER_VERSION}-x86_64/firecracker-${FIRECRACKER_VERSION}-x86_64" firecracker
+          chmod +x firecracker
+          ./firecracker --version
+          # Firecracker's own CI kernels (with virtio-vsock), newest 6.1 build.
+          ci="firecracker-ci/${FIRECRACKER_VERSION%.*}/x86_64"
+          key=$(curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/?prefix=${ci}/vmlinux-6.1&list-type=2" \
+            | grep -oP "(?<=<Key>)${ci}/vmlinux-6\.1\.[0-9]{1,3}(?=</Key>)" | sort -V | tail -1)
+          test -n "$key"
+          curl -fsSL -o vmlinux "https://s3.amazonaws.com/spec.ccfc.min/${key}"
+          echo "kernel: $key"
+      - name: The guest root filesystem
+        run: |
+          set -eu
+          sudo apt-get update -q && sudo apt-get install -yq busybox-static e2fsprogs
+          cargo build --locked --release -p compute-guest --target x86_64-unknown-linux-musl
+          distribution/microvm/build-rootfs.sh \
+            target/x86_64-unknown-linux-musl/release/compute-guest /bin/busybox \
+            "$RUNNER_TEMP/vm/rootfs.ext4" 512
+      - name: MicroVM sessions
+        env:
+          COMPUTE_REQUIRE_MICROVM: "1"
+          COMPUTE_FIRECRACKER: ${{ runner.temp }}/vm/firecracker
+          COMPUTE_VM_KERNEL: ${{ runner.temp }}/vm/vmlinux
+          COMPUTE_VM_ROOTFS: ${{ runner.temp }}/vm/rootfs.ext4
+        run: timeout 900 cargo test --locked -p compute-cli --test microvm -- --nocapture
+      - name: Guest agent and egress gateway
+        run: cargo test --locked -p compute-guest -p compute-egress
+      - name: VM logs
+        if: failure()
+        run: find /tmp -name firecracker.log -exec sh -c 'echo "== $1"; tail -n 50 "$1"' _ {} \; 2>/dev/null || true
+
+  container-engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Container sessions on a real engine
+        env:
+          COMPUTE_CONTAINER_ENGINE: docker
+          COMPUTE_REQUIRE_CONTAINER_ENGINE: "1"
+        run: |
+          docker version
+          docker pull debian:stable-slim
+          timeout 900 cargo test --locked -p compute-provider --test sessions a_real_container_engine -- --nocapture

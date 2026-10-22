@@ -561,6 +561,7 @@ fn session_requirements(capabilities: &[&str]) -> compute_placement::PlacementRe
         },
         network: NetworkPolicy::Network,
         isolation: IsolationProfile::Process,
+        host: Default::default(),
         architecture: None,
     })
     .unwrap();

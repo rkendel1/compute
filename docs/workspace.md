@@ -39,7 +39,11 @@ record, no cache, no artifact. A workspace is described by a digest.
 compute.workspace@1
 dir <path>                    each EMPTY directory, sorted
 file <x|-> <sha256> <path>    each regular file, sorted
+link <n> <path> <target>      each symbolic link, sorted; n = the path's length in bytes
 ```
+
+A workspace with no symbolic links has no `link` lines, so its digest is
+unchanged from before links were supported.
 
 Paths are relative, `/`-separated, sorted bytewise. The digest is
 `sha256:` of that text.
@@ -49,19 +53,20 @@ Paths are relative, `/`-separated, sorted bytewise. The digest is
 | relative paths | yes |
 | file contents | yes |
 | empty directories | yes |
-| non-empty directories | no (implied by their files) |
+| non-empty directories | no (implied by their files and links) |
 | executable bit | **yes**: the *owner* execute bit, `x` (workloads depend on it; git tracks it) |
 | other permission bits | no |
 | ownership | no |
 | timestamps | no |
 | extended attributes | no |
-| symbolic links, hard-link entries | **unsupported: refused**, never approximated |
+| symbolic links | **yes**: path and target, as written (not resolved). Nothing is read or written *through* a link: a path under one is refused |
+| hard links | as files: each name is a `file` line; a capture restores them as separate files |
 | devices, sockets, pipes | **unsupported: refused** |
-| paths with control characters or backslashes | **unsupported: refused** |
+| paths or link targets with control characters or backslashes, link targets of 100 bytes or more | **unsupported: refused** |
 
 Tar semantics are not inherited: the archive is only a transport, and a
-receiver validates it against this contract (it accepts only regular files and
-directories at safe relative paths) before anything is sent anywhere. The
+receiver validates it against this contract (it accepts only regular files,
+directories, and links at safe relative paths) before anything is sent anywhere. The
 digest is computed twice, independently: inside a computer (shell, over the
 live tree) and from an archive (Rust, without extracting), and the two agree.
 
@@ -81,8 +86,9 @@ live tree) and from an archive (Rust, without extracting), and the two agree.
 
 ## The three operations
 
-**export** (`Execute`): one durable job on the computer's target.
-It refuses unsupported entries, measures the workspace digest **before and
+**export** (`Execute`): durable jobs on the computer's target: one makes
+the archive, then one per 6 MiB chunk reads it back. The first
+refuses unsupported entries, measures the workspace digest **before and
 after** making the archive and refuses if they differ (the workspace changed
 while it was captured, whatever `tar` noticed), refuses an archive over the
 transport bound, and returns the archive, its digest, and the workspace digest.
@@ -106,24 +112,12 @@ Each is authorized to the environment's owner, and each is recorded as an
 
 ## Transport bound
 
-An archive travels through job output (export) and job environments (seed),
-so the capability is **currently bounded by job/output transport**:
-`WORKSPACE_ARCHIVE_LIMIT`, 8 MiB. Larger workspaces are refused with that
-reason, never truncated. Measured on this development machine (debug build,
-one workspace provider, an incompressible file):
-
-| Archive | Export | Seed |
-| ---: | ---: | ---: |
-| 1 MiB | 0.4 s | 11 s |
-| 4 MiB | 1.4 s | 41 s |
-| 8 MiB | 2.5 s | 84 s |
-| 12 MiB | 3.3 s | not completed (disk exhausted by the measurement itself) |
-
-Export is bounded by the 16 MiB job output cap (base64 of ~12 MiB); seed is
-slow, about 10 s per MiB, because each 96 KiB chunk is a durable job
-environment. The bound is set where seed stays under about a minute and a half.
-It is not optimized: the next workload that needs a bigger workspace should
-force a streamed artifact capability, not a bigger constant.
+An archive travels in chunks: export reads it back 6 MiB at a time through
+job output, and seed sends it 8 MiB of base64 at a time on job standard
+input, so no single job carries more than a chunk.
+`WORKSPACE_ARCHIVE_LIMIT` (256 MiB) bounds the whole; a larger workspace is
+refused with that reason, never truncated. Each chunk is an ordinary durable
+job with its own evidence.
 
 ## Lifecycle rule for compositions
 

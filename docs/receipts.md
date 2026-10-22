@@ -57,6 +57,25 @@ Artifact verification safely resolves each collected logical output below the
 supplied directory, checks byte length and SHA-256, and fails for missing or
 modified referenced outputs. Extra files do not invalidate the receipt.
 
+### Signed receipts
+
+A `compute serve` target signs every receipt it produces with its own
+Ed25519 key (kept, owner-only, as `.receipt-key` in its job store; the key's
+`sha256:` id is written beside it as `receipt-key.id`). The `signature`
+field carries the algorithm, the key id, the public key, and the signature
+over `receipt_hash`; it is not part of the hashed body, so the receipt's
+identity is unchanged.
+
+```sh
+compute receipt verify receipt.json --signed-by sha256:…
+```
+
+`verify` always checks a signature that is present. `--signed-by` also
+requires one, by the key you pinned: that is what turns "this receipt is
+internally consistent" into "the target I trust produced it". A receipt that
+is resealed later (a control plane binding its admission evidence) loses the
+signature, because the signer never saw the change.
+
 ## Schema summary
 
 - `receipt_version`, `execution_id`, and `receipt_hash`

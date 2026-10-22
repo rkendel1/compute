@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /**
  * Compute sessions for programs and agents: a temporary, authorized,
@@ -96,9 +99,14 @@ export interface SessionCreateOptions {
 }
 
 export interface SessionExecOptions {
+  /** Passed to `compute` in its own environment, by name: never on a command line. */
   env?: Record<string, string>;
   /** `10s`, `1m`. */
   timeout?: string;
+  /** Written to the command's standard input. */
+  stdin?: string;
+  /** The most bytes kept of each output stream (Compute keeps 16 MiB when unset). */
+  outputBytes?: number;
 }
 
 /** The outcome of one command: a durable job and its execution. */
@@ -109,6 +117,8 @@ export interface SessionExecResult {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  /** Whether stdout or stderr was cut at the output bound. */
+  truncated: { stdout: boolean; stderr: boolean };
   /** The full execution result, including its receipt. */
   result: Record<string, unknown>;
 }
@@ -203,7 +213,7 @@ export class ComputeSessions {
   }
 
   /** @internal */
-  async invoke(args: string[]): Promise<CommandResult> {
+  async invoke(args: string[], extra: { env?: Record<string, string> | undefined; stdin?: string | Uint8Array | undefined } = {}): Promise<CommandResult> {
     const options = this.#options;
     const [scope = "", command = ""] = args;
     const location: string[] = [];
@@ -214,9 +224,11 @@ export class ComputeSessions {
     return new Promise((resolvePromise, reject) => {
       const child = spawn(options.computeBinary ?? "compute", full, {
         cwd: options.cwd,
-        env: { ...process.env, ...options.env },
-        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, ...options.env, ...extra.env },
+        stdio: ["pipe", "pipe", "pipe"],
       });
+      // No input is an immediate end of file, never an inherited terminal.
+      child.stdin.end(extra.stdin ?? "");
       let stdout = "";
       let stderr = "";
       child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
@@ -251,9 +263,11 @@ export class ComputeSessionHandle {
   async exec(command: string[], options: SessionExecOptions = {}): Promise<SessionExecResult> {
     if (command.length === 0) throw new ComputeSessionError("invalid_command", "a command needs a program", null);
     const args = ["session", "exec", this.id, "--json"];
-    for (const [key, value] of Object.entries(options.env ?? {})) args.push("--env", `${key}=${value}`);
+    for (const key of Object.keys(options.env ?? {})) args.push("--env", key);
     if (options.timeout) args.push("--timeout", options.timeout);
-    const outcome = await this.sessions.invoke([...args, "--", ...command]);
+    if (options.outputBytes !== undefined) args.push("--output-bytes", String(options.outputBytes));
+    if (options.stdin !== undefined) args.push("--stdin");
+    const outcome = await this.sessions.invoke([...args, "--", ...command], { env: options.env, stdin: options.stdin });
     const result = parseJson<Record<string, unknown>>(outcome.stdout);
     if (!result || typeof result.execution_id !== "string") {
       throw commandError(outcome);
@@ -262,6 +276,7 @@ export class ComputeSessionHandle {
       const value = result[name] as { text?: string } | undefined;
       return value?.text ?? "";
     };
+    const truncated = (name: "stdout" | "stderr") => (result[name] as { truncated?: boolean } | undefined)?.truncated === true;
     return {
       jobId: String(result.job_id),
       executionId: result.execution_id,
@@ -269,8 +284,36 @@ export class ComputeSessionHandle {
       exitCode: typeof result.exit_code === "number" ? result.exit_code : null,
       stdout: stream("stdout"),
       stderr: stream("stderr"),
+      truncated: { stdout: truncated("stdout"), stderr: truncated("stderr") },
       result,
     };
+  }
+
+  /** A file's bytes, read from the session's workspace as a durable command. */
+  async readFile(path: string): Promise<Buffer> {
+    // Bytes go through a private file: the CLI's stdout is read as text.
+    const directory = await mkdtemp(join(tmpdir(), "compute-file-"));
+    try {
+      const target = join(directory, "data");
+      const outcome = await this.sessions.invoke(["session", "file", "read", this.id, path, "--output", target], {});
+      if (outcome.status !== 0) throw commandError(outcome);
+      return await readFile(target);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  /** Replace a file in the session's workspace, as a durable command. */
+  async writeFile(path: string, data: string | Uint8Array): Promise<void> {
+    const outcome = await this.sessions.invoke(["session", "file", "write", this.id, path], { stdin: data });
+    if (outcome.status !== 0) throw commandError(outcome);
+  }
+
+  /** `ls -la` of a directory in the session's workspace. */
+  async listFiles(path = "."): Promise<string> {
+    const outcome = await this.sessions.invoke(["session", "file", "list", this.id, path], {});
+    if (outcome.status !== 0) throw commandError(outcome);
+    return outcome.stdout;
   }
 
   logs(): Promise<SessionLogs> {

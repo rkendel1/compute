@@ -275,7 +275,11 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
             .args([
                 "--reconcile-interval-ms",
                 &command.reconcile_interval_ms.to_string(),
-            ]);
+            ])
+            // Every request carries the token in this private file: a local
+            // API is still not open to everything else on the machine.
+            .arg("--local-token")
+            .arg(home.join(crate::environment_cmd::LOCAL_TOKEN_FILE));
         // Headless is passed to the controller it starts, so the running
         // control plane and this command agree about the UI.
         if command.headless {
@@ -392,9 +396,15 @@ pub async fn up(command: UpCommand) -> compute_core::Result<()> {
         }
     }
     if !no_browser {
+        // The UI takes the local token from the fragment, which never
+        // reaches a server, and keeps it for the tab.
+        let address = match crate::environment_cmd::daemon_token("COMPUTE_DAEMON_TOKEN") {
+            Some(token) => format!("{url}/#token={token}"),
+            None => format!("{url}/"),
+        };
         for opener in ["xdg-open", "open"] {
             if std::process::Command::new(opener)
-                .arg(format!("{url}/"))
+                .arg(&address)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn()

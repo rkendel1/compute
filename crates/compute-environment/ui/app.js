@@ -57,6 +57,15 @@ function token() {
   try { return sessionStorage.getItem('compute.token') || ''; } catch { return ''; }
 }
 
+// `compute up` opens the UI with the local daemon token in the fragment,
+// which no server sees: keep it for this tab and take it out of the address.
+(() => {
+  const match = /^#token=([0-9a-f]{64})$/.exec(location.hash);
+  if (!match) return;
+  try { sessionStorage.setItem('compute.token', match[1]); } catch { /* the token button still works */ }
+  history.replaceState(null, '', location.pathname + location.search);
+})();
+
 async function api(method, path, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (token()) headers.Authorization = `Bearer ${token()}`;

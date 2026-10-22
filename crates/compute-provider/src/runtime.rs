@@ -492,18 +492,33 @@ impl RuntimeManager {
             )));
         }
         // Just assembled: wait out a transient "Text file busy".
-        let output = compute_core::executables::output_when_not_busy(
-            Command::new(&executable).arg("--version"),
-        )
-        .map_err(io_error)?;
-        let reported = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .trim()
-        .to_string();
-        if !output.status.success() || !reported.contains(&locked.version) {
+        let banner = |flag: &str| -> Result<(bool, String), ProviderError> {
+            let output = compute_core::executables::output_when_not_busy(
+                Command::new(&executable).arg(flag),
+            )
+            .map_err(io_error)?;
+            Ok((
+                output.status.success(),
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+                .trim()
+                .to_string(),
+            ))
+        };
+        let (mut reported_ok, mut reported) = banner("--version")?;
+        if !(reported_ok && reported.contains(&locked.version)) {
+            // BusyBox's shell has no `--version`; its usage banner names
+            // the build ("BusyBox v1.37.0 ..."), whatever the exit status.
+            let (_, usage) = banner("--help")?;
+            if usage.starts_with("BusyBox v") {
+                reported_ok = true;
+                reported = usage.lines().next().unwrap_or_default().to_owned();
+            }
+        }
+        if !reported_ok || !reported.contains(&locked.version) {
             return Err(unavailable(format!(
                 "prepared runtime version mismatch: expected {}, observed {reported}",
                 locked.version

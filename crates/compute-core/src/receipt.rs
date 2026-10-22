@@ -249,6 +249,167 @@ pub struct ExecutionReceipt {
     pub finished_at: Option<DateTime<Utc>>,
     pub provenance: ExecutionProvenance,
     pub receipt_hash: ReceiptHash,
+    /// What the execution ran *in*, when that is not the process this
+    /// receipt otherwise describes: a container, a virtual machine. Reported
+    /// by the session provider that owns the environment; part of the
+    /// hashed body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substrate: Option<SubstrateEvidence>,
+    /// The target's Ed25519 signature over `receipt_hash`, when the target
+    /// signs. Not part of the hashed body; resealing a receipt drops it,
+    /// because the signer never saw what changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<ReceiptSignature>,
+}
+
+/// The environment an execution ran in, as the provider that runs it reports
+/// it. Backend-neutral: `kind` and `backend` are names, and every
+/// backend-specific fact is a named entry, so a new backend adds entries, not
+/// fields. It is evidence of what was configured and started, not proof
+/// that the boundary held.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubstrateEvidence {
+    /// `compute.substrate@1`.
+    pub version: String,
+    /// `workspace`, `container`, `microvm`.
+    pub kind: String,
+    /// The software that provides it, with its version when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Identities of what it started from (`kernel`, `rootfs`, `image`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artifacts: BTreeMap<String, String>,
+    /// Limits the substrate was configured to enforce (`vcpus`,
+    /// `memory_bytes`, `pids`, `network`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub limits: BTreeMap<String, String>,
+}
+
+pub const SUBSTRATE_EVIDENCE_VERSION: &str = "compute.substrate@1";
+
+impl SubstrateEvidence {
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            version: SUBSTRATE_EVIDENCE_VERSION.into(),
+            kind: kind.into(),
+            backend: None,
+            artifacts: BTreeMap::new(),
+            limits: BTreeMap::new(),
+        }
+    }
+}
+
+/// A detached statement by the target that ran an execution: "this is the
+/// receipt I produced". `verify` checks it against the key it names; whether
+/// that key is one to trust is the reader's decision (`key_id` pins it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptSignature {
+    /// Always `ed25519`.
+    pub algorithm: String,
+    /// `sha256:` of the public key bytes.
+    pub key_id: String,
+    /// The 32-byte public key, hex.
+    pub public_key: String,
+    /// The 64-byte signature over the UTF-8 `receipt_hash`, hex.
+    pub signature: String,
+}
+
+impl ReceiptSignature {
+    fn check(&self, receipt_hash: &ReceiptHash) -> Result<()> {
+        let decode = |text: &str| -> Option<Vec<u8>> {
+            text.len()
+                .is_multiple_of(2)
+                .then(|| {
+                    (0..text.len())
+                        .step_by(2)
+                        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).ok())
+                        .collect::<Option<Vec<u8>>>()
+                })
+                .flatten()
+        };
+        let (Some(key), Some(signature)) = (decode(&self.public_key), decode(&self.signature))
+        else {
+            return Err(invalid("malformed receipt signature"));
+        };
+        if self.algorithm != "ed25519" || key.len() != 32 || signature.len() != 64 {
+            return Err(invalid("unsupported receipt signature"));
+        }
+        if self.key_id != format!("sha256:{:x}", Sha256::digest(&key)) {
+            return Err(invalid("receipt signature key id mismatch"));
+        }
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &key)
+            .verify(receipt_hash.0.as_bytes(), &signature)
+            .map_err(|_| invalid("receipt signature does not verify"))
+    }
+}
+
+/// A target's receipt signing key.
+pub struct ReceiptSigner {
+    pair: ring::signature::Ed25519KeyPair,
+}
+
+impl ReceiptSigner {
+    /// The key kept in `path` (PKCS#8), or a new one written there first,
+    /// readable only by its owner.
+    pub fn open_or_create(path: &Path) -> Result<Self> {
+        let document = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let generated = ring::signature::Ed25519KeyPair::generate_pkcs8(
+                    &ring::rand::SystemRandom::new(),
+                )
+                .map_err(|_| invalid("could not generate a receipt signing key"))?;
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let staged = path.with_extension("tmp");
+                {
+                    use std::io::Write;
+                    let mut options = std::fs::OpenOptions::new();
+                    options.write(true).create(true).truncate(true);
+                    #[cfg(unix)]
+                    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+                    let mut file = options.open(&staged)?;
+                    file.write_all(generated.as_ref())?;
+                    file.sync_all()?;
+                }
+                std::fs::rename(&staged, path)?;
+                generated.as_ref().to_vec()
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(&document)
+            .map_err(|_| invalid("the receipt signing key is unreadable"))?;
+        Ok(Self { pair })
+    }
+
+    /// `sha256:` of the public key: what a reader pins.
+    pub fn key_id(&self) -> String {
+        use ring::signature::KeyPair;
+        format!(
+            "sha256:{:x}",
+            Sha256::digest(self.pair.public_key().as_ref())
+        )
+    }
+
+    /// Sign a sealed receipt.
+    pub fn sign(&self, receipt: &mut ExecutionReceipt) {
+        use ring::signature::KeyPair;
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        receipt.signature = Some(ReceiptSignature {
+            algorithm: "ed25519".into(),
+            key_id: self.key_id(),
+            public_key: hex(self.pair.public_key().as_ref()),
+            signature: hex(self.pair.sign(receipt.receipt_hash.0.as_bytes()).as_ref()),
+        });
+    }
 }
 
 /// How the execution provider was chosen.
@@ -451,6 +612,8 @@ struct ReceiptBody<'a> {
     started_at: &'a Option<DateTime<Utc>>,
     finished_at: &'a Option<DateTime<Utc>>,
     provenance: &'a ExecutionProvenance,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    substrate: &'a Option<SubstrateEvidence>,
 }
 
 impl ExecutionReceipt {
@@ -477,8 +640,25 @@ impl ExecutionReceipt {
 
     pub fn seal(&mut self) -> Result<()> {
         self.normalize();
-        self.receipt_hash = self.hash()?;
+        let hash = self.hash()?;
+        if hash != self.receipt_hash {
+            self.signature = None;
+        }
+        self.receipt_hash = hash;
         Ok(())
+    }
+
+    /// Verify, and require the target's signature by the key `key_id` names.
+    pub fn verify_signed_by(&self, key_id: &str) -> Result<()> {
+        self.verify()?;
+        match &self.signature {
+            Some(signature) if signature.key_id == key_id => Ok(()),
+            Some(signature) => Err(invalid(format!(
+                "receipt is signed by {}, not {key_id}",
+                signature.key_id
+            ))),
+            None => Err(invalid("receipt is not signed")),
+        }
     }
 
     pub fn verify(&self) -> Result<()> {
@@ -740,6 +920,9 @@ impl ExecutionReceipt {
                 self.receipt_hash, actual
             )));
         }
+        if let Some(signature) = &self.signature {
+            signature.check(&self.receipt_hash)?;
+        }
         Ok(())
     }
 
@@ -774,6 +957,7 @@ impl ExecutionReceipt {
             started_at: &self.started_at,
             finished_at: &self.finished_at,
             provenance: &self.provenance,
+            substrate: &self.substrate,
         }
     }
 
@@ -943,6 +1127,8 @@ pub fn create_execution_receipt(
             manifest_id: environment.manifest_id,
         },
         receipt_hash: ReceiptHash(String::new()),
+        substrate: None,
+        signature: None,
     };
     receipt.seal()?;
     Ok(receipt)
@@ -1300,6 +1486,12 @@ mod tests {
         assert!(WorkloadIdentity::parse("md5:0000").is_err());
     }
 
+    fn other_public_key(signer: &ReceiptSigner, receipt: &ExecutionReceipt) -> String {
+        let mut receipt = receipt.clone();
+        signer.sign(&mut receipt);
+        receipt.signature.unwrap().public_key
+    }
+
     #[test]
     fn canonical_receipts_are_deterministic_and_execution_specific() {
         let request = ExecutionRequest {
@@ -1318,6 +1510,7 @@ mod tests {
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
             host_isolation: crate::HostProfile::Trusted,
+            host_writable: vec![],
             dependencies: None,
         };
         let resolved = ResolvedRuntime {
@@ -1410,6 +1603,43 @@ mod tests {
             Some(sha256_identity(b"runtime-artifact").as_str())
         );
         first.verify().unwrap();
+
+        // A target's signature: verified when present, pinned on request,
+        // broken by any change, and dropped by a reseal of a changed body.
+        let keys = tempfile::tempdir().unwrap();
+        let signer = ReceiptSigner::open_or_create(&keys.path().join("key")).unwrap();
+        let again = ReceiptSigner::open_or_create(&keys.path().join("key")).unwrap();
+        assert_eq!(signer.key_id(), again.key_id(), "the key is kept");
+        let mut signed = first.clone();
+        signer.sign(&mut signed);
+        signed.verify().unwrap();
+        signed.verify_signed_by(&signer.key_id()).unwrap();
+        assert!(signed.verify_signed_by("sha256:other").is_err());
+        assert!(
+            first.verify_signed_by(&signer.key_id()).is_err(),
+            "unsigned"
+        );
+        let mut forged = signed.clone();
+        forged
+            .signature
+            .as_mut()
+            .unwrap()
+            .signature
+            .replace_range(0..2, "00");
+        if forged.signature != signed.signature {
+            assert!(forged.verify().is_err());
+        }
+        let mut swapped = signed.clone();
+        let other = ReceiptSigner::open_or_create(&keys.path().join("other")).unwrap();
+        swapped.signature.as_mut().unwrap().public_key = other_public_key(&other, &first);
+        assert!(swapped.verify().is_err(), "a signature binds its key");
+        let mut resealed = signed.clone();
+        resealed.started_at = None;
+        resealed.seal().unwrap();
+        assert!(resealed.signature.is_none());
+        let mut unchanged = signed.clone();
+        unchanged.seal().unwrap();
+        assert_eq!(unchanged.signature, signed.signature);
 
         let mut pinned_host = first.clone();
         pinned_host.process_runtime = Some(crate::RuntimeResolution {

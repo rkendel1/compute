@@ -594,6 +594,7 @@ pub(crate) mod tests {
             resources: ResourceLimits::default(),
             isolation: IsolationProfile::Process,
             host_isolation: crate::HostProfile::Trusted,
+            host_writable: vec![],
             dependencies: None,
         };
         let resolved = ResolvedRuntime {

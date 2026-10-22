@@ -137,10 +137,23 @@ impl CommandRunner for SessionRunner {
         env: BTreeMap<String, String>,
     ) -> Result<CommandOutput, RunnerError> {
         let outcome = self.0.exec(argv, env).await.map_err(|e| RunnerError(e.0))?;
+        // stack-agent's output has no truncation flag; the agent reads it
+        // on stderr instead of mistaking a cut output for the whole.
+        let mut stderr = outcome.stderr;
+        for (stream, total, kept) in [
+            ("stdout", outcome.stdout_truncated, outcome.stdout.len()),
+            ("stderr", outcome.stderr_truncated, stderr.len()),
+        ] {
+            if let Some(total) = total {
+                stderr.push_str(&format!(
+                    "\n[compute: {stream} truncated: kept {kept} of {total} bytes]\n"
+                ));
+            }
+        }
         Ok(CommandOutput {
             exit_code: outcome.exit_code,
             stdout: outcome.stdout,
-            stderr: outcome.stderr,
+            stderr,
         })
     }
 }

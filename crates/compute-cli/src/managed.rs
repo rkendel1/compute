@@ -61,6 +61,92 @@ pub struct ManagedService {
     pub provider: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// The interpreter the executable runs on, when it is a script: `node` is the Node
+    /// runtime the installed Compute distribution bundles, never the host's. A
+    /// `#!/usr/bin/env node` executable would otherwise run on whatever `node` is first on
+    /// the user's PATH.
+    #[serde(default)]
+    pub interpreter: Option<String>,
+    /// Variables passed through from Compute's environment, by name. The service starts
+    /// from an empty environment plus `PATH`, `HOME`, `TMPDIR` and the locale, so nothing
+    /// else the user's shell holds (model keys, cloud tokens, Compute's own credential)
+    /// reaches it.
+    #[serde(default)]
+    pub environment: Vec<String>,
+    /// Where the service's authority comes from, when it needs one Compute cannot supply.
+    #[serde(default)]
+    pub authority: Option<ServiceAuthority>,
+}
+
+/// A service's authority: an operator-supplied module the service loads, named by a
+/// variable. Compute never writes or reads it; it only passes the variable through when
+/// the operator has put the module in place.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ServiceAuthority {
+    /// The variable the service reads the module's path from (`APPPORT_AUTHORITY`).
+    pub module_env: String,
+    /// Where the operator puts the module, relative to `COMPUTE_HOME`. Used when the
+    /// variable is not already set.
+    pub default_module: String,
+    /// What the service does without one, as the profile states it.
+    pub without: String,
+}
+
+/// The variables every managed service gets, whatever it declares.
+const BASE_ENVIRONMENT: &[&str] = &["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"];
+
+/// The command that runs a declared service: its executable, on the declared
+/// interpreter, from an allow-listed environment.
+fn service_command(
+    distribution: &Path,
+    state_home: &Path,
+    service: &ManagedService,
+) -> compute_core::Result<std::process::Command> {
+    let executable = distribution.join(&service.executable);
+    let mut command = match service.interpreter.as_deref() {
+        None => std::process::Command::new(&executable),
+        Some("node") => {
+            // The configured formula depends on base Compute, whose distribution ships
+            // Node. Outside an installed distribution (a developer checkout) there is
+            // none to use, and the executable runs as it is.
+            match compute_core::paths::installation_root()
+                .map(|root| root.join("runtimes/node/bin/node"))
+                .filter(|node| node.is_file())
+            {
+                Some(node) => {
+                    let mut command = std::process::Command::new(node);
+                    command.arg(&executable);
+                    command
+                }
+                None => std::process::Command::new(&executable),
+            }
+        }
+        Some(other) => {
+            return Err(ComputeError::Runtime(format!(
+                "managed service `{}` declares the interpreter `{other}`; only `node` is supported",
+                service.name
+            )));
+        }
+    };
+    command.env_clear();
+    for name in BASE_ENVIRONMENT
+        .iter()
+        .copied()
+        .chain(service.environment.iter().map(String::as_str))
+    {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    if let Some(authority) = &service.authority
+        && std::env::var_os(&authority.module_env).is_none()
+    {
+        let module = state_home.join(&authority.default_module);
+        if module.is_file() {
+            command.env(&authority.module_env, module);
+        }
+    }
+    Ok(command)
 }
 
 fn default_provider() -> String {
@@ -188,16 +274,15 @@ async fn ensure_one(
     }
 
     std::fs::create_dir_all(&working)?;
-    let mut command = std::process::Command::new(&executable);
+    // From an empty environment: the service never inherits a Compute credential,
+    // nor anything else the user's shell holds that it did not declare.
+    let mut command = service_command(distribution, state_home, &service)?;
     command
         .args(&service.arguments)
         // The service resolves its own state, configuration and authority from
         // this directory. Compute Configured only chooses where it runs; it
         // never reads or writes the state the service keeps there.
-        .current_dir(&working)
-        // The service must never inherit a Compute credential.
-        .env_remove("COMPUTE_DAEMON_TOKEN")
-        .env_remove("COMPUTE_DAEMON");
+        .current_dir(&working);
 
     let pid = crate::launch_cmd::detached(&mut command, &log)?;
     std::fs::write(&pid_file, pid.to_string())?;
@@ -250,7 +335,7 @@ async fn register(
 
     let mut client = compute_environment::client::DaemonClient::new(control_plane)
         .map_err(crate::environment_cmd::error)?;
-    if let Ok(token) = std::env::var(daemon_token_env) {
+    if let Some(token) = crate::environment_cmd::daemon_token(daemon_token_env) {
         client = client.with_bearer_token(token);
     }
     let definition = Definition {
@@ -415,6 +500,57 @@ mod tests {
     }
 
     #[test]
+    fn a_service_starts_from_an_allow_listed_environment_on_the_declared_interpreter() {
+        let service = &declared(&configured_distribution()).unwrap()[0];
+        assert_eq!(service.interpreter.as_deref(), Some("node"));
+        let authority = service
+            .authority
+            .as_ref()
+            .expect("the profile names the authority");
+        assert_eq!(authority.module_env, "APPPORT_AUTHORITY");
+        assert!(
+            service
+                .environment
+                .contains(&"APPPORT_AUTHORITY".to_owned())
+        );
+
+        let home = tempfile::tempdir().unwrap();
+        let module = home.path().join(&authority.default_module);
+        std::fs::create_dir_all(module.parent().unwrap()).unwrap();
+        std::fs::write(&module, "export const authorizer = null;").unwrap();
+        // SAFETY: test-only; no other thread in this test reads these variables.
+        unsafe {
+            std::env::set_var("COMPUTE_DAEMON_TOKEN", "must-not-reach-the-service");
+            std::env::set_var("SOME_MODEL_API_KEY", "must-not-reach-the-service");
+            std::env::remove_var("APPPORT_AUTHORITY");
+        }
+        let command = service_command(&configured_distribution(), home.path(), service).unwrap();
+        let environment: std::collections::BTreeMap<_, _> = command
+            .get_envs()
+            .filter_map(|(name, value)| Some((name.to_str()?.to_owned(), value?.to_owned())))
+            .collect();
+        unsafe {
+            std::env::remove_var("COMPUTE_DAEMON_TOKEN");
+            std::env::remove_var("SOME_MODEL_API_KEY");
+        }
+        assert!(!environment.contains_key("COMPUTE_DAEMON_TOKEN"));
+        assert!(!environment.contains_key("SOME_MODEL_API_KEY"));
+        assert_eq!(
+            environment
+                .get("APPPORT_AUTHORITY")
+                .map(|path| path.as_os_str()),
+            Some(module.as_os_str()),
+            "the operator's authority module is passed through"
+        );
+        assert!(
+            environment
+                .keys()
+                .all(|name| BASE_ENVIRONMENT.contains(&name.as_str())
+                    || service.environment.contains(name))
+        );
+    }
+
+    #[test]
     fn base_compute_declares_nothing() {
         // Base Compute ships no configured profile, so it starts no managed
         // service: the feature is additive.
@@ -456,6 +592,9 @@ mod tests {
             capabilities: vec![],
             provider: "local".into(),
             description: None,
+            interpreter: None,
+            environment: vec![],
+            authority: None,
         };
         let (pid_file, _, _) = layout(dir.path(), &service);
         std::fs::create_dir_all(pid_file.parent().unwrap()).unwrap();

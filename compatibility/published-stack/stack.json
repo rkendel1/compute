@@ -106,7 +106,17 @@
         "AppPort/ui/1"
       ],
       "provider": "this-machine",
-      "description": "AppPort Services management UI; owns its own state, authentication and management router"
+      "description": "AppPort Services management UI; owns its own state, authentication and management router. Management needs an AuthBoundry authorizer module (APPPORT_AUTHORITY), which the operator supplies; without one it serves discovery only",
+      "interpreter": "node",
+      "environment": [
+        "APPPORT_AUTHORITY",
+        "APPPORT_API_KEY"
+      ],
+      "authority": {
+        "module_env": "APPPORT_AUTHORITY",
+        "default_module": "configured/appport-authority.mjs",
+        "without": "discovery only: GET /v1/ui answers; every management operation answers 503 AUTHORITY_UNAVAILABLE"
+      }
     }
   ],
   "execution_providers": [

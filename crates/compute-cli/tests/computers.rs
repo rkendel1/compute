@@ -1303,4 +1303,199 @@ fn a_project_added_to_a_computer_is_loaded_and_listed() {
         Some(&"true".into()),
         "{build}"
     );
+
+    // A GitHub selection arrives as a provider-neutral, immutable Git source; loading it puts the
+    // repository at that exact commit, and the project in it, into the computer.
+    let source = moved["observed"]["repositories"]["web"]["commit"].clone();
+    let url = added["source"].as_str().unwrap().to_owned();
+    let file = root.join("source.json");
+    std::fs::write(
+        &file,
+        serde_json::json!({
+            "source": "git", "url": url, "owner": "local", "repository": "app",
+            "ref": "v2", "commit": source,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let loaded = cli.json(&[
+        "environment",
+        "source",
+        "myapp",
+        "--file",
+        file.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(loaded["name"], "app");
+    let checked_out = cli.computer_until("the loaded source", |view| {
+        view["converged"] == true && view["observed"]["repositories"]["app"]["commit"] == source
+    });
+    assert_eq!(
+        checked_out["observed"]["repositories"]["app"]["revision"],
+        source
+    );
+    let refused = cli.run(&["environment", "source", "myapp", "--file", "/dev/null"]);
+    assert!(!refused.status.success(), "an empty source is refused");
+    assert_eq!(
+        build.as_array().and_then(|build| build.last()),
+        Some(&"true".into()),
+        "{build}"
+    );
+}
+
+/// A computer asked for the `restricted` host profile runs every command under it: the command
+/// writes its own workspace and nothing else on the host, and runs in a cgroup Compute made for
+/// it. Skipped where the host cannot enforce the profile (`compute isolation` says so).
+#[test]
+fn a_restricted_computer_writes_only_its_workspace() {
+    let isolation: Value = serde_json::from_slice(
+        &std::process::Command::new(env!("CARGO_BIN_EXE_compute"))
+            .args(["isolation", "--json"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let supported = isolation["host"]["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|profile| profile["profile"] == "restricted" && profile["supported"] == true);
+    if !supported {
+        eprintln!("skipped: this host cannot enforce the restricted profile");
+        return;
+    }
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().to_path_buf();
+    let (_target, cli, _) = controller_with_target(&root);
+    cli.ok(&[
+        "environment",
+        "create",
+        "myapp",
+        "--cpu",
+        "1",
+        "--memory",
+        "256Mi",
+        "--persistent",
+        "--host-profile",
+        "restricted",
+    ]);
+    let ready = cli.computer_until("the restricted computer", |view| {
+        view["status"] == "running"
+    });
+    assert_eq!(ready["requirements"]["host"], "restricted", "{ready:#}");
+
+    // Its own workspace: writable.
+    cli.ok(&[
+        "environment",
+        "exec",
+        "myapp",
+        "--",
+        "sh",
+        "-c",
+        "echo kept > kept.txt",
+    ]);
+    assert_eq!(
+        cli.ok(&["environment", "exec", "myapp", "--", "cat", "kept.txt"])
+            .trim(),
+        "kept"
+    );
+    // Anywhere else on the host: refused by the kernel, and nothing is written.
+    let outside = root.join("outside.txt");
+    let escaped = cli.run(&[
+        "environment",
+        "exec",
+        "myapp",
+        "--",
+        "sh",
+        "-c",
+        &format!("echo escaped > {}", outside.display()),
+    ]);
+    assert!(
+        !escaped.status.success(),
+        "a write outside the workspace succeeded"
+    );
+    assert!(
+        !outside.exists(),
+        "a confined command wrote outside its workspace"
+    );
+    // Reading the system is allowed under `restricted`.
+    cli.ok(&["environment", "exec", "myapp", "--", "cat", "/etc/hostname"]);
+    // Its CPU and memory are a cgroup Compute made for the command.
+    let groups = cli.ok(&[
+        "environment",
+        "exec",
+        "myapp",
+        "--",
+        "cat",
+        "/proc/self/cgroup",
+    ]);
+    assert!(groups.contains("compute"), "{groups}");
+}
+
+/// G-POL-1: a computer's commands are admitted against its environment's policy, not only the
+/// target's: a command the policy forbids is refused before it runs.
+#[test]
+fn a_computers_commands_are_admitted_against_its_environment_policy() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().to_path_buf();
+    let (_target, cli, _) = controller_with_target(&root);
+    let policy = root.join("policy.json");
+    std::fs::write(
+        &policy,
+        r#"{"version": 1, "name": "short-commands", "limits": {"max_timeout_ms": 60000}}"#,
+    )
+    .unwrap();
+    cli.ok(&[
+        "environment",
+        "create",
+        "myapp",
+        "--cpu",
+        "1",
+        "--memory",
+        "64Mi",
+        "--persistent",
+        "--environment-policy",
+        policy.to_str().unwrap(),
+    ]);
+    cli.computer_until("the computer", |view| view["status"] == "running");
+    // Within the policy: runs.
+    assert_eq!(
+        cli.ok(&[
+            "environment",
+            "exec",
+            "myapp",
+            "--timeout",
+            "30s",
+            "--",
+            "echo",
+            "inside"
+        ])
+        .trim(),
+        "inside"
+    );
+    // Beyond it: refused, and the command never ran.
+    let marker = root.join("ran-anyway");
+    let refused = cli.run(&[
+        "environment",
+        "exec",
+        "myapp",
+        "--timeout",
+        "120s",
+        "--",
+        "sh",
+        "-c",
+        &format!("touch {}", marker.display()),
+    ]);
+    assert!(
+        !refused.status.success(),
+        "a command beyond the environment policy ran"
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(said.contains("timeout"), "{said}");
+    assert!(!marker.exists());
 }

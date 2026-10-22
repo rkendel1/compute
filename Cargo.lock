@@ -690,10 +690,13 @@ version = "0.1.20"
 dependencies = [
  "assert_cmd",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "compute-core",
+ "compute-egress",
  "compute-environment",
+ "compute-guest",
  "compute-network",
  "compute-placement",
  "compute-policy",
@@ -717,6 +720,7 @@ dependencies = [
  "toml",
  "walkdir",
  "wat",
+ "which",
 ]
 
 [[package]]
@@ -726,6 +730,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "libc",
+ "ring",
  "serde",
  "serde_json",
  "sha2",
@@ -733,6 +738,20 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "walkdir",
+]
+
+[[package]]
+name = "compute-egress"
+version = "0.1.20"
+dependencies = [
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -768,6 +787,18 @@ dependencies = [
  "walkdir",
  "wat",
  "webpki-roots",
+]
+
+[[package]]
+name = "compute-guest"
+version = "0.1.20"
+dependencies = [
+ "base64 0.22.1",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -843,9 +874,11 @@ dependencies = [
  "async-trait",
  "chrono",
  "compute-core",
+ "compute-guest",
  "compute-policy",
  "compute-runtime",
  "libc",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

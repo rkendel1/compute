@@ -37,21 +37,26 @@
 //! compute.workspace@1
 //! dir <path>                 one line per *empty* directory, sorted
 //! file <x|-> <sha256> <path> one line per regular file, sorted
+//! link <n> <path> <target>   one line per symbolic link, sorted; n is the
+//!                            path's length in bytes
 //! ```
 //!
 //! Paths are relative, `/`-separated, sorted by bytes. `x` means the owner
-//! execute bit is set. **Not part of the identity:** any other permission bit,
+//! execute bit is set. A workspace without symbolic links has no `link`
+//! lines, so its digest is what it always was. Hard links are files: each
+//! name is a `file` line with the same content, and a capture restores them
+//! as separate files. **Not part of the identity:** any other permission bit,
 //! ownership, timestamps, extended attributes, non-empty directories (implied
-//! by their files). **Unsupported, refused rather than approximated:**
-//! symbolic links, hard-link entries, devices, sockets, pipes, and paths
-//! holding control characters or backslashes.
+//! by their files and links). **Unsupported, refused rather than
+//! approximated:** devices, sockets, pipes, and paths or link targets holding
+//! control characters or backslashes.
 //!
 //! # Transport bound
 //!
-//! An archive travels through job output (export) and job environments
-//! (seed), so it is bounded by [`WORKSPACE_ARCHIVE_LIMIT`]. Larger workspaces
-//! are refused with that reason, not truncated. Lifting the bound is the job
-//! of a streamed artifact capability, not of this one.
+//! An archive travels in chunks through job output (export) and job input
+//! (seed), so no one job carries more than a chunk; the whole is bounded by
+//! [`WORKSPACE_ARCHIVE_LIMIT`]. Larger workspaces are refused with that
+//! reason, not truncated.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -72,7 +77,11 @@ use crate::model::*;
 pub const WORKSPACE_IDENTITY: &str = "compute.workspace@1";
 
 /// The largest workspace archive the job transport carries, in bytes.
-pub const WORKSPACE_ARCHIVE_LIMIT: usize = 8 * 1024 * 1024;
+pub const WORKSPACE_ARCHIVE_LIMIT: usize = 256 * 1024 * 1024;
+
+/// The archive bytes one export job returns (base64 grows it by a third,
+/// well inside a session command's output bound).
+const EXPORT_CHUNK: usize = 6 * 1024 * 1024;
 
 /// Shell shared by every workspace script. `workspace` lists the workspace
 /// (see the module documentation); `workspace_digest` prints the text that is
@@ -83,7 +92,7 @@ workspace() {
   find . -mindepth 1 \( -path ./repos -o \( -path './.compute/*' ! -path ./.compute/sources ! -path './.compute/sources/*' \) \) -prune -o "$@" -print
 }
 workspace_check() {
-  bad="$(workspace ! -type f ! -type d | head -n 1)"
+  bad="$(workspace ! -type f ! -type d ! -type l | head -n 1)"
   if [ -n "$bad" ]; then echo "unsupported entry: $bad" >&2; return 3; fi
   bad="$(workspace \( -name '*[[:cntrl:]]*' -o -name '*\\*' \) | head -n 1)"
   if [ -n "$bad" ]; then echo "unsupported path: $bad" >&2; return 3; fi
@@ -95,29 +104,45 @@ workspace_digest() {
     x=-; if [ -n "$(find "$f" -maxdepth 0 -perm -u+x)" ]; then x=x; fi
     printf 'file %s %s %s\n' "$x" "$(sum "$f" | cut -d' ' -f1)" "${f#./}"
   done
+  workspace -type l | LC_ALL=C sort | while IFS= read -r l; do
+    p="${l#./}"
+    printf 'link %s %s %s\n' "$(printf '%s' "$p" | LC_ALL=C wc -c | tr -d ' ')" "$p" "$(readlink "$l")"
+  done
 }
 digest() { workspace_digest | sum | cut -d' ' -f1; }
 "#;
 
-/// Export. Argument: the archive limit. Prints the archive as one base64
-/// line, the archive's own digest, the workspace digest, and the platform
-/// (`uname -s`-`uname -m`) it was read on. The workspace
-/// digest is taken before *and after* the archive is made: a workspace that
-/// changed in between is refused, whatever `tar` noticed.
+/// Export. Arguments: the archive limit, an export ID. Writes the archive
+/// to `.compute/exports/<id>.tar` and prints its size, its own digest, the
+/// workspace digest, and the platform (`uname -s`-`uname -m`) it was read
+/// on; [`EXPORT_READ`] returns it in chunks. The workspace digest is taken
+/// before *and after* the archive is made: a workspace that changed in
+/// between is refused, whatever `tar` noticed.
 const EXPORT_TAIL: &str = r#"
 workspace_check
 before="$(digest)"
-tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
-COPYFILE_DISABLE=1 tar -cf "$tmp" --exclude=./repos --exclude=./.compute/processes --exclude=./.compute/imports .
-size="$(wc -c <"$tmp" | tr -d ' ')"
+mkdir -p .compute/exports
+out=".compute/exports/$2.tar"
+trap 'if [ "$?" != 0 ]; then rm -f "$out"; fi' EXIT
+COPYFILE_DISABLE=1 tar -cf "$out" --exclude=./repos --exclude=./.compute/processes --exclude=./.compute/imports --exclude=./.compute/exports .
+size="$(wc -c <"$out" | tr -d ' ')"
 if [ "$size" -gt "$1" ]; then echo "the workspace archive is $size bytes; the transport carries $1" >&2; exit 5; fi
 after="$(digest)"
 if [ "$before" != "$after" ]; then echo "the workspace changed while it was captured" >&2; exit 4; fi
-base64 <"$tmp" | tr -d '\n'; echo
-sum <"$tmp" | cut -d' ' -f1
+echo "$size"
+sum <"$out" | cut -d' ' -f1
 echo "$before"
 echo "$(uname -s)-$(uname -m)"
 "#;
+
+/// One chunk of an export as a base64 line. Arguments: export ID, chunk
+/// size, chunk index.
+const EXPORT_READ: &str = r#"set -eu
+dd if=".compute/exports/$1.tar" bs="$2" skip="$3" count=1 2>/dev/null | base64 | tr -d '\n'; echo
+"#;
+
+/// Remove an export. Argument: export ID.
+const EXPORT_DONE: &str = r#"rm -f ".compute/exports/$1.tar""#;
 
 /// Verify: print the workspace digest.
 const DIGEST_TAIL: &str = r#"
@@ -175,12 +200,14 @@ pub(crate) struct ArchivedFile {
 }
 
 /// A validated workspace archive, read without extracting it: the files at
-/// safe relative paths, and the directories the identity records (the empty
-/// ones). The single implementation of the portable workspace rules; the
+/// safe relative paths, the symbolic links, and the directories the
+/// identity records (the empty ones). The single implementation of the portable workspace rules; the
 /// checkpoint artifact is built from it, never from the raw archive.
 #[derive(Debug, Clone)]
 pub(crate) struct ArchivedWorkspace {
     pub files: BTreeMap<String, ArchivedFile>,
+    /// Symbolic links: path to target, as written.
+    pub links: BTreeMap<String, String>,
     pub empty_directories: Vec<String>,
 }
 
@@ -197,6 +224,9 @@ impl ArchivedWorkspace {
                 if file.executable { 'x' } else { '-' },
                 file.sha256
             ));
+        }
+        for (name, target) in &self.links {
+            text.push_str(&format!("link {} {name} {target}\n", name.len()));
         }
         text
     }
@@ -219,13 +249,15 @@ pub(crate) fn identify(archive: &[u8]) -> Result<WorkspaceIdentity, EnvironmentE
 }
 
 /// Read and validate a workspace archive; see [`ArchivedWorkspace`]. Refuses
-/// anything that is not a regular file or a directory (links of either kind,
-/// devices, pipes), unsafe, absolute, or escaping paths, control characters,
-/// controller or re-derived state, a path given twice, and a path that is both a
-/// file and a directory.
+/// anything that is not a regular file, a directory, or a link (devices,
+/// pipes), unsafe, absolute, or escaping paths, control characters,
+/// controller or re-derived state, a path given twice, a path that is both a
+/// file (or link) and a directory, and a hard link to anything but a file
+/// read before it. A hard link is read as a copy of its file.
 pub(crate) fn read_workspace(archive: &[u8]) -> Result<ArchivedWorkspace, EnvironmentError> {
     let bad = |what: String| EnvironmentError::Invalid(format!("the workspace archive {what}"));
     let mut files = BTreeMap::<String, ArchivedFile>::new();
+    let mut links = BTreeMap::<String, String>::new();
     let mut directories = BTreeSet::<String>::new();
     let mut tar = tar::Archive::new(archive);
     for entry in tar
@@ -234,28 +266,16 @@ pub(crate) fn read_workspace(archive: &[u8]) -> Result<ArchivedWorkspace, Enviro
     {
         let mut entry = entry.map_err(|error| bad(format!("is unreadable: {error}")))?;
         let kind = entry.header().entry_type();
-        if !(kind.is_file() || kind.is_dir()) {
+        if !(kind.is_file() || kind.is_dir() || kind.is_symlink() || kind.is_hard_link()) {
             return Err(bad(format!(
-                "holds something other than files and directories ({kind:?})"
+                "holds something other than files, directories, and links ({kind:?})"
             )));
         }
         let path = entry
             .path()
             .map_err(|error| bad(format!("has an unreadable path: {error}")))?
             .into_owned();
-        let mut parts = vec![];
-        for component in path.components() {
-            match component {
-                Component::CurDir if parts.is_empty() => {}
-                Component::Normal(part) => match part.to_str() {
-                    Some(part) if !part.contains(|c: char| c.is_control() || c == '\\') => {
-                        parts.push(part.to_owned())
-                    }
-                    _ => return Err(bad(format!("has an unsupported path: {}", path.display()))),
-                },
-                _ => return Err(bad(format!("has an unsafe path: {}", path.display()))),
-            }
-        }
+        let parts = portable_parts(&path).map_err(bad)?;
         let allowed = match parts.first().map(String::as_str) {
             Some("repos") => false,
             Some(".compute") => {
@@ -276,6 +296,47 @@ pub(crate) fn read_workspace(archive: &[u8]) -> Result<ArchivedWorkspace, Enviro
             }
             continue;
         }
+        if parts.is_empty() || name == ".compute" {
+            return Err(bad(format!(
+                "holds {} as something other than a directory",
+                path.display()
+            )));
+        }
+        if kind.is_symlink() || kind.is_hard_link() {
+            let target = entry
+                .link_name()
+                .map_err(|error| bad(format!("has an unreadable link: {error}")))?
+                .ok_or_else(|| bad(format!("has a link without a target: {name}")))?
+                .into_owned();
+            let target = target
+                .to_str()
+                // A link target fits a plain tar header, as a checkpoint
+                // must hold it.
+                .filter(|target| {
+                    !target.is_empty()
+                        && target.len() < 100
+                        && !target.contains(|c: char| c.is_control() || c == '\\')
+                })
+                .ok_or_else(|| bad(format!("has an unsupported link target at {name}")))?
+                .to_owned();
+            if kind.is_hard_link() {
+                // A second name for a file already read: a copy of it.
+                let original = portable_parts(std::path::Path::new(&target))
+                    .map_err(bad)?
+                    .join("/");
+                let file = files.get(&original).cloned().ok_or_else(|| {
+                    bad(format!(
+                        "links {name} to {target}, which it does not hold as a file"
+                    ))
+                })?;
+                if files.insert(name.clone(), file).is_some() || links.contains_key(&name) {
+                    return Err(bad(format!("holds {name} twice")));
+                }
+            } else if links.insert(name.clone(), target).is_some() || files.contains_key(&name) {
+                return Err(bad(format!("holds {name} twice")));
+            }
+            continue;
+        }
         let executable = entry.header().mode().unwrap_or(0) & 0o100 != 0;
         let mut data = Vec::new();
         entry
@@ -289,7 +350,7 @@ pub(crate) fn read_workspace(archive: &[u8]) -> Result<ArchivedWorkspace, Enviro
             sha256,
             data,
         };
-        if files.insert(name.clone(), file).is_some() {
+        if files.insert(name.clone(), file).is_some() || links.contains_key(&name) {
             return Err(bad(format!("holds {name} twice")));
         }
     }
@@ -298,12 +359,14 @@ pub(crate) fn read_workspace(archive: &[u8]) -> Result<ArchivedWorkspace, Enviro
     let mut parents = BTreeSet::<&str>::new();
     for name in files
         .keys()
+        .chain(links.keys())
         .map(String::as_str)
         .chain(directories.iter().map(String::as_str))
     {
         let mut rest = name;
         while let Some((parent, _)) = rest.rsplit_once('/') {
-            if files.contains_key(parent) {
+            // Nothing is read through a link: a path under one is refused.
+            if files.contains_key(parent) || links.contains_key(parent) {
                 return Err(bad(format!(
                     "holds {parent} as both a file and a directory"
                 )));
@@ -312,7 +375,10 @@ pub(crate) fn read_workspace(archive: &[u8]) -> Result<ArchivedWorkspace, Enviro
             rest = parent;
         }
     }
-    if let Some(name) = directories.iter().find(|name| files.contains_key(*name)) {
+    if let Some(name) = directories
+        .iter()
+        .find(|name| files.contains_key(*name) || links.contains_key(*name))
+    {
         return Err(bad(format!("holds {name} as both a file and a directory")));
     }
     let empty_directories = directories
@@ -322,8 +388,28 @@ pub(crate) fn read_workspace(archive: &[u8]) -> Result<ArchivedWorkspace, Enviro
         .collect::<Vec<_>>();
     Ok(ArchivedWorkspace {
         files,
+        links,
         empty_directories,
     })
+}
+
+/// A relative path's parts, by the workspace rules: no absolute, parent, or
+/// unsafe components, no control characters or backslashes.
+fn portable_parts(path: &std::path::Path) -> Result<Vec<String>, String> {
+    let mut parts = vec![];
+    for component in path.components() {
+        match component {
+            Component::CurDir if parts.is_empty() => {}
+            Component::Normal(part) => match part.to_str() {
+                Some(part) if !part.contains(|c: char| c.is_control() || c == '\\') => {
+                    parts.push(part.to_owned())
+                }
+                _ => return Err(format!("has an unsupported path: {}", path.display())),
+            },
+            _ => return Err(format!("has an unsafe path: {}", path.display())),
+        }
+    }
+    Ok(parts)
 }
 
 impl Daemon {
@@ -338,13 +424,14 @@ impl Daemon {
     ) -> Result<WorkspaceExport, EnvironmentError> {
         let record = self.owned_environment(environment, operator).await?;
         let (_, client, session_id) = self.running(&record).await?;
+        let export = crate::auth::hex(&crate::auth::random::<8>()?);
         let (evidence, output) = self
             .run_in_computer_command(
                 &client,
                 &session_id,
                 script(
                     &workspace_script(EXPORT_TAIL),
-                    [WORKSPACE_ARCHIVE_LIMIT.to_string()],
+                    [WORKSPACE_ARCHIVE_LIMIT.to_string(), export.clone()],
                 ),
                 Duration::from_secs(300),
             )
@@ -359,7 +446,7 @@ impl Daemon {
             return Err(failed(evidence.error.clone().unwrap_or_default()));
         }
         let mut lines = output.lines();
-        let (Some(encoded), Some(archive_digest), Some(observed), Some(platform), None) = (
+        let (Some(size), Some(archive_digest), Some(observed), Some(platform), None) = (
             lines.next(),
             lines.next(),
             lines.next(),
@@ -368,9 +455,22 @@ impl Daemon {
         ) else {
             return Err(failed("the output was cut short".into()));
         };
-        let archive = base64::engine::general_purpose::STANDARD
-            .decode(encoded.trim())
-            .map_err(|error| failed(format!("the archive did not decode: {error}")))?;
+        let size = size
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|size| *size <= WORKSPACE_ARCHIVE_LIMIT)
+            .ok_or_else(|| failed(format!("the archive size {size:?} is not one it carries")))?;
+        let read = self.read_export(&client, &session_id, &export, size).await;
+        let _ = self
+            .run_in_computer_command(
+                &client,
+                &session_id,
+                script(EXPORT_DONE, [export]),
+                Duration::from_secs(60),
+            )
+            .await;
+        let archive = read.map_err(failed)?;
         if compute_core::sha256_identity(&archive) != format!("sha256:{}", archive_digest.trim()) {
             return Err(failed("the archive does not match its digest".into()));
         }
@@ -403,6 +503,52 @@ impl Daemon {
         )
         .await?;
         Ok(export)
+    }
+
+    /// An export's archive, read back in chunks of [`EXPORT_CHUNK`].
+    async fn read_export(
+        &self,
+        client: &compute_provider::RemoteProvider,
+        session_id: &str,
+        export: &str,
+        size: usize,
+    ) -> Result<Vec<u8>, String> {
+        let mut archive = Vec::with_capacity(size);
+        for index in 0..size.div_ceil(EXPORT_CHUNK) {
+            let (evidence, output) = self
+                .run_in_computer_command(
+                    client,
+                    session_id,
+                    script(
+                        EXPORT_READ,
+                        [
+                            export.to_owned(),
+                            EXPORT_CHUNK.to_string(),
+                            index.to_string(),
+                        ],
+                    ),
+                    Duration::from_secs(300),
+                )
+                .await;
+            if evidence.outcome != "succeeded" {
+                return Err(format!(
+                    "reading chunk {index} failed (job {}): {}",
+                    evidence.job_id,
+                    evidence.error.unwrap_or_default()
+                ));
+            }
+            let chunk = base64::engine::general_purpose::STANDARD
+                .decode(output.trim())
+                .map_err(|error| format!("chunk {index} did not decode: {error}"))?;
+            archive.extend_from_slice(&chunk);
+        }
+        if archive.len() != size {
+            return Err(format!(
+                "the archive read back is {} bytes, not {size}",
+                archive.len()
+            ));
+        }
+        Ok(archive)
     }
 
     /// Place a workspace archive into an environment's running computer,

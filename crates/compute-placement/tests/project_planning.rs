@@ -85,6 +85,7 @@ impl Project {
             isolation: compute_core::IsolationRequirement {
                 profile: compute_core::IsolationProfile::Process,
                 host: Default::default(),
+                writable: vec![],
             },
             dependencies: self
                 .capsule

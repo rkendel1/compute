@@ -863,6 +863,7 @@ impl Compute {
             resources,
             isolation,
             host_isolation: compute_core::HostProfile::Trusted,
+            host_writable: vec![],
             dependencies: None,
         })
     }

@@ -33,6 +33,7 @@ mod jobs;
 pub mod processes;
 mod runtime;
 mod sessions;
+mod vm;
 pub use containers::{CONTAINER_WORKSPACE, ContainerSessionProvider};
 pub use credentials::{
     INSECURE_AUTHENTICATION, InsecureUnauthenticated, NoCredentialsConfigured, TargetAuthorizer,
@@ -46,6 +47,7 @@ pub use sessions::{
     SessionProvider, WorkspaceSessionProvider, command_in_directory, environment_bundle,
     shell_request, unsupported,
 };
+pub use vm::{VM_WORKSPACE, VmImage, VmSessionProvider};
 #[doc(hidden)]
 pub mod testing;
 pub use jobs::JobEvent;

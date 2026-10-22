@@ -115,6 +115,7 @@ async function daemon(): Promise<{ endpoint: string; seen: Seen[]; close: () => 
     if (route === "POST /environments/my-app/repositories") return reply(200, view);
     if (route === "POST /environments/my-app/projects") return reply(200, view);
     if (route === "GET /environments/my-app/projects/app") return reply(200, { project_id: "prj_1", name: "app", environment: "my-app" });
+    if (route === "POST /environments/my-app/sources") return reply(200, { project_id: "prj_2", name: (entry.body as { repository: string }).repository, environment: "my-app" });
     if (route === "GET /environments/other/computer") return reply(403, { kind: "authorization_denied", message: "environment other belongs to another principal" });
     return reply(404, { kind: "not_found", message: route });
   });
@@ -238,6 +239,19 @@ test("a Git repository is loaded as a project into a computer", async () => {
       { path: "/environments/my-app/repositories", body: { name: "app", url: "https://example.invalid/app.git", revision: "HEAD" } },
       { path: "/environments/my-app/projects", body: { name: "app", repository: "app", test: ["npm", "test"] } },
     ]);
+  } finally {
+    stub.close();
+  }
+});
+
+test("an immutable Git source is loaded into a computer as it is", async () => {
+  const stub = await daemon();
+  try {
+    const client = new ComputeDaemonClient({ endpoint: stub.endpoint, token: "secret" });
+    const source = { source: "git" as const, url: "https://github.com/o/app.git", owner: "o", repository: "app", ref: "main", commit: "a".repeat(40) };
+    const loaded = await client.loadSource({ environment: "my-app", source });
+    assert.equal(loaded.name, "app");
+    assert.deepEqual(stub.seen.at(-1), { method: "POST", path: "/environments/my-app/sources", authorization: "Bearer secret", body: source });
   } finally {
     stub.close();
   }

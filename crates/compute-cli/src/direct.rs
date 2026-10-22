@@ -332,6 +332,7 @@ pub fn resolve(options: DirectOptions) -> compute_core::Result<ResolvedDirect> {
         isolation: IsolationRequirement {
             profile: isolation,
             host: Default::default(),
+            writable: vec![],
         },
         dependencies,
     };

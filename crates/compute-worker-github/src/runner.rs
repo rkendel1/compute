@@ -473,6 +473,7 @@ fn request(spec: &RunnerSpec, name: &str, script: PathBuf, token: &Secret) -> Ex
         },
         isolation: IsolationProfile::Process,
         host_isolation: Default::default(),
+        host_writable: vec![],
         dependencies: None,
     }
 }

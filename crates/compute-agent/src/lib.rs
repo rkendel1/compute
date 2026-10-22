@@ -211,6 +211,11 @@ pub struct Outcome {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    /// When stdout was cut at the command's output bound: how many bytes
+    /// it produced in all.
+    pub stdout_truncated: Option<u64>,
+    /// The same for stderr.
+    pub stderr_truncated: Option<u64>,
     pub job_id: String,
 }
 
@@ -475,14 +480,12 @@ impl AgentSession {
             .await
             .map_err(|e| fail("compute could not return the result", &e.message))?
             .result;
-        // Output Compute truncated is not the agent's answer: refuse it.
-        if result.stdout.truncated {
-            return Err(ComputeError(
-                "the command's output exceeded what compute captures".into(),
-            ));
-        }
+        // Output past the bound is dropped, and the outcome says so: the
+        // command still ran, and its exit code is still the truth.
         Ok(Outcome {
             exit_code: result.exit_code,
+            stdout_truncated: result.stdout.truncated.then_some(result.stdout.bytes),
+            stderr_truncated: result.stderr.truncated.then_some(result.stderr.bytes),
             stdout: result.stdout.text,
             stderr: result.stderr.text,
             job_id,

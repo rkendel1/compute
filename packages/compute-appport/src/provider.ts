@@ -47,6 +47,7 @@ import {
   environmentViewSchema,
   projectAddInputSchema,
   projectLoadInputSchema,
+  sourceLoadInputSchema,
   projectRemoveInputSchema,
   projectRemoveResultSchema,
   projectViewSchema,
@@ -897,6 +898,15 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
     attributes: { ...environmentAttributes, "compute.executes": true },
     handler: (input) => api(() => environments.loadProject(input)),
   });
+  const sourceLoad = defineCapability({
+    name: "compute.environment.source.load", version: 1,
+    description: "Load an immutable Git source (as a GitHub selection produces it) into an environment with a computer: its repository at that exact commit, and the project in it.",
+    input: sourceLoadInputSchema, output: projectViewSchema, effect: "consequential",
+    authorization: ["compute.environment.project.add"],
+    authorizationContract: { required: true, scopes: ["compute.environment.project.add"] },
+    attributes: { ...environmentAttributes, "compute.executes": true },
+    handler: (input) => api(() => environments.loadSource(input)),
+  });
   const projectRemove = defineCapability({
     name: "compute.environment.project.remove", version: 1,
     description: "Stop and remove one project. Sibling projects keep running.",
@@ -1129,7 +1139,7 @@ export function createComputeApplication(options: LocalComputeProviderOptions = 
       policyInspect, policyCheck, policyExplain, admission,
       submit, status, cancel, result, jobReceipt,
       environmentList, environmentInspect, environmentStatus, environmentCreate,
-      environmentStart, environmentStop, environmentRestart, projectAdd, projectLoad, projectRemove,
+      environmentStart, environmentStop, environmentRestart, projectAdd, projectLoad, sourceLoad, projectRemove,
       projectList, projectInspect, projectStart, projectStop, projectRestart,
       deploymentInspect, deploymentCreate, deploymentPromote, deploymentRollback,
       domainList, domainInspect, domainCreate, domainRemove,

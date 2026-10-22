@@ -33,6 +33,111 @@ struct StoredRequest {
     /// policy changes later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     admission: Option<Admission>,
+    /// The session substrate the receipt records (see [`ReservedJob`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    substrate: Option<compute_core::SubstrateEvidence>,
+    /// The request's bundle bytes, sealed at rest (see [`RequestSeal`]): the
+    /// bundle carries the command and its environment, which may hold a
+    /// computer's configuration values. On disk the request's own bundle is
+    /// then empty; reading the request restores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sealed_artifact: Option<String>,
+}
+
+/// The key a job store seals its requests' bundles with: AES-256-GCM, a key
+/// of this store's own (`.request-key`, mode 0600, made on first use), a
+/// random nonce per write, and the job id as associated data, so a sealed
+/// bundle cannot be moved onto another job. Anyone who can read the key can
+/// read the requests: this keeps configuration values out of what the store
+/// writes in the clear (copies, backups, logs of the directory), not from the
+/// target's own operator.
+struct RequestSeal {
+    key: ring::aead::LessSafeKey,
+}
+
+impl RequestSeal {
+    const FILE: &'static str = ".request-key";
+
+    fn open_or_create(root: &Path) -> Result<Self, ProviderError> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = root.join(Self::FILE);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut key = [0u8; 32];
+                ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut key)
+                    .map_err(|_| transport_error("no randomness for the request key"))?;
+                match fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)
+                {
+                    Ok(mut file) => {
+                        file.write_all(&key).map_err(transport_error)?;
+                        file.sync_all().map_err(transport_error)?;
+                        key.to_vec()
+                    }
+                    // Another manager made it first: use theirs.
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        fs::read(&path).map_err(transport_error)?
+                    }
+                    Err(error) => return Err(transport_error(error)),
+                }
+            }
+            Err(error) => return Err(transport_error(error)),
+        };
+        let key = ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, &bytes)
+            .map_err(|_| evidence_error("the job store's request key is not a 256-bit key"))?;
+        Ok(Self {
+            key: ring::aead::LessSafeKey::new(key),
+        })
+    }
+
+    fn seal(&self, job_id: &JobId, data: &[u8]) -> Result<String, ProviderError> {
+        let mut nonce = [0u8; ring::aead::NONCE_LEN];
+        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut nonce)
+            .map_err(|_| transport_error("no randomness for a request nonce"))?;
+        let mut sealed = data.to_vec();
+        self.key
+            .seal_in_place_append_tag(
+                ring::aead::Nonce::assume_unique_for_key(nonce),
+                ring::aead::Aad::from(job_id.0.as_bytes()),
+                &mut sealed,
+            )
+            .map_err(|_| transport_error("could not seal the request"))?;
+        let mut out = String::with_capacity((nonce.len() + sealed.len()) * 2);
+        for byte in nonce.iter().chain(&sealed) {
+            out.push_str(&format!("{byte:02x}"));
+        }
+        Ok(out)
+    }
+
+    fn open(&self, job_id: &JobId, sealed: &str) -> Result<Vec<u8>, ProviderError> {
+        let invalid = || evidence_error("the sealed request does not open with this store's key");
+        if !sealed.len().is_multiple_of(2) {
+            return Err(invalid());
+        }
+        let mut bytes = (0..sealed.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&sealed[i..i + 2], 16))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| invalid())?;
+        if bytes.len() < ring::aead::NONCE_LEN {
+            return Err(invalid());
+        }
+        let mut ciphertext = bytes.split_off(ring::aead::NONCE_LEN);
+        let nonce = ring::aead::Nonce::try_assume_unique_for_key(&bytes).map_err(|_| invalid())?;
+        let plain = self
+            .key
+            .open_in_place(
+                nonce,
+                ring::aead::Aad::from(job_id.0.as_bytes()),
+                &mut ciphertext,
+            )
+            .map_err(|_| invalid())?;
+        Ok(plain.to_vec())
+    }
 }
 
 /// What `JobManager::accept` receives.
@@ -50,6 +155,9 @@ pub(crate) struct ReservedJob {
     pub job_id: JobId,
     pub execution_id: String,
     pub session_id: Option<compute_core::SessionId>,
+    /// What the session's environment is, as its provider reports it. Only
+    /// a session sets it: a job submitted directly cannot claim one.
+    pub substrate: Option<compute_core::SubstrateEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +178,9 @@ pub struct JobEvent {
 
 pub struct JobManager {
     root: PathBuf,
+    seal: RequestSeal,
+    /// Signs every receipt this target produces.
+    signer: compute_core::ReceiptSigner,
     retention: Duration,
     provider: Arc<dyn ComputeProvider>,
     capacity: ProviderCapacity,
@@ -86,8 +197,19 @@ impl JobManager {
         provider: Arc<dyn ComputeProvider>,
     ) -> Result<Arc<Self>, ProviderError> {
         fs::create_dir_all(&root).map_err(transport_error)?;
+        let seal = RequestSeal::open_or_create(&root)?;
+        let signer = compute_core::ReceiptSigner::open_or_create(&root.join(".receipt-key"))
+            .map_err(evidence_error)?;
+        // What a reader pins: public, so written where it can be read.
+        fs::write(
+            root.join("receipt-key.id"),
+            format!("{}\n", signer.key_id()),
+        )
+        .map_err(transport_error)?;
         let manager = Arc::new(Self {
             root,
+            seal,
+            signer,
             retention,
             provider,
             capacity,
@@ -317,13 +439,14 @@ impl JobManager {
                 status: job.status,
             });
         }
-        let (job_id, execution_id, session_id) = match reserved {
+        let (job_id, execution_id, session_id, substrate) = match reserved {
             Some(reserved) => (
                 reserved.job_id,
                 Some(reserved.execution_id),
                 reserved.session_id,
+                reserved.substrate,
             ),
-            None => (JobId::generate(), None, None),
+            None => (JobId::generate(), None, None, None),
         };
         let directory = self.directory(&job_id);
         let dependency_id = bundle
@@ -398,13 +521,16 @@ impl JobManager {
             .prefix(".compute-job-")
             .tempdir_in(&self.root)
             .map_err(transport_error)?;
-        self.write_json(
+        self.write_request(
+            &job_id,
             &staging.path().join("request.json"),
             &StoredRequest {
                 owner,
                 idempotency_key_hash: key_hash,
                 request,
                 admission: None,
+                substrate,
+                sealed_artifact: None,
             },
         )?;
         self.write_json(&staging.path().join("status.json"), &job)?;
@@ -574,6 +700,7 @@ impl JobManager {
             let _ = self.release(&job_id).await;
             return;
         }
+        let substrate = stored.substrate.clone();
         let execution_request = stored.request;
         let reservation_evidence = self.read_job(&job_id).ok().and_then(|job| {
             let reservation = job.reservation?;
@@ -604,6 +731,7 @@ impl JobManager {
             Ok(mut response) => {
                 if let Some(receipt) = response.result.receipt.as_mut() {
                     receipt.reservation = Some(reservation_evidence.clone());
+                    receipt.substrate = substrate;
                     if let Some(placement) = receipt.placement.as_mut() {
                         placement.reservation = Some(reservation_evidence);
                     }
@@ -613,6 +741,7 @@ impl JobManager {
                             .await;
                         return;
                     }
+                    self.signer.sign(receipt);
                 }
                 let status = terminal_status(&response.result);
                 if let Err(error) = self.persist_result(&job_id, status, response.result).await {
@@ -758,7 +887,7 @@ impl JobManager {
             ));
         }
         stored.admission = Some(admission.clone());
-        self.write_json(&self.directory(job_id).join("request.json"), stored)?;
+        self.write_request(job_id, &self.directory(job_id).join("request.json"), stored)?;
         job.admission = Some(admission.summary());
         if admission.decision.admitted {
             job.status = JobStatus::Admitted;
@@ -1310,7 +1439,30 @@ impl JobManager {
         self.write_json(&self.directory(&job.job_id).join("status.json"), job)
     }
     fn read_request(&self, job_id: &JobId) -> Result<StoredRequest, ProviderError> {
-        self.read_json(&self.directory(job_id).join("request.json"))
+        let mut stored: StoredRequest =
+            self.read_json(&self.directory(job_id).join("request.json"))?;
+        if let Some(sealed) = stored.sealed_artifact.take() {
+            let data = self.seal.open(job_id, &sealed)?;
+            stored.request.artifact = crate::ArtifactTransport::Bundle { data };
+        }
+        Ok(stored)
+    }
+
+    /// Write a request with its bundle sealed (see [`RequestSeal`]).
+    fn write_request(
+        &self,
+        job_id: &JobId,
+        path: &Path,
+        stored: &StoredRequest,
+    ) -> Result<(), ProviderError> {
+        let mut on_disk = stored.clone();
+        if let crate::ArtifactTransport::Bundle { data } = &mut on_disk.request.artifact
+            && !data.is_empty()
+        {
+            on_disk.sealed_artifact = Some(self.seal.seal(job_id, data)?);
+            data.clear();
+        }
+        self.write_json(path, &on_disk)
     }
     fn read_events(&self, job_id: &JobId) -> Result<Vec<JobEvent>, ProviderError> {
         let path = self.directory(job_id).join("events.json");

@@ -44,6 +44,15 @@ class ComputeConfigured < Formula
       "#{bin}/compute-configured-verify" >/dev/null || exit
       status=$("#{formula_opt_libexec("compute")}/runtimes/node/bin/node" -p "require('#{libexec}/stack.json').distribution.certification_status") || exit
       printf '%s\n' "Configured Compute is $status and active through COMPUTE_STACKS."
+      # AppPort Services needs an AuthBoundry authorizer module for management; Compute cannot
+      # supply one. Say where it goes, and what the service does until it is there.
+      authority="${APPPORT_AUTHORITY:-${COMPUTE_HOME:-$HOME/.compute}/configured/appport-authority.mjs}"
+      if [ -f "$authority" ]; then
+        printf '%s\n' "AppPort Services management uses the authority module at $authority."
+      else
+        printf '%s\n' "AppPort Services serves discovery only: management answers 503 until an AuthBoundry" \
+          "authorizer module ({ authorizer, identify, credentials }) is at $authority (or APPPORT_AUTHORITY names one)."
+      fi
     SH
     # The Cloudflare execution provider the profile declares as optional. Base
     # Compute carries the provider; this only writes a credential-free pool file
@@ -111,6 +120,18 @@ class ComputeConfigured < Formula
           exit 2 ;;
       esac
     SH
+  end
+
+  def caveats
+    <<~EOS
+      compute-configured installs third-party packages under their own licenses
+      (THIRD_PARTY.md in the Compute repository). @authboundry/core and its platform
+      packages are proprietary (UNLICENSED) and run a closed native binary; they are
+      installed because @appport/services depends on them.
+
+      AppPort Services serves discovery only until an AuthBoundry authorizer module is at
+      ${COMPUTE_HOME:-~/.compute}/configured/appport-authority.mjs (or APPPORT_AUTHORITY names one).
+    EOS
   end
 
   test do

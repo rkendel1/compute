@@ -29,7 +29,7 @@ runtime state, and FeltDB stays the only durable runtime store
 | `compute stack diff [FROM] [TO]` | Shows what changed between two revisions: commits, lockfiles, toolchains, contract paths, packages, relationships, findings. Lists the affected sources and the suites to run. `head` resolves the manifest again. | nothing |
 | `compute stack update --candidate [--source NAME=REF] [--package PKG=VER]` | Resolves a candidate into `candidates/<digest>.lock`. | a candidate file only |
 | `compute stack test [REV] [--suite S] [--impacted-from REV] [--record]` | Clones every source at its locked commit from its declared repository and checks the tree and lockfiles against the lock. Then runs the suites in `compatibility/stack/`. | `--record` writes `evidence/<digest>.json` |
-| `compute stack promote REV --approve --approved-by NAME` | Makes a candidate the known-good lock (details below). | `stack.lock`, `history/` |
+| `compute stack promote REV --approve --approved-by NAME [--sign-key KEY]` | Makes a candidate the known-good lock (details below); signed when the stack names its approvers. | `stack.lock`, `history/` |
 | `compute stack reproduce [REV] [--into DIR]` | Restores every input of a revision from its declared sources and the registry, and verifies each one: commits, trees, lockfile digests, and package integrity recomputed from `npm pack`. | a work directory |
 | `compute stack inventory [REV] [--package P] [--consumer C] [--status S]` | Lists every use of every provided package at the revision's locked commits, and the findings. | nothing |
 | `compute stack consumers PKG [--target VERSION\|COMMIT]` | Lists who uses a package. With `--target`, lists what each consumer would have to change to move there. | nothing |
@@ -186,6 +186,19 @@ It then asks for `--approve --approved-by NAME`. It keeps the previous lock in
 `history/`, writes the new one with an approval record (who, when, and the
 evidence digest), and replaces `stack.lock`. Nothing else ever writes
 `stack.lock`.
+
+**Signed approvals.** A stack that names its approvers in `allowed_signers`
+beside its manifest (OpenSSH's allowed-signers format, with
+`namespaces="compute-stack-approval"`) needs `--sign-key KEY` as well: the
+approval is signed with that SSH key (`<revision>.approval.json.sig`) and
+verified against `allowed_signers` under the `--approved-by` identity before
+the lock is promoted. A signature that does not verify promotes nothing.
+Check one later with:
+
+```sh
+ssh-keygen -Y verify -f stacks/NAME/allowed_signers -I NAME -n compute-stack-approval \
+  -s history/REV.approval.json.sig < history/REV.approval.json
+```
 
 ## CI
 

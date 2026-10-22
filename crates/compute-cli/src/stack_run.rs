@@ -170,6 +170,7 @@ fn probe_spec(
         isolation: IsolationRequirement {
             profile: IsolationProfile::Process,
             host: Default::default(),
+            writable: vec![],
         },
         dependencies: None,
     };

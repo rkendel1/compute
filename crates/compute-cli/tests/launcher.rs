@@ -220,6 +220,29 @@ async fn the_launcher_makes_a_host_that_trusts_only_its_control_plane() {
     assert_eq!(info["control_plane"]["durability"], "local-development");
     assert_eq!(info["control_plane"]["state"]["kind"], "file");
 
+    // The control plane's own API is not open to everything on the machine:
+    // an anonymous caller is refused, and local clients present the token
+    // kept in a private file (the CLI above found it on its own).
+    assert_eq!(launched.http("/environments").0, 401);
+    let daemon_token = launched.home.join("daemon.token");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&daemon_token)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "the daemon token is private");
+    }
+    let daemon_token = std::fs::read_to_string(&daemon_token).unwrap();
+    let authorized = std::process::Command::new("curl")
+        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "-H"])
+        .arg(format!("Authorization: Bearer {}", daemon_token.trim()))
+        .arg(launched.url("/environments"))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&authorized.stdout), "200");
+
     // Launching again keeps the identity and the credential.
     let again = launched.command(&["up"]).output().unwrap();
     assert!(again.status.success(), "{again:?}");

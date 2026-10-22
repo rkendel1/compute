@@ -87,5 +87,5 @@ not involved.
 
 Restore into an existing environment (compose checkpoint and [replace](replace.md)),
 restore of a machine or process, lifecycle, terminals, endpoints, retention or
-deletion, streaming (the 8 MiB workspace bound applies), and a separate way to
+deletion, workspaces over the 256 MiB bound, and a separate way to
 supply declarations.

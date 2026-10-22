@@ -207,6 +207,16 @@ fn every_execution_site_is_classified() {
                 why: "the container session substrate of a target (docker/podman), inside a Computer",
             },
             Allowed {
+                file: "crates/compute-provider/src/vm.rs",
+                count: 2,
+                why: "the microVM session substrate of a target (Firecracker, and its --version for receipt evidence), inside a Computer",
+            },
+            Allowed {
+                file: "crates/compute-guest/src/lib.rs",
+                count: 1,
+                why: "the microVM guest agent: inside the VM it is PID 1 of, it runs the command of a session job the target already admitted and records",
+            },
+            Allowed {
                 file: "crates/compute-provider/src/runtime.rs",
                 count: 3,
                 why: "runtime acquisition and verification (curl, archive tools, the runtime's own --version)",
@@ -248,13 +258,13 @@ fn every_execution_site_is_classified() {
             },
             Allowed {
                 file: "crates/compute-cli/src/managed.rs",
-                count: 1,
-                why: "`compute up`/`compute down` for a configured installation: the managed services the distribution profile declares (its own installed executables, e.g. `appport-services serve`)",
+                count: 3,
+                why: "`compute up`/`compute down` for a configured installation: the managed services the distribution profile declares (its own installed executables, e.g. `appport-services serve`), started directly or on the bundled Node it declares as its interpreter",
             },
             Allowed {
                 file: "crates/compute-cli/src/stack_cmd.rs",
-                count: 8,
-                why: "`compute stack` tooling: git and npm to inspect sources and the registry, tool versions for the host record, and the stack's own recorded test suites (bash); operator tooling, never a workload",
+                count: 10,
+                why: "`compute stack` tooling: git and npm to inspect sources and the registry, tool versions for the host record, the stack's own recorded test suites (bash), and ssh-keygen to sign and verify approvals (plus its unit test, which makes a key); operator tooling, never a workload",
             },
             Allowed {
                 file: "crates/compute-cli/src/session_cmd.rs",

@@ -138,13 +138,21 @@ pub fn verify(
     path: &Path,
     distribution: Option<&Path>,
     artifacts: Option<&Path>,
+    signed_by: Option<&str>,
     json: bool,
 ) -> Result<()> {
     let bytes = std::fs::read(path)?;
     let receipt: ExecutionReceipt = serde_json::from_slice(&bytes).map_err(|error| {
         ComputeError::InvalidReceipt(format!("invalid canonical encoding: {error}"))
     })?;
-    receipt.verify()?;
+    match signed_by {
+        Some(key_id) => receipt.verify_signed_by(key_id)?,
+        None => receipt.verify()?,
+    }
+    let signature = match &receipt.signature {
+        Some(signature) => format!("verified ({})", signature.key_id),
+        None => "unsigned".to_owned(),
+    };
     if receipt.encoded_bytes()? != bytes {
         return Err(ComputeError::InvalidReceipt(
             "invalid canonical encoding".into(),
@@ -215,12 +223,14 @@ pub fn verify(
                 "distribution": distribution_status,
                 "artifacts": if artifacts.is_some() { "verified" } else { "not_requested" },
                 "verified_outputs": verified_outputs,
+                "signature": receipt.signature.as_ref().map(|signature| &signature.key_id),
             }))?
         );
     } else {
         println!("Receipt: {}", receipt.receipt_hash);
         println!("receipt hash: verified");
         println!("canonical serialization: verified");
+        println!("signature: {signature}");
         println!("distribution: {distribution_status}");
         println!(
             "artifacts: {}",

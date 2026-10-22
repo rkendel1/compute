@@ -2,7 +2,8 @@
 //!
 //! A checkpoint artifact is a canonical tar: `manifest.json`, then every file
 //! of the workspace as `files/<path>`, sorted, with zero timestamps and
-//! ownership and normalized modes (`0644`, `0755`). The manifest names every
+//! ownership and normalized modes (`0644`, `0755`), then every symbolic link
+//! as `files/<path>`, sorted. The manifest names every
 //! entry with its SHA-256 and carries the workspace identity
 //! (`compute.workspace@1`, see `docs/workspace.md`) the files must reproduce.
 //!
@@ -17,9 +18,9 @@
 //! **One set of filesystem rules.** The workspace module is the authority for
 //! what a portable workspace is. A checkpoint is built from a workspace archive
 //! that module has already validated ([`crate::daemon::ArchivedWorkspace`]), and
-//! [`validate`] runs the files back through the same reader, so symbolic and
-//! hard links, special files, absolute and escaping paths, control characters,
-//! and path collisions are refused by the same code. There is no second
+//! [`validate`] runs the files back through the same reader, so special
+//! files, paths under a link, absolute and escaping paths, control
+//! characters, and path collisions are refused by the same code. There is no second
 //! implementation here.
 //!
 //! **Validation is total.** [`validate`] rebuilds the canonical artifact from
@@ -125,6 +126,10 @@ pub enum Entry {
         size: u64,
         sha256: String,
     },
+    Link {
+        path: String,
+        target: String,
+    },
 }
 
 /// Everything a checkpoint records that is not the files.
@@ -184,6 +189,10 @@ pub(crate) fn build(
         size: file.data.len() as u64,
         sha256: file.sha256.clone(),
     }));
+    entries.extend(workspace.links.iter().map(|(path, target)| Entry::Link {
+        path: path.clone(),
+        target: target.clone(),
+    }));
     let manifest = Manifest {
         format: CHECKPOINT_FORMAT.into(),
         workspace_identity: WORKSPACE_IDENTITY.into(),
@@ -229,6 +238,18 @@ fn render(manifest: &Manifest, workspace: &ArchivedWorkspace) -> Result<Vec<u8>,
             &file.data,
         )?;
     }
+    for (path, target) in &workspace.links {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_mtime(0);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_entry_type(tar::EntryType::Symlink);
+        builder
+            .append_link(&mut header, format!("files/{path}"), target)
+            .map_err(|error| invalid(format!("cannot hold the link {path:?}: {error}")))?;
+    }
     builder.into_inner().map_err(|error| invalid(error))
 }
 
@@ -243,6 +264,7 @@ fn parse(bytes: &[u8]) -> Result<(Manifest, ArchivedWorkspace, Vec<u8>), Environ
     }
     let mut manifest = None;
     let mut contents = BTreeMap::<String, (bool, Vec<u8>)>::new();
+    let mut links = BTreeMap::<String, String>::new();
     let mut tar = tar::Archive::new(bytes);
     for (index, entry) in tar
         .entries()
@@ -250,8 +272,9 @@ fn parse(bytes: &[u8]) -> Result<(Manifest, ArchivedWorkspace, Vec<u8>), Environ
         .enumerate()
     {
         let mut entry = entry.map_err(|error| invalid(format!("is unreadable: {error}")))?;
-        if !entry.header().entry_type().is_file() {
-            return Err(invalid("holds something other than files"));
+        let kind = entry.header().entry_type();
+        if !(kind.is_file() || (kind.is_symlink() && index > 0)) {
+            return Err(invalid("holds something other than files and links"));
         }
         let path = entry
             .path()
@@ -276,6 +299,20 @@ fn parse(bytes: &[u8]) -> Result<(Manifest, ArchivedWorkspace, Vec<u8>), Environ
         let Some(name) = path.strip_prefix("files/") else {
             return Err(invalid(format!("holds an unexpected entry: {path}")));
         };
+        if kind.is_symlink() {
+            let target = entry
+                .link_name()
+                .map_err(|error| invalid(format!("has an unreadable link: {error}")))?
+                .map(|target| target.to_string_lossy().into_owned())
+                .ok_or_else(|| invalid(format!("holds a link without a target: {name}")))?;
+            if links.insert(name.to_owned(), target).is_some() || contents.contains_key(name) {
+                return Err(invalid(format!("holds {name} twice")));
+            }
+            continue;
+        }
+        if links.contains_key(name) {
+            return Err(invalid(format!("holds {name} twice")));
+        }
         if contents
             .insert(name.to_owned(), (executable, data))
             .is_some()
@@ -299,9 +336,18 @@ fn parse(bytes: &[u8]) -> Result<(Manifest, ArchivedWorkspace, Vec<u8>), Environ
     // What the manifest names must be exactly what the artifact holds.
     let mut directories = vec![];
     let mut named = 0usize;
+    let mut named_links = 0usize;
     for entry in &manifest.entries {
         match entry {
             Entry::Directory { path } => directories.push(path.clone()),
+            Entry::Link { path, target } => {
+                named_links += 1;
+                if links.get(path) != Some(target) {
+                    return Err(invalid(format!(
+                        "holds the link {path} differently from its manifest"
+                    )));
+                }
+            }
             Entry::File {
                 path,
                 executable,
@@ -323,20 +369,21 @@ fn parse(bytes: &[u8]) -> Result<(Manifest, ArchivedWorkspace, Vec<u8>), Environ
             }
         }
     }
-    if named != contents.len() {
+    if named != contents.len() || named_links != links.len() {
         return Err(invalid("holds files its manifest does not name"));
     }
     // The files go back through the workspace reader: its rules are the rules.
     let mut builder = tar::Builder::new(Vec::new());
-    let mut add = |path: &str, mode: u32, directory: bool, data: &[u8]| {
+    let mut add = |path: &str, mode: u32, kind: tar::EntryType, data: &[u8], link: &str| {
         let mut header = tar::Header::new_gnu();
         header.set_size(data.len() as u64);
         header.set_mode(mode);
-        header.set_entry_type(if directory {
-            tar::EntryType::Directory
-        } else {
-            tar::EntryType::Regular
-        });
+        header.set_entry_type(kind);
+        if kind.is_symlink() {
+            header
+                .set_link_name(link)
+                .map_err(|error| invalid(format!("holds an unusable link {path}: {error}")))?;
+        }
         // Raw, so an unsafe path reaches the reader instead of the builder's
         // own checks.
         let name = header.as_old_mut().name.as_mut();
@@ -351,10 +398,14 @@ fn parse(bytes: &[u8]) -> Result<(Manifest, ArchivedWorkspace, Vec<u8>), Environ
             .map_err(|error| invalid(error))
     };
     for path in &directories {
-        add(path, 0o755, true, &[])?;
+        add(path, 0o755, tar::EntryType::Directory, &[], "")?;
     }
     for (path, (executable, data)) in &contents {
-        add(path, if *executable { 0o755 } else { 0o644 }, false, data)?;
+        let mode = if *executable { 0o755 } else { 0o644 };
+        add(path, mode, tar::EntryType::Regular, data, "")?;
+    }
+    for (path, target) in &links {
+        add(path, 0o777, tar::EntryType::Symlink, &[], target)?;
     }
     let plain = builder.into_inner().map_err(|error| invalid(error))?;
     let workspace = read_workspace(&plain)?;
@@ -609,26 +660,66 @@ mod tests {
     }
 
     #[test]
+    fn links_are_workspace_content_and_survive_a_checkpoint() {
+        let with_links = archive(&[
+            ("./target", EntryType::Regular, 0o644, b"data"),
+            ("./link", EntryType::Symlink, 0o777, b""),
+            ("./copy", EntryType::Link, 0o644, b""),
+        ]);
+        let workspace = read_workspace(&with_links).unwrap();
+        assert_eq!(
+            workspace.links.get("link").map(String::as_str),
+            Some("target")
+        );
+        // A hard link is a file with the same content.
+        assert_eq!(workspace.files["copy"].data, b"data");
+        assert!(
+            workspace.identity_text().ends_with("link 4 link target\n"),
+            "{}",
+            workspace.identity_text()
+        );
+        // Without links, the identity is what it always was.
+        assert!(
+            !read_workspace(&portable())
+                .unwrap()
+                .identity_text()
+                .contains("link")
+        );
+        let bytes = build(&workspace, &provenance()).unwrap();
+        let checkpoint = validate(&bytes).unwrap();
+        assert!(checkpoint.manifest.entries.contains(&Entry::Link {
+            path: "link".into(),
+            target: "target".into(),
+        }));
+        assert_eq!(checkpoint.manifest.tree_digest, workspace.identity().digest);
+    }
+
+    #[test]
     fn unsafe_workspace_entries_are_refused_by_the_one_reader() {
         let refused = |entries: &[(&str, EntryType, u32, &[u8])], why: &str| {
             let error = read_workspace(&archive(entries)).unwrap_err().to_string();
             assert!(error.contains(why), "{why}: {error}");
         };
-        refused(
-            &[("./link", EntryType::Symlink, 0o777, b"")],
-            "other than files and directories",
-        );
+        // A hard link is a second name for a file read before it, nothing else.
         refused(
             &[("./link", EntryType::Link, 0o644, b"")],
-            "other than files and directories",
+            "does not hold as a file",
+        );
+        // Nothing is read through a link.
+        refused(
+            &[
+                ("./link", EntryType::Symlink, 0o777, b""),
+                ("./link/inside", EntryType::Regular, 0o644, b"x"),
+            ],
+            "as both a file and a directory",
         );
         refused(
             &[("./pipe", EntryType::Fifo, 0o644, b"")],
-            "other than files and directories",
+            "other than files, directories, and links",
         );
         refused(
             &[("./dev", EntryType::Char, 0o644, b"")],
-            "other than files and directories",
+            "other than files, directories, and links",
         );
         refused(
             &[("/etc/passwd", EntryType::Regular, 0o644, b"x")],

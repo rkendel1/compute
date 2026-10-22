@@ -160,14 +160,34 @@ impl Daemon {
                     } else {
                         recovery.collected.push(label.clone());
                     }
+                    // With no newer run of the unit, this run is its
+                    // runtime view: it ends as any run does, so the restart
+                    // policy (a `never` stays held) decides what comes next,
+                    // not a reconciler that finds nothing running. A newer
+                    // run, if any, keeps its view; this is evidence only.
+                    let generation = {
+                        let mut inner = self.inner.lock().await;
+                        let runtime = inner.runtime.entry(unit.clone()).or_default();
+                        if runtime.state.is_none() && runtime.handle.is_none() {
+                            runtime.service = true;
+                            runtime.generation += 1;
+                            runtime.state = Some(ActualState::Running);
+                            runtime.held = false;
+                            runtime.deployment_id = Some(manifest.deployment_id.clone());
+                            runtime.started_at = Some(manifest.started_at);
+                            runtime.unit_id = Some(manifest.unit_id.clone());
+                            runtime.placement = placement.clone();
+                            runtime.generation
+                        } else {
+                            u64::MAX
+                        }
+                    };
                     let outcome = self.unit_outcome(Ok(outcome), None, placement);
-                    // Evidence only: a newer run of the unit, if any, keeps
-                    // its runtime view.
                     let _ = self
                         .finish(
                             &unit,
                             Invocation {
-                                generation: u64::MAX,
+                                generation,
                                 started_at: manifest.started_at,
                                 unit_id: Some(manifest.unit_id.clone()),
                             },

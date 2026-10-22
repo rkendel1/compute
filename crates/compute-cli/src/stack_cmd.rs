@@ -152,6 +152,11 @@ pub enum StackCommands {
         approve: bool,
         #[arg(long)]
         approved_by: Option<String>,
+        /// The approver's SSH private key. Required when the stack names its
+        /// approvers (`allowed_signers` beside the manifest): the approval is
+        /// signed with it and verified against that file before it counts.
+        #[arg(long)]
+        sign_key: Option<PathBuf>,
     },
     /// Restore every input of a revision from its declared sources and the
     /// registry, and verify each against the lock.
@@ -1342,11 +1347,60 @@ fn test(
 
 // ---- promote ------------------------------------------------------------------------------------
 
+/// The SSH signature namespace of a stack approval, so a signature made for anything else (a
+/// commit, a file) is never accepted as one.
+const APPROVAL_NAMESPACE: &str = "compute-stack-approval";
+/// Who may approve: OpenSSH's allowed-signers format, beside the stack manifest. When it is
+/// present, an approval counts only signed by one of them, under the `--approved-by` identity.
+const ALLOWED_SIGNERS: &str = "allowed_signers";
+
+fn ssh_keygen() -> Command {
+    Command::new("ssh-keygen")
+}
+
+/// Sign `file` with `key`, writing `<file>.sig`, then verify that signature against the stack's
+/// approvers under `identity`. Either failing leaves no signature behind.
+fn sign_approval(
+    file: &Path,
+    key: &Path,
+    signers: &Path,
+    identity: &str,
+) -> Result<PathBuf, String> {
+    let signature = PathBuf::from(format!("{}.sig", file.display()));
+    let _ = std::fs::remove_file(&signature);
+    run(ssh_keygen()
+        .args(["-q", "-Y", "sign", "-n", APPROVAL_NAMESPACE, "-f"])
+        .arg(key)
+        .arg(file))
+    .map_err(|e| format!("could not sign the approval: {e}"))?;
+    let verified = std::fs::File::open(file)
+        .map_err(|e| e.to_string())
+        .and_then(|approval| {
+            run(ssh_keygen()
+                .args(["-Y", "verify", "-f"])
+                .arg(signers)
+                .args(["-I", identity, "-n", APPROVAL_NAMESPACE, "-s"])
+                .arg(&signature)
+                .stdin(approval))
+        });
+    match verified {
+        Ok(_) => Ok(signature),
+        Err(why) => {
+            let _ = std::fs::remove_file(&signature);
+            Err(format!(
+                "the signature does not verify as {identity} against {}: {why}",
+                signers.display()
+            ))
+        }
+    }
+}
+
 fn promote(
     located: &Located,
     candidate: &str,
     approve: bool,
     approved_by: Option<&str>,
+    sign_key: Option<&Path>,
     json: bool,
 ) -> Result<i32, ComputeError> {
     let resolver = ToolResolver::new()?;
@@ -1442,6 +1496,28 @@ fn promote(
         );
         return Ok(APPROVAL_REQUIRED);
     };
+    let signers = located.directory.join(ALLOWED_SIGNERS);
+    if signers.is_file() && sign_key.is_none() {
+        print(
+            json,
+            &Promotion {
+                candidate: &label,
+                lock: &digest,
+                promoted: false,
+                refusals: &[format!(
+                    "approval must be signed: this stack names its approvers in {}; pass --sign-key",
+                    signers.display()
+                )],
+            },
+            || {
+                println!(
+                    "not promoted: approvals of this stack are signed (--sign-key KEY); see {}",
+                    signers.display()
+                );
+            },
+        );
+        return Ok(APPROVAL_REQUIRED);
+    }
     let current = located.directory.join(LOCK_FILE);
     let previous = if current.is_file() {
         Some(read_lock(&current)?)
@@ -1465,13 +1541,31 @@ fn promote(
         "evidence": sha256_hex(&evidence_bytes),
         "previous": previous.as_ref().map(StackLock::digest),
     });
+    let approval_file = history.join(format!("{}.approval.json", revision_name(&digest)));
+    write_atomic(
+        &approval_file,
+        &serde_json::to_vec_pretty(&approval).expect("serializes"),
+    )?;
+    if let Some(key) = sign_key {
+        let signers = located.directory.join(ALLOWED_SIGNERS);
+        if !signers.is_file() {
+            let _ = std::fs::remove_file(&approval_file);
+            return Err(coded(
+                "stack_approval_signature",
+                format!(
+                    "--sign-key needs the stack's approvers in {}",
+                    signers.display()
+                ),
+            ));
+        }
+        if let Err(why) = sign_approval(&approval_file, key, &signers, approved_by) {
+            let _ = std::fs::remove_file(&approval_file);
+            return Err(coded("stack_approval_signature", why));
+        }
+    }
     write_atomic(
         &history.join(format!("{}.lock", revision_name(&digest))),
         &lock.canonical_bytes(),
-    )?;
-    write_atomic(
-        &history.join(format!("{}.approval.json", revision_name(&digest))),
-        &serde_json::to_vec_pretty(&approval).expect("serializes"),
     )?;
     write_atomic(&current, &lock.canonical_bytes())?;
     print(json, &approval, || {
@@ -1880,7 +1974,15 @@ pub fn stack(command: StackCommand) -> compute_core::Result<()> {
             candidate,
             approve,
             approved_by,
-        } => promote(&located, &candidate, approve, approved_by.as_deref(), json)?,
+            sign_key,
+        } => promote(
+            &located,
+            &candidate,
+            approve,
+            approved_by.as_deref(),
+            sign_key.as_deref(),
+            json,
+        )?,
         StackCommands::Reproduce {
             revision: name,
             into,
@@ -1894,6 +1996,37 @@ pub fn stack(command: StackCommand) -> compute_core::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// An approval counts only when signed by a named approver under the approver's own identity,
+    /// in the approval namespace; a refused signature leaves nothing behind.
+    #[test]
+    fn an_approval_is_signed_and_verified_against_the_stacks_approvers() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("approver");
+        let made = Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", "approver", "-f"])
+            .arg(&key)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+        let signers = dir.path().join(ALLOWED_SIGNERS);
+        std::fs::write(
+            &signers,
+            format!("randy@example.com namespaces=\"{APPROVAL_NAMESPACE}\" {public}"),
+        )
+        .unwrap();
+        let approval = dir.path().join("x.approval.json");
+        std::fs::write(&approval, b"{\"lock\":\"sha256:00\"}").unwrap();
+
+        let signature = sign_approval(&approval, &key, &signers, "randy@example.com").unwrap();
+        assert!(signature.is_file());
+
+        // Another identity is refused, and leaves no signature.
+        let refused = sign_approval(&approval, &key, &signers, "someone@example.com").unwrap_err();
+        assert!(refused.contains("does not verify"), "{refused}");
+        assert!(!signature.exists());
+    }
+
     use super::*;
 
     #[test]

@@ -39,6 +39,7 @@ compute stop
 | `--insecure` | off | Development mode on any listener: plaintext, and requests without a credential are admitted |
 | `--headless` | `[api] ui` (on) | Do not serve the operator UI. The API, execution, deployment, DNS and AppPort integration are unchanged; see [headless.md](headless.md) |
 | `--require-token-env NAME` | none | Development only: require `Authorization: Bearer $NAME` (a single shared token). Refused in production |
+| `--local-token FILE` | none (`compute up` sets `$COMPUTE_HOME/daemon.token`) | Require the token kept in this owner-only file, created when missing. Local CLI clients read `$COMPUTE_HOME/daemon.token` when `COMPUTE_DAEMON_TOKEN` is unset; `compute up` opens the UI with it in the URL fragment |
 | `--data-plane` | `supervisor` | `supervisor`: workloads run on the node's supervisor and outlive the controller. `in-process`: they run inside the controller (development) |
 | `--require-state-at-start` | off | Refuse to start while control state is unreachable, instead of starting in `degraded_control_plane` |
 | `--detach` | off | Start in the background, log to `daemon.log` in the state directory, and return once the API answers |
@@ -57,7 +58,7 @@ The API fails closed. How it is secured depends on how it is started:
 | TLS (`--tls-cert`, `--tls-key`), or `--production` with TLS | production | Every request, reads included, needs an operator credential with the right scope |
 | `--production` without TLS | refused | The controller does not start |
 | A non-loopback `--listen` without TLS or `--insecure` | refused | The controller does not start |
-| A loopback `--listen` without TLS | development | Admitted without a credential (or with the `--require-token-env` token when set) |
+| A loopback `--listen` without TLS | development | Admitted without a credential (or with the `--require-token-env` or `--local-token` token when set). `compute up` always sets `--local-token`, so another user, a web page, or a sandboxed workload with loopback network cannot call the API |
 | `--insecure` | development | Admitted without a credential; stated in `/info` and at start |
 
 `/info` and `compute doctor` report the mode and why.
@@ -297,6 +298,7 @@ admission.
 | `compute.environment.create@1`, `.start@1`, `.stop@1`, `.restart@1` | `compute.environment.<operation>` |
 | `compute.environment.project.add@1`, `.remove@1` | same as the capability |
 | `compute.environment.project.load@1` (a Git repository into an environment with a computer) | `compute.environment.project.add` |
+| `compute.environment.source.load@1` (an immutable Git source, as `@appport/github` produces it) | `compute.environment.project.add` |
 | `compute.project.list@1`, `.inspect@1` | `compute.project.read` |
 | `compute.project.start@1`, `.stop@1`, `.restart@1` | same as the capability |
 | `compute.deployment.inspect@1` | `compute.deployment.read` |

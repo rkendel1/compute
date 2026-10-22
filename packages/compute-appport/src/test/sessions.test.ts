@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { ComputeSessionError, createComputeSessions } from "../index.js";
 
@@ -38,6 +38,9 @@ async function fakeCompute(): Promise<{ binary: string; calls: () => Promise<str
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");
+// What a named --env would read, recorded where the test can see it.
+const named = args.flatMap((arg, at) => args[at - 1] === "--env" && !arg.includes("=") ? [arg + "=" + process.env[arg]] : []);
+if (named.length) fs.appendFileSync(${JSON.stringify(log)}.replace("calls", "env"), JSON.stringify(named) + "\\n");
 const record = ${JSON.stringify(record)};
 const [scope, command] = args;
 if (scope !== "session") process.exit(64);
@@ -97,6 +100,9 @@ test("sessions are created, used, and destroyed through compute session", async 
   ]);
   assert.deepEqual(calls[1], [
     "session", "exec", "--pool-config", "pool.toml", record.session_id, "--json",
-    "--env", "MODE=test", "--timeout", "10s", "--", "echo", "hello",
+    "--env", "MODE", "--timeout", "10s", "--", "echo", "hello",
   ]);
+  // The value travelled in compute's environment, never on its command line.
+  assert.ok(!calls.flat().some((arg) => arg.includes("test") && arg.includes("MODE")));
+  assert.deepEqual(JSON.parse(await readFile(join(dirname(fake.binary), "env.jsonl"), "utf8")), ["MODE=test"]);
 });

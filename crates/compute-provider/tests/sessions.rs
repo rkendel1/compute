@@ -381,6 +381,7 @@ fn request(network: NetworkPolicy, spec: SessionSpec) -> SessionCreateRequest {
             },
             network,
             isolation: Default::default(),
+            host: Default::default(),
             architecture: None,
         },
         spec,
@@ -1283,6 +1284,96 @@ fn the_workspace_provider_runs_commands_in_a_private_persistent_directory() {
         let (_, failed) = run(&client, &id, &["sh", "-c", "exit 3"]).await;
         assert_eq!(failed.status, JobStatus::Failed);
         assert_eq!(failed.result.exit_code, Some(3));
+        // Standard input reaches the command, which still runs in its
+        // workspace; output past the command's bound is cut and flagged.
+        let mut fed = SessionCommand::new(vec![
+            "sh".into(),
+            "-c".into(),
+            "cat > fed.txt && cat src/a fed.txt && printf 0123456789".into(),
+        ]);
+        fed.stdin = Some("from stdin\n".into());
+        fed.output_bytes = Some(18);
+        let submission = client.session_exec(&id, &fed).await.unwrap();
+        let fed = loop {
+            let job = client.job_status(&submission.job_id.0).await.unwrap();
+            if job.status.is_terminal() {
+                break client.job_result(&submission.job_id.0).await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(fed.status, JobStatus::Succeeded, "{fed:?}");
+        assert_eq!(fed.result.stdout.text, "one\nfrom stdin\n012");
+        assert!(fed.result.stdout.truncated);
+        assert_eq!(fed.result.stdout.bytes, 25);
+        // A command's environment is sealed at rest: the job store holds no
+        // readable copy of a value, in any encoding a request could carry.
+        let mut secret = SessionCommand::new(vec!["true".into()]);
+        secret
+            .env
+            .insert("API_TOKEN".into(), "zq-s3cret-value-zq".into());
+        let submission = client.session_exec(&id, &secret).await.unwrap();
+        loop {
+            let job = client.job_status(&submission.job_id.0).await.unwrap();
+            if job.status.is_terminal() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let value = b"zq-s3cret-value-zq";
+        let encodings = [
+            value.to_vec(),
+            value
+                .iter()
+                .map(|byte| byte.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+                .into_bytes(),
+            value
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+                .into_bytes(),
+        ];
+        for entry in walkdir::WalkDir::new(&stores.jobs) {
+            let entry = entry.unwrap();
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let bytes = std::fs::read(entry.path()).unwrap();
+            for encoding in &encodings {
+                assert!(
+                    !bytes
+                        .windows(encoding.len())
+                        .any(|window| window == &encoding[..]),
+                    "{} holds the value",
+                    entry.path().display()
+                );
+            }
+        }
+        // The receipt says what the command ran in, as the provider reports
+        // it; the substrate is part of what was signed.
+        let substrate = fed
+            .result
+            .receipt
+            .as_ref()
+            .unwrap()
+            .substrate
+            .clone()
+            .unwrap();
+        assert_eq!(substrate.kind, "workspace");
+        assert_eq!(substrate.version, compute_core::SUBSTRATE_EVIDENCE_VERSION);
+        // The target signs what it ran, with the key it publishes.
+        let key_id = std::fs::read_to_string(stores.jobs.join("receipt-key.id")).unwrap();
+        fed.result
+            .receipt
+            .as_ref()
+            .expect("a receipt")
+            .verify_signed_by(key_id.trim())
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("fed.txt")).unwrap(),
+            "from stdin\n"
+        );
         client.destroy_session(&id).await.unwrap();
         assert!(!workspace.exists());
     });
@@ -1400,8 +1491,8 @@ case "$verb" in
       case "$1" in
         --name) name="$2"; shift 2 ;;
         --volume) volume="${{2%%:*}}"; shift 2 ;;
-        --label|--workdir|--cpus|--memory|--network) shift 2 ;;
-        --detach) shift ;;
+        --label|--workdir|--cpus|--memory|--network|--cap-drop|--cap-add|--security-opt|--pids-limit|--runtime) shift 2 ;;
+        --detach|--init) shift ;;
         *) break ;;
       esac
     done
@@ -1412,7 +1503,8 @@ case "$verb" in
     while [ $# -gt 0 ]; do
       case "$1" in
         --workdir) shift 2 ;;
-        --env) envs="$envs $2"; shift 2 ;;
+        --interactive) shift ;;
+        --env) case "$2" in *=*) envs="$envs $2" ;; *) eval "value=\"\${{$2}}\""; envs="$envs $2=$value"; echo "$2" >> "$state/by-name" ;; esac; shift 2 ;;
         *) break ;;
       esac
     done
@@ -1438,11 +1530,14 @@ esac
 fn the_container_adapter_translates_the_session_contract() {
     let stores = Stores::new();
     let runtime = fake_container_runtime(&stores.environments);
-    let provider = Arc::new(compute_provider::ContainerSessionProvider::new(
-        runtime.display().to_string(),
-        "debian:stable-slim",
-        stores.environments.join("volumes"),
-    ));
+    let provider = Arc::new(
+        compute_provider::ContainerSessionProvider::new(
+            runtime.display().to_string(),
+            "debian:stable-slim",
+            stores.environments.join("volumes"),
+        )
+        .with_oci_runtime("runsc"),
+    );
     let server = Server::start(&stores, provider, Arc::new(Tokens::default()));
     let client = server.client("alice");
     let state = stores.environments.join("containers");
@@ -1460,6 +1555,12 @@ fn the_container_adapter_translates_the_session_contract() {
         for expected in [
             "--cpus\n1\n",
             "--memory\n67108864b\n",
+            "--init\n",
+            "--cap-drop\nALL\n",
+            "--cap-add\nCHOWN\n",
+            "--security-opt\nno-new-privileges\n",
+            "--pids-limit\n4096\n",
+            "--runtime\nrunsc\n",
             "debian:stable-slim\nsleep\ninfinity",
         ] {
             assert!(
@@ -1479,6 +1580,40 @@ fn the_container_adapter_translates_the_session_contract() {
         )
         .await;
         assert_eq!(result.status, JobStatus::Succeeded, "{result:?}");
+        // A command's values enter the container by name, never on the
+        // client's command line.
+        let mut secret =
+            SessionCommand::new(vec!["sh".into(), "-c".into(), "echo $API_TOKEN".into()]);
+        secret.env.insert("API_TOKEN".into(), "s3cret-value".into());
+        let submission = client.session_exec(&id, &secret).await.unwrap();
+        let job_id = submission.job_id.0.clone();
+        let carried = loop {
+            let job = client.job_status(&job_id).await.unwrap();
+            if job.status.is_terminal() {
+                break client.job_result(&job_id).await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(carried.result.stdout.text, "s3cret-value\n", "{carried:?}");
+        let substrate = carried
+            .result
+            .receipt
+            .as_ref()
+            .unwrap()
+            .substrate
+            .clone()
+            .unwrap();
+        assert_eq!(substrate.kind, "container");
+        assert_eq!(
+            substrate.backend.as_deref(),
+            Some("fake-docker (OCI runtime runsc)")
+        );
+        assert_eq!(substrate.artifacts["image_reference"], "debian:stable-slim");
+        assert_eq!(substrate.limits["pids"], "4096");
+        assert_eq!(
+            std::fs::read_to_string(state.join("by-name")).unwrap(),
+            "API_TOKEN\n"
+        );
         client.stop_session(&id).await.unwrap();
         assert_eq!(
             std::fs::read_to_string(state.join(&container).join("status"))
@@ -1682,4 +1817,118 @@ fn a_server_without_an_authority_fails_closed() {
         assert_eq!(error.kind, ProviderErrorKind::Unauthorized);
     });
     runtime.shutdown_background();
+}
+
+/// The container adapter against a real engine (COMPUTE_CONTAINER_ENGINE,
+/// e.g. `docker` or `podman`): the hardening is read back from inside the
+/// container, not from the command line that asked for it. Skipped without
+/// an engine, unless COMPUTE_REQUIRE_CONTAINER_ENGINE is set (CI).
+#[test]
+fn a_real_container_engine_enforces_the_hardened_session() {
+    let Ok(engine) = std::env::var("COMPUTE_CONTAINER_ENGINE") else {
+        assert!(
+            std::env::var_os("COMPUTE_REQUIRE_CONTAINER_ENGINE").is_none(),
+            "COMPUTE_CONTAINER_ENGINE is required"
+        );
+        eprintln!("skipping: no COMPUTE_CONTAINER_ENGINE");
+        return;
+    };
+    let stores = Stores::new();
+    let provider = Arc::new(compute_provider::ContainerSessionProvider::new(
+        engine,
+        "debian:stable-slim",
+        stores.environments.join("volumes"),
+    ));
+    let server = Server::start(&stores, provider, Arc::new(Tokens::default()));
+    let client = server.client("alice");
+    client_runtime().block_on(async {
+        let created = client
+            .create_session(&request(NetworkPolicy::None, ttl(3600)))
+            .await
+            .unwrap();
+        let id = created.session_id.0.clone();
+        let session = ready(&client, &id).await;
+        assert_eq!(
+            session.status,
+            compute_core::SessionStatus::Ready,
+            "{session:?}"
+        );
+        let sh = |script: &str| {
+            let client = client.clone();
+            let id = id.clone();
+            let script = script.to_owned();
+            async move {
+                let mut command =
+                    SessionCommand::new(vec!["sh".into(), "-c".into(), script.clone()]);
+                command
+                    .env
+                    .insert("API_TOKEN".into(), "zq-engine-secret".into());
+                command.timeout = Some(Duration::from_secs(60));
+                let submission = client.session_exec(&id, &command).await.unwrap();
+                loop {
+                    let job = client.job_status(&submission.job_id.0).await.unwrap();
+                    if job.status.is_terminal() {
+                        let result = client.job_result(&submission.job_id.0).await.unwrap();
+                        assert_eq!(result.status, JobStatus::Succeeded, "{script}: {result:?}");
+                        break result;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+        // Read back from inside: the capability set, no new privileges, the
+        // process limit, and no network but loopback.
+        let status = sh("grep -E '^(CapEff|NoNewPrivs)' /proc/self/status").await;
+        assert!(
+            status
+                .result
+                .stdout
+                .text
+                .contains("CapEff:\t00000000000000eb"),
+            "{}",
+            status.result.stdout.text
+        );
+        assert!(status.result.stdout.text.contains("NoNewPrivs:\t1"));
+        let pids =
+            sh("cat /sys/fs/cgroup/pids.max 2>/dev/null || cat /sys/fs/cgroup/pids/pids.max").await;
+        assert_eq!(pids.result.stdout.text.trim(), "4096");
+        let net = sh("ls /sys/class/net").await;
+        assert_eq!(net.result.stdout.text.trim(), "lo");
+        // A value reaches the command by name, and nothing Compute itself
+        // persists (requests, status, events) holds a readable copy. (The
+        // command printing it puts it in its own output, which is the
+        // workload's to keep.)
+        let token = sh("printf %s \"$API_TOKEN\"").await;
+        assert_eq!(token.result.stdout.text, "zq-engine-secret");
+        for entry in walkdir::WalkDir::new(&stores.jobs) {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.file_type().is_file()
+                && ["request.json", "status.json", "events.json"].contains(&name.as_str())
+            {
+                let bytes = std::fs::read(entry.path()).unwrap();
+                assert!(
+                    !bytes
+                        .windows(16)
+                        .any(|window| window == b"zq-engine-secret"),
+                    "{} holds the value",
+                    entry.path().display()
+                );
+            }
+        }
+        // The workspace survives stop and resume; destroy removes it all.
+        sh("echo kept > note").await;
+        client.stop_session(&id).await.unwrap();
+        client.resume_session(&id).await.unwrap();
+        assert_eq!(sh("cat note").await.result.stdout.text, "kept\n");
+        let container = session.provider_session_id.clone().unwrap();
+        client.destroy_session(&id).await.unwrap();
+        let inspect =
+            std::process::Command::new(std::env::var("COMPUTE_CONTAINER_ENGINE").unwrap())
+                .args(["inspect", &container])
+                .output()
+                .unwrap();
+        assert!(!inspect.status.success(), "the container is gone");
+    });
+    server.kill();
 }

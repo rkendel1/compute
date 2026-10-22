@@ -51,7 +51,30 @@ for (const [path, entry] of Object.entries(lock.packages)) {
   assert.match(entry.resolved, /^https:\/\/registry\.npmjs\.org\//, `${path} is not registry-resolved`);
   assert.ok(entry.integrity, `${path} has no registry integrity`);
 }
-pass('package_compatibility', `${Object.keys(stack.packages).length} exact top-level registry packages resolved with integrity`);
+// Licenses: open-source licenses only, except the proprietary AuthBoundry packages THIRD_PARTY.md names.
+const OPEN_LICENSES = new Set(['MIT', 'Apache-2.0', 'ISC', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD']);
+for (const [path, entry] of Object.entries(lock.packages)) {
+  if (!path.startsWith('node_modules/')) continue;
+  const name = path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length);
+  if (OPEN_LICENSES.has(entry.license)) continue;
+  assert.ok(entry.license === 'UNLICENSED' && name.startsWith('@authboundry/'),
+    `${path} is licensed ${entry.license ?? '(none declared)'}: add it to THIRD_PARTY.md and this check, or remove it`);
+}
+pass('package_compatibility', `${Object.keys(stack.packages).length} exact top-level registry packages resolved with integrity; licenses open-source except the proprietary @authboundry packages`);
+
+// The installed tree is the certified one. npm checks each tarball's integrity when it installs;
+// this digest covers the unpacked files, so an installation compares what is on disk with what
+// release CI certified (evidence.json, shipped beside this file).
+const nodeModules = fileURLToPath(new URL('node_modules/', here));
+const nodeModulesDigest = await treeDigest(nodeModules);
+const shippedEvidence = await readFile(new URL('evidence.json', here), 'utf8').then(JSON.parse).catch(() => null);
+if (shippedEvidence?.node_modules_digest) {
+  assert.equal(nodeModulesDigest, shippedEvidence.node_modules_digest,
+    'the installed node_modules differ from the certified tree: reinstall compute-configured');
+  pass('installed_tree', `node_modules matches the certified tree (${nodeModulesDigest.slice(0, 19)}…)`);
+} else {
+  pass('installed_tree', `node_modules digest ${nodeModulesDigest.slice(0, 19)}… recorded for the release`);
+}
 
 // ---- The configured agent: stack-agent ----------------------------------
 //
@@ -100,6 +123,22 @@ if (await stat(executable).then((s) => s.isFile()).catch(() => false)) {
   assert.ok(cargo, `${defaultRuntime.executable} is not in the artifact and no source tree pins it`);
 }
 pass('agent_runtime', `stack-agent@${defaultRuntime.version.slice(0, 12)} is the only agent; ${agentDetail}`);
+
+// Managed services run on the bundled Node, from an allow-listed environment, and say what they
+// do without the authority Compute cannot supply.
+for (const service of stack.managed_services ?? []) {
+  assert.equal(service.interpreter, 'node', `${service.name} must run on the bundled Node, not the host's`);
+  assert.ok(Array.isArray(service.environment), `${service.name} must declare the variables it is given`);
+  for (const name of service.environment) {
+    assert.ok(!/^COMPUTE_DAEMON/.test(name) && !/^CHIP_|_API_KEY$/.test(name) || name === 'APPPORT_API_KEY',
+      `${service.name} must not be given ${name}`);
+  }
+  if (service.authority) {
+    assert.ok(service.environment.includes(service.authority.module_env), `${service.name}: the authority variable is passed through`);
+    assert.match(service.authority.without, /503/, `${service.name}: the profile states what the service does without authority`);
+  }
+}
+pass('managed_services', `${(stack.managed_services ?? []).map(({ name }) => name).join(', ')} run on the bundled Node from an allow-listed environment; management without an operator authority module is stated, not hidden`);
 
 // Optional execution providers: declared as data, implemented by base Compute, never required.
 // With COMPUTE_BIN (as compute-configured-verify sets it), the installed Compute must report each
@@ -277,6 +316,7 @@ const evidence = {
     source: lock.packages[`node_modules/${name}`].resolved,
     integrity: lock.packages[`node_modules/${name}`].integrity,
   }])),
+  node_modules_digest: nodeModulesDigest,
   resolved: Object.fromEntries([...versions].map(([name, found]) => [name, [...found].sort()])),
   contracts: stack.contracts,
   // What this installation is, in one place: the configured release is the
@@ -292,3 +332,40 @@ const evidence = {
 const output = process.env.COMPUTE_COMPATIBILITY_EVIDENCE;
 if (output) await writeFile(output, `${JSON.stringify(evidence, null, 2)}\n`);
 console.log(JSON.stringify(evidence, null, 2));
+
+/**
+ * sha256 over every file and symlink under `root`, in sorted path order: each entry contributes its
+ * relative path, its kind, and its content (a file's bytes, a link's target). Modes and times are
+ * left out, so a copy of the same tree has the same digest. Native executables and libraries (ELF,
+ * Mach-O) contribute only their path: Homebrew rewrites their load paths when it installs a keg, so
+ * their bytes legitimately differ from what CI certified. npm's tarball integrity covers them.
+ */
+async function treeDigest(root) {
+  const { readdir, readlink, lstat } = await import('node:fs/promises');
+  const entries = [];
+  const walk = async (dir, prefix) => {
+    for (const name of (await readdir(dir)).sort()) {
+      const path = join(dir, name);
+      const relative = prefix ? `${prefix}/${name}` : name;
+      const info = await lstat(path);
+      if (info.isSymbolicLink()) entries.push([relative, 'link', Buffer.from(await readlink(path))]);
+      else if (info.isDirectory()) await walk(path, relative);
+      else if (info.isFile()) {
+        const bytes = await readFile(path);
+        entries.push(native(bytes) ? [relative, 'native', Buffer.alloc(0)] : [relative, 'file', bytes]);
+      }
+    }
+  };
+  const native = (bytes) => {
+    if (bytes.length < 4) return false;
+    const magic = bytes.readUInt32BE(0);
+    return [0x7f454c46, 0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe].includes(magic);
+  };
+  await walk(root, '');
+  const hash = createHash('sha256');
+  for (const [relative, kind, content] of entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    hash.update(`${relative}\0${kind}\0${content.length}\0`);
+    hash.update(content);
+  }
+  return `sha256:${hash.digest('hex')}`;
+}

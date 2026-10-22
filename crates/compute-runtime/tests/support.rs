@@ -31,6 +31,7 @@ pub fn shell(directory: &Path, script: &str) -> ExecutionRequest {
         resources: ResourceLimits::default(),
         isolation: IsolationProfile::Process,
         host_isolation: Default::default(),
+        host_writable: vec![],
         dependencies: None,
     }
 }

@@ -22,7 +22,7 @@ const wasm = new Uint8Array([
 const capabilities = [
   "compute.environment.list", "compute.environment.inspect", "compute.environment.status",
   "compute.environment.create", "compute.environment.start", "compute.environment.stop",
-  "compute.environment.restart", "compute.environment.project.add", "compute.environment.project.load", "compute.environment.project.remove",
+  "compute.environment.restart", "compute.environment.project.add", "compute.environment.project.load", "compute.environment.source.load", "compute.environment.project.remove",
   "compute.project.list", "compute.project.inspect", "compute.project.start", "compute.project.stop",
   "compute.project.restart", "compute.deployment.inspect", "compute.deployment.create",
   "compute.deployment.promote", "compute.deployment.rollback",
