@@ -133,3 +133,39 @@ async fn a_dropped_connection_ends_its_command() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(!marker.exists(), "the command outlived its connection");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_that_leaves_a_process_behind_still_ends() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = start(directory.path());
+    let started = std::time::Instant::now();
+    let (code, _, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        run(
+            &agent.1,
+            exec(
+                &[
+                    "busybox",
+                    "sh",
+                    "-c",
+                    "sleep 1000 > /dev/null 2>&1 & echo $! > sleeper",
+                ],
+                directory.path(),
+            ),
+        ),
+    )
+    .await
+    .expect("the command's exit is reported while its child runs on");
+    assert_eq!(code, 0);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let pid = std::fs::read_to_string(directory.path().join("sleeper")).unwrap();
+    // SAFETY: probing, then ending, the process the command left behind.
+    unsafe {
+        assert_eq!(
+            libc::kill(pid.trim().parse().unwrap(), 0),
+            0,
+            "it is still running"
+        );
+        libc::kill(pid.trim().parse().unwrap(), libc::SIGKILL);
+    }
+}

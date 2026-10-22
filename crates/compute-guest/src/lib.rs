@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -35,6 +36,10 @@ pub const HOST_CID: u32 = 2;
 
 /// The largest frame either side accepts.
 const MAX_FRAME: usize = 16 * 1024 * 1024;
+
+/// How long output is still collected after a command exits, from processes
+/// it left holding its streams.
+const EXIT_DRAIN: Duration = Duration::from_millis(250);
 
 /// The `PATH` a command starts with unless it sets its own.
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -255,6 +260,13 @@ async fn exec<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     // The client sends nothing after its request, so anything it does now
     // (it closed, or it broke the protocol) ends the command.
     let mut probe = [0_u8; 1];
+    // Output is forwarded until the command exits and its streams end. A
+    // process it left running may hold its streams open (a shell's forked
+    // in-process applet keeps a copy of them), so once the command has
+    // exited, what is left is drained for a moment and the exit reported:
+    // the command ended, whatever it left behind.
+    let mut status = None;
+    let mut drained = std::pin::pin!(tokio::time::sleep(Duration::from_secs(86400 * 365)));
     loop {
         tokio::select! {
             event = events.recv() => match event {
@@ -266,14 +278,25 @@ async fn exec<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 }
                 None => break,
             },
+            exited = child.wait(), if status.is_none() => {
+                status = Some(exited?);
+                drained
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + EXIT_DRAIN);
+            }
+            () = &mut drained => break,
             _ = reader.read(&mut probe) => {
                 end_group();
                 return Ok(());
             }
         }
     }
-    let _ = (out.await, err.await);
-    let status = child.wait().await?;
+    out.abort();
+    err.abort();
+    let status = match status {
+        Some(status) => status,
+        None => child.wait().await?,
+    };
     use std::os::unix::process::ExitStatusExt;
     write_frame(
         writer,
