@@ -420,6 +420,15 @@ impl VmSessionProvider {
                 "mem_file_path": directory.join("memory").display().to_string(),
             });
             api(&socket, "PUT", "/snapshot/create", &body.to_string()).await?;
+            // Only what is on disk counts, whatever the VMM answered.
+            for name in ["snapshot", "memory"] {
+                if !directory.join(name).is_file() {
+                    return Err(format!(
+                        "the VMM reported the snapshot written, but {} is not a file",
+                        directory.join(name).display()
+                    ));
+                }
+            }
             let stable = |name: &str| {
                 sync_path(&directory.join(name))
                     .map_err(|error| format!("flushing {name}: {error}"))
@@ -456,11 +465,14 @@ impl VmSessionProvider {
                 ProviderErrorKind::ProviderUnavailable,
                 match continued {
                     Ok(()) => format!(
-                        "the VM could not be suspended: {error}; it is still running, unchanged"
+                        "the VM could not be suspended: {error}; it is still running, unchanged \
+                         (VMM log: {})",
+                        self.log_tail(vm)
                     ),
                     Err(again) => format!(
                         "the VM could not be suspended: {error}; and it could not be continued: \
-                         {again} (it is paused)"
+                         {again} (it is paused; VMM log: {})",
+                        self.log_tail(vm)
                     ),
                 },
             ));
