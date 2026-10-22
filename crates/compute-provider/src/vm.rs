@@ -408,6 +408,26 @@ impl VmSessionProvider {
         self.forget_egress(vm);
     }
 
+    /// Append one operation's phase timings to the VM's `lifecycle.jsonl`:
+    /// where its time went, as diagnostic evidence (the benchmark reads it).
+    /// Never state: nothing reads it to decide anything.
+    fn record(&self, vm: &str, operation: &str, phases: &[(&str, std::time::Duration)]) {
+        let mut line = serde_json::json!({
+            "operation": operation,
+            "at": chrono::Utc::now().to_rfc3339(),
+        });
+        for (phase, took) in phases {
+            line[format!("{phase}_ms")] = serde_json::json!(took.as_secs_f64() * 1000.0);
+        }
+        if let Ok(mut log) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.directory(vm).join("lifecycle.jsonl"))
+        {
+            let _ = std::io::Write::write_all(&mut log, format!("{line}\n").as_bytes());
+        }
+    }
+
     /// The last lines the VMM wrote, for an error that names its cause.
     fn log_tail(&self, vm: &str) -> String {
         let log =
@@ -477,6 +497,7 @@ impl VmSessionProvider {
     /// stable storage, record the suspension, and end the VMM. On any
     /// failure before the record, the VM is continued and left running.
     async fn suspend(&self, vm: &str) -> Result<(), ProviderError> {
+        let started = std::time::Instant::now();
         let directory = self.directory(vm);
         let socket = directory.join("api.sock");
         for stale in ["snapshot", "memory"] {
@@ -497,6 +518,7 @@ impl VmSessionProvider {
                 "mem_file_path": directory.join("memory").display().to_string(),
             });
             api(&socket, "PUT", "/snapshot/create", &body.to_string()).await?;
+            let snapshot = started.elapsed();
             // Only what is on disk counts, whatever the VMM answered.
             for name in ["snapshot", "memory"] {
                 if !directory.join(name).is_file() {
@@ -528,7 +550,8 @@ impl VmSessionProvider {
                 suspended_at: chrono::Utc::now(),
             };
             self.write_suspension(vm, &record)
-                .map_err(|error| format!("recording the suspension: {error}"))
+                .map_err(|error| format!("recording the suspension: {error}"))?;
+            Ok::<_, String>(snapshot)
         }
         .await;
         if let Err(error) = written {
@@ -553,6 +576,17 @@ impl VmSessionProvider {
                     ),
                 },
             ));
+        }
+        if let Ok(snapshot) = written {
+            self.record(
+                vm,
+                "suspend",
+                &[
+                    ("snapshot", snapshot),
+                    ("flush", started.elapsed().saturating_sub(snapshot)),
+                    ("total", started.elapsed()),
+                ],
+            );
         }
         self.kill(vm);
         Ok(())
@@ -808,11 +842,18 @@ impl SessionProvider for VmSessionProvider {
         )
         .map_err(crate::transport_error)?;
         self.ensure_egress(&vm);
+        let started = std::time::Instant::now();
         self.launch(&vm, Some(&config))?;
+        let spawned = started.elapsed();
         if let Err(error) = self.wait_until_answering(&vm).await {
             self.kill(&vm);
             return Err(error);
         }
+        self.record(
+            &vm,
+            "boot",
+            &[("vmm_spawn", spawned), ("guest_ready", started.elapsed())],
+        );
         Ok(provisioned(&vm, capabilities))
     }
 
@@ -985,6 +1026,7 @@ impl SessionProvider for VmSessionProvider {
             )
         })?;
         self.ensure_egress(vm);
+        let started = std::time::Instant::now();
         if let Err(error) = self.load(vm).await {
             self.kill(vm);
             return Err(ProviderError::new(
@@ -1017,7 +1059,13 @@ impl SessionProvider for VmSessionProvider {
                 format!("the restored VM could not be continued: {error}"),
             ));
         }
+        let loaded = started.elapsed();
         self.wait_until_answering(vm).await?;
+        self.record(
+            vm,
+            "resume",
+            &[("load", loaded), ("guest_ready", started.elapsed())],
+        );
         for spent in ["snapshot", "memory"] {
             let _ = std::fs::remove_file(directory.join(spent));
         }
@@ -1067,6 +1115,8 @@ impl SessionProvider for VmSessionProvider {
             ));
         }
         // Memory, devices, and disk at one instant: all taken while paused.
+        let paused_at = std::time::Instant::now();
+        let mut phases = vec![];
         let taken = async {
             let body = serde_json::json!({
                 "snapshot_type": "Full",
@@ -1074,12 +1124,15 @@ impl SessionProvider for VmSessionProvider {
                 "mem_file_path": staging.join("memory").display().to_string(),
             });
             api(&socket, "PUT", "/snapshot/create", &body.to_string()).await?;
+            phases.push(("snapshot", paused_at.elapsed()));
             std::fs::copy(source.join("rootfs.ext4"), staging.join("rootfs.ext4"))
                 .map_err(|error| format!("copying the disk: {error}"))?;
+            phases.push(("disk_copy", paused_at.elapsed()));
             Ok::<_, String>(())
         }
         .await;
         let continued = api(&socket, "PATCH", "/vm", r#"{"state":"Resumed"}"#).await;
+        phases.push(("paused", paused_at.elapsed()));
         let recorded = taken.and_then(|()| {
             std::fs::copy(source.join("config.json"), staging.join("config.json"))
                 .map_err(|error| format!("copying the machine configuration: {error}"))?;
@@ -1137,6 +1190,8 @@ impl SessionProvider for VmSessionProvider {
                 ));
             }
         };
+        phases.push(("total", paused_at.elapsed()));
+        self.record(vm, "checkpoint", &phases);
         Ok(compute_core::MachineCheckpoint {
             id: checkpoint.to_owned(),
             evidence: BTreeMap::from([
@@ -1204,6 +1259,7 @@ impl SessionProvider for VmSessionProvider {
             ));
         }
         let directory = self.directory(&vm);
+        let started = std::time::Instant::now();
         std::fs::create_dir_all(&directory).map_err(crate::transport_error)?;
         // Its own disk: everything a child writes is its own.
         let staged = directory.join("rootfs.ext4.tmp");
@@ -1222,10 +1278,12 @@ impl SessionProvider for VmSessionProvider {
         )
         .map_err(crate::transport_error)?;
         self.ensure_egress(&vm);
-        let started = async {
+        let mut phases = vec![("disk_copy", started.elapsed())];
+        let running = async {
             self.load_from(&vm, &source.join("snapshot"), &source.join("memory"))
                 .await
                 .map_err(|error| format!("loading the checkpoint: {error}"))?;
+            phases.push(("load", started.elapsed()));
             api(
                 &directory.join("api.sock"),
                 "PATCH",
@@ -1237,13 +1295,16 @@ impl SessionProvider for VmSessionProvider {
             self.wait_until_answering(&vm)
                 .await
                 .map_err(|error| error.message)?;
+            phases.push(("guest_ready", started.elapsed()));
             // Not ready until its generator no longer matches its siblings'.
             self.reseed(&vm)
                 .await
-                .map_err(|error| format!("reseeding the child's random generator: {error}"))
+                .map_err(|error| format!("reseeding the child's random generator: {error}"))?;
+            phases.push(("reseeded", started.elapsed()));
+            Ok::<_, String>(())
         }
         .await;
-        if let Err(error) = started {
+        if let Err(error) = running {
             let log = self.log_tail(&vm);
             self.kill(&vm);
             let _ = std::fs::remove_dir_all(&directory);
@@ -1254,6 +1315,7 @@ impl SessionProvider for VmSessionProvider {
                 ),
             ));
         }
+        self.record(&vm, "fork_child", &phases);
         Ok(provisioned(&vm, capabilities))
     }
 
