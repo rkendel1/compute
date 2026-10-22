@@ -232,7 +232,7 @@ fn ui_assets_are_confined_to_their_own_routes() {
 fn the_api_route_table_covers_every_domain_a_control_plane_needs() {
     let routes = api::ROUTES
         .iter()
-        .map(|(method, path)| format!("{method} {path}"))
+        .map(|route| format!("{} {}", route.method, route.path))
         .collect::<Vec<_>>();
     let has = |needle: &str| routes.iter().any(|route| route.contains(needle));
     for domain in [
@@ -263,4 +263,37 @@ fn the_api_route_table_covers_every_domain_a_control_plane_needs() {
         !has("/api/v1"),
         "Compute did not add a parallel /api/v1 tree: compute.api@1 is the API"
     );
+}
+
+/// A control plane reads the whole surface from `GET /api`: every route,
+/// with the scope authorization will actually demand of it.
+#[test]
+fn the_contract_is_the_route_registry() {
+    let contract = api::contract();
+    assert_eq!(contract["api"], api::API_VERSION);
+    let routes = contract["routes"].as_array().unwrap();
+    assert_eq!(routes.len(), api::ROUTES.len());
+    for (published, route) in routes.iter().zip(api::ROUTES) {
+        let segments: Vec<&str> = route.path.trim_start_matches('/').split('/').collect();
+        assert_eq!(published["path"], route.path);
+        assert_eq!(
+            published["scope"],
+            compute_environment::auth::required_scope(route.method, &segments).as_str(),
+            "{} {}",
+            route.method,
+            route.path
+        );
+    }
+    for path in [
+        "/compute/sessions/{session}/fork",
+        "/compute/sessions/{session}/input",
+        "/compute/jobs/{job}/output",
+    ] {
+        assert!(
+            routes
+                .iter()
+                .any(|route| route["path"] == path && route["surface"] == "target"),
+            "{path} is declared as the target protocol"
+        );
+    }
 }

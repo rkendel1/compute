@@ -25,220 +25,8 @@ use crate::{EnvironmentError, RecipeResolveRequest};
 pub const API_VERSION: &str = "compute.api@1";
 const MAX_BODY_BYTES: usize = 512 * 1024 * 1024;
 
-/// Every operation of the Compute API, as `(method, path)`. Parameters are
-/// written `{name}`. The UI/API parity test holds the UI to this list.
-pub const ROUTES: &[(&str, &str)] = &[
-    ("GET", "/health"),
-    ("GET", "/ready"),
-    ("GET", "/info"),
-    ("GET", "/status"),
-    ("GET", "/auth/whoami"),
-    ("GET", "/auth/credentials"),
-    ("POST", "/auth/credentials"),
-    ("POST", "/auth/credentials/{credential}/revoke"),
-    ("POST", "/auth/credentials/{credential}/rotate"),
-    ("GET", "/audit"),
-    ("GET", "/metrics"),
-    ("POST", "/node/reconcile"),
-    ("GET", "/node/upgrade"),
-    ("POST", "/node/upgrade"),
-    ("POST", "/node/rollback"),
-    ("POST", "/shutdown"),
-    ("GET", "/environments"),
-    ("POST", "/environments"),
-    ("GET", "/environments/{environment}"),
-    ("DELETE", "/environments/{environment}"),
-    ("GET", "/environments/{environment}/status"),
-    ("POST", "/environments/{environment}/start"),
-    ("POST", "/environments/{environment}/stop"),
-    ("POST", "/environments/{environment}/restart"),
-    ("GET", "/environments/{environment}/projects"),
-    ("POST", "/environments/{environment}/projects"),
-    ("GET", "/environments/{environment}/projects/{project}"),
-    ("DELETE", "/environments/{environment}/projects/{project}"),
-    (
-        "GET",
-        "/environments/{environment}/projects/{project}/status",
-    ),
-    (
-        "POST",
-        "/environments/{environment}/projects/{project}/start",
-    ),
-    (
-        "POST",
-        "/environments/{environment}/projects/{project}/stop",
-    ),
-    (
-        "POST",
-        "/environments/{environment}/projects/{project}/restart",
-    ),
-    (
-        "GET",
-        "/environments/{environment}/projects/{project}/executions",
-    ),
-    (
-        "GET",
-        "/environments/{environment}/projects/{project}/receipts",
-    ),
-    (
-        "GET",
-        "/environments/{environment}/projects/{project}/workloads/{workload}",
-    ),
-    (
-        "POST",
-        "/environments/{environment}/projects/{project}/workloads/{workload}/start",
-    ),
-    (
-        "POST",
-        "/environments/{environment}/projects/{project}/workloads/{workload}/stop",
-    ),
-    (
-        "POST",
-        "/environments/{environment}/projects/{project}/workloads/{workload}/restart",
-    ),
-    (
-        "POST",
-        "/environments/{environment}/projects/{project}/workloads/{workload}/run",
-    ),
-    (
-        "GET",
-        "/environments/{environment}/projects/{project}/workloads/{workload}/logs",
-    ),
-    // Environments on a computer.
-    ("GET", "/environments/{environment}/computer"),
-    ("POST", "/environments/{environment}/contents"),
-    ("POST", "/environments/{environment}/repositories"),
-    (
-        "DELETE",
-        "/environments/{environment}/repositories/{repository}",
-    ),
-    ("POST", "/environments/{environment}/packages"),
-    ("DELETE", "/environments/{environment}/packages/{package}"),
-    ("POST", "/environments/{environment}/processes"),
-    ("DELETE", "/environments/{environment}/processes/{process}"),
-    (
-        "POST",
-        "/environments/{environment}/processes/{process}/start",
-    ),
-    (
-        "POST",
-        "/environments/{environment}/processes/{process}/stop",
-    ),
-    ("POST", "/environments/{environment}/reconcile"),
-    ("POST", "/environments/{environment}/replace"),
-    ("POST", "/environments/{environment}/fork"),
-    ("POST", "/environments/{environment}/checkpoint"),
-    ("POST", "/checkpoints/{checkpoint}/restore"),
-    ("GET", "/environments/{environment}/checkpoints"),
-    (
-        "GET",
-        "/environments/{environment}/checkpoints/{checkpoint}",
-    ),
-    ("POST", "/environments/{environment}/workspace/export"),
-    ("POST", "/environments/{environment}/workspace/seed"),
-    ("POST", "/environments/{environment}/workspace/verify"),
-    ("POST", "/environments/{environment}/exec"),
-    ("POST", "/environments/{environment}/connect"),
-    ("GET", "/environments/{environment}/jobs/{job}"),
-    ("GET", "/environments/{environment}/logs"),
-    ("POST", "/environments/{environment}/run"),
-    ("POST", "/environments/{environment}/release"),
-    ("POST", "/environments/{environment}/config"),
-    ("GET", "/environments/{environment}/config"),
-    ("POST", "/environments/{environment}/config/change"),
-    ("POST", "/environments/{environment}/config/import"),
-    ("POST", "/environments/{environment}/config/discover"),
-    ("POST", "/environments/{environment}/lifecycle"),
-    ("POST", "/environments/{environment}/propose"),
-    ("POST", "/environments/{environment}/sources"),
-    (
-        "POST",
-        "/environments/{environment}/processes/{process}/restart",
-    ),
-    ("GET", "/recipes"),
-    ("GET", "/recipes/starters"),
-    ("POST", "/recipes"),
-    ("POST", "/recipes/resolve"),
-    ("GET", "/recipes/{recipe}"),
-    ("GET", "/recipes/{recipe}/resolve"),
-    ("GET", "/targets"),
-    // Software: projects, their versions, and where they run.
-    ("GET", "/software"),
-    ("GET", "/software/{project}"),
-    ("GET", "/software/{project}/versions"),
-    ("POST", "/software/{project}/versions"),
-    ("GET", "/software/{project}/versions/{version}"),
-    ("POST", "/software/{project}/deploy"),
-    ("GET", "/software/{project}/promotion"),
-    ("POST", "/software/{project}/promote"),
-    ("POST", "/software/{project}/rollback"),
-    ("GET", "/rollouts"),
-    ("GET", "/rollouts/{rollout}"),
-    // Work sessions: ways into an environment.
-    ("GET", "/sessions"),
-    ("POST", "/sessions"),
-    ("GET", "/sessions/{session}"),
-    ("DELETE", "/sessions/{session}"),
-    ("GET", "/projects"),
-    ("GET", "/projects/{project}"),
-    ("GET", "/projects/{project}/status"),
-    ("GET", "/projects/{project}/revisions"),
-    ("POST", "/projects/{project}/revisions"),
-    ("GET", "/deployments"),
-    ("POST", "/deployments"),
-    ("POST", "/deployments/promote"),
-    ("GET", "/deployments/{deployment}"),
-    ("GET", "/deployments/{deployment}/receipt"),
-    ("POST", "/deployments/{deployment}/rollback"),
-    ("GET", "/domains"),
-    ("POST", "/domains"),
-    ("GET", "/domains/{domain}"),
-    ("DELETE", "/domains/{domain}"),
-    ("GET", "/dns"),
-    ("POST", "/dns/reconcile"),
-    ("GET", "/certificates"),
-    ("POST", "/certificates/{domain}/renew"),
-    ("GET", "/network"),
-    ("GET", "/executions/{execution}"),
-    ("GET", "/receipts/{receipt}"),
-    ("GET", "/events"),
-    ("GET", "/events/stream"),
-    ("GET", "/providers"),
-    ("GET", "/services"),
-    ("GET", "/services/{service}/ui"),
-    ("GET", "/applications"),
-    ("GET", "/applications/{application}"),
-    ("GET", "/applications/{application}/deployments"),
-    ("POST", "/applications/{application}/deployments"),
-    (
-        "GET",
-        "/applications/{application}/deployments/{deployment}",
-    ),
-    (
-        "GET",
-        "/applications/{application}/deployments/{deployment}/receipt",
-    ),
-    ("POST", "/applications/{application}/rollback"),
-    ("POST", "/applications/{application}/stop"),
-    ("GET", "/applications/{application}/logs"),
-    ("GET", "/compute/capabilities"),
-    ("GET", "/compute/health"),
-    ("GET", "/compute/capacity"),
-    ("POST", "/compute/execute"),
-    ("POST", "/compute/admission"),
-    ("POST", "/compute/runtimes/resolve"),
-    ("POST", "/compute/runtimes/prepare"),
-    ("POST", "/compute/runtimes/status"),
-    ("POST", "/compute/jobs"),
-    ("GET", "/compute/jobs"),
-    ("GET", "/compute/jobs/{job}"),
-    ("GET", "/compute/jobs/{job}/result"),
-    ("GET", "/compute/jobs/{job}/receipt"),
-    ("GET", "/compute/jobs/{job}/logs"),
-    ("POST", "/compute/jobs/{job}/cancel"),
-    ("POST", "/services"),
-    ("DELETE", "/services/{service}"),
-];
+/// Every operation of the Compute API: the route registry.
+pub use crate::routes::ROUTES;
 
 const UI_HTML: &str = include_str!("../ui/index.html");
 /// The UI script: the vendored shared design system (`ui/vendor/stack-ui`), then
@@ -767,28 +555,23 @@ async fn dispatch(
     result
 }
 
+/// The contract a control plane reads to know this API: every operation,
+/// its method and path, the scope it needs, and its surface.
+pub fn contract() -> Value {
+    serde_json::json!({
+        "api": API_VERSION,
+        "scopes": crate::auth::Scope::ALL.map(crate::auth::Scope::as_str),
+        "routes": ROUTES,
+    })
+}
+
 /// `METHOD /route/{template}`: the route with identifiers replaced by the
 /// names of their parameters, as [`ROUTES`] lists it.
 fn operation_name(method: &str, segments: &[&str]) -> String {
-    for (route_method, route) in ROUTES {
-        if *route_method != method {
-            continue;
-        }
-        let template = route
-            .trim_matches('/')
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .collect::<Vec<_>>();
-        if template.len() == segments.len()
-            && template
-                .iter()
-                .zip(segments)
-                .all(|(expected, actual)| expected.starts_with('{') || expected == actual)
-        {
-            return format!("{method} {route}");
-        }
+    match crate::routes::find(method, segments) {
+        Some(route) => format!("{method} {}", route.path),
+        None => format!("{method} /{}", segments.join("/")),
     }
-    format!("{method} /{}", segments.join("/"))
 }
 
 /// The resource a route acts on and its identifier: the innermost named
@@ -976,6 +759,7 @@ async fn route(
     };
     match (method, segments) {
         ("GET", ["info"]) => ok(to_value(Box::pin(daemon.info()).await)?),
+        ("GET", ["api"]) => ok(contract()),
         ("GET", ["status"]) => ok(to_value(Box::pin(daemon.status()).await)?),
 
         // Operators.

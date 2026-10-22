@@ -175,7 +175,8 @@ contents.
 
 Plain HTTP/1.1 with JSON bodies. Every response carries
 `X-Compute-Api: compute.api@1`. `compute_environment::api::ROUTES` lists
-every operation. The UI uses no other, and a test enforces it.
+every operation, with its operation ID and scope, and `GET /api` publishes
+that contract ([api.md](api.md)). The UI uses no other, and a test enforces it.
 
 ```text
 GET  /health                  (no credential; for probes)

@@ -104,7 +104,8 @@ fn the_audit_lists_every_cli_command_and_no_other() {
 fn the_audit_lists_every_api_route_with_its_scope() {
     let actual: BTreeMap<(String, String), String> = compute_environment::api::ROUTES
         .iter()
-        .map(|(method, path)| {
+        .map(|route| {
+            let (method, path) = (route.method, route.path);
             let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
             let scope = compute_environment::auth::required_scope(method, &segments);
             ((method.to_string(), path.to_string()), format!("{scope:?}"))

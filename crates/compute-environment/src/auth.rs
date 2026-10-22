@@ -80,114 +80,11 @@ impl Scope {
     }
 }
 
-/// The scope a route needs. Anything unlisted needs `compute.admin`: new
-/// routes fail closed until they declare otherwise.
+/// The scope a route needs, as the route registry declares it
+/// ([`crate::routes::ROUTES`]). Anything unlisted needs `compute.admin`: new
+/// routes fail closed until they are declared.
 pub fn required_scope(method: &str, segments: &[&str]) -> Scope {
-    match (method, segments) {
-        ("GET", ["audit", ..]) | ("GET", ["auth", "credentials", ..]) => Scope::Admin,
-        ("GET", _) => Scope::Read,
-        ("POST", ["environments", _, "projects", _, "workloads", _, "run"])
-        | ("POST", ["environments", _, "exec" | "connect" | "run" | "propose"])
-        | ("POST", ["environments", _, "workspace", "export" | "verify"])
-        | ("POST", ["environments", _, "config", "discover"]) => Scope::Execute,
-        // Explaining a draft recipe changes nothing.
-        ("POST", ["recipes", "resolve"]) => Scope::Read,
-        // Recipes are shared, versioned policy: writing one is an operation.
-        ("POST", ["recipes"]) => Scope::Operate,
-        // Versions and their rollouts are deployments.
-        ("POST", ["software", _, "versions" | "deploy" | "promote" | "rollback"]) => {
-            Scope::Deploy
-        }
-        // A release is a deployment: a change to what the computer runs.
-        ("POST", ["environments", _, "release"]) => Scope::Deploy,
-        // What belongs in an environment's computer, and its computer.
-        (
-            "POST",
-            [
-                "environments",
-                _,
-                "contents" | "repositories" | "packages" | "processes",
-            ],
-        )
-        | (
-            "POST",
-            [
-                "environments",
-                _,
-                "processes",
-                _,
-                "start" | "stop" | "restart",
-            ],
-        )
-        | (
-            "POST",
-            [
-                "environments",
-                _,
-                "reconcile" | "replace" | "config" | "lifecycle" | "fork" | "checkpoint",
-            ],
-        )
-        | ("POST", ["environments", _, "workspace", "seed"])
-        | ("POST", ["environments", _, "config", "change" | "import"])
-        | ("POST", ["checkpoints", _, "restore"])
-        // Work sessions: a way into an environment, or a temporary one.
-        | ("POST", ["sessions"])
-        | ("DELETE", ["sessions", _])
-        | (
-            "DELETE",
-            [
-                "environments",
-                _,
-                "repositories" | "packages" | "processes",
-                _,
-            ],
-        ) => Scope::Operate,
-        // Runs, jobs, admission, and runtime preparation on this node as a
-        // provider.
-        ("POST", ["compute", ..]) => Scope::Execute,
-        ("POST", ["projects", _, "revisions"])
-        | ("POST", ["applications", _, "deployments"])
-        | ("POST", ["applications", _, "rollback"])
-        | ("POST", ["deployments"])
-        | ("POST", ["deployments", "promote"])
-        | ("POST", ["deployments", _, "rollback"])
-        | ("POST", ["environments", _, "projects" | "sources"])
-        | ("DELETE", ["environments", _, "projects", _]) => Scope::Deploy,
-        ("POST", ["environments"])
-        | ("DELETE", ["environments", _])
-        | ("POST", ["environments", _, "start" | "stop" | "restart"])
-        | (
-            "POST",
-            [
-                "environments",
-                _,
-                "projects",
-                _,
-                "start" | "stop" | "restart",
-            ],
-        )
-        | (
-            "POST",
-            [
-                "environments",
-                _,
-                "projects",
-                _,
-                "workloads",
-                _,
-                "start" | "stop" | "restart",
-            ],
-        )
-        | ("POST", ["domains"])
-        | ("DELETE", ["domains", _])
-        | ("POST", ["dns", "reconcile"])
-        | ("POST", ["certificates", _, "renew"])
-        | ("POST", ["services"])
-        | ("DELETE", ["services", _])
-        | ("POST", ["applications", _, "stop"])
-        | ("POST", ["node", "reconcile"]) => Scope::Operate,
-        _ => Scope::Admin,
-    }
+    crate::routes::find(method, segments).map_or(Scope::Admin, |route| route.scope)
 }
 
 /// Who is asking.
@@ -877,7 +774,12 @@ mod tests {
             Scope::Admin
         );
         assert_eq!(required_scope("PATCH", &["anything"]), Scope::Admin);
-        for (method, route) in crate::api::ROUTES {
+        for crate::routes::Route {
+            method,
+            path: route,
+            ..
+        } in crate::routes::ROUTES
+        {
             let segments = route
                 .trim_matches('/')
                 .split('/')
