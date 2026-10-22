@@ -11,7 +11,7 @@ async-trait.workspace = true
 compute-state = { path = "../compute-state" }
 # FeltDB's native client; exact, as CERTIFIED_FELTDB_VERSION says (a test
 # checks the lockfile). Its wire types are FeltDB's own.
-feltdb-client = "=0.2.0"
+feltdb-client = "=0.2.1"
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

@@ -24,6 +24,7 @@ const NAVIGATION = [
   { id: 'domains', label: 'Domains', href: '#/domains', className: 'manage-only' },
   { id: 'services', label: 'Services', href: '#/services', className: 'manage-only' },
   { id: 'events', label: 'Events', href: '#/events', className: 'manage-only' },
+  { id: 'access', label: 'Access', href: '#/access', className: 'manage-only' },
 ].map((item, order) => ({ ...item, order, attrs: { 'data-nav': item.id } }));
 
 /// The theme the operator chose, applied before the first paint.
@@ -663,16 +664,25 @@ async function environmentView(name) {
         computer
           ? h('a', { class: 'button', href: `#/work/${enc(name)}` }, 'Work')
           : h('button', { onclick: () => deployWizard({ environment: name }) }, 'Add project'),
-        h('button', { onclick: () => environmentLifecycle(name, 'start') }, 'Start'),
+        // Where the machine keeps its memory when stopped, stopping is a
+        // suspend: said so, because what survives it differs.
+        h('button', { onclick: () => environmentLifecycle(name, 'start'), 'data-lifecycle': 'start' },
+          computer && capabilities(computer).memory_suspend ? 'Resume' : 'Start'),
         h('button', { onclick: () => environmentLifecycle(name, 'restart') }, 'Restart'),
-        h('button', { class: 'danger', onclick: () => environmentLifecycle(name, 'stop') }, 'Stop'))),
+        h('button', { class: 'danger', onclick: () => environmentLifecycle(name, 'stop'), 'data-lifecycle': 'stop',
+          title: computer && capabilities(computer).memory_suspend ? 'Suspends the machine: its memory and running processes are kept' : '' },
+        computer && capabilities(computer).memory_suspend ? 'Suspend' : 'Stop'))),
   ];
   if (computer) {
     // An environment with a computer: its projects are software in its
     // repositories, built and run there. Deployment is a release of one,
     // reconciled in place.
     const observed = computer.observed || {};
-    const rollouts = await api('GET', `/rollouts?environment=${enc(name)}`).catch(() => []);
+    const [rollouts, checkpoints] = await Promise.all([
+      api('GET', `/rollouts?environment=${enc(name)}`).catch(() => []),
+      // Unreadable checkpoints are said to be, not shown as none.
+      api('GET', `/environments/${enc(name)}/checkpoints`).catch((error) => ({ error })),
+    ]);
     const running = computer.status === 'running';
     const rows = (computer.desired.projects || []).map((project) => {
       const repository = (computer.desired.repositories || []).find((item) => item.name === project.repository) || {};
@@ -719,6 +729,7 @@ async function environmentView(name) {
       header,
       h('div', { class: 'subtitle' }, `${(computer.desired.projects || []).length} projects · ${(computer.desired.processes || []).length} processes · desired ${environment.desired_state} · policy ${short(environment.policy_id)}`),
       machineSection(name, environment),
+      checkpointSection(name, environment, checkpoints),
       h('h2', {}, 'Software'),
       StackUI.dom.DataTable({
         label: 'Software',
@@ -900,7 +911,33 @@ function machineFactItems(computer) {
       : (computer.requested_target ? `${computer.requested_target} (requested)` : 'placing…') },
     { label: 'Lifetime', value: lifetimeText(computer) },
     { label: 'Machine', mono: true, value: machine.resource || machine.session_id || null },
+    { label: 'Capabilities', value: capabilityList(computer) },
   ];
+}
+
+/// What this computer's backend can do, as its target declared it when the
+/// machine started: each feature that depends on it is offered only where
+/// it is said here, and refused (with the reason) everywhere else.
+const CAPABILITIES = [
+  { key: 'memory_suspend', label: 'Suspend with memory', missing: 'Stopping keeps the disk; running processes end' },
+  { key: 'fork', label: 'Fork running machine', missing: 'Forks copy the workspace files only' },
+  { key: 'terminal', label: 'Interactive terminal', missing: 'Commands run to completion without a terminal' },
+];
+
+function capabilities(computer) {
+  return computer.capabilities || {};
+}
+
+function capabilityList(computer) {
+  if (!computer.capabilities) return h('span', { class: 'meta' }, 'Known once the machine starts');
+  const declared = capabilities(computer);
+  return h('ul', { class: 'capabilities', 'data-capabilities': 'true' }, CAPABILITIES.map((capability) => h('li', {
+    'data-capability': capability.key,
+    'data-available': String(Boolean(declared[capability.key])),
+    title: declared[capability.key] ? '' : capability.missing,
+  }, StackUI.dom.StatusIndicator(declared[capability.key]
+    ? { tone: 'positive', label: capability.label }
+    : { tone: 'neutral', glyph: '–', label: `${capability.label}: no` }))));
 }
 
 function machineFacts(computer) {
@@ -948,8 +985,112 @@ function machineSection(name, environment) {
       : h('div', { class: 'panel error' }, `${computer.failure.phase}: ${computer.failure.code} — ${computer.failure.message}`)) : null,
     h('div', { class: 'actions row' },
       h('a', { class: 'button primary', href: `#/work/${enc(name)}`, 'data-work': 'true' }, 'Work on this →'),
+      h('button', { disabled: computer.status !== 'running', 'data-fork': 'true', onclick: () => forkDialog(name, environment) }, 'Fork…'),
+      h('button', { disabled: computer.status !== 'running', 'data-checkpoint': 'true', onclick: () => captureCheckpoint(name) }, 'Checkpoint'),
       h('button', { disabled: !live, onclick: () => replaceDialog(name, computer) }, 'Replace machine…'),
       h('button', { class: 'danger', disabled: !live, onclick: () => destroyComputer(name) }, 'Destroy')),
+  ];
+}
+
+// ---- Manage: derived environments ----------------------------------------------------
+//
+// Fork, checkpoint and restore all make a new environment from this one's
+// state; none of them changes this one. Fork copies now; a checkpoint keeps
+// the workspace to restore from later.
+
+/// Fork this environment into a new one. What is copied is chosen, never
+/// substituted: a machine that cannot fork its running memory offers only
+/// the files.
+function forkDialog(name, environment) {
+  const computer = environment.computer;
+  const canFork = Boolean(capabilities(computer).fork);
+  // Public values are returned; sensitive ones only say they are configured.
+  const hasConfig = Object.keys(computer.config || {}).length > 0
+    || ((computer.configuration && computer.configuration.variables) || []).some((variable) => variable.configured);
+  const target = h('input', { id: 'fork-name', autocomplete: 'off', placeholder: `${name}-copy`, required: true });
+  const copyConfig = h('input', { id: 'fork-config', type: 'checkbox' });
+  const configNote = h('div', { class: 'meta', 'data-fork-config-note': 'true' });
+  const choice = (value, label, detail, disabled, reason) => h('label', { class: `check${disabled ? ' disabled' : ''}`, title: reason || '' },
+    h('input', { type: 'radio', name: 'fork-state', value, checked: value === 'workspace', disabled, 'data-fork-state': value, onchange: update }),
+    ' ', h('strong', {}, label), h('div', { class: 'meta' }, disabled ? reason : detail));
+  function update() {
+    const machine = dialog.querySelector('input[name="fork-state"]:checked').value === 'machine';
+    // A memory fork carries the running processes, and so the values they
+    // were started with: copying them is then not optional.
+    copyConfig.disabled = machine && hasConfig;
+    if (machine && hasConfig) copyConfig.checked = true;
+    configNote.textContent = machine && hasConfig
+      ? 'The running processes hold this environment\'s configuration values, so a machine fork carries them.'
+      : 'Configuration values are where credentials live: they are left behind unless you copy them.';
+  }
+  modal(`Fork ${name}`, h('div', { class: 'fork' },
+    h('p', {}, `A new environment, with its own machine, owned by you. ${name} is not changed.`),
+    h('label', { for: 'fork-name' }, 'New environment'), target,
+    h('fieldset', {}, h('legend', {}, 'What to copy'),
+      choice('workspace', 'Files', 'The workspace and declared contents, into a new machine placement chooses. Processes start fresh.'),
+      choice('machine', 'Running machine', 'Memory and disk, on the same target: processes continue from where they are.',
+        !canFork, `This machine cannot fork while running (${computer.provider_kind || 'its backend'}); fork its files instead.`)),
+    h('label', { class: 'check' }, copyConfig, ' Copy configuration values'),
+    configNote), [
+    h('button', { onclick: close }, 'Cancel'),
+    h('button', { class: 'primary', 'data-fork-go': 'true', onclick: async () => {
+      const newName = target.value.trim();
+      if (!newName) { target.focus(); return; }
+      const state = dialog.querySelector('input[name="fork-state"]:checked').value;
+      close();
+      const forked = await act(`Forked ${name} into ${newName}`, () => api('POST', `/environments/${enc(name)}/fork`, {
+        name: newName, copy_config: copyConfig.checked, state,
+      }));
+      if (forked) location.hash = `#/environments/${enc(newName)}`;
+    } }, 'Fork'),
+  ]);
+  update();
+}
+
+async function captureCheckpoint(name) {
+  await act(`Checkpoint of ${name} captured`, () => api('POST', `/environments/${enc(name)}/checkpoint`, {}));
+}
+
+function restoreDialog(name, checkpoint) {
+  const target = h('input', { id: 'restore-name', autocomplete: 'off', placeholder: `${name}-restored`, required: true });
+  modal('Restore a checkpoint', h('div', {},
+    h('p', {}, 'A new environment and machine, seeded with the checkpoint\'s workspace and verified before it is created. ',
+      h('span', { class: 'mono' }, short(checkpoint.checkpoint_id)), ` of ${name} is not consumed or changed.`),
+    h('label', { for: 'restore-name' }, 'New environment'), target), [
+    h('button', { onclick: close }, 'Cancel'),
+    h('button', { class: 'primary', 'data-restore-go': 'true', onclick: async () => {
+      const newName = target.value.trim();
+      if (!newName) { target.focus(); return; }
+      close();
+      const restored = await act(`Restored into ${newName}`, () => api('POST', `/checkpoints/${enc(checkpoint.checkpoint_id)}/restore`, { name: newName }));
+      if (restored) location.hash = `#/environments/${enc(newName)}`;
+    } }, 'Restore'),
+  ]);
+}
+
+function checkpointSection(name, environment, checkpoints) {
+  const running = environment.computer.status === 'running';
+  return [
+    h('h2', {}, 'Checkpoints'),
+    StackUI.dom.DataTable({
+      label: 'Checkpoints',
+      attrs: { 'data-checkpoints': 'true' },
+      error: checkpoints && checkpoints.error ? { message: checkpoints.error.message, code: checkpoints.error.kind, onRetry: () => render() } : undefined,
+      columns: [{ id: 'checkpoint', header: 'Checkpoint' }, { id: 'captured', header: 'Captured' }, { id: 'contents', header: 'Workspace' },
+        { id: 'parent', header: 'From' }, { id: 'actions', header: '' }],
+      rows: (Array.isArray(checkpoints) ? checkpoints : []).map((checkpoint) => ({
+        key: checkpoint.checkpoint_id,
+        attrs: { 'data-checkpoint-id': checkpoint.checkpoint_id },
+        cells: {
+          checkpoint: h('span', { class: 'mono', title: checkpoint.checkpoint_id }, short(checkpoint.checkpoint_id)),
+          captured: h('span', { title: checkpoint.created_at }, `${ago(checkpoint.created_at)} by ${checkpoint.owner}`),
+          contents: `${checkpoint.files} files · ${bytes(checkpoint.size)}`,
+          parent: checkpoint.parent_checkpoint_id ? h('span', { class: 'mono' }, short(checkpoint.parent_checkpoint_id)) : '—',
+          actions: h('button', { 'data-restore': checkpoint.checkpoint_id, onclick: () => restoreDialog(name, checkpoint) }, 'Restore as new environment…'),
+        },
+      })),
+      emptyTitle: running ? 'No checkpoints. Capture one to keep this workspace to restore from later.' : 'No checkpoints.',
+    }),
   ];
 }
 
@@ -1189,10 +1330,22 @@ async function workView(name) {
 
     h('h3', {}, 'Terminal'),
     h('div', { class: 'panel terminal' },
-      h('div', { class: 'add-row' }, terminal, h('button', { disabled: !running, onclick: () => terminal.value.trim() && runCommand(name, terminal.value.trim()) }, 'Run')),
+      h('div', { class: 'add-row' }, terminal,
+        h('button', { disabled: !running, onclick: () => terminal.value.trim() && runCommand(name, terminal.value.trim()) }, 'Run'),
+        h('button', {
+          disabled: !running || !capabilities(computer).terminal || Boolean(TERMINALS.get(name)),
+          'data-interactive': 'true',
+          title: capabilities(computer).terminal ? 'A shell (or the command typed) on a terminal in the computer' : CAPABILITIES[2].missing,
+          onclick: () => openTerminal(name, terminal.value.trim()),
+        }, 'Interactive terminal')),
+      capabilities(computer).terminal ? null
+        : h('div', { class: 'meta', 'data-no-terminal': 'true' }, `Interactive terminal: not on this machine (${(computer.machine && computer.machine.provider_kind) || computer.provider_kind || 'its backend'}). ${CAPABILITIES[2].missing}.`),
       output ? h('div', { 'data-output': output.status },
-        h('div', { class: 'meta' }, `${output.title} · ${output.status}${output.job ? ` · job ${output.job}` : ''}`),
-        h('pre', { class: 'mono' }, output.text || '')) : h('div', { class: 'meta' }, 'Commands run inside the computer as durable jobs, with receipts.')),
+        h('div', { class: 'meta' }, `${output.title} · ${output.status}${output.job ? ` · job ${output.job}` : ''} `,
+          output.status === 'running' && output.job
+            ? h('button', { 'data-cancel': output.job, onclick: () => cancelJob(name, output.job) }, 'Cancel') : null),
+        h('pre', { class: 'mono' }, output.text || '')) : h('div', { class: 'meta' }, 'Commands run inside the computer as durable jobs, with receipts.'),
+      terminalPanel(name)),
 
     h('h3', {}, 'Files'),
     h('div', { class: 'panel terminal' },
@@ -1251,6 +1404,116 @@ async function followJob(name, title, submitted) {
     await new Promise((resolve) => setTimeout(resolve, delay));
     delay = Math.min(delay * 2, 1000);
   }
+}
+
+async function cancelJob(name, job) {
+  await act('Cancelled', () => api('POST', `/environments/${enc(name)}/jobs/${enc(job)}/cancel`));
+}
+
+// ---- Work: an interactive terminal ---------------------------------------------------
+//
+// An interactive command is a durable job like any other, on a terminal in
+// the computer. Its output is read from the job's log from an offset (a
+// long poll), so nothing is lost while the page re-renders; what is typed
+// goes to the running command, never starts another.
+
+/// Open terminals, by environment: the job and how much of its output this
+/// page has read.
+const TERMINALS = new Map();
+const TERMINAL_SIZE = { rows: 24, cols: 100 };
+
+const fromBase64 = (text) => Uint8Array.from(atob(text || ''), (character) => character.charCodeAt(0));
+const toBase64 = (text) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+/// What a terminal shows, without its control sequences.
+const screenText = (text) => text.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\x1b\][^\x07]*\x07/g, '').replace(/\r/g, '');
+
+async function openTerminal(name, line) {
+  try {
+    const submitted = await api('POST', `/environments/${enc(name)}/exec`, {
+      command: line ? ['sh', '-c', line] : ['sh'],
+      terminal: TERMINAL_SIZE,
+    });
+    const session = { job: submitted.job_id, title: line || 'sh', offset: 0, text: '', complete: false, decoder: new TextDecoder() };
+    TERMINALS.set(name, session);
+    await render();
+    streamTerminal(name, session);
+  } catch (error) {
+    toast(`Terminal failed: ${error.message}`, true);
+  }
+}
+
+async function streamTerminal(name, session) {
+  while (TERMINALS.get(name) === session && !session.complete) {
+    try {
+      const chunk = await api('POST', `/environments/${enc(name)}/jobs/${enc(session.job)}/output`, {
+        stream: 'stdout', offset: session.offset, wait_ms: 5000,
+      });
+      session.text += session.decoder.decode(fromBase64(chunk.data), { stream: !chunk.complete });
+      session.offset = chunk.next_offset;
+      session.complete = chunk.complete;
+      session.error = null;
+    } catch (error) {
+      session.error = error.message;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    paintTerminal(name);
+  }
+}
+
+/// Update an open terminal in place: no re-render, so focus and typing stay.
+function paintTerminal(name) {
+  const session = TERMINALS.get(name);
+  const screen = document.querySelector(`[data-terminal="${CSS.escape(name)}"] pre`);
+  const status = document.querySelector(`[data-terminal="${CSS.escape(name)}"] [data-terminal-status]`);
+  if (!session || !screen) return;
+  screen.textContent = screenText(session.text);
+  screen.scrollTop = screen.scrollHeight;
+  status.textContent = session.complete ? 'ended' : (session.error ? `reconnecting: ${session.error}` : 'running');
+  const panel = screen.closest('[data-terminal]');
+  panel.dataset.state = session.complete ? 'ended' : 'running';
+  for (const control of panel.querySelectorAll('[data-while-running]')) control.disabled = session.complete;
+  const closer = panel.querySelector('[data-terminal-close]');
+  if (closer) closer.disabled = !session.complete;
+}
+
+async function sendInput(name, input) {
+  const session = TERMINALS.get(name);
+  if (!session || session.complete) return;
+  try {
+    await api('POST', `/environments/${enc(name)}/jobs/${enc(session.job)}/input`, input);
+  } catch (error) {
+    toast(`Input failed: ${error.message}`, true);
+  }
+}
+
+function terminalPanel(name) {
+  const session = TERMINALS.get(name);
+  if (!session) return null;
+  const line = h('input', { class: 'mono', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Input to the terminal', 'data-while-running': 'true',
+    onkeydown: (event) => {
+      if (event.key === 'Enter') {
+        sendInput(name, { data: toBase64(`${event.target.value}\n`) });
+        event.target.value = '';
+      } else if (event.key === 'c' && event.ctrlKey) {
+        event.preventDefault();
+        sendInput(name, { signal: 2 });
+      } else if (event.key === 'd' && event.ctrlKey) {
+        event.preventDefault();
+        sendInput(name, { close: true });
+      }
+    } });
+  const panel = h('div', { class: 'interactive', 'data-terminal': name, 'data-job': session.job, 'data-state': session.complete ? 'ended' : 'running' },
+    h('div', { class: 'meta' }, `$ ${session.title} · job ${session.job} · `, h('span', { 'data-terminal-status': 'true' }, session.complete ? 'ended' : 'running')),
+    h('pre', { class: 'mono screen', role: 'log', 'aria-live': 'polite' }, screenText(session.text)),
+    h('div', { class: 'add-row' }, line,
+      h('button', { 'data-while-running': 'true', title: 'Interrupt (Ctrl-C)', onclick: () => sendInput(name, { signal: 2 }) }, 'Ctrl-C'),
+      h('button', { 'data-while-running': 'true', title: 'End of input (Ctrl-D)', onclick: () => sendInput(name, { close: true }) }, 'End input'),
+      h('button', { class: 'danger', 'data-while-running': 'true', onclick: () => cancelJob(name, session.job) }, 'Cancel'),
+      h('button', { disabled: !session.complete, 'data-terminal-close': 'true', title: 'Closes this view; the job and its receipt remain',
+        onclick: () => { TERMINALS.delete(name); render(); } }, 'Close')),
+    h('div', { class: 'meta' }, 'Enter sends a line; Ctrl-C interrupts; Ctrl-D ends input. The command keeps running if you leave this page.'));
+  for (const control of panel.querySelectorAll('[data-while-running]')) control.disabled = session.complete;
+  return panel;
 }
 
 async function runCommand(name, line) {
@@ -2401,6 +2664,203 @@ async function domainView(name) {
   ];
 }
 
+// ---- Access -------------------------------------------------------------------------------
+//
+// Who may operate this control plane, what they did, and the API they do it
+// with. Credentials and the audit trail need compute.admin; the API contract
+// needs only compute.read. A page the credential cannot read says which
+// scope it lacks rather than showing nothing.
+
+const ACCESS_TABS = [
+  { id: 'credentials', label: 'Credentials' },
+  { id: 'audit', label: 'Audit trail' },
+  { id: 'api', label: 'API' },
+];
+const SCOPES = ['compute.read', 'compute.execute', 'compute.deploy', 'compute.operate', 'compute.admin'];
+
+async function accessView(tab) {
+  const active = ACCESS_TABS.some((item) => item.id === tab) ? tab : 'credentials';
+  let panel;
+  try {
+    panel = await ({ credentials: credentialsTab, audit: auditTab, api: apiTab })[active]();
+  } catch (error) {
+    panel = error.kind === 'authorization_denied'
+      ? StackUI.dom.EmptyState({ title: 'Your credential cannot read this', body: error.message, attrs: { 'data-access-denied': active } })
+      : StackUI.dom.ErrorPanel({ title: 'Could not read it', message: error.message, code: error.kind, requestId: error.requestId, onRetry: () => render() });
+  }
+  return [
+    h('div', { class: 'title' }, h('h1', {}, 'Access')),
+    h('div', { class: 'subtitle' }, 'Who may operate this control plane, what was done, and the API it is done with.'),
+    StackUI.dom.Tabs({
+      className: 'tabs', label: 'Access sections', idPrefix: 'access', panelId: 'access-panel', active,
+      tabs: ACCESS_TABS.map((item) => ({ ...item, className: item.id === active ? 'active' : null, attrs: { 'data-access-tab': item.id } })),
+      onSelect: (item) => {
+        if (location.hash === `#/access/${item}`) return;
+        focusAfterRoute = `access-tab-${item}`;
+        location.hash = `#/access/${item}`;
+      },
+    }),
+    StackUI.dom.TabPanel({ id: 'access-panel', idPrefix: 'access', active, children: panel }),
+  ];
+}
+
+function credentialStatus(credential) {
+  if (credential.revoked_at) return StackUI.dom.StatusIndicator({ tone: 'neutral', label: `Revoked ${ago(credential.revoked_at)}` });
+  if (credential.expires_at && new Date(credential.expires_at) < new Date()) return StackUI.dom.StatusIndicator({ tone: 'negative', label: 'Expired' });
+  return StackUI.dom.StatusIndicator({ tone: 'positive', label: credential.expires_at ? `Active · expires ${ago(credential.expires_at)}` : 'Active' });
+}
+
+/// A token is shown once, here, and never again by any surface.
+function showToken(title, issued) {
+  modal(title, h('div', { 'data-issued': issued.credential.credential_id },
+    h('p', {}, `For ${issued.credential.operator_id}, with ${issued.credential.scopes.join(', ')}. Copy it now: Compute keeps only its verifier and cannot show it again.`),
+    h('pre', { class: 'mono token', 'data-token': 'true' }, issued.token)), [
+    h('button', { onclick: () => navigator.clipboard && navigator.clipboard.writeText(issued.token).then(() => toast('Copied')) }, 'Copy'),
+    h('button', { class: 'primary', onclick: () => { close(); render(); } }, 'Done'),
+  ]);
+}
+
+function createCredentialDialog() {
+  const operator = h('input', { id: 'credential-operator', autocomplete: 'off', required: true });
+  const description = h('input', { id: 'credential-description', autocomplete: 'off' });
+  const expires = h('input', { id: 'credential-expires', type: 'number', min: '1', placeholder: 'never' });
+  const scopes = SCOPES.map((scope) => h('label', { class: 'check' }, h('input', { type: 'checkbox', value: scope, checked: scope === 'compute.read', 'data-scope': scope }), ' ', h('span', { class: 'mono' }, scope)));
+  modal('New credential', h('div', {},
+    h('label', { for: 'credential-operator' }, 'Operator'), operator,
+    h('fieldset', {}, h('legend', {}, 'Scopes'), scopes),
+    h('label', { for: 'credential-description' }, 'Description'), description,
+    h('label', { for: 'credential-expires' }, 'Expires in (days)'), expires), [
+    h('button', { onclick: close }, 'Cancel'),
+    h('button', { class: 'primary', 'data-credential-create': 'true', onclick: async () => {
+      if (!operator.value.trim()) { operator.focus(); return; }
+      const chosen = [...dialog.querySelectorAll('[data-scope]:checked')].map((input) => input.value);
+      try {
+        const issued = await api('POST', '/auth/credentials', {
+          operator_id: operator.value.trim(),
+          scopes: chosen,
+          description: description.value.trim() || null,
+          expires_in_seconds: Number(expires.value) ? Math.round(Number(expires.value) * 86400) : null,
+        });
+        showToken('Credential created', issued);
+      } catch (error) {
+        toast(`Could not create it: ${error.message}`, true);
+      }
+    } }, 'Create'),
+  ]);
+}
+
+async function rotateCredential(credential) {
+  if (!await confirmImpact(`Rotate ${credential.credential_id}?`, ['Its current token stops working now', 'A new token is shown once'], ['Its operator and scopes'], 'danger')) return;
+  try {
+    showToken('Credential rotated', await api('POST', `/auth/credentials/${enc(credential.credential_id)}/rotate`, { grace_seconds: 0 }));
+  } catch (error) {
+    toast(`Could not rotate it: ${error.message}`, true);
+  }
+}
+
+async function revokeCredential(credential) {
+  if (!await confirmImpact(`Revoke ${credential.credential_id}?`, [`Every request made with it, from now on (${credential.operator_id})`], ['What it already did, which stays in the audit trail'], 'danger')) return;
+  await act('Credential revoked', () => api('POST', `/auth/credentials/${enc(credential.credential_id)}/revoke`));
+}
+
+async function credentialsTab() {
+  const credentials = await api('GET', '/auth/credentials');
+  return [
+    h('div', { class: 'actions row' }, h('button', { class: 'primary', 'data-credential-new': 'true', onclick: createCredentialDialog }, 'New credential')),
+    StackUI.dom.DataTable({
+      label: 'Credentials',
+      attrs: { 'data-credentials': 'true' },
+      columns: [{ id: 'id', header: 'Credential' }, { id: 'operator', header: 'Operator' }, { id: 'scopes', header: 'Scopes' },
+        { id: 'created', header: 'Created' }, { id: 'status', header: 'Status' }, { id: 'actions', header: '' }],
+      rows: credentials.map((credential) => ({
+        key: credential.credential_id,
+        attrs: { 'data-credential': credential.credential_id },
+        cells: {
+          id: h('span', { class: 'mono', title: credential.description || '' }, credential.credential_id),
+          operator: credential.operator_id,
+          scopes: h('span', {}, credential.scopes.map((scope) => h('span', { class: 'chip mono' }, scope))),
+          created: ago(credential.created_at),
+          status: credentialStatus(credential),
+          actions: credential.revoked_at ? null : h('span', {},
+            h('button', { onclick: () => rotateCredential(credential) }, 'Rotate'), ' ',
+            h('button', { class: 'danger', onclick: () => revokeCredential(credential) }, 'Revoke')),
+        },
+      })),
+      emptyTitle: 'No credentials. Every request is made by the development operator or the daemon token.',
+    }),
+  ];
+}
+
+async function auditTab() {
+  const records = await api('GET', '/audit?limit=200');
+  return StackUI.dom.DataTable({
+    label: 'Audit trail',
+    attrs: { 'data-audit': 'true' },
+    columns: [{ id: 'when', header: 'When' }, { id: 'operator', header: 'Operator' }, { id: 'operation', header: 'Operation' },
+      { id: 'resource', header: 'Resource' }, { id: 'result', header: 'Result' }],
+    rows: records.map((record) => ({
+      key: record.request_id,
+      attrs: { 'data-audit-request': record.request_id },
+      cells: {
+        when: h('span', { title: record.at }, ago(record.at)),
+        operator: h('span', { title: record.credential_id || '' }, record.operator_id),
+        operation: h('span', { class: 'mono' }, record.operation),
+        resource: record.resource_id ? h('span', {}, `${record.resource} `, h('span', { class: 'mono' }, record.resource_id)) : record.resource,
+        result: StackUI.dom.StatusIndicator({
+          tone: record.result === 'accepted' ? 'positive' : 'negative',
+          label: `${record.result} · ${record.status}${record.error_kind ? ` ${record.error_kind}` : ''}`,
+        }),
+      },
+    })),
+    emptyTitle: 'No changes recorded yet. Every change, and every refused request, is recorded here.',
+  });
+}
+
+async function apiTab() {
+  const contract = await api('GET', '/api');
+  const filter = h('input', { id: 'api-filter', type: 'search', placeholder: 'Filter by operation, path, or scope', autocomplete: 'off', 'aria-label': 'Filter operations',
+    oninput: () => {
+      const text = filter.value.trim().toLowerCase();
+      for (const row of document.querySelectorAll('[data-operation]')) {
+        row.hidden = Boolean(text) && !row.dataset.search.includes(text);
+      }
+    } });
+  const surface = (name, title, note) => {
+    const routes = contract.routes.filter((route) => route.surface === name);
+    return [
+      h('h2', {}, `${title} · ${routes.length}`),
+      h('div', { class: 'meta' }, note),
+      StackUI.dom.DataTable({
+        label: title,
+        attrs: { [`data-surface`]: name },
+        columns: [{ id: 'operation', header: 'Operation' }, { id: 'route', header: 'Route' }, { id: 'scope', header: 'Scope' }],
+        rows: routes.map((route) => ({
+          key: route.operation,
+          attrs: { 'data-operation': route.operation, 'data-search': `${route.operation} ${route.method} ${route.path} ${route.scope}`.toLowerCase() },
+          cells: {
+            operation: h('span', { class: 'mono' }, route.operation),
+            route: h('span', { class: 'mono' }, `${route.method} ${route.path}`),
+            scope: h('span', { class: 'chip mono' }, route.scope),
+          },
+        })),
+      }),
+    ];
+  };
+  return [
+    h('div', { class: 'panel note' }, h('strong', {}, contract.api), ` · ${contract.routes.length} operations. A control plane reads the same contract from `,
+      h('span', { class: 'mono' }, 'GET /api'), ' to know what it may call; every route is authorized with the scope shown. ',
+      h('button', { 'data-api-download': 'true', onclick: () => {
+        // Built from the authenticated response: a plain link could not carry the token.
+        const link = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(contract, null, 2)], { type: 'application/json' })), download: 'compute-api.json' });
+        link.click();
+        URL.revokeObjectURL(link.href);
+      } }, 'Download JSON')),
+    filter,
+    surface('controller', 'Controller', 'What a control plane, the CLI, and this page call.'),
+    surface('target', 'Target protocol', 'compute.remote@1: this node as a target in another controller\'s pool. A control plane reaches these through the controller, never directly.'),
+  ];
+}
+
 // ---- Router and live updates --------------------------------------------------------------
 
 /// The mode the operator was last in, for pages that belong to both.
@@ -2434,6 +2894,7 @@ function route() {
   if (parts[0] === 'domains' && parts[1]) return { nav: 'domains', render: () => domainView(parts[1]) };
   if (parts[0] === 'domains') return { nav: 'domains', render: domainsView };
   if (parts[0] === 'events') return { mode: 'manage', nav: 'events', render: eventsView };
+  if (parts[0] === 'access') return { mode: 'manage', nav: 'access', render: () => accessView(parts[1] || 'credentials') };
   return { mode: lastMode(), nav: 'home', render: homeView };
 }
 

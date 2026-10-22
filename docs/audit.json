@@ -4184,7 +4184,7 @@
    "method": "GET",
    "path": "/auth/credentials",
    "scope": "Admin",
-   "ui": false,
+   "ui": true,
    "cli": true,
    "appport": false,
    "http_path_in_tests": true
@@ -4193,7 +4193,7 @@
    "method": "POST",
    "path": "/auth/credentials",
    "scope": "Admin",
-   "ui": false,
+   "ui": true,
    "cli": true,
    "appport": false,
    "http_path_in_tests": true
@@ -4202,7 +4202,7 @@
    "method": "POST",
    "path": "/auth/credentials/{credential}/revoke",
    "scope": "Admin",
-   "ui": false,
+   "ui": true,
    "cli": true,
    "appport": false,
    "http_path_in_tests": true
@@ -4211,7 +4211,7 @@
    "method": "POST",
    "path": "/auth/credentials/{credential}/rotate",
    "scope": "Admin",
-   "ui": false,
+   "ui": true,
    "cli": true,
    "appport": false,
    "http_path_in_tests": true
@@ -4220,7 +4220,7 @@
    "method": "GET",
    "path": "/audit",
    "scope": "Admin",
-   "ui": false,
+   "ui": true,
    "cli": true,
    "appport": false,
    "http_path_in_tests": true
@@ -4607,7 +4607,7 @@
    "method": "POST",
    "path": "/environments/{environment}/fork",
    "scope": "Operate",
-   "ui": false,
+   "ui": true,
    "cli": true,
    "appport": false,
    "http_path_in_tests": false
@@ -4652,7 +4652,7 @@
    "method": "POST",
    "path": "/environments/{environment}/checkpoint",
    "scope": "Operate",
-   "ui": false,
+   "ui": true,
    "cli": true,
    "appport": false,
    "http_path_in_tests": false
@@ -4661,7 +4661,7 @@
    "method": "POST",
    "path": "/checkpoints/{checkpoint}/restore",
    "scope": "Operate",
-   "ui": false,
+   "ui": true,
    "cli": true,
    "appport": false,
    "http_path_in_tests": false
@@ -4670,7 +4670,7 @@
    "method": "GET",
    "path": "/environments/{environment}/checkpoints",
    "scope": "Read",
-   "ui": false,
+   "ui": true,
    "cli": true,
    "appport": false,
    "http_path_in_tests": false
@@ -5489,7 +5489,7 @@
    "method": "GET",
    "path": "/api",
    "scope": "Read",
-   "ui": false,
+   "ui": true,
    "cli": false,
    "appport": false,
    "http_path_in_tests": false
@@ -5651,7 +5651,7 @@
    "method": "POST",
    "path": "/environments/{environment}/jobs/{job}/output",
    "scope": "Read",
-   "ui": false,
+   "ui": true,
    "cli": false,
    "appport": false,
    "http_path_in_tests": true
@@ -5660,7 +5660,7 @@
    "method": "POST",
    "path": "/environments/{environment}/jobs/{job}/input",
    "scope": "Execute",
-   "ui": false,
+   "ui": true,
    "cli": false,
    "appport": false,
    "http_path_in_tests": true
@@ -5669,7 +5669,7 @@
    "method": "POST",
    "path": "/environments/{environment}/jobs/{job}/cancel",
    "scope": "Execute",
-   "ui": false,
+   "ui": true,
    "cli": false,
    "appport": false,
    "http_path_in_tests": true

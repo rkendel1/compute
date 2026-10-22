@@ -152,7 +152,9 @@ from whether standard input is a terminal;
 `compute session input` sends data, a resize, a signal, or the end of input.
 
 - **The job stays authoritative.** An interactive command is a durable job
-  like any other: its output is the job's log (bounded as any output is),
+  like any other: its output is the job's log, kept to the command's output
+  limit like its result (the log stops growing at the limit, so it is the
+  prefix the result keeps),
   its receipt is the same, and cancellation and timeouts apply.
 - **Output** is read from the job's log from a byte offset, with a long
   poll (`POST /compute/jobs/{id}/output`): a client that reconnects reads
@@ -193,9 +195,17 @@ latency` step of the `microvm` CI job, which keeps the JSON as the
 - **Guest:** Firecracker v1.11.0, guest kernel 6.1.102, 1 vCPU, 256 MiB,
   512 MiB rootfs, network through the egress gateway only.
 - **Build:** release.
+- **Samples:** every sample reported succeeded. A failed or timed-out
+  operation aborts the benchmark rather than being dropped. Quantiles are
+  nearest rank, `round(q·(n−1))`. From the next run the JSON records the
+  commit, and CI runs 21 times so that warm operations reach n = 20 and get
+  a p95.
 
-End to end through the CLI (milliseconds). This includes the CLI process,
-HTTP, authorization, the durable job, and admission.
+End to end through the CLI (milliseconds): wall time from starting the CLI
+process to its exit. It includes the CLI process, HTTP, authorization, the
+durable job, and admission. `create → ready` is `session create --wait`.
+`resume → ready` and `fork → ready` likewise return only once the session is
+ready.
 
 | Operation | Cold | Median (warm) | p95 | Max (warm) | n |
 | --- | --- | --- | --- | --- | --- |

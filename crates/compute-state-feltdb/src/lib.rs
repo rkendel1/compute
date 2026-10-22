@@ -1,19 +1,26 @@
 //! Compute control state in Managed FeltDB.
 //!
 //! Managed FeltDB is the durable authority for Compute control state. This
-//! adapter speaks FeltDB's application-scoped Service API only, through the
-//! native client (`feltdb-client`), whose request and response documents are
-//! FeltDB's own types:
+//! adapter reaches FeltDB only through the native client's named methods
+//! (`feltdb-client`), whose request and response documents are FeltDB's own
+//! types; it builds no route or request body by hand:
 //!
-//! - `GET  /v1/application`: discovers the active revision of the Compute
-//!   application in a FeltDB environment
-//! - `POST /v1/query`: reads, bounded and paginated; indexed where the model
-//!   declares an index, and the plan FeltDB reports is counted in
-//!   [`AccessReport`]
-//! - `POST /v1/transactions`: writes, atomically, fenced on record versions
-//! - `GET  /v1/state/version`: the authoritative committed revision, which
-//!   proves snapshots coherent and caches current
-//! - `GET  /health`: the server's own health and version
+//! - `Application::discover` (`GET /v1/application`): the active revision of
+//!   the Compute application in a FeltDB environment
+//! - `Application::query` (`POST /v1/query`): reads, bounded and paginated;
+//!   indexed where the model declares an index, and the plan FeltDB reports
+//!   is counted in [`AccessReport`]
+//! - `Application::commit` (`POST /v1/transactions`): writes, atomically,
+//!   each fenced on the record version it was read at
+//! - `Application::state_version` (`GET /v1/state/version`): the
+//!   authoritative committed revision, which proves snapshots coherent and
+//!   caches current
+//! - `Client::health` (`GET /health`): the server's own health and version
+//! - `Client::control` (`/api/…`, `/admin/backups`): provisioning, model
+//!   upgrades, and backup ([`provision`], [`upgrade`])
+//!
+//! A private certificate authority (`[state.feltdb] ca_file`) is added to the
+//! public roots; verification is never disabled.
 //!
 //! Every query is ordered and limited by FeltDB, never by reading a
 //! collection whole and trimming it here.
@@ -30,13 +37,9 @@ use compute_state::{
     AccessReport, BackendInfo, Collection, Comparison, ID_FIELD, Query, Record, Revision,
     StateError, StateStore, Write,
 };
-use feltdb_client::feltdb::state_contract::{AuthorizationContext, TransactionRequest};
-use feltdb_client::wire::{
-    CanonicalQuery, QueryFilter, QueryOrder, QueryResult, SortDirection, TransactionOperation,
-    TransactionOperationKind,
-};
-use feltdb_client::{AppCommit, Method};
-use serde_json::{Map, Value, json};
+use feltdb_client::AppTransaction;
+use feltdb_client::wire::{CanonicalQuery, QueryFilter, QueryOrder, QueryResult, SortDirection};
+use serde_json::{Map, Value};
 use tokio::sync::RwLock;
 
 mod provision;
@@ -57,16 +60,13 @@ pub const COMPUTE_MANIFEST: &str = include_str!("../model/compute.manifest.json"
 /// crate is built with (pinned exactly; a test fails if `Cargo.lock`
 /// resolves another), and the crates.io `feltdb-server` CI runs every
 /// FeltDB test against.
-pub const CERTIFIED_FELTDB_VERSION: &str = "0.2.0";
+pub const CERTIFIED_FELTDB_VERSION: &str = "0.2.1";
 
 /// The `@feltdb/core` release that compiles `compute.flow` to the checked-in
 /// manifest (`packages/compute-state-model`); a development-time tool, not
 /// part of the runtime. `scripts/feltdb/verify-version.mjs` fails if npm
 /// resolves anything else.
 pub const MODEL_COMPILER_VERSION: &str = "0.11.9";
-
-/// Why `ca_file` is refused: the client cannot trust a private CA yet.
-const PRIVATE_CA_UNSUPPORTED: &str = "a private FeltDB certificate authority ([state.feltdb] ca_file) is not supported by feltdb-client 0.2.0, the FeltDB client this build uses (it trusts only public roots); remove ca_file, or serve FeltDB with a publicly trusted certificate";
 
 /// FeltDB caps a query page at 1000 records, and re-executes a query for
 /// every page, so pages are as large as it allows.
@@ -209,14 +209,16 @@ struct Refusal {
 
 impl FeltDbState {
     pub fn new(config: FeltDbConfig) -> Result<Self, StateError> {
-        // Refused rather than ignored: a private CA silently dropped would
-        // fail every request with a certificate error far from its cause.
-        if config.ca_certificate.is_some() {
-            return Err(StateError::Invalid(PRIVATE_CA_UNSUPPORTED.into()));
-        }
-        let client = feltdb_client::Client::builder(&config.url)
+        // A private CA is added to the public roots, never in place of
+        // verification; one that is not a PEM certificate is refused here,
+        // not at the first request.
+        let mut builder = feltdb_client::Client::builder(&config.url)
             .token(config.token.clone())
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(30));
+        if let Some(ca) = &config.ca_certificate {
+            builder = builder.add_root_certificate_pem(ca.clone());
+        }
+        let client = builder
             .build()
             .map_err(|error| StateError::Invalid(format!("FeltDB {}: {error}", config.url)))?;
         let application = client
@@ -254,19 +256,22 @@ impl FeltDbState {
 
     /// FeltDB's own health: status, server version, and contract. Also
     /// records the server version for diagnostics.
-    pub async fn health(&self) -> Result<Value, StateError> {
-        let health =
-            self.send(Method::GET, "/health", None)
-                .await
-                .map_err(|refusal| match refusal {
-                    Ok(refusal) => StateError::Unavailable(format!(
-                        "FeltDB health refused ({} {}): {}",
-                        refusal.status, refusal.code, refusal.message
-                    )),
-                    Err(error) => error,
-                })?;
-        let version = health["version"].as_str().map(str::to_owned);
-        self.account(|access| access.server_version = version);
+    pub async fn health(&self) -> Result<feltdb_client::Health, StateError> {
+        let health = self
+            .client
+            .health()
+            .await
+            .map_err(|error| match self.refusal(error) {
+                Ok(refusal) => StateError::Unavailable(format!(
+                    "FeltDB health refused ({} {}): {}",
+                    refusal.status, refusal.code, refusal.message
+                )),
+                Err(error) => error,
+            })?;
+        self.account(|access| {
+            access.connection = "connected".into();
+            access.server_version = Some(health.version.clone());
+        });
         Ok(health)
     }
 
@@ -325,19 +330,14 @@ impl FeltDbState {
         &self.config
     }
 
-    async fn send(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&Value>,
-    ) -> Result<Value, Result<Refusal, StateError>> {
-        match self.client.request(method, path, body).await {
-            Ok(value) => {
-                self.account(|access| access.connection = "connected".into());
-                Ok(value)
-            }
-            Err(error) => Err(self.refusal(error)),
-        }
+    /// Account a committed transaction and its state versions, when read.
+    fn committed(&self, transition: Option<(u64, u64)>, writes: &[Write]) -> Option<(u64, u64)> {
+        self.account(|access| {
+            access.transactions += 1;
+            access.last_mutation_at = Some(chrono::Utc::now());
+        });
+        self.transitions.record(transition, writes);
+        transition
     }
 
     /// A client error as a refusal (FeltDB answered and refused) or an
@@ -451,30 +451,6 @@ impl FeltDbState {
                     Ok(refusal) => return Err(refusal),
                     Err(error) => return Err(unavailable(error)),
                 },
-            }
-        }
-    }
-
-    /// POST an application-scoped request, rediscovering the revision once
-    /// if the schema moved underneath us.
-    async fn scoped(&self, path: &str, key: &str, payload: Value) -> Result<Value, Refusal> {
-        let mut refreshed = false;
-        loop {
-            let revision = self.revision(false).await.map_err(unavailable)?;
-            let body = json!({
-                "application_id": self.config.application_id,
-                "environment": self.config.environment,
-                "revision_id": revision,
-                key: payload,
-            });
-            match self.send(Method::POST, path, Some(&body)).await {
-                Ok(value) => return Ok(value),
-                Err(Ok(refusal)) if !refreshed && Self::schema_moved(&refusal) => {
-                    refreshed = true;
-                    self.revision(true).await.map_err(unavailable)?;
-                }
-                Err(Ok(refusal)) => return Err(refusal),
-                Err(Err(error)) => return Err(unavailable(error)),
             }
         }
     }
@@ -615,10 +591,6 @@ impl FeltDbState {
             .collect::<Result<Vec<_>, _>>()?;
         Ok((records, response.next_cursor))
     }
-}
-
-fn encode(value: &str) -> String {
-    feltdb_client::path_segment(value)
 }
 
 /// A canonical query with only what Compute uses.
@@ -815,31 +787,31 @@ impl StateStore for FeltDbState {
     /// scope names the state namespace it counts, so revisions of two
     /// stores are never compared.
     async fn revision(&self) -> Result<Option<Revision>, StateError> {
-        let revision = self.revision(false).await?;
-        let path = format!(
-            "/v1/state/version?application_id={}&environment={}&revision_id={}",
-            encode(&self.config.application_id),
-            encode(&self.config.environment),
-            encode(&revision)
-        );
-        let version = match self.send(Method::GET, &path, None).await {
-            Ok(version) => version,
-            Err(Ok(refusal)) => return Err(refused(refusal, &[])),
-            Err(Err(error)) => return Err(error),
+        // Discovered (and refreshed) through the same application handle,
+        // so this is one request at the revision Compute holds.
+        self.revision(false).await?;
+        let version = match self.application.state_version().await {
+            Ok(version) => {
+                self.account(|access| access.connection = "connected".into());
+                version
+            }
+            Err(error) => {
+                return Err(match self.refusal(error) {
+                    Ok(refusal) => refused(refusal, &[]),
+                    Err(error) => error,
+                });
+            }
         };
         self.account(|access| {
             access.revision_reads += 1;
             access.last_read_at = Some(chrono::Utc::now());
         });
-        let value = version["state_version"]
-            .as_u64()
-            .ok_or_else(|| StateError::Invalid("FeltDB did not report a state version".into()))?;
         Ok(Some(Revision {
-            value,
+            value: version.state_version,
             scope: format!(
                 "feltdb:{}:{}",
                 self.config.url,
-                version["state_namespace"].as_str().unwrap_or_default()
+                version.state_namespace.unwrap_or_default()
             ),
         }))
     }
@@ -916,78 +888,6 @@ impl StateStore for FeltDbState {
     /// FeltDB reports the committed state version immediately before and
     /// after the transaction, read inside its commit critical section.
     async fn commit_tracked(&self, writes: Vec<Write>) -> Result<Option<(u64, u64)>, StateError> {
-        let operation =
-            |kind, collection: &Collection, id: &str, value, if_version| TransactionOperation {
-                kind,
-                collection: collection.name().into(),
-                id: id.into(),
-                value,
-                if_version,
-            };
-        let mut operations = vec![];
-        for write in &writes {
-            match write {
-                Write::Create {
-                    collection,
-                    id,
-                    value,
-                } => operations.push(operation(
-                    TransactionOperationKind::Insert,
-                    collection,
-                    id,
-                    identified(value, id),
-                    None,
-                )),
-                // FeltDB updates merge fields; Compute replaces documents.
-                // A fenced delete and an insert in one transaction is an
-                // atomic replace.
-                Write::Replace {
-                    collection,
-                    id,
-                    value,
-                    expected,
-                } => {
-                    operations.push(operation(
-                        TransactionOperationKind::Delete,
-                        collection,
-                        id,
-                        Value::Null,
-                        *expected,
-                    ));
-                    operations.push(operation(
-                        TransactionOperationKind::Insert,
-                        collection,
-                        id,
-                        identified(value, id),
-                        None,
-                    ));
-                }
-                // FeltDB's native update merges top-level fields.
-                Write::Update {
-                    collection,
-                    id,
-                    fields,
-                    expected,
-                } => operations.push(operation(
-                    TransactionOperationKind::Update,
-                    collection,
-                    id,
-                    Value::Object(fields.clone()),
-                    *expected,
-                )),
-                Write::Delete {
-                    collection,
-                    id,
-                    expected,
-                } => operations.push(operation(
-                    TransactionOperationKind::Delete,
-                    collection,
-                    id,
-                    Value::Null,
-                    *expected,
-                )),
-            }
-        }
         let transaction_id = format!(
             "compute-{}-{}-{}",
             std::process::id(),
@@ -997,58 +897,90 @@ impl StateStore for FeltDbState {
                 .unwrap_or_default(),
             self.transactions.fetch_add(1, Ordering::Relaxed)
         );
-        // The server fills tenant, revision, schema, and authorization from
-        // the authenticated scope; empty values defer to it.
-        let transaction = TransactionRequest {
-            transaction_id: Some(transaction_id),
-            tenant_id: String::new(),
-            application_id: String::new(),
-            revision_id: String::new(),
-            schema_version: 0,
-            state_namespace: None,
-            causal_parent: None,
-            authorization: AuthorizationContext {
-                subject: String::new(),
-                tenant_id: String::new(),
-                application_id: String::new(),
-                revision_id: String::new(),
-                capabilities: Default::default(),
-                readable_collections: Default::default(),
-                writable_collections: Default::default(),
-                field_projections: Default::default(),
-            },
-            operations,
-            preconditions: vec![],
-            fences: vec![],
-        };
-        let transaction = serde_json::to_value(&transaction)
-            .map_err(|error| StateError::Invalid(format!("a FeltDB transaction: {error}")))?;
-        // A transport failure is retried once with the same transaction ID;
-        // FeltDB answers a replayed ID with the original result.
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            match self
-                .scoped("/v1/transactions", "transaction", transaction.clone())
-                .await
-            {
-                Ok(result) => {
-                    self.account(|access| {
-                        access.transactions += 1;
-                        access.last_mutation_at = Some(chrono::Utc::now());
-                    });
-                    // Committed: an answer Compute cannot read does not
-                    // undo it, so its state versions are simply unknown.
-                    let transition = serde_json::from_value::<AppCommit>(result)
-                        .ok()
-                        .map(|commit| (commit.result.state_before, commit.result.state_after));
-                    self.transitions.record(transition, &writes);
-                    return Ok(transition);
+        // Each write fenced on the version it was read at, where it was.
+        let mut transaction = AppTransaction::new(transaction_id);
+        for write in &writes {
+            transaction = match write {
+                Write::Create {
+                    collection,
+                    id,
+                    value,
+                } => transaction.insert(collection.name(), id.as_str(), identified(value, id)),
+                // FeltDB updates merge fields; Compute replaces documents.
+                // A fenced delete and an insert in one transaction is an
+                // atomic replace.
+                Write::Replace {
+                    collection,
+                    id,
+                    value,
+                    expected,
+                } => match expected {
+                    Some(version) => {
+                        transaction.delete_if_version(collection.name(), id.as_str(), *version)
+                    }
+                    None => transaction.delete(collection.name(), id.as_str()),
                 }
-                Err(refusal) if refusal.status == 0 && attempts == 1 => continue,
-                Err(refusal) => {
+                .insert(collection.name(), id.as_str(), identified(value, id)),
+                // FeltDB's native update merges top-level fields.
+                Write::Update {
+                    collection,
+                    id,
+                    fields,
+                    expected,
+                } => {
+                    let fields = Value::Object(fields.clone());
+                    match expected {
+                        Some(version) => transaction.update_if_version(
+                            collection.name(),
+                            id.as_str(),
+                            fields,
+                            *version,
+                        ),
+                        None => transaction.update(collection.name(), id.as_str(), fields),
+                    }
+                }
+                Write::Delete {
+                    collection,
+                    id,
+                    expected,
+                } => match expected {
+                    Some(version) => {
+                        transaction.delete_if_version(collection.name(), id.as_str(), *version)
+                    }
+                    None => transaction.delete(collection.name(), id.as_str()),
+                },
+            };
+        }
+        // A transport failure is retried once with the same transaction ID;
+        // FeltDB answers a replayed ID with the original result. A schema
+        // that moved is rediscovered once.
+        let (mut retried, mut refreshed) = (false, false);
+        loop {
+            let refusal = match self.application.commit(&transaction).await {
+                Ok(commit) => {
+                    let transition = Some((commit.result.state_before, commit.result.state_after));
+                    return Ok(self.committed(transition, &writes));
+                }
+                // Committed: an answer Compute cannot read does not undo
+                // it, so its state versions are simply unknown.
+                Err(feltdb_client::Error::Decode { .. }) => {
+                    return Ok(self.committed(None, &writes));
+                }
+                Err(error) => self.refusal(error),
+            };
+            match refusal {
+                Err(_) if !retried => retried = true,
+                Ok(refusal) if !refreshed && Self::schema_moved(&refusal) => {
+                    refreshed = true;
+                    self.revision(true).await?;
+                }
+                Ok(refusal) => {
                     self.account(|access| access.failed_transactions += 1);
                     return Err(refused(refusal, &writes));
+                }
+                Err(error) => {
+                    self.account(|access| access.failed_transactions += 1);
+                    return Err(error);
                 }
             }
         }
@@ -1076,15 +1008,15 @@ mod tests {
     }
 
     #[test]
-    fn a_private_ca_is_refused_not_ignored() {
+    fn a_private_ca_that_is_not_a_certificate_is_refused_at_start() {
         let error = FeltDbState::new(FeltDbConfig {
-            ca_certificate: Some(b"-----BEGIN CERTIFICATE-----".to_vec()),
+            ca_certificate: Some(b"not a certificate".to_vec()),
             ..config()
         })
         .err()
         .expect("refused");
         assert!(
-            matches!(&error, StateError::Invalid(message) if message.contains("ca_file")),
+            matches!(&error, StateError::Invalid(message) if message.contains("feltdb.example.com")),
             "{error:?}"
         );
         assert!(FeltDbState::new(config()).is_ok());

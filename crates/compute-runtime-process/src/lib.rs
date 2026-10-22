@@ -831,6 +831,9 @@ impl ProcessRuntime {
         let stdout_limit = workload.resources.stdout_bytes;
         let stderr_limit = workload.resources.stderr_bytes;
         let (mut stdout_log, mut stderr_log) = open_logs(control).await?;
+        let bounded = control.is_some_and(ExecutionControl::logs_bounded);
+        let stdout_log_limit = stdout_limit.filter(|_| bounded);
+        let stderr_log_limit = stderr_limit.filter(|_| bounded);
         let mut stdout_buffer = Vec::new();
         let mut stderr_buffer = Vec::new();
         let (mut stdout_total, mut stderr_total) = (0_u64, 0_u64);
@@ -841,6 +844,7 @@ impl ProcessRuntime {
                 &mut stdout_buffer,
                 &mut stdout_total,
                 stdout_log.as_mut(),
+                stdout_log_limit,
             );
             let stderr_read = read_teed(
                 &mut stderr,
@@ -848,6 +852,7 @@ impl ProcessRuntime {
                 &mut stderr_buffer,
                 &mut stderr_total,
                 stderr_log.as_mut(),
+                stderr_log_limit,
             );
             let (stdout, stderr, status) = tokio::join!(stdout_read, stderr_read, child.wait());
             stdout?;
@@ -887,14 +892,16 @@ impl ProcessRuntime {
                         stdout_limit,
                         &mut stdout_buffer,
                         &mut stdout_total,
-                        stdout_log.as_mut()
+                        stdout_log.as_mut(),
+                        stdout_log_limit,
                     ),
                     read_teed(
                         &mut stderr,
                         stderr_limit,
                         &mut stderr_buffer,
                         &mut stderr_total,
-                        stderr_log.as_mut()
+                        stderr_log.as_mut(),
+                        stderr_log_limit,
                     )
                 );
                 stdout_rest?;
@@ -1068,16 +1075,18 @@ async fn open_logs(
     ))
 }
 
-/// Read to end, keeping at most `limit + 1` bytes in memory and appending
-/// every byte to `log` as it arrives.
 /// Read a stream to its end, keeping at most `limit` + 1 bytes (enough to
-/// know it was exceeded) and counting all of them in `total`.
+/// know it was exceeded) and counting all of them in `total`. Every byte is
+/// appended to `log` as it arrives, up to `log_limit` when there is one: the
+/// log is then the prefix the result keeps, and a reader at any offset into
+/// it reads what the result reports.
 async fn read_teed<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
     limit: Option<u64>,
     output: &mut Vec<u8>,
     total: &mut u64,
     mut log: Option<&mut tokio::fs::File>,
+    log_limit: Option<u64>,
 ) -> std::io::Result<()> {
     let max = limit.and_then(|value| usize::try_from(value).ok());
     let mut buffer = [0_u8; 8192];
@@ -1086,9 +1095,16 @@ async fn read_teed<R: tokio::io::AsyncRead + Unpin>(
         if count == 0 {
             return Ok(());
         }
+        let logged = log_limit.map_or(count, |log_limit| {
+            usize::try_from(log_limit.saturating_sub(*total))
+                .unwrap_or(usize::MAX)
+                .min(count)
+        });
         *total += count as u64;
-        if let Some(log) = log.as_deref_mut() {
-            log.write_all(&buffer[..count]).await?;
+        if let Some(log) = log.as_deref_mut()
+            && logged > 0
+        {
+            log.write_all(&buffer[..logged]).await?;
             log.flush().await?;
         }
         match max {
@@ -1288,5 +1304,34 @@ mod tests {
         assert!(wrong.installed);
         assert!(!wrong.available);
         assert!(wrong.remediation.unwrap().contains(&definition.version));
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::read_teed;
+
+    #[tokio::test]
+    async fn a_bounded_log_is_the_prefix_the_result_keeps() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("stdout.log");
+        for (log_limit, expected) in [(Some(10_u64), 10_usize), (None, 100)] {
+            let mut log = tokio::fs::File::create(&path).await.unwrap();
+            let mut input: &[u8] = &[b'x'; 100];
+            let (mut output, mut total) = (vec![], 0);
+            read_teed(
+                &mut input,
+                Some(10),
+                &mut output,
+                &mut total,
+                Some(&mut log),
+                log_limit,
+            )
+            .await
+            .unwrap();
+            assert_eq!(total, 100, "every byte is counted");
+            assert_eq!(output.len(), 11, "the result keeps its limit and one more");
+            assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, expected);
+        }
     }
 }

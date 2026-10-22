@@ -459,3 +459,113 @@ async fn development_mode_is_explicit() {
     assert!(Daemon::start(config).await.is_err());
     daemon.shutdown().await;
 }
+
+/// The published contract is what is enforced: for every declared route, a
+/// credential with exactly its scope gets past authorization and a
+/// credential with any other single scope is refused, against the real
+/// server. Reads sent as POST (job output, recipe resolution) are reads:
+/// they are not audited as changes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_route_enforces_the_scope_it_publishes_and_only_changes_are_audited() {
+    use compute_environment::auth::Scope;
+    let node = production_node().await;
+    let admin = node.bootstrap();
+    let mut credentials = vec![];
+    for scope in [Scope::Read, Scope::Execute, Scope::Deploy, Scope::Operate] {
+        let issued = node
+            .issue(&admin, &format!("only-{scope:?}"), &[scope.as_str()], None)
+            .await;
+        credentials.push((scope, issued.token));
+    }
+    let contract: serde_json::Value = node.with(&admin).get("/api").await.unwrap();
+    let published = contract["routes"].as_array().unwrap();
+    assert_eq!(published.len(), api::ROUTES.len());
+    let mut checked = 0;
+    for route in api::ROUTES {
+        // Unauthenticated probes, and the two that end the daemon or never
+        // answer.
+        if ["/health", "/ready", "/shutdown", "/events/stream"].contains(&route.path) {
+            continue;
+        }
+        let concrete = route
+            .path
+            .split('/')
+            .map(|segment| match segment {
+                "{environment}" => "nowhere",
+                "{session}" => "ses_none",
+                "{job}" => "job_none",
+                "{receipt}" => "sha256:none",
+                "{domain}" => "none.example.com",
+                "{credential}" => "cred_none",
+                other if other.starts_with('{') => "none",
+                other => other,
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        for (scope, token) in &credentials {
+            let client = node.with(token);
+            let result = match route.method {
+                "GET" => client.get::<serde_json::Value>(&concrete).await.map(|_| ()),
+                "POST" => client
+                    .post::<_, serde_json::Value>(&concrete, Some(&serde_json::json!({})))
+                    .await
+                    .map(|_| ()),
+                "DELETE" => client
+                    .delete::<serde_json::Value>(&concrete)
+                    .await
+                    .map(|_| ()),
+                other => panic!("unexpected method {other}"),
+            };
+            // The target protocol answers in its own error shape
+            // (`compute.remote@1` has one refusal kind); the controller
+            // says `authorization_denied`. Both name the scope.
+            let denied = match &result {
+                Err(error) if error.kind() == "authorization_denied" => true,
+                Err(EnvironmentError::Unauthorized(message))
+                    if route.surface == compute_environment::routes::Surface::Target =>
+                {
+                    message.contains(&format!("needs {}", route.scope.as_str()))
+                }
+                _ => false,
+            };
+            assert_eq!(
+                denied,
+                route.scope != *scope,
+                "{} {} declares {}; a {} credential got {result:?}",
+                route.method,
+                route.path,
+                route.scope.as_str(),
+                scope.as_str()
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 600, "{checked} checks");
+
+    let reader = &credentials[0].1;
+    let _ = node
+        .with(reader)
+        .post::<_, serde_json::Value>("/recipes/resolve", Some(&serde_json::json!({})))
+        .await;
+    let audit: Vec<compute_state::AuditRecord> =
+        node.with(&admin).get("/audit?limit=10000").await.unwrap();
+    for read in [
+        "POST /recipes/resolve",
+        "POST /compute/jobs/{job}/output",
+        "POST /environments/{environment}/jobs/{job}/output",
+    ] {
+        assert!(
+            audit
+                .iter()
+                .all(|record| record.operation != read || record.result == "rejected"),
+            "{read} is a read and was audited as a change"
+        );
+    }
+    assert!(
+        audit
+            .iter()
+            .any(|record| record.operation == "POST /environments/{environment}/fork"),
+        "a change is audited"
+    );
+    node.daemon.shutdown().await;
+}

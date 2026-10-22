@@ -95,7 +95,12 @@ fn phases(vm: &Path) -> Vec<Value> {
     std::fs::read_to_string(vm.join("lifecycle.jsonl"))
         .unwrap_or_default()
         .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
+        // A line that does not parse is a provider defect, not a sample to
+        // drop quietly.
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("{}: {line}: {error}", vm.display()))
+        })
         .collect()
 }
 
@@ -285,8 +290,13 @@ fn microvm_lifecycle_latency() {
     let report = json!({
         "format": "compute.microvm-bench@1",
         "measured_at": chrono::Utc::now().to_rfc3339(),
+        // Tied to what was measured: CI's commit, or the checkout's.
+        "commit": std::env::var("GITHUB_SHA")
+            .unwrap_or_else(|_| command_line("git", &["rev-parse", "HEAD"])),
         "conditions": {
             "runs": runs,
+            "failures": "none: any failed or timed-out operation aborts the benchmark, so every sample reported succeeded",
+            "quantiles": "nearest rank, round(q * (n - 1)) of the sorted samples; p95 only when n >= 20",
             "cold_run": "the first run (the VMM binary, kernel, and rootfs not yet in the page cache)",
             "build": if cfg!(debug_assertions) { "debug" } else { "release" },
             "cpu": cpu,

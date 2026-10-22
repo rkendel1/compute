@@ -6650,8 +6650,21 @@ async fn a_running_machine_is_forked_into_a_new_environment_on_its_target() {
     }
     sh(&daemon, "origin", "echo before > marker").await;
 
-    let report = daemon
+    // The source's processes hold its configuration; a memory fork carries
+    // them, so it is refused unless the configuration is taken too, and
+    // nothing is created.
+    let refused = daemon
         .fork_machine("origin", "alice", machine_fork("copy"))
+        .await;
+    assert!(
+        matches!(&refused, Err(EnvironmentError::Invalid(message)) if message.contains("APP_ENV")),
+        "{refused:?}"
+    );
+    assert!(daemon.computer("copy").await.is_err());
+    let mut taking_config = machine_fork("copy");
+    taking_config.copy_config = true;
+    let report = daemon
+        .fork_machine("origin", "alice", taking_config)
         .await
         .unwrap();
     let origin = running_computer(&daemon, "origin").await;
@@ -6659,7 +6672,7 @@ async fn a_running_machine_is_forked_into_a_new_environment_on_its_target() {
     assert_eq!(report.target, "target-a");
     assert_eq!(Some(&report.source_session), origin.session_id.as_ref());
     assert_ne!(report.session, report.source_session);
-    assert_eq!(report.omitted_config, vec!["APP_ENV".to_string()]);
+    assert!(report.omitted_config.is_empty());
     let checkpoint = report.checkpoint.clone().expect("the target's checkpoint");
     let child = target_a.client().session(&report.session).await.unwrap();
     let lineage = child.lineage.expect("the child's lineage");
@@ -6687,10 +6700,10 @@ async fn a_running_machine_is_forked_into_a_new_environment_on_its_target() {
 
     // Refused, with nothing created: a name in use, another target, a
     // computer that cannot fork its machine, and anyone but the owner.
+    let mut again = machine_fork("copy");
+    again.copy_config = true;
     assert!(matches!(
-        daemon
-            .fork_machine("origin", "alice", machine_fork("copy"))
-            .await,
+        daemon.fork_machine("origin", "alice", again).await,
         Err(EnvironmentError::Conflict(_))
     ));
     let mut elsewhere = machine_fork("elsewhere");
@@ -6716,4 +6729,148 @@ async fn a_running_machine_is_forked_into_a_new_environment_on_its_target() {
         assert!(daemon.computer(name).await.is_err(), "{name} was created");
     }
     daemon.shutdown().await;
+}
+
+/// Two removals of one environment at once: both are answered as the
+/// removal they asked for, and the machine is torn down once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn racing_removals_both_succeed_and_tear_down_once() {
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let (daemon, _node) =
+        start_daemon(Arc::new(MemoryState::new()), pool(&[("target-a", &target)])).await;
+    daemon
+        .create_computer_environment(
+            definition(
+                "gone",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                EnvironmentContents::default(),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    running_computer(&daemon, "gone").await;
+    let (first, second) = tokio::join!(
+        daemon.destroy_computer("gone", "alice"),
+        daemon.destroy_computer("gone", "alice")
+    );
+    assert!(first.is_ok() && second.is_ok(), "{first:?}\n{second:?}");
+    computer_where(&daemon, "gone", "the computer to be destroyed", |view| {
+        view.status == ComputerStatus::Destroyed
+    })
+    .await;
+    let live = target
+        .client()
+        .sessions()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|session| !session.status.is_terminal())
+        .count();
+    assert_eq!(live, 0);
+    let requested = events(&daemon, "gone")
+        .await
+        .iter()
+        // The request's event; the driver's own transition carries
+        // `expired`.
+        .filter(|(kind, data)| kind == "computer.destroying" && data.get("expired").is_none())
+        .count();
+    assert_eq!(requested, 1, "the removal is requested once");
+    daemon.shutdown().await;
+}
+
+/// A controller that stops in the middle of a machine fork leaves a
+/// candidate whose computer names the child by reference. The next
+/// controller asks the target again with that reference and gets the same
+/// child, never a second one; and asking for the fork again clears that
+/// candidate before making a new one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_fork_interrupted_by_a_controller_restart_makes_one_child() {
+    let workspaces = tempfile::tempdir().unwrap();
+    let gate = Arc::new(Semaphore::new(1));
+    let forks = SessionCapabilities {
+        fork: true,
+        ..full()
+    };
+    let target = Target::start(
+        Steered::new(workspaces.path(), forks, Some(gate.clone())),
+        &[],
+    );
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (first, _node) = start_daemon(store.clone(), pool(&[("target-a", &target)])).await;
+    let mut origin = definition(
+        "origin",
+        ComputerLifecycle::Persistent,
+        requirements(),
+        EnvironmentContents::default(),
+    );
+    origin.env.clear();
+    first
+        .create_computer_environment(origin, "alice")
+        .await
+        .unwrap();
+    running_computer(&first, "origin").await;
+    let live = async || {
+        target
+            .client()
+            .sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|session| !session.status.is_terminal())
+            .collect::<Vec<_>>()
+    };
+    // The child is admitted and waits to start (no permit left).
+    let forking = {
+        let first = first.clone();
+        tokio::spawn(async move {
+            first
+                .fork_machine("origin", "alice", machine_fork("copy"))
+                .await
+        })
+    };
+    let child = eventually("the child to be admitted", async || {
+        live()
+            .await
+            .into_iter()
+            .find(|session| session.lineage.is_some())
+    })
+    .await;
+    first.shutdown().await;
+    forking.abort();
+    drop(first);
+
+    let (second, _node2) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    gate.add_permits(64);
+    let candidate = computer_where(&second, "copy--candidate", "the candidate to run", |view| {
+        view.status == ComputerStatus::Running
+    })
+    .await;
+    assert_eq!(
+        candidate.session_id.as_deref(),
+        Some(child.session_id.0.as_str()),
+        "the same child, not a second"
+    );
+    assert_eq!(live().await.len(), 2, "the source and one child");
+
+    // Asking again: the stale candidate goes, and the fork completes.
+    let report = second
+        .fork_machine("origin", "alice", machine_fork("copy"))
+        .await
+        .unwrap();
+    assert_ne!(report.session, child.session_id.0);
+    let remaining = eventually("the stale child to go", async || {
+        let sessions = live().await;
+        (sessions.len() == 2).then_some(sessions)
+    })
+    .await;
+    assert!(
+        remaining
+            .iter()
+            .all(|session| session.session_id != child.session_id),
+        "the interrupted fork's child was torn down"
+    );
+    second.shutdown().await;
 }

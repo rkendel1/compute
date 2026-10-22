@@ -253,6 +253,24 @@ impl Daemon {
                 "a machine fork runs where its source's memory is, on {target}, not {asked}"
             )));
         }
+        // The source's processes were started with its configuration, and
+        // a memory fork carries them as they are: the values are in the
+        // fork whether or not they are copied into its record. Say so
+        // rather than report them as left behind.
+        if !request.copy_config && !record.value.config.is_empty() {
+            return Err(EnvironmentError::Invalid(format!(
+                "a machine fork carries {source}'s running processes, which hold its \
+                 configuration values ({}); fork with copy_config to take them, or fork \
+                 the workspace (state: workspace), which leaves them behind",
+                record
+                    .value
+                    .config
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
         let derivation = Derivation {
             composition: "fork",
             label: source,
@@ -325,11 +343,9 @@ impl Daemon {
             source_session: session_id,
             session,
             checkpoint,
-            omitted_config: if request.copy_config {
-                vec![]
-            } else {
-                record.value.config.keys().cloned().collect()
-            },
+            // Nothing is left behind: either there was no configuration, or
+            // it was copied (a memory fork carries it regardless).
+            omitted_config: vec![],
             computer,
         })
     }

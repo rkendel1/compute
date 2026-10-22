@@ -86,7 +86,7 @@ jobs:
           COMPUTE_FIRECRACKER: ${{ runner.temp }}/vm/firecracker
           COMPUTE_VM_KERNEL: ${{ runner.temp }}/vm/vmlinux
           COMPUTE_VM_ROOTFS: ${{ runner.temp }}/vm/rootfs.ext4
-          COMPUTE_BENCH_RUNS: "20"
+          COMPUTE_BENCH_RUNS: "21"
           COMPUTE_BENCH_OUT: ${{ runner.temp }}/microvm-bench.json
         run: timeout 1200 cargo test --release --locked -p compute-cli --test microvm_bench -- --ignored --nocapture
       - name: Keep the measurement

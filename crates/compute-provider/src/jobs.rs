@@ -678,7 +678,9 @@ impl JobManager {
                 .await;
             return;
         }
-        let mut control = compute_core::ExecutionControl::new().with_log_directory(log_directory);
+        let mut control = compute_core::ExecutionControl::new()
+            .with_log_directory(log_directory)
+            .with_bounded_logs();
         let reserved_execution_id = self.read_job(&job_id).ok().and_then(|job| job.execution_id);
         if let Some(execution_id) = &reserved_execution_id {
             control = control.with_execution_id(execution_id.clone());

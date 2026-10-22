@@ -1511,9 +1511,9 @@ dependencies = [
 
 [[package]]
 name = "feltdb"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26f9012e9ea8976c7571ff0ec05b2ff4b4173a6e33ea88fe1af57ef8520a020c"
+checksum = "bcb48172583208b246084653458ddec061e3bc582318be4277a8d9daa7c85899"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1528,9 +1528,9 @@ dependencies = [
 
 [[package]]
 name = "feltdb-client"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f79b0b9b87a574069451b96e498b202ba7f06c7652f5ec948ef62704732777d8"
+checksum = "12d3b4f4d22e2c85195e48c7548b9cbc4a4e1ce8bd46d56e6a8a0934f8987cd5"
 dependencies = [
  "feltdb",
  "reqwest",

@@ -30,8 +30,20 @@ source of the surface. Each entry has:
 
 Authorization (`auth::required_scope`), audit operation names, the published
 contract, and the UI/API parity tests all read this one table. The scope
-isn't kept in a second list beside it. A request matching no entry needs
-`compute.admin`, so a route is unusable until it is declared.
+isn't kept in a second list beside it.
+
+- **Only declared routes are served.** An authenticated request that
+  matches no entry is answered `no_route`, whatever the caller's scopes, so
+  a handler without a declaration is unreachable. With the parity test
+  (every declared route is served), the served surface is the published one.
+- **Reads are reads.** A route declared `compute.read` is a read even when
+  it is a `POST` because it takes a body (job output, recipe resolution).
+  Reads aren't written to the audit trail, and like `GET`s they are served
+  while control state is unavailable. Every other request is a change: it
+  is audited, and it is refused while control state is unavailable.
+- **Enforced as published.** `tests/security.rs` checks every route on a
+  real TLS daemon. A credential holding exactly the declared scope gets past
+  authorization; a credential holding any other single scope is refused.
 
 `GET /api` (scope `compute.read`) returns the contract:
 
@@ -82,7 +94,7 @@ reached through the environment that owns it:
 | Input, resize, signal, end of input | `POST /environments/{e}/jobs/{job}/input` `{data, resize, signal, close}` | the job isn't running, or isn't interactive |
 | Cancel | `POST /environments/{e}/jobs/{job}/cancel` | the job isn't this environment's |
 | Suspend and resume | `POST /environments/{e}/stop`, `/start` | never; memory is kept only where the computer view's `memory_suspend` says so |
-| Machine fork | `POST /environments/{e}/fork` with `state: "machine"` | the backend lacks `fork` |
+| Machine fork | `POST /environments/{e}/fork` with `state: "machine"` | the backend lacks `fork`; the source has configuration and `copy_config` is not set (its processes carry the values) |
 
 Every one of these checks the environment's owner, carries the scope in the
 registry, and is audited like any other controller operation.
@@ -96,7 +108,7 @@ registry, and is audited like any other controller operation.
 | `/environments/{e}/exec` vs `/compute/sessions/{id}/exec` | The controller route is the control-plane one. It accepts the same command, terminal fields included. |
 | Three ways to deliver software: `/projects` + `/deployments` (environments without a computer), `/applications`, `/software` + `/rollouts` | `/software` and `/rollouts` are canonical. The other two are **legacy**: each entry names its successor, and they stay served until `compute.api@2`. |
 | Rollback in three places | `POST /software/{p}/rollback` is canonical; the others are legacy aliases of it. |
-| Two error vocabularies | One per surface. Controller routes that relay a target's refusal translate it into a controller `kind`. |
+| Two error vocabularies | One per surface. Controller routes that relay a target's refusal translate it into a controller `kind`. On the target surface a scope refusal is `403` with the protocol's single `unauthorized` kind (the message names the missing scope); the controller says `authorization_denied`. |
 
 ## Versioning and migration
 

@@ -15,7 +15,7 @@ reads filtered in Compute are prohibited on production controller paths.**
         │                       │
  ephemeral working state   durable authority
         │                       │
-     controller          FeltDB 0.2.0 (crates)
+     controller          FeltDB 0.2.1 (crates)
         │                       │
         └───────────┬───────────┘
                     │
@@ -52,12 +52,12 @@ version.
 
 ## Version
 
-Compute is certified against the FeltDB crates **0.2.0**
+Compute is certified against the FeltDB crates **0.2.1**
 (`feltdb-client` and `feltdb-server` on crates.io). The version is declared
 once, as `CERTIFIED_FELTDB_VERSION` in
 `crates/compute-state-feltdb/src/lib.rs`, and:
 
-- `compute-state-feltdb` depends on `feltdb-client = "=0.2.0"`, and a test
+- `compute-state-feltdb` depends on `feltdb-client = "=0.2.1"`, and a test
   fails unless `Cargo.lock` resolves exactly that version;
 - CI installs `feltdb-server` from crates.io at that version and runs every
   FeltDB test against it (`.github/workflows/feltdb-consumer.yml`). State
@@ -71,29 +71,33 @@ The model compiler is separate: `packages/compute-state-model` compiles
 `scripts/feltdb/verify-version.mjs` fails unless npm resolves exactly that.
 It is a development-time tool; nothing at run time uses npm.
 
-**Private CA.** `[state.feltdb] ca_file` is refused at start with its
-reason: feltdb-client 0.2.0 trusts only public roots. Support returns with
-a feltdb-client release that can add a root
-(`ClientBuilder::add_root_certificate_pem`).
+**Private CA.** `[state.feltdb] ca_file` names a PEM certificate authority
+that is added to the public roots (`ClientBuilder::add_root_certificate_pem`).
+Verification is never disabled. A file that is not a PEM certificate is
+refused at start, not at the first request. Certified against a real server
+behind a private CA by `a_private_ca_is_trusted_and_verification_is_never_skipped`:
+provision, connect, health and the state version all succeed through the CA,
+and the same endpoint without it is refused.
 
 ## How Compute talks to FeltDB
 
-`compute-state-feltdb` is a Rust client of FeltDB's application-scoped
-Service API, built on the native `feltdb-client` crate: discovery and
-queries go through its `Application` handle, and queries, transactions and
-their results are FeltDB's own wire types (`feltdb_client::wire`), so
-Compute and the server serialize the same structs. It uses only public
-FeltDB endpoints, and adds none:
+`compute-state-feltdb` is a Rust client of FeltDB built on the native
+`feltdb-client` crate. Every call is one of the client's named methods, and
+Compute builds no route or request body by hand. Queries, transactions,
+drafts, revisions, manifests and validation reports are FeltDB's own types
+(`feltdb_client::wire`, `feltdb::application`), so Compute and the server
+serialize the same structs. It uses only public FeltDB endpoints, and adds
+none:
 
-| Endpoint | Use |
-| --- | --- |
-| `GET /v1/application` | The Compute application's active revision |
-| `POST /v1/query` | Bounded, ordered, paginated reads; the plan FeltDB reports is counted |
-| `POST /v1/transactions` | Atomic, version-fenced writes (a change and its events are one transaction) |
-| `GET /v1/state/version` | The committed revision: proves a snapshot coherent, a cache current |
-| `GET /health` | FeltDB's own health and server version |
-| `/api/applications/…` | Provisioning and upgrading the model (draft, validate, commit, promote) |
-| `POST /admin/backups` | FeltDB's online backup, when an upgrade is asked to take one |
+| Client method | Endpoint | Use |
+| --- | --- | --- |
+| `Application::discover` | `GET /v1/application` | The Compute application's active revision |
+| `Application::query` | `POST /v1/query` | Bounded, ordered, paginated reads; the plan FeltDB reports is counted |
+| `Application::commit` with `AppTransaction` (`insert`, `update_if_version`, `delete_if_version`) | `POST /v1/transactions` | Atomic writes, each fenced on the version it was read at. A replace is a version-checked delete and an insert of the same id; a stale version is refused (`PRECONDITION_FAILED`) |
+| `Application::state_version` | `GET /v1/state/version` | The committed revision: proves a snapshot coherent, a cache current |
+| `Client::health` | `GET /health` | FeltDB's own health and server version |
+| `Client::control()`: `tenants`, `create_tenant`, `applications`, `create_application`, `application`, `create_draft`, `update_draft` (at the draft's version), `validate_draft`, `commit_draft`, `revision`, `promote` | `/api/tenants`, `/api/applications/…` | Provisioning and upgrading the model |
+| `Control::backup` | `POST /admin/backups` | FeltDB's online backup, when an upgrade is asked to take one |
 
 ## Reading
 

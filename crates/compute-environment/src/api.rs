@@ -407,7 +407,13 @@ async fn dispatch(
         }
         _ => {}
     }
-    let mutation = method != "GET";
+    // A change is any request but a read. A read is a GET, or a route the
+    // registry declares as needing only `compute.read` (job output and
+    // recipe resolution are POSTs because they take a body): polling
+    // output is not audited as a change, and is served like a GET.
+    let mutation = method != "GET"
+        && crate::routes::find(&method, &segments)
+            .is_none_or(|route| route.scope != crate::auth::Scope::Read);
     let operation = operation_name(&method, &segments);
     let (resource, resource_id) = resource_of(&segments);
     let audit = |operator: &str,
@@ -455,6 +461,16 @@ async fn dispatch(
             return Err(error);
         }
     };
+    // Only what the registry declares is served: a handler without a
+    // declaration is unreachable, so the published contract is the whole
+    // surface. (Asked only of an authenticated caller, so the table cannot
+    // be probed anonymously.)
+    if crate::routes::find(&method, &segments).is_none() {
+        return Err(EnvironmentError::NoRoute(format!(
+            "{method} {}",
+            request.path
+        )));
+    }
     let scope = required_scope(&method, &segments);
     if !principal.allows(scope) {
         let error = EnvironmentError::Forbidden(format!(

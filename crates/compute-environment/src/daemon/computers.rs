@@ -4974,26 +4974,25 @@ impl Daemon {
     /// Destroy sessions on targets that no live computer owns: what a
     /// provider built after Compute stopped wanting it.
     async fn sweep_orphans(self: Arc<Self>) {
-        let (computers, targets) = {
+        let computers = || async {
             let inner = self.inner.lock().await;
-            let computers = inner
+            inner
                 .desired
                 .computers
                 .values()
                 .map(|computer| (computer.id.clone(), computer.value.clone()))
-                .collect::<BTreeMap<_, _>>();
-            let targets = computers
-                .values()
-                .filter_map(|computer| computer.target.clone())
-                .chain(computers.values().flat_map(|computer| {
-                    computer
-                        .retired
-                        .iter()
-                        .map(|retired| retired.target.clone())
-                }))
-                .collect::<std::collections::BTreeSet<_>>();
-            (computers, targets)
+                .collect::<BTreeMap<_, _>>()
         };
+        let targets = computers()
+            .await
+            .into_values()
+            .flat_map(|computer| {
+                computer
+                    .target
+                    .into_iter()
+                    .chain(computer.retired.into_iter().map(|retired| retired.target))
+            })
+            .collect::<std::collections::BTreeSet<_>>();
         for target in targets {
             let Ok(client) = self.target_client(&target) else {
                 continue;
@@ -5001,6 +5000,17 @@ impl Daemon {
             let Ok(sessions) = client.sessions().await else {
                 continue;
             };
+            // Ownership is decided from state read *after* the listing. A
+            // computer's reference is written before its session is asked
+            // for, so every session listed here whose computer exists is
+            // in this read; a snapshot taken before the listing would miss
+            // one placed and provisioned in between, and destroy it. Its
+            // own writes are read back first; if they cannot be, nothing
+            // is destroyed.
+            if self.refresh_targeted().await.is_err() {
+                return;
+            }
+            let computers = computers().await;
             for session in sessions {
                 if session.status.is_terminal() {
                     continue;

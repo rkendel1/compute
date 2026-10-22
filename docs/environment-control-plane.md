@@ -321,7 +321,7 @@ on an environment with a computer.
 | `destroy` | yes | teardown | ends it; record kept | `computer.destroyed` | operate |
 | `session open/close` | a `WorkSession` | ephemeral: creates/destroys its environment | no | `work_session.*` | operate |
 | bundle `deploy`, `project add`, `promote` on a computer environment | — | — | — | refused, with the release to use | — |
-| Environments **without** a computer: `project add`, `deploy`, `promote`, `rollback`, `workload run`, `application deploy` | yes | on the control-plane node (`machine.kind = node`, shown in Manage) | — | deployments, executions, receipts | deploy/operate/execute |
+| Environments **without** a computer: `project add`, `deploy`, `promote`, `rollback`, `workload run` (an `application deploy` always makes a computer environment) | yes | on the control-plane node (`machine.kind = node`, shown in Manage) | — | deployments, executions, receipts | deploy/operate/execute |
 
 The last row is the one path that still runs on the daemon's node: an
 environment created without a computer. It is shown as such everywhere
@@ -400,6 +400,24 @@ lacks or the UI anything it lacks:
 | Create, stop, resume, replace, destroy a computer | `compute environment create\|stop\|start\|replace\|destroy` | as before |
 | Lifetime, configuration | `compute environment lifetime\|config` | `POST /environments/{e}/lifecycle\|config` |
 | Temporary computer | `compute session open --cpu 2` | `POST /sessions` |
+| Cancel a running command (Work → Terminal) | — (the API, or the UI) | `POST /environments/{e}/jobs/{job}/cancel` |
+| Interactive terminal (Work → Terminal), where the machine can | `compute session exec --tty`, `attach`, `input` | `POST /environments/{e}/exec` with `terminal`, then `POST /environments/{e}/jobs/{job}/output\|input\|cancel` |
+| What the machine can do (Manage → Computer → Capabilities) | `compute environment computer ENV --json` | `GET /environments/{e}/computer` (`capabilities`) |
+| Fork: files or the running machine (Manage → Fork…) | `compute environment fork ENV NAME [--machine] [--copy-config]` | `POST /environments/{e}/fork` (`state`) |
+| Checkpoint, restore (Manage → Checkpoint, Checkpoints) | `compute environment checkpoint\|checkpoints\|restore` | `POST /environments/{e}/checkpoint`, `GET /environments/{e}/checkpoints`, `POST /checkpoints/{c}/restore` |
+| Credentials, audit trail, the API contract (Access) | `compute auth create\|list\|rotate\|revoke\|audit` | `/auth/credentials…`, `GET /audit`, `GET /api` |
+
+### Where things are
+
+The UI is organised by what is being acted on, the same in both modes:
+
+| Surface | Holds | Mode |
+| --- | --- | --- |
+| **Environments → an environment** | The machine as a whole: what it is, what it can do (**Capabilities**: suspend with memory, fork the running machine, an interactive terminal; each shown as available or not on this machine), and what makes another environment from it (**Fork…**, **Checkpoint**, **Checkpoints → Restore as new environment…**). Stop and Start read **Suspend** and **Resume** where the machine keeps its memory. | Manage |
+| **Computers → an environment** | What is inside the machine and what it is doing: contents (GO), commands, an **interactive terminal** where the machine has one, files, sessions. A running command can be cancelled. | Work |
+| **Access** | Who may operate the control plane (**Credentials**: create, rotate and revoke; a token is shown once), what was done (**Audit trail**), and the **API** it is done with (the published contract, by surface and scope). | Manage |
+
+A feature the machine's backend lacks is shown as unavailable, with the reason, and is never replaced by a weaker one. For example, a fork of a machine that cannot fork its memory offers only the files.
 
 `@compute/appport` has a function for each (`proposeProject`,
 `publishVersion`, `deployVersion`, `promotionPlan`, `promoteVersion`,
