@@ -6474,3 +6474,83 @@ async fn an_environments_jobs_are_read_driven_and_cancelled_through_it() {
     assert_eq!(ended.job.status, compute_core::JobStatus::Cancelled);
     daemon.shutdown().await;
 }
+
+/// A derived environment (fork, restore, replace) runs on the machine its
+/// candidate prepared, under the candidate's provisioning reference. The
+/// orphan sweep recognises that machine by the computer that holds it, not
+/// by the candidate the reference named, so it is never torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_orphan_sweep_keeps_a_derived_environments_machine() {
+    let workspaces = tempfile::tempdir().unwrap();
+    let target = Target::start(Steered::new(workspaces.path(), full(), None), &[]);
+    let store: Arc<dyn StateStore> = Arc::new(MemoryState::new());
+    let (first, _node) = start_daemon(store.clone(), pool(&[("target-a", &target)])).await;
+    first
+        .create_computer_environment(
+            definition(
+                "origin",
+                ComputerLifecycle::Persistent,
+                requirements(),
+                EnvironmentContents::default(),
+            ),
+            "alice",
+        )
+        .await
+        .unwrap();
+    computer_where(&first, "origin", "the origin to run", |view| {
+        view.status == ComputerStatus::Running
+    })
+    .await;
+    first
+        .fork_environment("origin", "alice", fork_of("copy"))
+        .await
+        .unwrap();
+    let copy = running_computer(&first, "copy").await;
+    first.shutdown().await;
+    drop(first);
+
+    // A real orphan, so the sweep is seen to have run.
+    let orphan = target
+        .client()
+        .create_session(
+            &compute_provider::SessionCreateRequest::new(
+                &compute_provider::SessionEnvironmentSpec {
+                    resources: Default::default(),
+                    network: NetworkPolicy::Network,
+                    isolation: Default::default(),
+                    host: Default::default(),
+                    architecture: None,
+                },
+                compute_core::SessionSpec {
+                    reference: Some("cmp_000000000000000000000000:1".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (second, _node2) = start_daemon(store, pool(&[("target-a", &target)])).await;
+    eventually("the orphan to go", async || {
+        let session = target.client().session(&orphan.session_id.0).await.ok()?;
+        session.status.is_terminal().then_some(())
+    })
+    .await;
+    let session = target
+        .client()
+        .session(copy.session_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        !session.status.is_terminal(),
+        "the fork's machine was swept: {:?}",
+        session.status
+    );
+    assert!(
+        !events(&second, "copy")
+            .await
+            .iter()
+            .any(|(kind, _)| kind == "computer.orphan_destroyed")
+    );
+    second.shutdown().await;
+}

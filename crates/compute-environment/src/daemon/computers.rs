@@ -4892,7 +4892,11 @@ impl Daemon {
                 if !computer_id.starts_with("cmp_") {
                     continue;
                 }
-                let owned = computers.get(computer_id).is_some_and(|computer| {
+                // Owned by whichever computer holds it. A derived
+                // environment (fork, restore, replace) runs on the machine
+                // its candidate provisioned, so the reference can name a
+                // computer that no longer exists while the session is live.
+                let owned = computers.values().any(|computer| {
                     !computer.status.is_terminal()
                         && (computer.reference.as_ref() == Some(reference)
                             || computer.session_id.as_ref() == Some(&session.session_id.0)
