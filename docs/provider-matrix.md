@@ -25,8 +25,8 @@ computers are placed on.
 | `compute serve` | pool member / target | yes | yes | no — started by `compute up` locally (with a credential for its control plane), by hand elsewhere | **yes**: a target credential on every request; the named `--insecure-unauthenticated` is the only open mode | yes: `unreachable` / `lost` within one liveness interval | yes | IMPLEMENTED + VERIFIED |
 | daemon node (`/compute/*`) | pool member | no | yes | n/a | yes (daemon scopes; `DaemonAuthorized`) | n/a | tests | IMPLEMENTED + VERIFIED |
 | workspace | session provider | yes | yes (in session) | n/a | via its target | yes: a missing workspace makes the session `environment_lost`, the computer `lost` | yes | IMPLEMENTED + VERIFIED |
-| container (docker/podman) | session provider | yes | yes (in session) | n/a | via its target | via `inspect` (unverified against an engine) | fake docker only | IMPLEMENTED |
-| Firecracker / KVM | session provider | — | — | — | — | — | — | MISSING |
+| container (docker/podman) | session provider | yes | yes (in session) | n/a | via its target | via `inspect` | CI `container-engine` (real Docker) | IMPLEMENTED + VERIFIED |
+| microvm (Firecracker / KVM) | session provider | yes (Linux with KVM) | yes (in session, over vsock) | n/a | via its target | via `inspect` (VMM process) | CI `microvm`; see [session-backends.md](session-backends.md) | IMPLEMENTED |
 | Fly Machines | provisioning adapter | — | — | — | — | — | — | MISSING |
 | Railway | provisioning adapter | — | — | — | — | — | — | MISSING |
 | Render | provisioning adapter | — | — | — | — | — | — | MISSING |

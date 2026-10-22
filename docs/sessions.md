@@ -232,6 +232,7 @@ from the provider's name.
 | `suspend` | The provider can suspend the environment on `stop`. |
 | `resume` | A stopped session can be resumed. |
 | `claim` | The session can be claimed (kept beyond its TTL). |
+| `memory_suspend` | `stop` keeps memory, processes, and devices, and `resume` continues them or fails; never a cold start in their place. |
 | `process_tree_termination` | `stop` and `destroy` succeed only once every process the environment owns is confirmed gone, else they fail `termination_failed` ([lifecycle.md](lifecycle.md)). |
 
 An operation the session's capabilities do not include fails with
@@ -341,10 +342,11 @@ they keep their job, execution, and receipt. The VM has no network
 interface: with `--vm-egress ADDR` (a `compute egress serve` gateway), a
 session that asks for `network` gets exactly one route out, through the
 gateway's allowlist and credential brokering ([egress.md](egress.md));
-without it, microVM sessions offer only `none`. `stop` pauses the VM and
-writes a full snapshot, and `resume` loads it: processes, memory, and open
-files continue. A snapshot that cannot be written or loaded falls back to a
-cold boot of the same disk. Verified on KVM in CI (`.github/workflows/microvm.yml`).
+without it, microVM sessions offer only `none`. microVM sessions declare
+`memory_suspend`: `stop` writes a full snapshot and `resume` continues the
+same processes and memory, or fails; it never cold-boots in its place
+([session-backends.md](session-backends.md), which also lists what each
+backend supports and how it is verified).
 
 Two session fields exist for environment computers
 ([computers.md](computers.md)): `persistent` (created claimed, with no

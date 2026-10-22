@@ -121,29 +121,33 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
         ),
     )
     .unwrap();
-    let _server = Running(
-        std::process::Command::new(env!("CARGO_BIN_EXE_compute"))
-            .args(["serve", "--listen", &listen, "--public-url"])
-            .arg(format!("http://{listen}"))
-            .arg("--job-store")
-            .arg(root.join("jobs"))
-            .arg("--session-store")
-            .arg(root.join("sessions"))
-            .arg("--credentials")
-            .arg(root.join("node-credentials.json"))
-            .args([
-                "--session-provider",
-                "microvm",
-                "--vm-firecracker",
-                &firecracker,
-            ])
-            .args(["--vm-kernel", &kernel, "--vm-rootfs", &rootfs])
-            .args(["--vm-egress", &gateway])
-            .spawn()
-            .unwrap(),
-    );
+    let serve = || {
+        Running(
+            std::process::Command::new(env!("CARGO_BIN_EXE_compute"))
+                .args(["serve", "--listen", &listen, "--public-url"])
+                .arg(format!("http://{listen}"))
+                .arg("--job-store")
+                .arg(root.join("jobs"))
+                .arg("--session-store")
+                .arg(root.join("sessions"))
+                .arg("--credentials")
+                .arg(root.join("node-credentials.json"))
+                .args([
+                    "--session-provider",
+                    "microvm",
+                    "--vm-firecracker",
+                    &firecracker,
+                ])
+                .args(["--vm-kernel", &kernel, "--vm-rootfs", &rootfs])
+                .args(["--vm-egress", &gateway])
+                .spawn()
+                .unwrap(),
+        )
+    };
+    let mut server = serve();
     wait_for(&listen);
 
+    let started = Instant::now();
     let created: Value = serde_json::from_str(&ok(
         &root,
         &[
@@ -166,6 +170,8 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
     let session = &created["session"];
     assert_eq!(session["status"], "ready", "{created}");
     assert_eq!(session["provider_kind"], "microvm");
+    assert_eq!(session["capabilities"]["memory_suspend"], true, "{created}");
+    let created_in = started.elapsed();
     let id = session["session_id"].as_str().unwrap().to_owned();
     let exec = |script: &str| {
         ok(
@@ -185,6 +191,9 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
     };
 
     // Its own kernel and init, its own workspace, no network interface.
+    let first = Instant::now();
+    exec("true");
+    let first_exec_in = first.elapsed();
     let host_kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap();
     assert_ne!(
         exec("uname -r").trim(),
@@ -240,16 +249,106 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
     drop(piped.stdin.take());
     assert_eq!(piped.wait_with_output().unwrap().stdout, b"kept\n");
 
-    // A process running when the session is stopped is still running after
-    // it resumes: the VM was suspended, not rebooted.
-    exec("sleep 100000 > /dev/null 2>&1 & echo $! > sleeper");
+    // Suspension keeps memory. The evidence is held in the guest's memory,
+    // not in any command's output: a tmpfs file (lost by any reboot), a
+    // process with a known PID, and a counter that process keeps in memory
+    // and reports only through tmpfs.
+    let nonce = format!("{:x}", std::process::id() as u64 * 7919 + port as u64);
+    exec(&format!("printf {nonce} > /tmp/nonce"));
+    exec("sleep 100000 > /dev/null 2>&1 & echo $! > /tmp/sleeper");
+    exec(
+        "(i=0; while :; do i=$((i+1)); echo $i > /tmp/count.new; mv /tmp/count.new /tmp/count; \
+         sleep 1; done) > /dev/null 2>&1 & echo $! > /tmp/counter",
+    );
+    std::thread::sleep(Duration::from_millis(2500));
+    let sleeper = exec("cat /tmp/sleeper").trim().to_owned();
+    let counter = exec("cat /tmp/counter").trim().to_owned();
+    let counted: u64 = exec("cat /tmp/count").trim().parse().unwrap();
+    assert!(counted > 0);
+    let vm_directory = std::fs::read_dir(root.join("sessions/microvms"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+
+    // A snapshot that cannot be written fails the stop and loses nothing.
+    std::fs::create_dir(vm_directory.join("snapshot")).unwrap();
+    let refused = compute(&root, &["session", "stop", &id]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(!refused.status.success(), "{said}");
+    assert!(said.contains("still running, unchanged"), "{said}");
+    assert!(
+        !vm_directory.join("suspension.json").exists(),
+        "no suspension is recorded for a snapshot that failed"
+    );
+    std::fs::remove_dir(vm_directory.join("snapshot")).unwrap();
+
+    // The retried stop completes the suspension, and reports it only once
+    // it is on stable storage.
+    let stopping = Instant::now();
     ok(&root, &["session", "stop", &id]);
-    ok(&root, &["session", "resume", &id]);
-    assert_eq!(exec("cat note").trim(), "kept");
+    let stopped_in = stopping.elapsed();
+    let record: Value =
+        serde_json::from_slice(&std::fs::read(vm_directory.join("suspension.json")).unwrap())
+            .unwrap();
+    assert_eq!(record["format"], "compute.vm-suspension@1", "{record}");
     assert_eq!(
-        exec("kill -0 \"$(cat sleeper)\" && echo alive").trim(),
+        record["memory_bytes"].as_u64(),
+        Some(
+            std::fs::metadata(vm_directory.join("memory"))
+                .unwrap()
+                .len()
+        )
+    );
+    assert!(!vm_directory.join("pid").exists(), "the VMM has ended");
+    // Stopping a stopped session is not an error, and changes nothing.
+    ok(&root, &["session", "stop", &id]);
+
+    // The controller restarts while the machine is suspended.
+    drop(server);
+    server = serve();
+    wait_for(&listen);
+
+    let resuming = Instant::now();
+    ok(&root, &["session", "resume", &id]);
+    let resumed_in = resuming.elapsed();
+    // Ready means ready: the first command after the resume runs.
+    assert_eq!(exec("cat /tmp/nonce").trim(), nonce, "tmpfs survived");
+    assert_eq!(exec("cat note").trim(), "kept", "the disk survived");
+    assert_eq!(
+        exec(&format!("kill -0 {sleeper} && echo alive")).trim(),
         "alive",
-        "the process survived suspension"
+        "the process survived suspension, with its PID"
+    );
+    assert_eq!(exec("cat /tmp/counter").trim(), counter);
+    std::thread::sleep(Duration::from_millis(2500));
+    let continued: u64 = exec("cat /tmp/count").trim().parse().unwrap();
+    assert!(
+        continued > counted,
+        "the counter continued from memory ({counted} -> {continued})"
+    );
+    assert!(
+        !vm_directory.join("suspension.json").exists(),
+        "a resumed VM's snapshot is retired"
+    );
+    // Egress is reconnected after the controller restart.
+    assert!(exec("wget -q -T 20 -O - http://example.com/").contains("Example Domain"));
+    // Resuming a running session is a conflict, not a second machine.
+    let again = compute(&root, &["session", "resume", &id]);
+    assert!(!again.status.success());
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("cannot be resumed"),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    eprintln!(
+        "lifecycle (1 vCPU, 256 MiB, one run, debug build): create+boot {created_in:?}, \
+         first exec {first_exec_in:?}, stop {stopped_in:?}, resume {resumed_in:?}"
     );
 
     // The receipt says the command ran in this VM: the VMM, what it booted,
@@ -300,7 +399,34 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
         &["receipt", "verify", receipt_path.to_str().unwrap()],
     );
 
+    // A damaged snapshot is refused: the machine is not cold-booted in its
+    // place, and the session stays stopped with the reason.
+    ok(&root, &["session", "stop", &id]);
+    let memory = std::fs::OpenOptions::new()
+        .write(true)
+        .open(vm_directory.join("memory"))
+        .unwrap();
+    memory.set_len(4096).unwrap();
+    let damaged = compute(&root, &["session", "resume", &id]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&damaged.stdout),
+        String::from_utf8_lossy(&damaged.stderr)
+    );
+    assert!(said.contains("not cold-booted"), "{said}");
+    let info: Value =
+        serde_json::from_str(&ok(&root, &["session", "info", &id, "--json"])).unwrap();
+    assert_eq!(info["status"], "stopped", "{info}");
+    assert!(
+        info["failure"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not cold-booted")),
+        "{info}"
+    );
+    assert!(!vm_directory.join("pid").exists(), "nothing was booted");
+
     ok(&root, &["session", "destroy", &id]);
+    drop(server);
     assert!(
         !root.join("sessions/microvms").exists()
             || std::fs::read_dir(root.join("sessions/microvms"))

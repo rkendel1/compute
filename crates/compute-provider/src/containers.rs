@@ -200,6 +200,7 @@ impl SessionProvider for ContainerSessionProvider {
             // The engine ends every process in a container it stops or
             // removes; the provider confirms the container's state after.
             process_tree_termination: true,
+            memory_suspend: false,
         }
     }
 

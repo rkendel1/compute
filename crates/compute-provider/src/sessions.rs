@@ -561,6 +561,7 @@ impl SessionProvider for WorkspaceSessionProvider {
             resume: true,
             claim: true,
             process_tree_termination: crate::processes::ownership_scan_available(),
+            memory_suspend: false,
         }
     }
 

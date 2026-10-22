@@ -128,7 +128,7 @@ pub struct SessionCapabilities {
     pub persistent_storage: bool,
     /// The provider can stop the environment's machine and later resume it
     /// with its storage kept: everything running in it is ended on stop. It
-    /// does not mean memory or process state is kept.
+    /// does not mean memory or process state is kept (see `memory_suspend`).
     pub suspend: bool,
     pub resume: bool,
     pub claim: bool,
@@ -139,10 +139,17 @@ pub struct SessionCapabilities {
     /// anything is acquired.
     #[serde(default)]
     pub process_tree_termination: bool,
+    /// `stop` keeps the machine's memory, processes, and devices, and
+    /// `resume` continues them exactly where they were, or fails: a provider
+    /// with this capability never substitutes a cold start for a resume.
+    /// Written only when true, so readers that predate it still parse every
+    /// record that does not depend on it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory_suspend: bool,
 }
 
 impl SessionCapabilities {
-    pub const NAMES: [&'static str; 10] = [
+    pub const NAMES: [&'static str; 11] = [
         "exec",
         "terminal",
         "filesystem",
@@ -153,6 +160,7 @@ impl SessionCapabilities {
         "resume",
         "claim",
         "process_tree_termination",
+        "memory_suspend",
     ];
 
     /// Whether the named capability is present; `None` for an unknown name.
@@ -168,6 +176,7 @@ impl SessionCapabilities {
             "resume" => self.resume,
             "claim" => self.claim,
             "process_tree_termination" => self.process_tree_termination,
+            "memory_suspend" => self.memory_suspend,
             _ => return None,
         })
     }
