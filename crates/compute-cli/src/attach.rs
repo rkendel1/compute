@@ -206,7 +206,8 @@ pub async fn attach(
     };
     let ended = tokio::select! {
         read = reading => { read?; true }
-        _ = detached.recv() => false,
+        // Only a detach: the input ending (its sender dropped) is not one.
+        Some(()) = detached.recv() => false,
     };
     sending.abort();
     drop(raw);

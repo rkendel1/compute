@@ -26,7 +26,7 @@ substrate (fakes or skips). A skipped test is not verification.
 | `network` | host network or `none`* | engine network or `none` | **egress gateway only** (no NIC) | none |
 | `suspend` / `resume` (storage kept) | yes | yes (container stop/start) | yes | n/a |
 | `memory_suspend` (processes and memory kept) | **no** | **no** | yes, verified on KVM | n/a |
-| `fork` (machine fork) | **no** | **no** | yes; KVM verification pending (see below) | n/a |
+| `fork` (machine fork) | **no** | **no** | yes, verified on KVM | n/a |
 | `process_tree_termination` | where an ownership scan is available | yes | yes (the VM ends) | n/a |
 | receipt `substrate` evidence | no | engine, OCI runtime, image, limits | VMM version, kernel and rootfs digests, vCPUs, memory, network | n/a |
 
@@ -123,11 +123,18 @@ refused with `operation_unsupported` and nothing is created.
 | Evidence | A child's `lineage` names its parent session, the checkpoint, and the checkpoint's evidence (snapshot digest, sizes, VMM); its receipts' substrate names the checkpoint's snapshot digest (`artifacts.checkpoint`). |
 | Limits | Only VMs booted with relocatable device paths (every VM created since fork existed) can be forked; an older VM is refused with that reason. A child has its source's resources and network. The disk is copied while the source is paused, so the pause grows with the disk's size. |
 
-**Status:** implemented; the manager's semantics (lineage, partial failure,
+**Status:** verified. The manager's semantics (lineage, partial failure,
 restart recovery, refusals, checkpoint release) are tested against a fake
-provider, and the Firecracker path by `crates/compute-cli/tests/microvm.rs`
-on KVM (the `microvm` CI job). Until that job passes, machine fork on
-Firecracker is not verified.
+provider; the Firecracker path by `crates/compute-cli/tests/microvm.rs` on
+KVM, first passing in
+[run 39741122138](https://github.com/rkendel1/compute/actions/runs/39741122138):
+two children of a live machine with its memory, PIDs, counter, and disk;
+one child's writes and kills reaching neither the source nor its sibling;
+diverging `/dev/urandom`; egress per child; a receipt naming the checkpoint
+that verifies; lineage across a controller restart; an unwritable
+checkpoint failing the child with its reason while the source runs on; the
+checkpoint released; nothing left after destroy. One sample (debug build,
+nested KVM): two children ready in 6.8 s.
 
 ## Interactive commands
 
