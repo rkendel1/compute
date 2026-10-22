@@ -491,6 +491,93 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
     }
     eprintln!("fork (2 children, 1 vCPU, 256 MiB, one run, debug build): {forked_in:?}");
 
+    // Interactive: commands on a terminal in the VM, driven through the CLI.
+    // Standard input here is a pipe, so the CLI streams it as typed input.
+    let terminal_receipt = root.join("terminal-receipt.json");
+    let mut typed = std::process::Command::new(env!("CARGO_BIN_EXE_compute"))
+        .current_dir(&root)
+        .args(["session", "exec", &id, "--tty", "--receipt"])
+        .arg(&terminal_receipt)
+        .args(["--", "sh"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(
+        typed.stdin.as_mut().unwrap(),
+        b"tty; stty size; echo $((6*7)); exit 7\n",
+    )
+    .unwrap();
+    drop(typed.stdin.take());
+    let typed = typed.wait_with_output().unwrap();
+    let screen = String::from_utf8_lossy(&typed.stdout);
+    assert_eq!(typed.status.code(), Some(7), "{screen}");
+    assert!(
+        screen.contains("/dev/pts/"),
+        "a terminal in the guest: {screen}"
+    );
+    assert!(screen.contains("24 80"), "{screen}");
+    assert!(screen.contains("42"), "{screen}");
+    // The same durable job and receipt as any command.
+    ok(
+        &root,
+        &["receipt", "verify", terminal_receipt.to_str().unwrap()],
+    );
+
+    // Detached, driven by `session input`, then attached again: the same
+    // command throughout, never started twice.
+    let detached: Value = serde_json::from_str(&ok(
+        &root,
+        &["session", "exec", &id, "--tty", "--detach", "--", "sh"],
+    ))
+    .unwrap();
+    let job = detached["job_id"].as_str().unwrap().to_owned();
+    ok(
+        &root,
+        &["session", "input", &id, &job, "--data", "echo one\n"],
+    );
+    ok(
+        &root,
+        &["session", "input", &id, &job, "--resize", "30x100"],
+    );
+    ok(
+        &root,
+        &["session", "input", &id, &job, "--data", "stty size\n"],
+    );
+    let mut attached = std::process::Command::new(env!("CARGO_BIN_EXE_compute"))
+        .current_dir(&root)
+        .args(["session", "attach", &id, &job, "--from-start"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(attached.stdin.as_mut().unwrap(), b"exit 9\n").unwrap();
+    drop(attached.stdin.take());
+    let attached = attached.wait_with_output().unwrap();
+    let screen = String::from_utf8_lossy(&attached.stdout);
+    assert_eq!(attached.status.code(), Some(9), "{screen}");
+    assert!(screen.contains("one"), "earlier output, replayed: {screen}");
+    assert!(screen.contains("30 100"), "the resize reached it: {screen}");
+
+    // A signal reaches the command's process group.
+    let sleeping: Value = serde_json::from_str(&ok(
+        &root,
+        &[
+            "session", "exec", &id, "--tty", "--detach", "--", "sleep", "1000",
+        ],
+    ))
+    .unwrap();
+    let job = sleeping["job_id"].as_str().unwrap().to_owned();
+    ok(&root, &["session", "input", &id, &job, "--signal", "15"]);
+    let ended = compute(&root, &["session", "attach", &id, &job, "--from-start"]);
+    assert_eq!(ended.status.code(), Some(128 + 15));
+    // Input for a command that has ended is refused.
+    assert!(
+        !compute(&root, &["session", "input", &id, &job, "--data", "x"])
+            .status
+            .success()
+    );
+
     // A snapshot that cannot be written fails the stop and loses nothing.
     std::fs::create_dir(vm_directory.join("snapshot")).unwrap();
     let refused = compute(&root, &["session", "stop", &id]);

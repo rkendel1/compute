@@ -2546,6 +2546,45 @@
    "tests": []
   },
   {
+   "command": "compute session fork",
+   "about": "Fork a running session's machine into new sessions: each continues from the same instant (memory, processes, disk), with its own copy of everything mutable",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target session store",
+   "authority": "target: target credential",
+   "ui": "none",
+   "tests": [
+    "crates/compute-provider/tests/sessions.rs",
+    "crates/compute-cli/tests/microvm.rs"
+   ]
+  },
+  {
+   "command": "compute session attach",
+   "about": "Attach this terminal to a running interactive execution: input goes to it, its output comes back; Ctrl-] detaches",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target session store",
+   "authority": "target: target credential",
+   "ui": "none",
+   "tests": [
+    "crates/compute-cli/tests/guest_terminal.rs",
+    "crates/compute-cli/tests/microvm.rs"
+   ]
+  },
+  {
+   "command": "compute session input",
+   "about": "Send input, a resize, a signal, or the end of input to a running interactive execution",
+   "help_defect": null,
+   "interface": "targets directly",
+   "state": "target session store",
+   "authority": "target: target credential",
+   "ui": "none",
+   "tests": [
+    "crates/compute-provider/tests/sessions.rs",
+    "crates/compute-cli/tests/microvm.rs"
+   ]
+  },
+  {
    "command": "compute egress serve",
    "about": "Serve an egress gateway: sessions reach the network only through it",
    "help_defect": null,

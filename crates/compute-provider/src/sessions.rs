@@ -401,6 +401,10 @@ pub struct SessionEnvironment {
     /// The host profile the session was created with (its environment
     /// bundle's), which every command in it runs under.
     pub host: HostProfile,
+    /// For an interactive command (`terminal`, `interactive`): the node-local
+    /// socket on which the running command must accept control frames
+    /// (`compute_guest::Request::{Input, Resize, Signal, CloseInput}`).
+    pub attach: Option<std::path::PathBuf>,
 }
 
 /// Connection material a provider issues for one connection.
@@ -1126,6 +1130,97 @@ impl SessionManager {
         })
     }
 
+    /// Deliver input to an interactive execution that is running: bytes, a
+    /// resize, a signal, or the end of its input. It goes to the running
+    /// command only; nothing is started, so a client that reconnects and
+    /// sends again reaches the same command.
+    pub async fn input(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        owner: &str,
+        input: compute_core::SessionInput,
+    ) -> Result<(), ProviderError> {
+        let session = self.owned(session_id, owner)?;
+        if input.data.len() > compute_core::MAX_SESSION_INPUT_BYTES {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ArtifactInvalid,
+                format!(
+                    "input is at most {} bytes at a time",
+                    compute_core::MAX_SESSION_INPUT_BYTES
+                ),
+            ));
+        }
+        let execution = session
+            .executions
+            .iter()
+            .find(|execution| execution.job_id == input.job_id)
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::UnknownJob,
+                    "no such execution in this session",
+                )
+            })?;
+        let ended = || {
+            conflict(format!(
+                "execution {} is not running an interactive command",
+                input.job_id
+            ))
+        };
+        if execution.status.is_terminal() {
+            return Err(ended());
+        }
+        // A command that has just been accepted may not be listening yet.
+        let path = self.attach_path(&input.job_id);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match tokio::net::UnixStream::connect(&path).await {
+                Ok(stream) => break stream,
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    if self
+                        .jobs
+                        .status(&input.job_id, &session.owner)
+                        .await
+                        .is_ok_and(|job| job.status.is_terminal())
+                    {
+                        return Err(ended());
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(_) => return Err(ended()),
+            }
+        };
+        let mut frames = vec![];
+        if let Some(size) = input.resize {
+            frames.push(compute_guest::Request::Resize {
+                size: compute_guest::TerminalSize {
+                    rows: size.rows,
+                    cols: size.cols,
+                },
+            });
+        }
+        if !input.data.is_empty() {
+            frames.push(compute_guest::Request::Input { data: input.data });
+        }
+        if let Some(signal) = input.signal {
+            if !(1..=64).contains(&signal) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ArtifactInvalid,
+                    "a signal is 1 to 64",
+                ));
+            }
+            frames.push(compute_guest::Request::Signal { signal });
+        }
+        if input.close {
+            frames.push(compute_guest::Request::CloseInput);
+        }
+        for frame in &frames {
+            compute_guest::write_frame(&mut stream, frame)
+                .await
+                .map_err(|_| ended())?;
+        }
+        Ok(())
+    }
+
     /// Release a checkpoint once no session still needs it: none waiting to
     /// be provisioned from it. Each child checks after its own outcome is
     /// durable, so the last one to finish (or a restart) releases it.
@@ -1292,7 +1387,33 @@ impl SessionManager {
         if !session.capabilities.exec {
             return Err(unsupported(&session.provider_kind, "exec"));
         }
-        let environment = self.environment(&session)?;
+        let interactive = command.terminal.is_some() || command.interactive;
+        if interactive && !session.capabilities.terminal {
+            return Err(unsupported(
+                &session.provider_kind,
+                "interactive commands (terminal)",
+            ));
+        }
+        if let Some(size) = command.terminal
+            && !((1..=1000).contains(&size.rows) && (1..=1000).contains(&size.cols))
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::ArtifactInvalid,
+                "a terminal is 1 to 1000 rows and columns",
+            ));
+        }
+        let execution = SessionExecution {
+            job_id: JobId::generate(),
+            execution_id: compute_core::new_execution_id(),
+            purpose: "exec".into(),
+            command: command.command.clone(),
+            submitted_at: Utc::now(),
+            status: JobStatus::Queued,
+        };
+        let mut environment = self.environment(&session)?;
+        if interactive {
+            environment.attach = Some(self.attach_path(&execution.job_id));
+        }
         let mut request = self
             .provider
             .exec(&environment, &command)
@@ -1309,14 +1430,6 @@ impl SessionManager {
                 .execution
                 .policy;
         }
-        let execution = SessionExecution {
-            job_id: JobId::generate(),
-            execution_id: compute_core::new_execution_id(),
-            purpose: "exec".into(),
-            command: command.command.clone(),
-            submitted_at: Utc::now(),
-            status: JobStatus::Queued,
-        };
         // Record the intent first: a restart between here and acceptance
         // leaves an execution the session can account for.
         self.mutate(session_id, None, "exec_requested", |session| {
@@ -2174,7 +2287,18 @@ impl SessionManager {
                 .isolation
                 .unwrap_or(bundle.workload.isolation.profile),
             host: bundle.workload.isolation.host,
+            attach: None,
         })
+    }
+
+    /// Where an interactive execution accepts control: derived from its job,
+    /// so input for a job always finds it, and nothing more is stored.
+    fn attach_path(&self, job_id: &JobId) -> std::path::PathBuf {
+        let digest = compute_core::sha256_identity(job_id.0.as_bytes());
+        self.root.join(".attach").join(format!(
+            "{}.sock",
+            &digest.trim_start_matches("sha256:")[..16]
+        ))
     }
 
     fn failure(&self, phase: SessionPhase, error: &ProviderError) -> SessionFailure {

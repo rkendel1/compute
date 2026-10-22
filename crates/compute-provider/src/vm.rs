@@ -747,7 +747,9 @@ impl SessionProvider for VmSessionProvider {
     fn capabilities(&self) -> SessionCapabilities {
         SessionCapabilities {
             exec: true,
-            terminal: false,
+            // Commands on a terminal (a PTY in the guest) and with input,
+            // resizes, and signals while they run.
+            terminal: true,
             filesystem: true,
             network: self.egress.is_some(),
             public_endpoint: false,
@@ -868,6 +870,23 @@ impl SessionProvider for VmSessionProvider {
         arguments.extend(["--env".into(), "COMPUTE_SESSION_ID".into()]);
         if command.stdin.is_some() {
             arguments.push("--stdin".into());
+        }
+        // Interactive: the guest runs it on a terminal, or with its input
+        // open, and the job accepts control on the session's attach socket.
+        if command.terminal.is_some() || command.interactive {
+            let attach = environment.attach.as_ref().ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::ArtifactInvalid,
+                    "an interactive command needs its attach socket",
+                )
+            })?;
+            arguments.extend(["--attach".into(), attach.display().to_string()]);
+            match command.terminal {
+                Some(size) => {
+                    arguments.extend(["--tty".into(), format!("{}x{}", size.rows, size.cols)])
+                }
+                None => arguments.push("--interactive".into()),
+            }
         }
         arguments.push("--".into());
         arguments.extend(command.command.iter().cloned());
@@ -1030,7 +1049,15 @@ impl SessionProvider for VmSessionProvider {
         let target = self.root.join(&relative);
         let staging = self.root.join(CHECKPOINTS).join(format!(".{checkpoint}"));
         let _ = std::fs::remove_dir_all(&staging);
-        std::fs::create_dir_all(&staging).map_err(crate::transport_error)?;
+        std::fs::create_dir_all(&staging).map_err(|error| {
+            ProviderError::new(
+                ProviderErrorKind::ProviderUnavailable,
+                format!(
+                    "the checkpoint could not be written ({}): {error}; the VM continues, unchanged",
+                    staging.display()
+                ),
+            )
+        })?;
         let socket = source.join("api.sock");
         if let Err(error) = api(&socket, "PATCH", "/vm", r#"{"state":"Paused"}"#).await {
             let _ = std::fs::remove_dir_all(&staging);

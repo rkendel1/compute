@@ -2291,3 +2291,114 @@ fn fork_is_refused_where_it_cannot_mean_what_it_says() {
     assert_eq!(fake.calls("checkpoint"), 0);
     server.kill();
 }
+
+#[test]
+fn a_jobs_output_is_read_from_an_offset_while_it_runs() {
+    let stores = Stores::new();
+    let fake = Fake::new(&stores.environments, everything());
+    let tokens: Arc<Tokens> = Arc::new(Tokens::default());
+    let client_runtime = client_runtime();
+    let server = Server::start(&stores, fake.clone(), tokens);
+    let client = server.client("alice");
+    client_runtime.block_on(async {
+        let source = running_source(&client).await;
+        let submission = client
+            .session_exec(
+                &source,
+                &SessionCommand::new(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "printf 'hello '; sleep 1; printf world".into(),
+                ]),
+            )
+            .await
+            .unwrap();
+        let job = submission.job_id.0.clone();
+        // A long poll returns what is there, before the job ends.
+        let first = client.job_output(&job, "stdout", 0, 5000).await.unwrap();
+        assert_eq!(first.offset, 0);
+        assert!(first.data.starts_with(b"hello"), "{first:?}");
+        assert!(!first.complete);
+        // Reading on from where it was, until the job ends.
+        let mut text = first.data.clone();
+        let mut at = first.next_offset;
+        loop {
+            let chunk = client.job_output(&job, "stdout", at, 5000).await.unwrap();
+            assert_eq!(chunk.offset, at);
+            text.extend_from_slice(&chunk.data);
+            at = chunk.next_offset;
+            if chunk.complete {
+                break;
+            }
+        }
+        assert_eq!(text, b"hello world");
+        // From the middle; and past the end, which is the end.
+        let middle = client.job_output(&job, "stdout", 6, 0).await.unwrap();
+        assert_eq!(middle.data, b"world");
+        let past = client.job_output(&job, "stdout", 1 << 40, 0).await.unwrap();
+        assert_eq!((past.offset, past.data.len()), (11, 0));
+        assert!(past.complete);
+        assert!(client.job_output(&job, "stdin", 0, 0).await.is_err());
+        // Another owner reads nothing.
+        assert!(
+            server
+                .client("mallory")
+                .job_output(&job, "stdout", 0, 0)
+                .await
+                .is_err()
+        );
+    });
+    server.kill();
+}
+
+#[test]
+fn interactive_commands_need_a_terminal_and_input_needs_a_running_one() {
+    let tokens: Arc<Tokens> = Arc::new(Tokens::default());
+    let client_runtime = client_runtime();
+    let stores = Stores::new();
+    let fake = Fake::new(&stores.environments, minimal());
+    let server = Server::start(&stores, fake.clone(), tokens.clone());
+    let client = server.client("alice");
+    client_runtime.block_on(async {
+        let source = running_source(&client).await;
+        for interactive in [false, true] {
+            let mut command = SessionCommand::new(vec!["sh".into()]);
+            if interactive {
+                command.interactive = true;
+            } else {
+                command.terminal = Some(compute_core::TerminalSize { rows: 24, cols: 80 });
+            }
+            let refused = client.session_exec(&source, &command).await.unwrap_err();
+            assert_eq!(
+                refused.kind,
+                ProviderErrorKind::OperationUnsupported,
+                "{refused:?}"
+            );
+        }
+        let input = |job: &str| compute_core::SessionInput {
+            job_id: compute_core::JobId(job.into()),
+            data: b"x".to_vec(),
+            resize: None,
+            signal: None,
+            close: false,
+        };
+        // No such execution in this session.
+        let unknown = client
+            .session_input(&source, &input("job_0000000000000000"))
+            .await
+            .unwrap_err();
+        assert_eq!(unknown.kind, ProviderErrorKind::UnknownJob, "{unknown:?}");
+        // An execution that has ended takes no input.
+        let (submission, _) = run(&client, &source, &["true"]).await;
+        wait_for(&client, &source, |session| {
+            session.active_executions().next().is_none()
+        })
+        .await;
+        let ended = client
+            .session_input(&source, &input(&submission.job_id.0))
+            .await
+            .unwrap_err();
+        assert_eq!(ended.kind, ProviderErrorKind::SessionConflict, "{ended:?}");
+    });
+    server.kill();
+}

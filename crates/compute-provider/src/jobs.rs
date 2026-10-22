@@ -1252,6 +1252,61 @@ impl JobManager {
         })
     }
 
+    /// Read a job's output from a byte offset, waiting up to `wait_ms` (at
+    /// most 30 s) for some past it. Status is read before size, so a
+    /// `complete` read whose data ends at the log's end has everything.
+    pub async fn output(
+        &self,
+        job_id: &JobId,
+        owner: &str,
+        request: &compute_core::JobOutputRequest,
+    ) -> Result<compute_core::JobOutput, ProviderError> {
+        /// The most one read returns.
+        const CHUNK: u64 = 256 * 1024;
+        self.authorize_owner(job_id, owner)?;
+        self.require_not_expired(job_id)?;
+        let file = match request.stream.as_str() {
+            "stdout" => "stdout.log",
+            "stderr" => "stderr.log",
+            other => {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ArtifactInvalid,
+                    format!("no stream {other:?}: stdout or stderr"),
+                ));
+            }
+        };
+        let path = self.directory(job_id).join("logs").join(file);
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_millis(request.wait_ms.min(30_000));
+        loop {
+            let complete = self.read_job(job_id)?.status.is_terminal();
+            let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+            let offset = request.offset.min(size);
+            if size > offset || complete || tokio::time::Instant::now() >= deadline {
+                let mut data = vec![];
+                if size > offset {
+                    use std::io::{Read, Seek};
+                    let mut log = std::fs::File::open(&path).map_err(transport_error)?;
+                    log.seek(std::io::SeekFrom::Start(offset))
+                        .map_err(transport_error)?;
+                    log.take(CHUNK.min(size - offset))
+                        .read_to_end(&mut data)
+                        .map_err(transport_error)?;
+                }
+                let next_offset = offset + data.len() as u64;
+                return Ok(compute_core::JobOutput {
+                    job_id: job_id.clone(),
+                    stream: request.stream.clone(),
+                    offset,
+                    data,
+                    next_offset,
+                    complete: complete && next_offset >= size,
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     /// Wait until the job is terminal, observing the durable record.
     pub(crate) async fn wait_terminal(
         &self,

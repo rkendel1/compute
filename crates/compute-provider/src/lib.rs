@@ -1982,6 +1982,44 @@ impl RemoteProvider {
         .await
     }
 
+    /// Input for a running interactive execution in a session.
+    pub async fn session_input(
+        &self,
+        session_id: &str,
+        input: &compute_core::SessionInput,
+    ) -> Result<(), ProviderError> {
+        let session_id = checked_session_id(session_id)?;
+        self.send(
+            "POST",
+            &format!("/compute/sessions/{session_id}/input"),
+            Some(input),
+            None,
+        )
+        .await
+    }
+
+    /// A job's output from `offset`, waiting up to `wait_ms` for some.
+    pub async fn job_output(
+        &self,
+        job_id: &str,
+        stream: &str,
+        offset: u64,
+        wait_ms: u64,
+    ) -> Result<compute_core::JobOutput, ProviderError> {
+        let job_id = checked_job_id(job_id)?;
+        self.send(
+            "POST",
+            &format!("/compute/jobs/{job_id}/output"),
+            Some(&compute_core::JobOutputRequest {
+                stream: stream.into(),
+                offset,
+                wait_ms,
+            }),
+            None,
+        )
+        .await
+    }
+
     pub async fn job_logs(&self, job_id: &str) -> Result<compute_core::JobLogs, ProviderError> {
         let job_id = checked_job_id(job_id)?;
         self.get(&format!("/compute/jobs/{job_id}/logs")).await
@@ -2120,6 +2158,8 @@ pub enum ProviderOperation {
     Cancel,
     Events,
     Logs,
+    /// Read a job's output from an offset.
+    Output,
     SessionCreate,
     SessionList,
     SessionInspect,
@@ -2134,6 +2174,8 @@ pub enum ProviderOperation {
     /// Fork a running session into new sessions, each admitted as a
     /// creation is.
     SessionFork,
+    /// Input for a running interactive execution.
+    SessionInput,
     /// Expose an endpoint of a session. Every requested endpoint is its own
     /// authorization decision.
     SessionExpose,
@@ -2155,6 +2197,7 @@ impl ProviderOperation {
                 | Self::SessionDestroy
                 | Self::SessionClaim
                 | Self::SessionFork
+                | Self::SessionInput
                 | Self::SessionExpose
         )
     }
@@ -2428,7 +2471,8 @@ impl RemoteService {
             | ProviderOperation::Artifacts
             | ProviderOperation::Cancel
             | ProviderOperation::Events
-            | ProviderOperation::Logs => (modes.jobs, "durable jobs"),
+            | ProviderOperation::Logs
+            | ProviderOperation::Output => (modes.jobs, "durable jobs"),
             operation if operation.is_session() => (modes.sessions, "sessions"),
             _ => (true, ""),
         };
@@ -2596,6 +2640,15 @@ impl RemoteService {
                     .logs(job_id.as_ref().expect("job route"), &owner)
                     .await,
             ),
+            ProviderOperation::Output => match decode::<compute_core::JobOutputRequest>(body) {
+                Ok(request) => encode_result(
+                    self.state
+                        .jobs
+                        .output(job_id.as_ref().expect("job route"), &owner, &request)
+                        .await,
+                ),
+                Err(error) => Err(error),
+            },
             _ => Err(ProviderError::new(
                 ProviderErrorKind::ProtocolUnsupported,
                 "unknown provider endpoint",
@@ -2656,6 +2709,10 @@ impl RemoteService {
             ProviderOperation::SessionFork => {
                 let fork: compute_core::SessionForkRequest = decode(body)?;
                 encode_result(sessions.fork(&id(), &owner, fork).await)
+            }
+            ProviderOperation::SessionInput => {
+                let input: compute_core::SessionInput = decode(body)?;
+                encode_result(sessions.input(&id(), &owner, input).await)
             }
             _ => Err(ProviderError::new(
                 ProviderErrorKind::ProtocolUnsupported,
@@ -2733,6 +2790,7 @@ fn parse_route(method: &str, path: &str) -> Result<Option<Route>, ProviderError>
             ("POST", Some("destroy")) => ProviderOperation::SessionDestroy,
             ("POST", Some("claim")) => ProviderOperation::SessionClaim,
             ("POST", Some("fork")) => ProviderOperation::SessionFork,
+            ("POST", Some("input")) => ProviderOperation::SessionInput,
             _ => return Ok(None),
         };
         return Ok(route(operation, None, Some(session_id)));
@@ -2758,6 +2816,7 @@ fn parse_route(method: &str, path: &str) -> Result<Option<Route>, ProviderError>
         ("GET", Some("artifacts")) => ProviderOperation::Artifacts,
         ("GET", Some("events")) => ProviderOperation::Events,
         ("GET", Some("logs")) => ProviderOperation::Logs,
+        ("POST", Some("output")) => ProviderOperation::Output,
         ("POST", Some("cancel")) => ProviderOperation::Cancel,
         _ => return Ok(None),
     };

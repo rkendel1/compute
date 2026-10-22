@@ -592,6 +592,90 @@ pub struct SessionCommand {
     /// [`SESSION_OUTPUT_BYTES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_bytes: Option<u64>,
+    /// Run it on a terminal of this size: its output is the terminal's (one
+    /// stream), and input, resizes, and signals may be sent while it runs
+    /// (`POST /compute/sessions/{id}/input`). Needs `terminal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalSize>,
+    /// Keep its standard input open after `stdin`, for input sent while it
+    /// runs. Needs `terminal` (the provider's interactive channel).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interactive: bool,
+}
+
+/// A terminal's size, in character cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalSize {
+    pub rows: u16,
+    pub cols: u16,
+}
+
+/// Bytes on the wire as base64 text.
+pub mod base64_bytes {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Input for an interactive execution that is running: any of more bytes,
+/// a terminal resize, a signal to its process group, or the end of its
+/// input. Delivered to the running command; never starts one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionInput {
+    pub job_id: crate::JobId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "base64_bytes")]
+    pub data: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resize: Option<TerminalSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub close: bool,
+}
+
+/// The most input one [`SessionInput`] carries.
+pub const MAX_SESSION_INPUT_BYTES: usize = 64 * 1024;
+
+/// A read of a job's output from a byte offset: the durable log itself, so
+/// a client that reconnects reads from where it was, and nothing is lost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobOutputRequest {
+    /// `stdout` or `stderr`.
+    pub stream: String,
+    pub offset: u64,
+    /// Wait up to this long for output past `offset` (bounded by the
+    /// server).
+    #[serde(default)]
+    pub wait_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobOutput {
+    pub job_id: crate::JobId,
+    pub stream: String,
+    /// Where `data` starts: the requested offset, or the log's end if the
+    /// request was past it.
+    pub offset: u64,
+    #[serde(with = "base64_bytes")]
+    pub data: Vec<u8>,
+    /// Where the next read starts.
+    pub next_offset: u64,
+    /// The job has ended; with `data` empty, nothing more will come.
+    pub complete: bool,
 }
 
 /// What a session command keeps of each output stream unless it asks for
@@ -607,6 +691,8 @@ impl SessionCommand {
             timeout: None,
             stdin: None,
             output_bytes: None,
+            terminal: None,
+            interactive: false,
         }
     }
 

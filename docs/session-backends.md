@@ -18,10 +18,10 @@ substrate (fakes or skips). A skipped test is not verification.
 | Hosts sessions | yes | yes | yes | **no** (`sessions_unsupported`) |
 | `exec` | yes | yes | yes | n/a |
 | bounded stdin (`--stdin`) | yes | yes | yes | stdin per invocation |
-| streaming stdin | **no** | **no** | **no** | no |
-| output streamed while running | polling (`--follow`) | polling | polling | no |
-| `terminal` (PTY, resize) | **no** | **no** | **no** | no |
-| signals to a running command | cancel only | cancel only | cancel only | no |
+| streaming stdin (`exec --interactive`) | **no** | **no** | yes; KVM verification pending | no |
+| output while running, from an offset (`attach`, `POST /compute/jobs/{id}/output`) | yes | yes | yes | no |
+| `terminal`: PTY, resize (`exec --tty`, `attach`) | **no** | **no** | yes; KVM verification pending | no |
+| signals to a running command | cancel only | cancel only | any signal to its process group (`session input --signal`); cancel | no |
 | workspace files (`session file`) | yes | yes | yes | n/a |
 | `network` | host network or `none`* | engine network or `none` | **egress gateway only** (no NIC) | none |
 | `suspend` / `resume` (storage kept) | yes | yes (container stop/start) | yes | n/a |
@@ -129,10 +129,42 @@ provider, and the Firecracker path by `crates/compute-cli/tests/microvm.rs`
 on KVM (the `microvm` CI job). Until that job passes, machine fork on
 Firecracker is not verified.
 
+## Interactive commands
+
+`compute session exec --tty` runs a command on a terminal (a PTY in the
+guest) and attaches to it; `--interactive` keeps its standard input open
+without a terminal. `--detach` returns the job, and `compute session attach
+SESSION JOB` attaches (Ctrl-] detaches, leaving it running);
+`compute session input` sends data, a resize, a signal, or the end of input.
+
+- **The job stays authoritative.** An interactive command is a durable job
+  like any other: its output is the job's log (bounded as any output is),
+  its receipt is the same, and cancellation and timeouts apply.
+- **Output** is read from the job's log from a byte offset, with a long
+  poll (`POST /compute/jobs/{id}/output`): a client that reconnects reads
+  from where it was, `--from-start` replays from the beginning, and nothing
+  is lost while no one is attached. Polling (`--follow`, `logs`) still works.
+- **Input** (`POST /compute/sessions/{id}/input`, owner-scoped) goes to the
+  running command over a node-local, owner-only socket the job's process
+  listens on; it never starts a command, so attaching again reaches the
+  same one. Input for an ended execution is refused.
+- **Advertised only where implemented:** microVM sessions declare
+  `terminal`; process and container sessions do not, and refuse `--tty` and
+  `--interactive` before anything runs.
+
+Tested: the guest agent with real PTYs (input, resize, end of input,
+signals, a plain command taking no control); `compute guest-exec` with its
+attach socket against the real agent (`tests/guest_terminal.rs`); the
+output API and refusals on the session server; and through the CLI on KVM
+(`microvm.rs`: a PTY in the guest, typed input, exit codes, a resize, a
+detached command reattached with its earlier output, a signal, a receipt
+that verifies). Not yet exercised: a microVM session created with a
+`restricted` or `isolated` host profile (the job's client process must be
+able to create its attach socket), and interactive commands in containers.
+
 ## Not implemented
 
-- Interactive terminals: PTY allocation, resize, streaming stdin, signals
-  other than cancellation, reattaching to a running command's stream.
+- Interactive commands in process and container sessions.
 - Measured startup and lifecycle latency: the KVM test prints one run's
   timings; there is no benchmark (distributions over repeated runs) yet.
 - A VM backend on macOS.

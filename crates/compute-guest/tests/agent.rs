@@ -23,8 +23,10 @@ fn start(directory: &Path) -> Agent {
         .arg(&socket)
         .spawn()
         .unwrap();
+    // Listening, not merely bound: the socket's file exists from bind(2),
+    // before connections are accepted.
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !socket.exists() {
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
         assert!(Instant::now() < deadline, "the agent never listened");
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -46,6 +48,8 @@ fn exec(argv: &[&str], cwd: &Path) -> Request {
         env: BTreeMap::new(),
         cwd: cwd.display().to_string(),
         stdin: vec![],
+        terminal: None,
+        interactive: false,
     }
 }
 
@@ -69,6 +73,8 @@ async fn the_agent_runs_commands_with_their_input_environment_and_status() {
             env: BTreeMap::from([("GREETING".to_owned(), "hello".to_owned())]),
             cwd: workspace.display().to_string(),
             stdin: b"from-stdin\n".to_vec(),
+            terminal: None,
+            interactive: false,
         },
     )
     .await;
@@ -190,4 +196,161 @@ async fn the_agent_reseeds_the_kernel_generator_or_says_why_not() {
             .expect_err("out of bounds");
         assert!(error.to_string().contains("reseed takes"), "{error}");
     }
+}
+
+/// Run an interactive command, feeding it `controls` (each after `pause`),
+/// and return its exit code and output.
+async fn interactive(
+    socket: &Path,
+    request: Request,
+    controls: Vec<Request>,
+    pause: Duration,
+) -> (i32, String, String) {
+    let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+    let (sender, receiver) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        for control in controls {
+            tokio::time::sleep(pause).await;
+            if sender.send(control).await.is_err() {
+                break;
+            }
+        }
+        // Hold the channel open until the command ends.
+        sender.closed().await;
+    });
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    let code = tokio::time::timeout(
+        Duration::from_secs(30),
+        compute_guest::exec_client_controlled(stream, &request, &mut stdout, &mut stderr, receiver),
+    )
+    .await
+    .expect("the command ended")
+    .unwrap();
+    (
+        code,
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    )
+}
+
+fn exec_request(argv: &[&str], terminal: Option<(u16, u16)>, interactive: bool) -> Request {
+    Request::Exec {
+        argv: argv.iter().map(|part| part.to_string()).collect(),
+        env: BTreeMap::new(),
+        cwd: "/".into(),
+        stdin: vec![],
+        terminal: terminal.map(|(rows, cols)| compute_guest::TerminalSize { rows, cols }),
+        interactive,
+    }
+}
+
+fn input(text: &str) -> Request {
+    Request::Input {
+        data: text.as_bytes().to_vec(),
+    }
+}
+
+#[tokio::test]
+async fn a_command_on_a_terminal_takes_input_resizes_and_exits() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = start(directory.path());
+    let (code, output, _) = interactive(
+        &agent.1,
+        exec_request(&["sh"], Some((24, 80)), false),
+        vec![
+            input("tty; stty size\n"),
+            Request::Resize {
+                size: compute_guest::TerminalSize {
+                    rows: 30,
+                    cols: 100,
+                },
+            },
+            input("stty size; echo $((6*7)); exit 3\n"),
+        ],
+        Duration::from_millis(300),
+    )
+    .await;
+    assert_eq!(code, 3, "{output}");
+    assert!(output.contains("/dev/pts/"), "a real terminal: {output}");
+    assert!(
+        output.contains("24 80"),
+        "the size it started with: {output}"
+    );
+    assert!(output.contains("30 100"), "the size it was given: {output}");
+    assert!(output.contains("42"), "{output}");
+}
+
+#[tokio::test]
+async fn end_of_input_on_a_terminal_ends_a_reader() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = start(directory.path());
+    let (code, output, _) = interactive(
+        &agent.1,
+        exec_request(&["sh", "-c", "cat; echo done"], Some((24, 80)), false),
+        vec![input("typed\n"), Request::CloseInput],
+        Duration::from_millis(300),
+    )
+    .await;
+    assert_eq!(code, 0, "{output}");
+    assert!(
+        output.contains("typed") && output.contains("done"),
+        "{output}"
+    );
+}
+
+#[tokio::test]
+async fn standard_input_streams_until_it_is_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = start(directory.path());
+    let (code, output, stderr) = interactive(
+        &agent.1,
+        exec_request(&["cat"], None, true),
+        vec![input("first "), input("second"), Request::CloseInput],
+        Duration::from_millis(200),
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(output, "first second");
+}
+
+#[tokio::test]
+async fn a_signal_reaches_the_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = start(directory.path());
+    for terminal in [None, Some((24, 80))] {
+        let (code, output, _) = interactive(
+            &agent.1,
+            exec_request(&["sleep", "1000"], terminal, true),
+            vec![Request::Signal { signal: 15 }],
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(code, 128 + 15, "{terminal:?}: {output}");
+    }
+}
+
+#[tokio::test]
+async fn a_command_that_is_not_interactive_takes_no_control() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = start(directory.path());
+    // Anything a client sends after a plain command's request ends it, as
+    // it always has: no exit is reported, the connection just ends.
+    let stream = tokio::net::UnixStream::connect(&agent.1).await.unwrap();
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    sender.send(input("ignored")).await.unwrap();
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    let ended = tokio::time::timeout(
+        Duration::from_secs(10),
+        compute_guest::exec_client_controlled(
+            stream,
+            &exec_request(&["sleep", "1000"], None, false),
+            &mut stdout,
+            &mut stderr,
+            receiver,
+        ),
+    )
+    .await
+    .expect("the command was ended, not left to run");
+    assert_eq!(ended.unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+    drop(sender);
 }
