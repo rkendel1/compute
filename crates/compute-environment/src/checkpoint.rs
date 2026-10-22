@@ -695,6 +695,18 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_cut_on_an_entry_boundary_is_refused() {
+        let whole = portable();
+        assert!(read_workspace(&whole).is_ok());
+        // Every entry intact, the end-of-archive marker gone: it would
+        // read as a smaller workspace.
+        let cut = &whole[..whole.len() - 1024];
+        let error = read_workspace(cut).unwrap_err().to_string();
+        assert!(error.contains("end-of-archive"), "{error}");
+        assert!(read_workspace(&whole[..whole.len() - 1]).is_err());
+    }
+
+    #[test]
     fn unsafe_workspace_entries_are_refused_by_the_one_reader() {
         let refused = |entries: &[(&str, EntryType, u32, &[u8])], why: &str| {
             let error = read_workspace(&archive(entries)).unwrap_err().to_string();

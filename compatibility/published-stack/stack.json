@@ -2,15 +2,15 @@
   "format": "compute.distribution-profile@1",
   "profile": "configured",
   "name": "published-compute-ecosystem",
-  "compute": "0.1.20",
+  "compute": "0.1.21",
   "platform": "linux-x86_64",
   "distribution": {
-    "identity": "compute-configured-0.1.20-linux-x86_64",
+    "identity": "compute-configured-0.1.21-linux-x86_64",
     "certification_status": "certified",
-    "base_asset": "compute-0.1.20-linux-x86_64.tar.gz",
-    "configured_asset": "compute-configured-0.1.20-linux-x86_64.tar.gz",
+    "base_asset": "compute-0.1.21-linux-x86_64.tar.gz",
+    "configured_asset": "compute-configured-0.1.21-linux-x86_64.tar.gz",
     "pipeline": "distribution-certification",
-    "release": "https://github.com/rkendel1/compute/releases/tag/v0.1.20"
+    "release": "https://github.com/rkendel1/compute/releases/tag/v0.1.21"
   },
   "runtime": {
     "implementation": "base-compute",
@@ -24,7 +24,7 @@
       {
         "name": "stack-agent",
         "package": "github:rkendel1/stack-agent",
-        "version": "1cf91e63d2242f9aca4cbeb2d1d939b84a00be14",
+        "version": "e73e74a72b42a40ff20ceef02805c99c6ef83d9e",
         "executable": "stack-agent/bin/compute-stack-agent",
         "default": true,
         "capabilities": [

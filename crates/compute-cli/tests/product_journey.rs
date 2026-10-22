@@ -144,6 +144,12 @@ fn the_whole_product_from_one_command() {
     assert!(output.status.success(), "{output:?}");
     let said = String::from_utf8_lossy(&output.stdout);
     assert!(said.contains("Compute is running"), "{said}");
+    let opened = said
+        .lines()
+        .find_map(|line| line.strip_prefix("Compute is running: "))
+        .expect("the address to open")
+        .trim()
+        .to_owned();
     let deadline = Instant::now() + Duration::from_secs(30);
     while std::net::TcpStream::connect(&launched.listen).is_err() {
         assert!(
@@ -162,6 +168,7 @@ fn the_whole_product_from_one_command() {
         "module": module,
         "chromium": browser,
         "base": format!("http://{}", launched.listen),
+        "open": opened,
         "shots": shots,
         "repos": { "web": web, "api": api },
         "ports": { "web": free_port(), "api": free_port(), "trial": free_port() },

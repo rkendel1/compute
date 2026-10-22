@@ -256,6 +256,17 @@ pub(crate) fn identify(archive: &[u8]) -> Result<WorkspaceIdentity, EnvironmentE
 /// read before it. A hard link is read as a copy of its file.
 pub(crate) fn read_workspace(archive: &[u8]) -> Result<ArchivedWorkspace, EnvironmentError> {
     let bad = |what: String| EnvironmentError::Invalid(format!("the workspace archive {what}"));
+    // A tar archive ends with two zero blocks. Without them, input that
+    // stopped on an entry boundary would read as a smaller, complete
+    // workspace.
+    if archive.len() % 512 != 0
+        || archive.len() < 1024
+        || archive[archive.len() - 1024..]
+            .iter()
+            .any(|byte| *byte != 0)
+    {
+        return Err(bad("is truncated: it has no end-of-archive marker".into()));
+    }
     let mut files = BTreeMap::<String, ArchivedFile>::new();
     let mut links = BTreeMap::<String, String>::new();
     let mut directories = BTreeSet::<String>::new();

@@ -3154,7 +3154,9 @@ async fn workspace_state_is_exported_seeded_and_verified_without_fork() {
             "dest2",
             "alice",
             WorkspaceSeedRequest {
-                archive: export.archive[..export.archive.len() / 2].to_vec(),
+                // Through the first entry (a tar pads to a 10 KiB record, so
+                // half of a small archive can be padding alone).
+                archive: export.archive[..700].to_vec(),
                 digest: None,
             },
         )

@@ -66,6 +66,9 @@ pub(crate) struct Derivation<'a> {
     pub provenance: serde_json::Value,
 }
 
+/// How often a handoff that lost a version race is retried from a fresh read.
+const HANDOFF_RETRIES: usize = 5;
+
 impl Daemon {
     /// Fork an environment; see the module documentation.
     pub async fn fork_environment(
@@ -247,10 +250,26 @@ impl Daemon {
         };
         let mut jobs = prior_jobs;
         jobs.extend(seed.jobs.iter().cloned());
-        let computer = match self
+        // The handoff is fenced on the candidate's records. A write that
+        // lost to another change is retried from a fresh read, which checks
+        // again that the candidate is still the verified, running machine.
+        let mut adopted = self
             .adopt_candidate(derivation, &candidate, &export.digest, &jobs)
-            .await
-        {
+            .await;
+        for _ in 0..HANDOFF_RETRIES {
+            match &adopted {
+                Err(EnvironmentError::Conflict(message))
+                    if message.contains("changed: expected version") =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    adopted = self
+                        .adopt_candidate(derivation, &candidate, &export.digest, &jobs)
+                        .await;
+                }
+                _ => break,
+            }
+        }
+        let computer = match adopted {
             Ok(computer) => computer,
             Err(error) => {
                 return Err(self
