@@ -321,7 +321,7 @@ on an environment with a computer.
 | `destroy` | yes | teardown | ends it; record kept | `computer.destroyed` | operate |
 | `session open/close` | a `WorkSession` | ephemeral: creates/destroys its environment | no | `work_session.*` | operate |
 | bundle `deploy`, `project add`, `promote` on a computer environment | — | — | — | refused, with the release to use | — |
-| Environments **without** a computer: `project add`, `deploy`, `promote`, `rollback`, `workload run`, `application deploy` | yes | on the control-plane node (`machine.kind = node`, shown in Manage) | — | deployments, executions, receipts | deploy/operate/execute |
+| Environments **without** a computer: `project add`, `deploy`, `promote`, `rollback`, `workload run` (an `application deploy` always makes a computer environment) | yes | on the control-plane node (`machine.kind = node`, shown in Manage) | — | deployments, executions, receipts | deploy/operate/execute |
 
 The last row is the one path that still runs on the daemon's node: an
 environment created without a computer. It is shown as such everywhere

@@ -99,12 +99,35 @@ fork SOURCE NAME --machine
   HANDOFF, as above
 ```
 
-Same identity invariant: a new environment, a new computer, a new session,
-owned by the operator who forked, with configuration values copied only with
-`--copy-config`. What differs is what is inherited: the machine's memory
-and disk (the target's checkpoint is recorded in the child's lineage and the
-report) instead of the portable workspace. The backends that can do it are
-in [session-backends.md](session-backends.md#machine-fork).
+Same identity invariant: a new environment, a new computer and a new session,
+owned by the operator who forked. What differs is what is inherited: the
+machine's memory and disk instead of the portable workspace. The target's
+checkpoint is recorded in the child's lineage and in the report. The backends
+that can do it are listed in
+[session-backends.md](session-backends.md#machine-fork).
+
+### What a machine fork carries, and what it does not
+
+| | Machine fork |
+| --- | --- |
+| **Configuration values** | Carried. The source's processes were started with them and hold them in memory. A source with configuration is therefore refused unless `--copy-config` is given. The fork's record then holds the same values, and nothing is reported as left behind when it is in memory. |
+| **Files, including any secret a process wrote to disk** | Carried, as in the workspace fork. |
+| **Egress credentials** (`compute egress`) | Never inside a machine: the host's gateway adds them on the way out. They aren't in the checkpoint, can't be revived from one, and a change at the gateway applies to source and fork alike. The gateway's rules are the node's. A fork can reach what its source could; there is no per-fork egress binding. |
+| **Operator and target credentials** | Never inside a machine. The fork is authorized as a new environment owned by the operator who forked, and the target admits the child as a new session. |
+| **The kernel's random state** | Reseeded in each child before it is used. |
+| **User-space state that should be unique** (a process's own PRNG, in-memory TLS session keys, UUID generators seeded at start) | Duplicated, as in any memory fork. A workload that must not share these across forks has to re-derive them on resume. Compute cannot do this for it. |
+| **Machine checkpoints** | Transient. Released once every child has started, so there is no old memory image to restore later. |
+
+### When the controller stops mid-fork
+
+A controller that stops after the candidate's computer was recorded leaves the
+candidate. Its computer names the child by reference, so the next controller
+gets the same child from the target and never a second one
+(`a_machine_fork_interrupted_by_a_controller_restart_makes_one_child`). The
+candidate keeps running until the fork is asked for again, which clears it
+first, or until it is destroyed. The workspace fork, restore and replace
+behave the same way after a crash. Only a failure they see themselves stops
+their candidate.
 
 ## Not built
 
