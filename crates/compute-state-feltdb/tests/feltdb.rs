@@ -356,18 +356,22 @@ fn tls_in_front_of(url: &str, directory: &Path) -> Tls {
     }
 }
 
+/// A FeltDB behind a private CA. feltdb-client 0.2.0 trusts only public
+/// roots, so `ca_file` is refused with its reason when it is configured,
+/// never ignored; and verification is never optional: without the CA, the
+/// same endpoint is refused. Serving through a private CA returns with a
+/// client that can add a root (`add_root_certificate_pem`, feltdb-client's
+/// `tests/private_ca.rs`).
 #[tokio::test]
 #[ignore = "requires FELTDB_SERVER_BIN, openssl, and python3"]
-async fn compute_speaks_to_feltdb_over_verified_https() {
-    use compute_state::{Batch, ControlState, EnvironmentRecord};
-
+async fn a_private_ca_is_refused_and_verification_is_never_skipped() {
     let data = tempfile_dir();
     let token = create_key(&data);
     let server = start(&data);
     let tls = tls_in_front_of(&server.url, &data);
     let https = format!("https://localhost:{}", tls.port);
 
-    let provisioned = provision(ProvisionRequest {
+    let refused = provision(ProvisionRequest {
         url: https.clone(),
         token: token.clone(),
         application_id: None,
@@ -377,54 +381,25 @@ async fn compute_speaks_to_feltdb_over_verified_https() {
         ca_certificate: Some(tls.ca.clone()),
     })
     .await
-    .expect("provision over HTTPS");
-    let config = FeltDbConfig {
-        url: https.clone(),
-        token: token.clone(),
-        application_id: provisioned.application_id.clone(),
-        environment: "production".into(),
-        ca_certificate: Some(tls.ca.clone()),
-    };
-    let state = ControlState::new(Arc::new(
-        FeltDbState::connect(config.clone()).await.unwrap(),
-    ));
-    let environment = EnvironmentRecord {
-        configuration: None,
-        recipe: None,
-        name: "production".into(),
-        desired_state: compute_state::DesiredState::Running,
-        config: Default::default(),
-        policy: None,
-        provider: None,
-        created_at: chrono::Utc::now(),
-        owner: None,
-        computer: None,
-        contents: None,
-    };
-    state
-        .transaction(Batch::new().create("env_tls", &environment))
-        .await
-        .expect("a transaction over HTTPS");
-    assert_eq!(
-        state
-            .get::<EnvironmentRecord>("env_tls")
-            .await
-            .unwrap()
-            .unwrap()
-            .value,
-        environment
+    .expect_err("a private CA is refused");
+    assert!(
+        matches!(&refused, compute_state::StateError::Invalid(message) if message.contains("ca_file")),
+        "{refused:?}"
     );
 
-    // Verification is not optional: without the CA, the same endpoint is
-    // refused.
-    let untrusted = FeltDbState::connect(FeltDbConfig {
+    let untrusted = provision(ProvisionRequest {
+        url: https,
+        token,
+        application_id: None,
+        tenant_id: None,
+        tenant_name: "compute-tls".into(),
+        environment: "production".into(),
         ca_certificate: None,
-        ..config
     })
     .await;
     assert!(
         matches!(untrusted, Err(compute_state::StateError::Unavailable(_))),
-        "an unverified certificate is refused"
+        "an unverified certificate is refused: {untrusted:?}"
     );
     drop(tls);
     drop(server);

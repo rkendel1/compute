@@ -1,9 +1,12 @@
 name: feltdb-consumer
 
-# Compute as a consumer of the certified FeltDB release. The feltdb-server
-# the tests run is built from the source shipped inside the @feltdb/core
-# package npm actually resolved, so the build, the model compiler, and the
-# authority under test are one version.
+# Compute as a consumer of the certified FeltDB release. Compute talks to
+# FeltDB through the native `feltdb-client` crate, pinned exactly to
+# CERTIFIED_FELTDB_VERSION, and every test runs against `feltdb-server` from
+# crates.io at that same version. npm's @feltdb/core is only the model
+# compiler (MODEL_COMPILER_VERSION); the server bundled in it, which Compute
+# was certified against before the crates existed, is the "previous" server
+# whose state must open on the certified one.
 
 on:
   workflow_dispatch:
@@ -32,19 +35,17 @@ jobs:
         working-directory: packages/compute-state-model
         run: npm run check && npm test
 
-      - name: Build feltdb-server from the resolved package
+      - name: Install the certified feltdb-server from crates.io
+        run: |
+          version=$(sed -n 's/^pub const CERTIFIED_FELTDB_VERSION: &str = "\(.*\)";$/\1/p' crates/compute-state-feltdb/src/lib.rs)
+          test -n "$version"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/feltdb" cargo install feltdb-server --version "=$version" --locked --root "$RUNNER_TEMP/feltdb-server"
+          echo "FELTDB_SERVER_BIN=$RUNNER_TEMP/feltdb-server/bin/feltdb-server" >> "$GITHUB_ENV"
+
+      - name: Build the previous server (bundled in @feltdb/core), for compatibility
         run: |
           source=packages/compute-state-model/node_modules/@feltdb/core/dist/create/server-source
-          CARGO_TARGET_DIR="$RUNNER_TEMP/feltdb" cargo build --release --manifest-path "$source/Cargo.toml" -p feltdb-server
-          echo "FELTDB_SERVER_BIN=$RUNNER_TEMP/feltdb/release/feltdb-server" >> "$GITHUB_ENV"
-
-      - name: Build the previous FeltDB release, for compatibility
-        run: |
-          mkdir -p "$RUNNER_TEMP/previous"
-          cd "$RUNNER_TEMP/previous"
-          npm pack @feltdb/core@0.11.8 >/dev/null
-          tar xzf feltdb-core-0.11.8.tgz
-          CARGO_TARGET_DIR="$RUNNER_TEMP/feltdb-previous" cargo build --release --manifest-path package/dist/create/server-source/Cargo.toml -p feltdb-server
+          CARGO_TARGET_DIR="$RUNNER_TEMP/feltdb-previous" cargo build --release --locked --manifest-path "$source/Cargo.toml" -p feltdb-server
           echo "FELTDB_PREVIOUS_SERVER_BIN=$RUNNER_TEMP/feltdb-previous/release/feltdb-server" >> "$GITHUB_ENV"
 
       - name: State backends conform

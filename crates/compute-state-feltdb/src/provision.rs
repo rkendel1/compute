@@ -71,13 +71,17 @@ pub async fn provision_manifest(
     })?;
     let post = |path: String, body: Value| {
         let client = &client;
-        async move { client.send(reqwest::Method::POST, &path, Some(&body)).await }
+        async move {
+            client
+                .send(feltdb_client::Method::POST, &path, Some(&body))
+                .await
+        }
     };
     let (tenant_id, application_id) = match &request.application_id {
         Some(application_id) => {
             let application = client
                 .send(
-                    reqwest::Method::GET,
+                    feltdb_client::Method::GET,
                     &format!("/api/applications/{}", encode(application_id)),
                     None,
                 )
@@ -100,7 +104,7 @@ pub async fn provision_manifest(
                 Some(tenant) => tenant.clone(),
                 None => {
                     let tenants = client
-                        .send(reqwest::Method::GET, "/api/tenants", None)
+                        .send(feltdb_client::Method::GET, "/api/tenants", None)
                         .await
                         .map_err(|refusal| failure("list tenants", refusal))?;
                     let existing = tenants.as_array().into_iter().flatten().find(|tenant| {
@@ -124,7 +128,7 @@ pub async fn provision_manifest(
             };
             let applications = client
                 .send(
-                    reqwest::Method::GET,
+                    feltdb_client::Method::GET,
                     &format!("/api/tenants/{}/applications", encode(&tenant_id)),
                     None,
                 )
@@ -160,7 +164,7 @@ pub async fn provision_manifest(
     // Already current? Compare with the active revision's collections.
     let current = client
         .send(
-            reqwest::Method::GET,
+            feltdb_client::Method::GET,
             &format!(
                 "/v1/application?application_id={}&environment={}",
                 encode(&application_id),
@@ -177,7 +181,7 @@ pub async fn provision_manifest(
     {
         Some(revision_id) => client
             .send(
-                reqwest::Method::GET,
+                feltdb_client::Method::GET,
                 &format!(
                     "/api/applications/{}/revisions/{}",
                     encode(&application_id),
@@ -237,28 +241,28 @@ pub async fn provision_manifest(
         .ok_or_else(|| StateError::Invalid("FeltDB returned no draft ID".into()))?
         .to_string();
     let draft_version = draft["version"].as_u64().unwrap_or(1);
-    let put = client
-        .http
-        .put(format!(
-            "{}/api/applications/{}/drafts/{}",
-            client.config.url,
-            encode(&application_id),
-            encode(&draft_id)
-        ))
-        .bearer_auth(&request.token)
-        .header("FeltDB-Protocol", "1")
-        .header("If-Version", draft_version.to_string())
-        .json(&json!({ "manifest": manifest }))
-        .send()
+    // The draft is replaced only at the version just read.
+    let draft_version = draft_version.to_string();
+    client
+        .client
+        .request_with_headers(
+            feltdb_client::Method::PUT,
+            &format!(
+                "/api/applications/{}/drafts/{}",
+                encode(&application_id),
+                encode(&draft_id)
+            ),
+            &[("If-Version", draft_version.as_str())],
+            Some(&json!({ "manifest": manifest })),
+        )
         .await
-        .map_err(|error| StateError::Unavailable(error.to_string()))?;
-    if !put.status().is_success() {
-        let status = put.status();
-        let body = put.text().await.unwrap_or_default();
-        return Err(StateError::Invalid(format!(
-            "FeltDB refused the Compute model ({status}): {body}"
-        )));
-    }
+        .map_err(|error| match client.refusal(error) {
+            Ok(refusal) => StateError::Invalid(format!(
+                "FeltDB refused the Compute model ({} {}): {}",
+                refusal.status, refusal.code, refusal.message
+            )),
+            Err(error) => error,
+        })?;
     let validation = post(
         format!(
             "/api/applications/{}/drafts/{}/validate",
@@ -418,7 +422,7 @@ pub async fn inspect_model(config: &FeltDbConfig) -> Result<ModelInspection, Sta
         .map_err(|error| StateError::Invalid(format!("embedded manifest: {error}")))?;
     let current = client
         .send(
-            reqwest::Method::GET,
+            feltdb_client::Method::GET,
             &format!(
                 "/v1/application?application_id={}&environment={}",
                 encode(&config.application_id),
@@ -435,7 +439,7 @@ pub async fn inspect_model(config: &FeltDbConfig) -> Result<ModelInspection, Sta
     let stored = match &active_revision {
         Some(revision_id) => client
             .send(
-                reqwest::Method::GET,
+                feltdb_client::Method::GET,
                 &format!(
                     "/api/applications/{}/revisions/{}",
                     encode(&config.application_id),

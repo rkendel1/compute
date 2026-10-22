@@ -25,7 +25,7 @@ substrate (fakes or skips). A skipped test is not verification.
 | workspace files (`session file`) | yes | yes | yes | n/a |
 | `network` | host network or `none`* | engine network or `none` | **egress gateway only** (no NIC) | none |
 | `suspend` / `resume` (storage kept) | yes | yes (container stop/start) | yes | n/a |
-| `memory_suspend` (processes and memory kept) | **no** | **no** | **declared**; see status below | n/a |
+| `memory_suspend` (processes and memory kept) | **no** | **no** | yes, verified on KVM | n/a |
 | machine fork / branch | **no** | **no** | **no** | n/a |
 | `process_tree_termination` | where an ownership scan is available | yes | yes (the VM ends) | n/a |
 | receipt `substrate` evidence | no | engine, OCI runtime, image, limits | VMM version, kernel and rootfs digests, vCPUs, memory, network | n/a |
@@ -80,8 +80,28 @@ stop (a running `session exec` stream); the processes they started survive.
 Integrity is checked by sizes and the device snapshot's digest, not a full
 digest of guest memory.
 
-**Status:** implemented; verification on KVM is pending in CI (`microvm`
-job). Until that job passes, this is not a verified capability.
+**Status:** verified on KVM in CI (`microvm` job,
+`crates/compute-cli/tests/microvm.rs`; first pass:
+[run 39723092926](https://github.com/rkendel1/compute/actions/runs/39723092926)).
+The test proves, through the real `compute serve` and CLI:
+
+- a tmpfs file, a background process (same PID), and a counter it keeps
+  in memory all survive stop and resume, and the counter continues;
+- the controller restarting while the machine is suspended;
+- egress reconnected after the resume;
+- a snapshot that cannot be written fails the stop and loses nothing, and
+  the retried stop succeeds;
+- a repeated stop is a no-op, a resume of a running session a conflict;
+- a damaged memory file is refused, with no cold boot in its place.
+
+Lifecycle calls for one VM are serialized: a caller and the session sweep
+can both drive one session, and two concurrent suspends of one VM were the
+cause of every earlier failure of this job.
+
+One run's timings, for orientation only (not a benchmark: one sample, a
+debug build, a GitHub-hosted runner with nested KVM, 1 vCPU, 256 MiB):
+create and boot 3.26 s, first command 137 ms, stop (suspend) 1.76 s,
+resume to ready 136 ms.
 
 ## Not implemented
 
@@ -89,5 +109,5 @@ job). Until that job passes, this is not a verified capability.
 - Interactive terminals: PTY allocation, resize, streaming stdin, signals
   other than cancellation, reattaching to a running command's stream.
 - Measured startup and lifecycle latency: the KVM test prints one run's
-  timings for diagnosis; there is no benchmark yet.
+  timings; there is no benchmark (distributions over repeated runs) yet.
 - A VM backend on macOS.

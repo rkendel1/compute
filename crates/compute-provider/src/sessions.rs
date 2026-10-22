@@ -419,6 +419,11 @@ pub struct ProviderConnection {
 /// `operation_unsupported`, and its [`SessionProvider::capabilities`] must
 /// say so. The manager checks capabilities before calling, so the defaults
 /// are a second line of defence.
+///
+/// Lifecycle calls for one session can arrive concurrently (a caller and
+/// the sweep both drive an in-flight state), and again after a restart:
+/// each must be idempotent and safe against another call for the same
+/// session in flight.
 #[async_trait]
 pub trait SessionProvider: Send + Sync {
     /// Implementation name, recorded for operators. Never used for

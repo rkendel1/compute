@@ -114,6 +114,10 @@ pub struct VmSessionProvider {
     client: PathBuf,
     egress: Option<SocketAddr>,
     forwarding: Mutex<BTreeSet<String>>,
+    /// One lifecycle operation per VM at a time. A caller and the session
+    /// sweep can both drive one session: two suspends of one VM would each
+    /// take the other's snapshot for a stale one.
+    lifecycle: Mutex<BTreeMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     /// The VMM and what every VM boots from, measured once.
     identity: VmIdentity,
 }
@@ -163,7 +167,21 @@ impl VmSessionProvider {
             client: client.into(),
             egress: None,
             forwarding: Mutex::new(BTreeSet::new()),
+            lifecycle: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Hold `vm`'s lifecycle lock; another provision, stop, resume, or
+    /// destroy of it waits, then finds the state this one left.
+    async fn exclusive(&self, vm: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = self
+            .lifecycle
+            .lock()
+            .expect("lifecycle")
+            .entry(vm.to_owned())
+            .or_default()
+            .clone();
+        lock.lock_owned().await
     }
 
     /// Sessions that ask for network reach it only through this egress
@@ -420,6 +438,15 @@ impl VmSessionProvider {
                 "mem_file_path": directory.join("memory").display().to_string(),
             });
             api(&socket, "PUT", "/snapshot/create", &body.to_string()).await?;
+            // Only what is on disk counts, whatever the VMM answered.
+            for name in ["snapshot", "memory"] {
+                if !directory.join(name).is_file() {
+                    return Err(format!(
+                        "the VMM reported the snapshot written, but {} is not a file",
+                        directory.join(name).display()
+                    ));
+                }
+            }
             let stable = |name: &str| {
                 sync_path(&directory.join(name))
                     .map_err(|error| format!("flushing {name}: {error}"))
@@ -456,11 +483,14 @@ impl VmSessionProvider {
                 ProviderErrorKind::ProviderUnavailable,
                 match continued {
                     Ok(()) => format!(
-                        "the VM could not be suspended: {error}; it is still running, unchanged"
+                        "the VM could not be suspended: {error}; it is still running, unchanged \
+                         (VMM log: {})",
+                        self.log_tail(vm)
                     ),
                     Err(again) => format!(
                         "the VM could not be suspended: {error}; and it could not be continued: \
-                         {again} (it is paused)"
+                         {again} (it is paused; VMM log: {})",
+                        self.log_tail(vm)
                     ),
                 },
             ));
@@ -638,6 +668,7 @@ impl SessionProvider for VmSessionProvider {
         );
         let mut capabilities = self.capabilities();
         capabilities.network = request.network != NetworkPolicy::None;
+        let _exclusive = self.exclusive(&vm).await;
         // Idempotent per session: a VM that runs is this session's.
         if self.running_pid(&vm).is_some() {
             self.ensure_egress(&vm);
@@ -757,6 +788,7 @@ impl SessionProvider for VmSessionProvider {
 
     async fn stop(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         let vm = Self::vm(provider_session_id)?;
+        let _exclusive = self.exclusive(vm).await;
         if self.suspension(vm).is_ok() {
             // Already suspended: a repeated stop, or one interrupted after
             // its record was written (the VM has been paused since).
@@ -781,6 +813,7 @@ impl SessionProvider for VmSessionProvider {
 
     async fn resume(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         let vm = Self::vm(provider_session_id)?;
+        let _exclusive = self.exclusive(vm).await;
         let directory = self.directory(vm);
         if !directory.join("rootfs.ext4").exists() {
             return Err(ProviderError::new(
@@ -858,6 +891,7 @@ impl SessionProvider for VmSessionProvider {
 
     async fn destroy(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         let vm = Self::vm(provider_session_id)?;
+        let _exclusive = self.exclusive(vm).await;
         self.kill(vm);
         if self.running_pid(vm).is_some() {
             return Err(ProviderError::new(
@@ -1037,6 +1071,28 @@ mod tests {
         std::fs::create_dir_all(provider.directory(VM)).unwrap();
         let error = provider.stop(VM).await.unwrap_err();
         assert!(error.message.contains("memory is gone"), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_operations_on_one_vm_are_serialized() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = std::sync::Arc::new(provider(root.path()));
+        let held = provider.exclusive(VM).await;
+        let waiting = {
+            let provider = provider.clone();
+            tokio::spawn(async move { provider.stop(VM).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !waiting.is_finished(),
+            "a stop waits for the operation in flight"
+        );
+        // Another VM is not held up.
+        let other = "compute-vm-ffffffffffffffffffffffff";
+        drop(provider.exclusive(other).await);
+        drop(held);
+        // It then sees the state the other left (here: nothing to suspend).
+        assert!(waiting.await.unwrap().is_err());
     }
 
     #[tokio::test]

@@ -89,8 +89,13 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
         return;
     }
     let firecracker = std::env::var("COMPUTE_FIRECRACKER").unwrap_or_else(|_| "firecracker".into());
-    let temporary = tempfile::tempdir().unwrap();
-    let root = temporary.path().to_path_buf();
+    // Kept when the test fails, so CI can print the VMM's log; removed at
+    // the end when it passes.
+    let root = tempfile::Builder::new()
+        .prefix("compute-microvm-")
+        .tempdir()
+        .unwrap()
+        .keep();
 
     // The only way out: a gateway that allows one host.
     let gateway = format!("127.0.0.1:{}", free_port());
@@ -272,24 +277,8 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
         .unwrap()
         .path();
 
-    // A snapshot that cannot be written fails the stop and loses nothing.
-    std::fs::create_dir(vm_directory.join("snapshot")).unwrap();
-    let refused = compute(&root, &["session", "stop", &id]);
-    let said = format!(
-        "{}{}",
-        String::from_utf8_lossy(&refused.stdout),
-        String::from_utf8_lossy(&refused.stderr)
-    );
-    assert!(!refused.status.success(), "{said}");
-    assert!(said.contains("still running, unchanged"), "{said}");
-    assert!(
-        !vm_directory.join("suspension.json").exists(),
-        "no suspension is recorded for a snapshot that failed"
-    );
-    std::fs::remove_dir(vm_directory.join("snapshot")).unwrap();
-
-    // The retried stop completes the suspension, and reports it only once
-    // it is on stable storage.
+    // Stop suspends the machine, and reports it only once the suspension is
+    // on stable storage.
     let stopping = Instant::now();
     ok(&root, &["session", "stop", &id]);
     let stopped_in = stopping.elapsed();
@@ -350,6 +339,31 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
         "lifecycle (1 vCPU, 256 MiB, one run, debug build): create+boot {created_in:?}, \
          first exec {first_exec_in:?}, stop {stopped_in:?}, resume {resumed_in:?}"
     );
+
+    // A snapshot that cannot be written fails the stop and loses nothing.
+    std::fs::create_dir(vm_directory.join("snapshot")).unwrap();
+    let refused = compute(&root, &["session", "stop", &id]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(!refused.status.success(), "{said}");
+    assert!(said.contains("still running, unchanged"), "{said}");
+    assert!(
+        !vm_directory.join("suspension.json").exists(),
+        "no suspension is recorded for a snapshot that failed"
+    );
+    std::fs::remove_dir(vm_directory.join("snapshot")).unwrap();
+    // The retried stop suspends it, and nothing was lost by the failure.
+    ok(&root, &["session", "stop", &id]);
+    ok(&root, &["session", "resume", &id]);
+    assert_eq!(
+        exec(&format!("kill -0 {sleeper} && echo alive")).trim(),
+        "alive",
+        "a failed suspension lost nothing"
+    );
+    assert_eq!(exec("cat /tmp/nonce").trim(), nonce);
 
     // The receipt says the command ran in this VM: the VMM, what it booted,
     // and the limits it was booted with.
@@ -427,6 +441,7 @@ fn a_microvm_session_is_its_own_machine_and_survives_suspension() {
 
     ok(&root, &["session", "destroy", &id]);
     drop(server);
+    let _ = std::fs::remove_dir_all(&root);
     assert!(
         !root.join("sessions/microvms").exists()
             || std::fs::read_dir(root.join("sessions/microvms"))
