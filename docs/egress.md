@@ -18,7 +18,8 @@ compute egress serve --rules egress.json --listen 127.0.0.1:3128 --ca-out egress
     { "host": "registry.npmjs.org", "ports": [443] }
   ],
   "credentials": [
-    { "host": "api.github.com", "header": "authorization", "prefix": "Bearer ", "value_env": "GITHUB_TOKEN" }
+    { "host": "api.github.com", "header": "authorization", "prefix": "Bearer ", "value_env": "GITHUB_TOKEN" },
+    { "host": "api.openai.com", "header": "authorization", "prefix": "Bearer ", "value_file": "/home/me/.config/compute/openai.token" }
   ]
 }
 ```
@@ -49,12 +50,26 @@ The gateway is the policy; the session's network is the enforcement. A
 session whose only route out is the gateway (a container on a network with
 no other egress, a VM whose only interface reaches the gateway) cannot go
 around it. A session with ordinary network access can ignore
-`HTTPS_PROXY`. Session providers that attach the gateway as the only route
-are the next step; until then, pair it with a network that has no other
-egress.
+`HTTPS_PROXY`. A microVM session (`compute serve --session-provider microvm
+--vm-egress ADDR`, [sessions.md](sessions.md)) is the first kind with no
+other route: its VM has no network interface, and its only way out is the
+gateway, over vsock. For containers and workspaces, pair the gateway with a
+network that has no other egress.
 
-Credential values come from the gateway's environment by name
-(`value_env`), so the rules file can be reviewed and stored like any other
-configuration. In a configured installation, values are expected to come
-from the credential custody the AppPort and AuthBoundry services already
-provide, rather than from a second secret store in Compute.
+## Credential custody: the local trust boundary
+
+The rules file names where each credential is kept and never holds it: a
+rules file with a `value` is refused. A credential is `value_env` (a variable
+in the gateway's own environment) or `value_file` (a file readable only by
+its owner; anything looser is refused), with an optional `prefix` such as
+`Bearer `. Values are read once, at start, and live only in the gateway's
+memory: never in a session, a rules file, or a job request.
+
+That is **local custody**, and the gateway says so when it starts
+(`credential custody: local …`). It keeps credentials out of what a session
+can reach; it does not protect them from the account that runs the gateway,
+and it is not production-grade custody. Custody mediated by AuthBoundry, the
+system that already holds credentials for AppPort services, is a separate
+integration: the gateway would resolve a binding through it instead of
+reading a value itself, and nothing in the rules format would change but
+the reference.
