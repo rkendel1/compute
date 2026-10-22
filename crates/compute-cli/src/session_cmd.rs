@@ -163,6 +163,10 @@ struct AttachArgs {
     /// Replay its output from the start, not only what comes next.
     #[arg(long)]
     from_start: bool,
+    /// Drive it from this terminal: raw input, Ctrl-] detaches, and size
+    /// changes are forwarded.
+    #[arg(long)]
+    tty: bool,
 }
 
 #[derive(Args, Debug)]
@@ -339,7 +343,9 @@ pub async fn session(command: SessionCommand) -> compute_core::Result<()> {
             };
             let (remote, _, _) = locate(&location, &target).await?;
             let offset = if args.from_start { 0 } else { u64::MAX };
-            match crate::attach::attach(remote, &args.session_id, &args.job_id, offset).await? {
+            match crate::attach::attach(remote, &args.session_id, &args.job_id, offset, args.tty)
+                .await?
+            {
                 crate::attach::Attached::Ended(code) => std::process::exit(code),
                 crate::attach::Attached::Detached => Ok(()),
             }
@@ -639,7 +645,9 @@ async fn exec(location: &PoolLocation, args: ExecArgs) -> compute_core::Result<(
     }
     if args.tty || args.interactive {
         let job = submission.job_id.0.clone();
-        return match crate::attach::attach(remote.clone(), &args.session_id, &job, 0).await? {
+        return match crate::attach::attach(remote.clone(), &args.session_id, &job, 0, args.tty)
+            .await?
+        {
             crate::attach::Attached::Detached => Ok(()),
             crate::attach::Attached::Ended(code) => {
                 if let Some(path) = &args.receipt {

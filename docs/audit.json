@@ -2560,7 +2560,7 @@
   },
   {
    "command": "compute session attach",
-   "about": "Attach this terminal to a running interactive execution: input goes to it, its output comes back; Ctrl-] detaches",
+   "about": "Attach to a running interactive execution: input goes to it, its output comes back; with --tty, raw input and Ctrl-] detaches",
    "help_defect": null,
    "interface": "targets directly",
    "state": "target session store",

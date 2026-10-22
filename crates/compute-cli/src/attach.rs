@@ -20,11 +20,6 @@ pub enum Attached {
     Detached,
 }
 
-fn is_tty(fd: i32) -> bool {
-    // SAFETY: isatty has no preconditions.
-    unsafe { libc::isatty(fd) == 1 }
-}
-
 /// This terminal's size, if standard output is one.
 pub fn terminal_size() -> Option<TerminalSize> {
     let mut window: libc::winsize = unsafe { std::mem::zeroed() };
@@ -36,12 +31,14 @@ pub fn terminal_size() -> Option<TerminalSize> {
     })
 }
 
-/// Raw mode on standard input while attached; restored on drop.
+/// Raw mode on standard input while attached; restored on drop. Asked
+/// for explicitly; standard input that has no terminal attributes (a
+/// pipe) is left as it is.
 struct Raw(Option<libc::termios>);
 
 impl Raw {
-    fn enter() -> Self {
-        if !is_tty(libc::STDIN_FILENO) {
+    fn enter(terminal: bool) -> Self {
+        if !terminal {
             return Self(None);
         }
         let mut original: libc::termios = unsafe { std::mem::zeroed() };
@@ -79,17 +76,20 @@ fn input(job_id: &str) -> SessionInput {
     }
 }
 
-/// Attach this process's terminal (or pipes) to a running interactive
-/// execution, from output `offset` (`u64::MAX`: from now).
+/// Attach this process's standard streams to a running interactive
+/// execution, from output `offset` (`u64::MAX`: from now). `terminal` is
+/// the caller's explicit choice (`--tty`), never inferred: raw input,
+/// Ctrl-] to detach, and window size changes forwarded.
 pub async fn attach(
     remote: Arc<RemoteProvider>,
     session_id: &str,
     job_id: &str,
     offset: u64,
+    terminal: bool,
 ) -> compute_core::Result<Attached> {
     use tokio::io::AsyncWriteExt;
-    let tty = is_tty(libc::STDIN_FILENO);
-    let raw = Raw::enter();
+    let tty = terminal;
+    let raw = Raw::enter(terminal);
     let (detach_tx, mut detached) = tokio::sync::mpsc::channel::<()>(1);
 
     // Input: this process's standard input, as it arrives.

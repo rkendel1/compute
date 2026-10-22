@@ -141,7 +141,10 @@ nested KVM): two children ready in 6.8 s.
 `compute session exec --tty` runs a command on a terminal (a PTY in the
 guest) and attaches to it; `--interactive` keeps its standard input open
 without a terminal. `--detach` returns the job, and `compute session attach
-SESSION JOB` attaches (Ctrl-] detaches, leaving it running);
+SESSION JOB` attaches; with `--tty` it drives the command from this
+terminal (raw input, size changes forwarded, Ctrl-] detaches and leaves it
+running). Terminal handling is always that explicit flag, never inferred
+from whether standard input is a terminal;
 `compute session input` sends data, a resize, a signal, or the end of input.
 
 - **The job stays authoritative.** An interactive command is a durable job
