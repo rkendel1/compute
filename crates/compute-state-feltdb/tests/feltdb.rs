@@ -356,22 +356,21 @@ fn tls_in_front_of(url: &str, directory: &Path) -> Tls {
     }
 }
 
-/// A FeltDB behind a private CA. feltdb-client 0.2.0 trusts only public
-/// roots, so `ca_file` is refused with its reason when it is configured,
-/// never ignored; and verification is never optional: without the CA, the
-/// same endpoint is refused. Serving through a private CA returns with a
-/// client that can add a root (`add_root_certificate_pem`, feltdb-client's
-/// `tests/private_ca.rs`).
+/// A FeltDB behind a private CA: `ca_file` is added to the public roots, so
+/// provisioning, connecting, health and the state version all work through
+/// it; and
+/// verification is never optional: without the CA, the same endpoint is
+/// refused.
 #[tokio::test]
 #[ignore = "requires FELTDB_SERVER_BIN, openssl, and python3"]
-async fn a_private_ca_is_refused_and_verification_is_never_skipped() {
+async fn a_private_ca_is_trusted_and_verification_is_never_skipped() {
     let data = tempfile_dir();
     let token = create_key(&data);
     let server = start(&data);
     let tls = tls_in_front_of(&server.url, &data);
     let https = format!("https://localhost:{}", tls.port);
 
-    let refused = provision(ProvisionRequest {
+    let provisioned = provision(ProvisionRequest {
         url: https.clone(),
         token: token.clone(),
         application_id: None,
@@ -381,10 +380,20 @@ async fn a_private_ca_is_refused_and_verification_is_never_skipped() {
         ca_certificate: Some(tls.ca.clone()),
     })
     .await
-    .expect_err("a private CA is refused");
+    .expect("provisioned through the private CA");
+    let state = FeltDbState::connect(FeltDbConfig {
+        url: https.clone(),
+        token: token.clone(),
+        application_id: provisioned.application_id.clone(),
+        environment: "production".into(),
+        ca_certificate: Some(tls.ca.clone()),
+    })
+    .await
+    .expect("connected through the private CA");
+    assert_eq!(state.health().await.unwrap().status, "healthy");
     assert!(
-        matches!(&refused, compute_state::StateError::Invalid(message) if message.contains("ca_file")),
-        "{refused:?}"
+        state.revision().await.unwrap().is_some(),
+        "the committed state version is read through the private CA"
     );
 
     let untrusted = provision(ProvisionRequest {

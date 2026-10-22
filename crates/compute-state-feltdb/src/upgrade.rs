@@ -335,13 +335,11 @@ async fn online_backup(config: &FeltDbConfig, token: &str, output: &str) -> Resu
     })
     .map_err(|error| error.to_string())?;
     backup
-        .send(
-            feltdb_client::Method::POST,
-            "/admin/backups",
-            Some(&json!({ "output": output })),
-        )
+        .client
+        .control()
+        .backup(output)
         .await
-        .map_err(|refusal| match refusal {
+        .map_err(|error| match backup.refusal(error) {
             Ok(refusal) => format!(
                 "FeltDB refused the backup ({} {}): {}; the backup key needs cluster:write",
                 refusal.status, refusal.code, refusal.message

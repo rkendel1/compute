@@ -10,7 +10,7 @@
 //! application = "app_..."       # from `compute control-plane provision`
 //! environment = "production"
 //! token_env = "COMPUTE_FELTDB_TOKEN"
-//! ca_file = "/etc/compute/feltdb-ca.pem"   # a private CA: refused until feltdb-client supports one
+//! ca_file = "/etc/compute/feltdb-ca.pem"   # a private CA, added to the public roots
 //!
 //! [state.file]
 //! path = "/var/lib/compute/control-state.json"

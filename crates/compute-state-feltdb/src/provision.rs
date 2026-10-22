@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{COMPUTE_MANIFEST, FeltDbConfig, FeltDbState, encode};
+use crate::{COMPUTE_MANIFEST, FeltDbConfig, FeltDbState};
 use compute_state::StateError;
 
 #[derive(Debug, Clone)]
@@ -62,40 +62,30 @@ pub async fn provision_manifest(
     request: ProvisionRequest,
     compiled: &str,
 ) -> Result<Provisioned, StateError> {
-    let client = FeltDbState::new(FeltDbConfig {
+    let state = FeltDbState::new(FeltDbConfig {
         url: request.url.clone(),
         token: request.token.clone(),
         application_id: request.application_id.clone().unwrap_or_default(),
         environment: request.environment.clone(),
         ca_certificate: request.ca_certificate.clone(),
     })?;
-    let post = |path: String, body: Value| {
-        let client = &client;
-        async move {
-            client
-                .send(feltdb_client::Method::POST, &path, Some(&body))
-                .await
-        }
+    let control = state.client.control();
+    let refused = |step: &'static str| {
+        let state = &state;
+        move |error: feltdb_client::Error| failure(step, state.refusal(error))
     };
     let (tenant_id, application_id) = match &request.application_id {
         Some(application_id) => {
-            let application = client
-                .send(
-                    feltdb_client::Method::GET,
-                    &format!("/api/applications/{}", encode(application_id)),
-                    None,
-                )
+            let application = control
+                .application(application_id)
                 .await
-                .map_err(|refusal| failure("read the Compute application", refusal))?;
-            let tenant = application["tenant_id"]
-                .as_str()
-                .ok_or_else(|| StateError::Invalid("the application has no tenant".into()))?;
-            if application["name"].as_str() != Some("compute") {
+                .map_err(refused("read the Compute application"))?;
+            if application.name != "compute" {
                 return Err(StateError::Invalid(format!(
                     "FeltDB application {application_id} is not named compute"
                 )));
             }
-            (tenant.to_string(), application_id.clone())
+            (application.tenant_id, application_id.clone())
         }
         None => {
             // Adopt what already exists, so provisioning twice never
@@ -103,55 +93,37 @@ pub async fn provision_manifest(
             let tenant_id = match &request.tenant_id {
                 Some(tenant) => tenant.clone(),
                 None => {
-                    let tenants = client
-                        .send(feltdb_client::Method::GET, "/api/tenants", None)
-                        .await
-                        .map_err(|refusal| failure("list tenants", refusal))?;
-                    let existing = tenants.as_array().into_iter().flatten().find(|tenant| {
-                        tenant["name"].as_str() == Some(request.tenant_name.as_str())
-                    });
-                    match existing.and_then(|tenant| tenant["id"].as_str()) {
-                        Some(id) => id.to_string(),
-                        None => post(
-                            "/api/tenants".into(),
-                            json!({ "name": request.tenant_name }),
-                        )
-                        .await
-                        .map_err(|refusal| failure("create a tenant", refusal))?["id"]
-                            .as_str()
-                            .ok_or_else(|| {
-                                StateError::Invalid("FeltDB returned no tenant ID".into())
-                            })?
-                            .to_string(),
+                    let tenants = control.tenants().await.map_err(refused("list tenants"))?;
+                    match tenants
+                        .into_iter()
+                        .find(|tenant| tenant.name == request.tenant_name)
+                    {
+                        Some(tenant) => tenant.id,
+                        None => {
+                            control
+                                .create_tenant(&request.tenant_name)
+                                .await
+                                .map_err(refused("create a tenant"))?
+                                .id
+                        }
                     }
                 }
             };
-            let applications = client
-                .send(
-                    feltdb_client::Method::GET,
-                    &format!("/api/tenants/{}/applications", encode(&tenant_id)),
-                    None,
-                )
+            let existing = control
+                .applications(&tenant_id)
                 .await
-                .map_err(|refusal| failure("list applications", refusal))?;
-            let existing = applications
-                .as_array()
+                .map_err(refused("list applications"))?
                 .into_iter()
-                .flatten()
-                .find(|application| application["name"].as_str() == Some("compute"))
-                .and_then(|application| application["id"].as_str())
-                .map(str::to_owned);
+                .find(|application| application.name == "compute");
             let application_id = match existing {
-                Some(id) => id,
-                None => post(
-                    format!("/api/tenants/{}/applications", encode(&tenant_id)),
-                    json!({ "name": "compute" }),
-                )
-                .await
-                .map_err(|refusal| failure("create the Compute application", refusal))?["id"]
-                    .as_str()
-                    .ok_or_else(|| StateError::Invalid("FeltDB returned no application ID".into()))?
-                    .to_string(),
+                Some(application) => application.id,
+                None => {
+                    control
+                        .create_application(&tenant_id, "compute")
+                        .await
+                        .map_err(refused("create the Compute application"))?
+                        .id
+                }
             };
             (tenant_id, application_id)
         }
@@ -162,42 +134,29 @@ pub async fn provision_manifest(
     manifest["application_id"] = json!(application_id);
 
     // Already current? Compare with the active revision's collections.
-    let current = client
-        .send(
-            feltdb_client::Method::GET,
-            &format!(
-                "/v1/application?application_id={}&environment={}",
-                encode(&application_id),
-                encode(&request.environment)
-            ),
-            None,
-        )
+    let base = state
+        .client
+        .application(application_id.clone())
+        .environment(request.environment.clone())
+        .discover()
         .await
-        .ok();
-    // The active revision, when there is one.
-    let active = match current
-        .as_ref()
-        .and_then(|current| current["revision_id"].as_str())
-    {
-        Some(revision_id) => client
-            .send(
-                feltdb_client::Method::GET,
-                &format!(
-                    "/api/applications/{}/revisions/{}",
-                    encode(&application_id),
-                    encode(revision_id)
-                ),
-                None,
-            )
+        .ok()
+        .map(|current| current.revision_id);
+    // The active revision, when there is one, with its manifest as FeltDB
+    // serializes it.
+    let active = match &base {
+        Some(revision_id) => control
+            .revision(&application_id, revision_id)
             .await
             .ok()
-            .map(|revision| (revision_id.to_string(), revision)),
+            .and_then(|revision| serde_json::to_value(revision.manifest).ok())
+            .map(|manifest| (revision_id.clone(), manifest)),
         None => None,
     };
     // Never replace a model this build does not fully know: that would
     // drop collections, fields, or indexes a newer Compute relies on.
-    if let Some((revision_id, revision)) = &active {
-        let comparison = compare_models(&revision["manifest"], &manifest);
+    if let Some((revision_id, active_manifest)) = &active {
+        let comparison = compare_models(active_manifest, &manifest);
         if !comparison.unknown.is_empty() {
             return Err(StateError::Invalid(format!(
                 "refusing to downgrade the Compute model: the active revision {revision_id} declares {} that this build does not ({}); upgrade Compute instead",
@@ -206,8 +165,8 @@ pub async fn provision_manifest(
             )));
         }
     }
-    if let Some((revision_id, revision)) = &active
-        && same_model(&revision["manifest"], &manifest)
+    if let Some((revision_id, active_manifest)) = &active
+        && same_model(active_manifest, &manifest)
     {
         return Ok(Provisioned {
             tenant_id,
@@ -219,94 +178,62 @@ pub async fn provision_manifest(
     }
     // FeltDB requires the state schema version to increase with every
     // schema change.
-    if let Some((_, revision)) = &active {
-        let version = revision["manifest"]["state_schema_version"]
+    if let Some((_, active_manifest)) = &active {
+        let version = active_manifest["state_schema_version"]
             .as_u64()
             .unwrap_or(1);
         manifest["state_schema_version"] = json!(version + 1);
     }
+    let manifest: feltdb_client::feltdb::application::ApplicationManifest =
+        serde_json::from_value(manifest).map_err(|error| {
+            StateError::Invalid(format!(
+                "the Compute model is not a FeltDB manifest: {error}"
+            ))
+        })?;
 
-    let base = current
-        .as_ref()
-        .and_then(|current| current["revision_id"].as_str())
-        .map(str::to_owned);
-    let draft = post(
-        format!("/api/applications/{}/drafts", encode(&application_id)),
-        json!({ "base_revision_id": base }),
-    )
-    .await
-    .map_err(|refusal| failure("create a draft", refusal))?;
-    let draft_id = draft["draft_id"]
-        .as_str()
-        .ok_or_else(|| StateError::Invalid("FeltDB returned no draft ID".into()))?
-        .to_string();
-    let draft_version = draft["version"].as_u64().unwrap_or(1);
-    // The draft is replaced only at the version just read.
-    let draft_version = draft_version.to_string();
-    client
-        .client
-        .request_with_headers(
-            feltdb_client::Method::PUT,
-            &format!(
-                "/api/applications/{}/drafts/{}",
-                encode(&application_id),
-                encode(&draft_id)
-            ),
-            &[("If-Version", draft_version.as_str())],
-            Some(&json!({ "manifest": manifest })),
-        )
+    let draft = control
+        .create_draft(&application_id, base.as_deref())
         .await
-        .map_err(|error| match client.refusal(error) {
+        .map_err(refused("create a draft"))?;
+    // The draft is replaced only at the version just read.
+    control
+        .update_draft(&application_id, &draft.draft_id, draft.version, &manifest)
+        .await
+        .map_err(|error| match state.refusal(error) {
             Ok(refusal) => StateError::Invalid(format!(
                 "FeltDB refused the Compute model ({} {}): {}",
                 refusal.status, refusal.code, refusal.message
             )),
             Err(error) => error,
         })?;
-    let validation = post(
-        format!(
-            "/api/applications/{}/drafts/{}/validate",
-            encode(&application_id),
-            encode(&draft_id)
-        ),
-        json!({}),
-    )
-    .await
-    .map_err(|refusal| failure("validate the Compute model", refusal))?;
-    if validation["valid"].as_bool() != Some(true) {
+    let validation = control
+        .validate_draft(&application_id, &draft.draft_id)
+        .await
+        .map_err(refused("validate the Compute model"))?;
+    if !validation.valid {
         return Err(StateError::Invalid(format!(
             "FeltDB rejected the Compute model: {}",
-            validation["issues"]
+            serde_json::to_value(&validation.issues).unwrap_or_default()
         )));
     }
-    let revision = post(
-        format!(
-            "/api/applications/{}/drafts/{}/commit",
-            encode(&application_id),
-            encode(&draft_id)
-        ),
-        json!({}),
-    )
-    .await
-    .map_err(|refusal| failure("commit the Compute model", refusal))?;
-    let revision_id = revision["revision_id"]
-        .as_str()
-        .ok_or_else(|| StateError::Invalid("FeltDB returned no revision ID".into()))?
-        .to_string();
-    post(
-        format!(
-            "/api/applications/{}/revisions/{}/promote",
-            encode(&application_id),
-            encode(&revision_id)
-        ),
-        json!({
-            "environment": request.environment,
-            "reason": format!("Compute control model {}", compute_state::STATE_VERSION),
-            "expected_current_revision": base,
-        }),
-    )
-    .await
-    .map_err(|refusal| failure("promote the Compute model", refusal))?;
+    let revision_id = control
+        .commit_draft(&application_id, &draft.draft_id)
+        .await
+        .map_err(refused("commit the Compute model"))?
+        .revision_id;
+    control
+        .promote(
+            &application_id,
+            &revision_id,
+            &feltdb_client::Promotion::new(request.environment.clone())
+                .reason(format!(
+                    "Compute control model {}",
+                    compute_state::STATE_VERSION
+                ))
+                .expect_current(base.clone()),
+        )
+        .await
+        .map_err(refused("promote the Compute model"))?;
     Ok(Provisioned {
         tenant_id,
         application_id,
@@ -417,38 +344,25 @@ pub struct ModelInspection {
 
 /// Inspect the active Compute model without changing anything.
 pub async fn inspect_model(config: &FeltDbConfig) -> Result<ModelInspection, StateError> {
-    let client = FeltDbState::new(config.clone())?;
+    let state = FeltDbState::new(config.clone())?;
     let ours: Value = serde_json::from_str(COMPUTE_MANIFEST)
         .map_err(|error| StateError::Invalid(format!("embedded manifest: {error}")))?;
-    let current = client
-        .send(
-            feltdb_client::Method::GET,
-            &format!(
-                "/v1/application?application_id={}&environment={}",
-                encode(&config.application_id),
-                encode(&config.environment)
-            ),
-            None,
-        )
+    let active_revision = state
+        .application
+        .discover()
         .await
-        .ok();
-    let active_revision = current
-        .as_ref()
-        .and_then(|current| current["revision_id"].as_str())
-        .map(str::to_owned);
+        .ok()
+        .map(|current| current.revision_id);
     let stored = match &active_revision {
-        Some(revision_id) => client
-            .send(
-                feltdb_client::Method::GET,
-                &format!(
-                    "/api/applications/{}/revisions/{}",
-                    encode(&config.application_id),
-                    encode(revision_id)
-                ),
-                None,
-            )
-            .await
-            .map_err(|refusal| failure("read the active Compute model", refusal))?,
+        Some(revision_id) => {
+            let revision = state
+                .client
+                .control()
+                .revision(&config.application_id, revision_id)
+                .await
+                .map_err(|error| failure("read the active Compute model", state.refusal(error)))?;
+            json!({ "manifest": serde_json::to_value(revision.manifest).unwrap_or_default() })
+        }
         None => Value::Null,
     };
     Ok(ModelInspection {
@@ -507,4 +421,30 @@ fn same_model(stored: &Value, ours: &Value) -> bool {
     fields(stored) == fields(ours)
         && names(stored, "indexes") == names(ours, "indexes")
         && names(stored, "policies") == names(ours, "policies")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The model is sent to FeltDB as its own `ApplicationManifest`, the
+    /// struct the server stores it as: nothing Compute declares may be lost
+    /// on the way.
+    #[test]
+    fn the_compute_model_is_a_feltdb_manifest_without_loss() {
+        let compiled: Value = serde_json::from_str(COMPUTE_MANIFEST).unwrap();
+        let typed: feltdb_client::feltdb::application::ApplicationManifest =
+            serde_json::from_value(compiled.clone()).unwrap();
+        let round_trip = serde_json::to_value(&typed).unwrap();
+        assert!(same_model(&round_trip, &compiled));
+        assert!(compare_models(&round_trip, &compiled).unknown.is_empty());
+        assert!(compare_models(&compiled, &round_trip).unknown.is_empty());
+        for key in ["collections", "indexes", "policies"] {
+            assert_eq!(
+                round_trip[key].as_array().map(Vec::len),
+                compiled[key].as_array().map(Vec::len),
+                "{key}"
+            );
+        }
+    }
 }
