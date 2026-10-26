@@ -497,6 +497,80 @@ impl Daemon {
             .and_then(|record| record.value.endpoint))
     }
 
+    /// The repository the agent works on for an environment: the first one its
+    /// computer holds.
+    async fn agent_project(&self, environment: &str) -> Result<String, EnvironmentError> {
+        self.computer(environment)
+            .await?
+            .desired
+            .repositories
+            .first()
+            .map(|repository| repository.url.clone())
+            .ok_or_else(|| {
+                EnvironmentError::Invalid(format!(
+                    "{environment} has no repository for the agent to work on; add one first"
+                ))
+            })
+    }
+
+    /// Where the agent service for an environment is: the address the operator
+    /// registered, else this installation's own agent (started now when
+    /// `start`), else nothing, and the caller's environment or default applies.
+    pub async fn agent_base(
+        &self,
+        environment: Option<&str>,
+        start: bool,
+    ) -> Result<(Option<String>, &'static str), EnvironmentError> {
+        if let Some(address) = self.agent_address().await? {
+            return Ok((Some(address), "registered"));
+        }
+        if self.agent.status(None).await["native"] != true {
+            return Ok((None, "default"));
+        }
+        let environment = environment.ok_or_else(|| {
+            EnvironmentError::Invalid("say which environment the agent is working in".into())
+        })?;
+        if !start {
+            return Ok((None, "native"));
+        }
+        let project = self.agent_project(environment).await?;
+        Ok((Some(self.agent.ensure(&project).await?), "native"))
+    }
+
+    /// What the Work page shows about the agent for an environment. Reading it
+    /// starts nothing.
+    pub async fn agent_status(
+        &self,
+        environment: Option<&str>,
+    ) -> Result<serde_json::Value, EnvironmentError> {
+        if let Some(address) = self.agent_address().await? {
+            return Ok(crate::agent_service::status_from(Some(&address), "registered").await);
+        }
+        let project = match environment {
+            Some(environment) => self.agent_project(environment).await.ok(),
+            None => None,
+        };
+        let mut native = self.agent.status(project.as_deref()).await;
+        if native["native"] != true {
+            return Ok(crate::agent_service::status(None).await);
+        }
+        native["source"] = "native".into();
+        native["reachable"] = native["running"].clone();
+        if project.is_none() {
+            native["error"] =
+                "this environment has no repository for the agent to work on; add one first".into();
+        }
+        Ok(native)
+    }
+
+    /// Save the model the agent uses.
+    pub async fn set_agent_model(
+        &self,
+        model: crate::agent_runtime::ModelSettings,
+    ) -> Result<(), EnvironmentError> {
+        self.agent.set_model(model).await
+    }
+
     /// Register where the agent service listens, as the shared service
     /// `stack-agent`, so it is durable and every controller agrees on it. An
     /// empty address removes the registration, and the environment variable or

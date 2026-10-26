@@ -153,11 +153,28 @@ impl Answer {
     }
 }
 
+/// Whether something answers `GET /health` at this address.
+pub async fn status_of(base: &str) -> bool {
+    matches!(
+        call(Some(base), reqwest::Method::GET, "/health", None).await,
+        Ok(answer) if answer.status < 500
+    )
+}
+
 /// Whether an agent service is reachable, and where its address came from.
 /// Never fails: an unreachable service is the answer, with the reason and what
 /// to do about it.
 pub async fn status(registered: Option<&str>) -> Value {
-    let (url, source) = resolve(registered);
+    status_from(registered, "registered").await
+}
+
+/// As [`status`], naming the source of an address the caller resolved.
+pub async fn status_from(address: Option<&str>, given: &'static str) -> Value {
+    let registered = address;
+    let (url, mut source) = resolve(registered);
+    if registered.is_some() {
+        source = given;
+    }
     // `GET /health` is in the route list stack-agent's profile declares. Any
     // answer below 500 means a service is listening.
     match call(registered, reqwest::Method::GET, "/health", None).await {

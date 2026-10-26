@@ -787,8 +787,7 @@ async fn route(
 
         // The agent service the operator runs beside this controller.
         ("GET", ["agent"]) => {
-            let address = Box::pin(daemon.agent_address()).await?;
-            ok(crate::agent_service::status(address.as_deref()).await)
+            ok(Box::pin(daemon.agent_status(query.get("environment").map(String::as_str))).await?)
         }
         ("POST", ["agent", "address"]) => {
             let request: serde_json::Value = parse(body)?;
@@ -797,20 +796,32 @@ async fn route(
                     .await?,
             )
         }
+        ("POST", ["agent", "model"]) => {
+            Box::pin(daemon.set_agent_model(parse(body)?)).await?;
+            ok(serde_json::json!({ "saved": true }))
+        }
         ("POST", ["agent", "work"]) => {
-            let address = Box::pin(daemon.agent_address()).await?;
-            relay(crate::agent_service::submit(address.as_deref(), parse(body)?).await?)
+            let request: serde_json::Value = parse(body)?;
+            let (address, _) =
+                Box::pin(daemon.agent_base(request["environment"].as_str(), true)).await?;
+            relay(crate::agent_service::submit(address.as_deref(), request).await?)
         }
         ("GET", ["agent", "work", work]) => {
-            let address = Box::pin(daemon.agent_address()).await?;
+            let (address, _) =
+                Box::pin(daemon.agent_base(query.get("environment").map(String::as_str), true))
+                    .await?;
             relay(crate::agent_service::work(address.as_deref(), work).await?)
         }
         ("GET", ["agent", "work", work, "events"]) => {
-            let address = Box::pin(daemon.agent_address()).await?;
+            let (address, _) =
+                Box::pin(daemon.agent_base(query.get("environment").map(String::as_str), true))
+                    .await?;
             relay(crate::agent_service::events(address.as_deref(), work).await?)
         }
         ("POST", ["agent", "work", work, "cancel"]) => {
-            let address = Box::pin(daemon.agent_address()).await?;
+            let (address, _) =
+                Box::pin(daemon.agent_base(query.get("environment").map(String::as_str), true))
+                    .await?;
             relay(crate::agent_service::cancel(address.as_deref(), work).await?)
         }
 

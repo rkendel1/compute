@@ -1180,16 +1180,17 @@ function temporaryDialog() {
 // page submits a goal through `/agent/work`, shows what the service reports,
 // and can cancel. Nothing about the work is kept here beyond which one is open.
 
-const AGENT = { work: null, goal: '' };
+const AGENT = { work: null, environment: null, goal: '' };
 
 /// Where the agent service listens, and the way to change it. A registered
-/// address is kept by the control plane; without one the environment variable
-/// or the default applies, and the page says which.
+/// address is kept by the control plane; without one the agent this install
+/// ships is started for the environment, so there is normally nothing to set.
 function agentAddress(status) {
-  const source = { registered: 'set here', environment: 'from COMPUTE_STACK_AGENT_URL', default: 'the default' }[status.source] || '';
-  const field = h('input', { id: 'agent-address', value: status.url || '', placeholder: 'http://127.0.0.1:8765', autocomplete: 'off', 'aria-label': 'Agent service address',
+  const source = { registered: 'set here', environment: 'from COMPUTE_STACK_AGENT_URL', default: 'the default', native: 'started by Compute' }[status.source] || '';
+  const field = h('input', { id: 'agent-address', value: status.source === 'native' ? '' : (status.url || ''), placeholder: 'http://127.0.0.1:8765', autocomplete: 'off', 'aria-label': 'Agent service address',
     onkeydown: (event) => { if (event.key === 'Enter') setAddress(event.target.value); } });
-  return h('div', { 'data-agent-address': status.source || '' },
+  return h('details', { 'data-agent-address': status.source || '' },
+    h('summary', {}, 'Use a different agent service'),
     h('div', { class: 'add-row' }, field,
       h('button', { 'data-agent-address-set': 'true', onclick: () => setAddress(field.value) }, 'Set address'),
       status.source === 'registered' ? h('button', { 'data-agent-address-reset': 'true', onclick: () => setAddress('') }, 'Reset') : null),
@@ -1200,9 +1201,31 @@ async function setAddress(url) {
   await act(url.trim() ? 'Agent address set' : 'Agent address reset', () => api('POST', '/agent/address', { url }));
 }
 
-async function agentPanel() {
-  const status = await api('GET', '/agent').catch((error) => ({ reachable: false, error: error.message }));
-  if (!status.reachable) {
+/// The model the agent uses. The key is sent once and never shown again.
+function agentModelForm(model, first) {
+  const field = (id, label, value, attributes) => [h('label', { for: id }, label), h('input', { id, value: value || '', autocomplete: 'off', ...attributes })];
+  return h('div', { 'data-agent-model': first ? 'missing' : 'set' },
+    first ? h('div', { class: 'meta' }, 'The agent needs a model to think with. Say where it is once; Compute starts the agent itself after that.') : null,
+    field('agent-provider', 'Provider', model.provider || 'openai-compatible'),
+    field('agent-model', 'Model', model.model, { placeholder: 'e.g. mlx-community/Qwen3.5-4B-MLX-4bit' }),
+    field('agent-endpoint', 'Endpoint', model.endpoint, { placeholder: 'http://127.0.0.1:1337/v1/chat/completions' }),
+    field('agent-key', 'API key (leave empty for a local model)', '', { type: 'password' }),
+    h('div', { class: 'actions row' },
+      h('button', { class: 'primary', 'data-agent-model-save': 'true', onclick: async () => {
+        const value = (id) => document.getElementById(id).value.trim();
+        await act('Model saved', () => api('POST', '/agent/model', {
+          provider: value('agent-provider'), model: value('agent-model'), endpoint: value('agent-endpoint'), api_key: value('agent-key'),
+        }));
+      } }, 'Save model')));
+}
+
+async function agentPanel(environment) {
+  const status = await api('GET', `/agent?environment=${enc(environment)}`).catch((error) => ({ reachable: false, error: error.message }));
+  const native = status.native === true;
+  if (native && !status.model.configured) {
+    return h('div', { class: 'panel draft', 'data-agent': 'needs-model' }, agentModelForm(status.model, true), agentAddress(status));
+  }
+  if (!native && !status.reachable) {
     return h('div', { class: 'panel draft', 'data-agent': 'unreachable' },
       h('div', {}, state('failed', 'Agent service not reachable')),
       h('div', { class: 'meta' }, status.error || 'The agent service did not answer.'),
@@ -1210,17 +1233,18 @@ async function agentPanel() {
   }
   const goal = h('input', { id: 'agent-goal', placeholder: 'What should the agent do?', autocomplete: 'off', value: AGENT.goal, 'aria-label': 'Goal for the agent',
     oninput: (event) => { AGENT.goal = event.target.value; },
-    onkeydown: (event) => { if (event.key === 'Enter') submitGoal(); } });
-  const rows = [h('div', { class: 'add-row' }, goal, h('button', { class: 'primary', 'data-agent-run': 'true', onclick: submitGoal }, 'Run'))];
-  if (AGENT.work) {
+    onkeydown: (event) => { if (event.key === 'Enter') submitGoal(environment); } });
+  const rows = [h('div', { class: 'add-row' }, goal, h('button', { class: 'primary', 'data-agent-run': 'true', onclick: () => submitGoal(environment) }, 'Run'))];
+  if (native && status.error) rows.push(h('div', { class: 'error' }, status.error));
+  if (AGENT.work && AGENT.environment === environment) {
     const [work, events] = await Promise.all([
-      api('GET', `/agent/work/${enc(AGENT.work)}`).catch((error) => ({ status: 'unavailable', error: error.message })),
-      api('GET', `/agent/work/${enc(AGENT.work)}/events`).catch(() => ({ events: [] })),
+      api('GET', `/agent/work/${enc(AGENT.work)}?environment=${enc(environment)}`).catch((error) => ({ status: 'unavailable', error: error.message })),
+      api('GET', `/agent/work/${enc(AGENT.work)}/events?environment=${enc(environment)}`).catch(() => ({ events: [] })),
     ]);
     const active = ['queued', 'running'].includes(work.status);
     rows.push(h('div', { 'data-agent-work': AGENT.work, 'data-status': work.status },
       h('div', { class: 'meta' }, `work ${AGENT.work} · `, state(work.status === 'succeeded' || work.status === 'completed' ? 'succeeded' : (active ? 'running' : work.status === 'failed' ? 'failed' : work.status)),
-        active ? [' ', h('button', { class: 'danger small', 'data-agent-cancel': 'true', onclick: cancelGoal }, 'Cancel')] : null),
+        active ? [' ', h('button', { class: 'danger small', 'data-agent-cancel': 'true', onclick: () => cancelGoal(environment) }, 'Cancel')] : null),
       work.error ? h('div', { class: 'error' }, work.error) : null,
       h('pre', { class: 'mono', 'aria-live': 'polite' }, (events.events || []).map((event) => {
         const { kind, ...rest } = event;
@@ -1230,19 +1254,22 @@ async function agentPanel() {
     if (active) operationTimer = setTimeout(() => { if (!dialog.open && !document.activeElement.closest('.draft')) render(); }, 2000);
   }
   return h('div', { class: 'panel draft', 'data-agent': 'ready' }, rows,
-    agentAddress(status),
-    h('div', { class: 'meta' }, 'The agent runs each goal in its own isolated computer; it is not this one.'));
+    h('div', { class: 'meta' }, native
+      ? `${status.running ? 'The agent is running.' : 'The agent starts with your first goal.'} It works on this environment's repository, each goal in its own isolated computer. Model: ${status.model.model}.`
+      : 'The agent runs each goal in its own isolated computer; it is not this one.'),
+    native ? h('details', {}, h('summary', {}, 'Change the model'), agentModelForm(status.model, false)) : null,
+    agentAddress(status));
 }
 
-async function submitGoal() {
+async function submitGoal(environment) {
   const goal = AGENT.goal.trim();
   if (!goal) { toast('Say what the agent should do', true); return; }
-  const work = await act('Goal sent to the agent', () => api('POST', '/agent/work', { goal }));
-  if (work && work.work_id) { AGENT.work = work.work_id; AGENT.goal = ''; await render(); }
+  const work = await act('Goal sent to the agent', () => api('POST', '/agent/work', { goal, environment }));
+  if (work && work.work_id) { AGENT.work = work.work_id; AGENT.environment = environment; AGENT.goal = ''; await render(); }
 }
 
-async function cancelGoal() {
-  await act('Cancelling', () => api('POST', `/agent/work/${enc(AGENT.work)}/cancel`));
+async function cancelGoal(environment) {
+  await act('Cancelling', () => api('POST', `/agent/work/${enc(AGENT.work)}/cancel?environment=${enc(environment)}`));
 }
 
 async function workView(name) {
@@ -1351,7 +1378,7 @@ async function workView(name) {
     computer.failure ? h('div', { class: 'panel error' }, `${computer.failure.phase}: ${computer.failure.code} — ${computer.failure.message}`) : null,
 
     h('h3', {}, 'Agent'),
-    await agentPanel(),
+    await agentPanel(name),
 
     h('h3', {}, 'Repositories'),
     table(['Repository', 'URL', 'Revision', 'Checked out', 'Last synced', ''], repositories, 'No repositories.'),

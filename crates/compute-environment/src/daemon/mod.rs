@@ -682,6 +682,8 @@ impl TerminalLog {
 
 pub struct Daemon {
     config: DaemonConfig,
+    /// The agent service the Work page uses, started on demand.
+    agent: Arc<crate::agent_runtime::AgentRuntime>,
     /// This node as a `compute.remote@1` provider, on the same runtime
     /// substrate its deployments use. Present when it has a public URL.
     remote: Option<Arc<compute_provider::RemoteService>>,
@@ -975,8 +977,24 @@ impl Daemon {
             }
             None => None,
         };
+        // The computer host the agent's sessions run on: the pool's first remote
+        // member that has a credential file.
+        let agent_target = config.pool.as_ref().and_then(|pool| {
+            pool.providers.values().find_map(|provider| {
+                match (&provider.kind, &provider.endpoint, &provider.token_file) {
+                    (ProviderKind::Remote, Some(endpoint), Some(file)) => {
+                        Some((endpoint.clone(), file.clone()))
+                    }
+                    _ => None,
+                }
+            })
+        });
+        let agent = crate::agent_runtime::AgentRuntime::new(
+            crate::agent_runtime::AgentRuntime::setup_for(&config.state_dir, agent_target),
+        );
         let daemon = Arc::new(Self {
             config,
+            agent,
             remote,
             control,
             instance_id,
@@ -1185,6 +1203,7 @@ impl Daemon {
     /// daemon starts again) and signal shutdown.
     pub async fn shutdown(self: &Arc<Self>) {
         let _ = self.shutdown.send(true);
+        self.agent.stop_all().await;
         let _guard = self.reconciling.lock().await;
         let units = self
             .inner
