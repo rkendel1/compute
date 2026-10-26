@@ -17,11 +17,11 @@ description = "Deterministic fakes-only harness for the Compute -> Rust Chip -> 
 # tests/pins.rs against the product workspace's pin.
 [dependencies]
 async-trait = "0.1"
-chip-core = { git = "https://github.com/rkendel1/stack-agent", rev = "e73e74a72b42a40ff20ceef02805c99c6ef83d9e" }
-chip-fx = { git = "https://github.com/rkendel1/stack-agent", rev = "e73e74a72b42a40ff20ceef02805c99c6ef83d9e" }
-chip-inference = { git = "https://github.com/rkendel1/stack-agent", rev = "e73e74a72b42a40ff20ceef02805c99c6ef83d9e" }
-fx-core = { git = "https://github.com/rkendel1/stack-agent", rev = "e73e74a72b42a40ff20ceef02805c99c6ef83d9e" }
-fx-single-attempt = { git = "https://github.com/rkendel1/stack-agent", rev = "e73e74a72b42a40ff20ceef02805c99c6ef83d9e" }
+chip-core = { git = "https://github.com/rkendel1/stack-agent", rev = "7f2942f0638d42e5f83971d612f0e16b774d7e55" }
+chip-fx = { git = "https://github.com/rkendel1/stack-agent", rev = "7f2942f0638d42e5f83971d612f0e16b774d7e55" }
+chip-inference = { git = "https://github.com/rkendel1/stack-agent", rev = "7f2942f0638d42e5f83971d612f0e16b774d7e55" }
+fx-core = { git = "https://github.com/rkendel1/stack-agent", rev = "7f2942f0638d42e5f83971d612f0e16b774d7e55" }
+fx-single-attempt = { git = "https://github.com/rkendel1/stack-agent", rev = "7f2942f0638d42e5f83971d612f0e16b774d7e55" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

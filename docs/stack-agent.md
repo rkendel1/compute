@@ -114,13 +114,18 @@ nothing and forwards no Compute credential.
 
 | Route | Calls |
 | --- | --- |
-| `GET /agent` | whether a service answers, at which address (`reachable: false` says why and how to start it) |
+| `GET /agent` | whether a service answers (`GET /health`), at which address and where that came from (`reachable: false` says why and how to start it) |
+| `POST /agent/address` | register `{url}` as the service's address; an empty `url` resets it |
 | `POST /agent/work` | `POST /v1/work` with only `{goal}` (and `kind`) |
 | `GET /agent/work/{work}`, `…/events` | the service's work record and events |
 | `POST /agent/work/{work}/cancel` | `POST /v1/work/{id}/cancel` |
 
-`COMPUTE_STACK_AGENT_URL` says where the service listens (default `http://127.0.0.1:8765`). Only a plain
-`http` loopback address is accepted, because the service has no authentication of its own. The service
+The panel shows where the service is expected and lets you change it: type an address and press
+**Set address**. That registers the shared service `stack-agent` (capability `Agent/loop@1`, through
+`POST /agent/address`), so it is durable and every controller agrees on it; **Reset** removes it. Without
+a registered address, `COMPUTE_STACK_AGENT_URL` applies, then the default `http://127.0.0.1:8765`; the
+panel says which. Only a plain `http` loopback address is accepted, because the service has no
+authentication of its own. The service
 runs each goal in its own session, never in the computer whose page you are looking at. The Manage page
 no longer offers an "Agent" template: a template cannot supply the target, token and model key the
 service needs, and the placeholder it used (`exec ./agent`) never ran.

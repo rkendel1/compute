@@ -100,7 +100,7 @@ mod tests {
 
     const STACK_AGENT: &str = r#"{"default":"stack-agent","runtimes":[
         {"name":"stack-agent","package":"github:rkendel1/stack-agent",
-         "version":"e73e74a72b42a40ff20ceef02805c99c6ef83d9e",
+         "version":"7f2942f0638d42e5f83971d612f0e16b774d7e55",
          "executable":"stack-agent/bin/compute-stack-agent","default":true}]}"#;
 
     /// A profile directory that lives as long as the test.
@@ -144,7 +144,7 @@ mod tests {
             .default_runtime()
             .expect("stack-agent is default");
         assert_eq!(runtime.package, "github:rkendel1/stack-agent");
-        assert_eq!(runtime.version, "e73e74a72b42a40ff20ceef02805c99c6ef83d9e");
+        assert_eq!(runtime.version, "7f2942f0638d42e5f83971d612f0e16b774d7e55");
         assert!(runtime.default);
     }
 
@@ -153,7 +153,7 @@ mod tests {
         let capabilities = declared(&profile(
             r#"{"default":"absent","runtimes":[
                 {"name":"stack-agent","package":"github:rkendel1/stack-agent",
-                 "version":"e73e74a72b42a40ff20ceef02805c99c6ef83d9e",
+                 "version":"7f2942f0638d42e5f83971d612f0e16b774d7e55",
                  "executable":"stack-agent/bin/compute-stack-agent"}]}"#,
         ));
         assert_eq!(capabilities.default, None);

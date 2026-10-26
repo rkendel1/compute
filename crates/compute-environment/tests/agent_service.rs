@@ -104,6 +104,41 @@ async fn goals_reach_the_agent_service_and_answers_come_back_unchanged() {
 
     let status: Value = client.get("/agent").await.unwrap();
     assert_eq!(status["reachable"], true, "{status}");
+    assert_eq!(status["source"], "environment");
+
+    // An address set from the page is registered, wins over the environment,
+    // and is refused unless it is loopback http.
+    let refused = client
+        .post::<_, Value>(
+            "/agent/address",
+            Some(&json!({"url": "http://example.com:8765"})),
+        )
+        .await
+        .expect_err("not loopback");
+    assert_eq!(refused.kind(), "invalid");
+    let live = std::env::var(agent_service::URL_ENV).unwrap();
+    unsafe { std::env::set_var(agent_service::URL_ENV, "http://127.0.0.1:9") };
+    let set: Value = client
+        .post("/agent/address", Some(&json!({"url": format!("{live}/")})))
+        .await
+        .unwrap();
+    assert_eq!(set["source"], "registered", "{set}");
+    assert_eq!(set["url"], live.as_str());
+    assert_eq!(set["reachable"], true, "{set}");
+    let services: Value = client.get("/services").await.unwrap();
+    assert_eq!(services[0]["name"], "stack-agent");
+    assert_eq!(services[0]["capabilities"][0], "Agent/loop@1");
+    let reset: Value = client
+        .post("/agent/address", Some(&json!({"url": ""})))
+        .await
+        .unwrap();
+    assert_eq!(reset["source"], "environment", "{reset}");
+    assert_eq!(reset["reachable"], false);
+    // Registered again so the rest of the test goes through it.
+    let _: Value = client
+        .post("/agent/address", Some(&json!({"url": live})))
+        .await
+        .unwrap();
 
     // Only the goal is passed on, and the service's answer is the answer.
     let submitted: Value = client
