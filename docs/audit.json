@@ -4191,6 +4191,15 @@
   },
   {
    "method": "POST",
+   "path": "/agent/model",
+   "scope": "Operate",
+   "ui": true,
+   "cli": false,
+   "appport": false,
+   "http_path_in_tests": false
+  },
+  {
+   "method": "POST",
    "path": "/agent/address",
    "scope": "Operate",
    "ui": true,

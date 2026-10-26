@@ -108,27 +108,40 @@ key never enters a session (`crates/compute-stack-agent/tests/launcher.rs`,
 
 ## From the Work page
 
-The Work page has an **Agent** panel: type a goal, press Run, watch the service's events, cancel. The
-controller carries each call to the service you started above and returns its answer; it stores
-nothing and forwards no Compute credential.
+On a configured install there is nothing to start or export. The Work page's **Agent** panel is a goal
+box; type a goal and press Run. The first time, it asks once where the model is (a provider, a model and
+an endpoint, plus a key if the model needs one), and that is the only thing Compute cannot work out.
 
-| Route | Calls |
+What Compute does on the first goal for an environment (`crates/compute-environment/src/agent_runtime.rs`):
+
+| The service needs | Compute supplies |
 | --- | --- |
-| `GET /agent` | whether a service answers (`GET /health`), at which address and where that came from (`reachable: false` says why and how to start it) |
-| `POST /agent/address` | register `{url}` as the service's address; an empty `url` resets it |
-| `POST /agent/work` | `POST /v1/work` with only `{goal}` (and `kind`) |
-| `GET /agent/work/{work}`, `…/events` | the service's work record and events |
-| `POST /agent/work/{work}/cancel` | `POST /v1/work/{id}/cancel` |
+| `COMPUTE_STACK_AGENT_TARGET` and its token file | the pool's first remote member (your `this-machine`) and its credential file |
+| `COMPUTE_STACK_AGENT_PROJECT` | the first repository of the environment the goal is for |
+| `COMPUTE_STACK_AGENT_WORKER` | the executable the install's profile names |
+| the model (`CHIP_*`) | what you saved on the page, else the daemon's own `CHIP_*` variables |
+| a port and a work database | a free loopback port and a per-project database under the node's state directory |
 
-The panel shows where the service is expected and lets you change it: type an address and press
-**Set address**. That registers the shared service `stack-agent` (capability `Agent/loop@1`, through
-`POST /agent/address`), so it is durable and every controller agrees on it; **Reset** removes it. Without
-a registered address, `COMPUTE_STACK_AGENT_URL` applies, then the default `http://127.0.0.1:8765`; the
-panel says which. Only a plain `http` loopback address is accepted, because the service has no
-authentication of its own. The service
-runs each goal in its own session, never in the computer whose page you are looking at. The Manage page
-no longer offers an "Agent" template: a template cannot supply the target, token and model key the
-service needs, and the placeholder it used (`exec ./agent`) never ran.
+It starts `serve` from an empty environment (nothing else of the daemon's reaches the agent), waits for
+`GET /health`, and relays the goal. One service runs per project; changing the model stops them and the
+next goal starts fresh ones. A service that dies as it starts is reported with its own last output. The
+daemon finds the install even when started as plain `compute start`, by the Homebrew layout it lives in.
+The saved model is a file in the node's state directory (`agent/model.json`) that only the daemon's user
+can read; the API never returns the key. Nothing else is stored: the services are working state.
+
+| Route | Does |
+| --- | --- |
+| `GET /agent?environment=` | what the panel shows: whether there is an agent, whether the model is set, whether it is running (reads start nothing) |
+| `POST /agent/model` | save `{provider, model, endpoint, api_key}`; the key is never echoed |
+| `POST /agent/work` | `{goal, environment}`: start the service if needed, then `POST /v1/work` with only the goal |
+| `GET /agent/work/{work}`, `…/events`, `POST …/cancel` | the service's work record, events and cancellation (`?environment=`) |
+| `POST /agent/address` | use an agent service you run yourself instead: register `{url}` (empty resets) |
+
+A registered address (under **Use a different agent service**) takes precedence over the native agent;
+without one on a base install, `COMPUTE_STACK_AGENT_URL` and then `http://127.0.0.1:8765` apply. Only a
+plain `http` loopback address is accepted, because the service has no authentication of its own. The
+service runs each goal in its own session, never in the computer whose page you are looking at. To run it
+yourself, see "Running it" above.
 
 ## Packaging
 

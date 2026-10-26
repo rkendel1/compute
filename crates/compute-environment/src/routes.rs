@@ -64,6 +64,13 @@ pub const ROUTES: &[Route] = &[
     route("GET", "/agent", Read, "agent.status", Controller),
     route(
         "POST",
+        "/agent/model",
+        Operate,
+        "agent.model.set",
+        Controller,
+    ),
+    route(
+        "POST",
         "/agent/address",
         Operate,
         "agent.address.set",
