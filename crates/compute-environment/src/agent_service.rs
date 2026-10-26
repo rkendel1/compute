@@ -31,10 +31,30 @@ pub struct Answer {
     pub body: Vec<u8>,
 }
 
-fn base() -> Result<reqwest::Url, EnvironmentError> {
-    let text = std::env::var(URL_ENV).unwrap_or_else(|_| DEFAULT_URL.into());
-    let url = reqwest::Url::parse(&text)
-        .map_err(|_| EnvironmentError::Invalid(format!("{URL_ENV} is not a URL")))?;
+/// The registered service's name and the capability it declares: the same
+/// identifiers the distribution profile gives the agent runtime.
+pub const SERVICE: &str = "stack-agent";
+pub const CAPABILITY: &str = "Agent/loop@1";
+
+/// Where an address came from, in the order it wins.
+fn resolve(registered: Option<&str>) -> (String, &'static str) {
+    if let Some(url) = registered {
+        return (url.to_owned(), "registered");
+    }
+    match std::env::var(URL_ENV) {
+        Ok(url) => (url, "environment"),
+        Err(_) => (DEFAULT_URL.to_owned(), "default"),
+    }
+}
+
+/// An address the service may be reached at: plain http on loopback, because
+/// the service has no authentication of its own.
+pub fn validate(text: &str) -> Result<reqwest::Url, EnvironmentError> {
+    let url = reqwest::Url::parse(text.trim()).map_err(|_| {
+        EnvironmentError::Invalid(
+            "the agent address is not a URL, e.g. http://127.0.0.1:8765".into(),
+        )
+    })?;
     let loopback = url.host_str().is_some_and(|host| {
         let host = host.trim_start_matches('[').trim_end_matches(']');
         host == "localhost"
@@ -49,19 +69,21 @@ fn base() -> Result<reqwest::Url, EnvironmentError> {
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err(EnvironmentError::Invalid(format!(
-            "{URL_ENV} must be a plain http loopback URL: the agent service has no authentication of its own"
-        )));
+        return Err(EnvironmentError::Invalid(
+            "the agent address must be a plain http loopback URL (127.0.0.1 or localhost): the agent service has no authentication of its own"
+                .into(),
+        ));
     }
     Ok(url)
 }
 
 async fn call(
+    registered: Option<&str>,
     method: reqwest::Method,
     path: &str,
     body: Option<Vec<u8>>,
 ) -> Result<Answer, EnvironmentError> {
-    let mut url = base()?;
+    let mut url = validate(&resolve(registered).0)?;
     let prefix = url.path().trim_end_matches('/').to_owned();
     url.set_path(&format!("{prefix}{path}"));
     let client = reqwest::Client::builder()
@@ -80,7 +102,7 @@ async fn call(
     let response = request.send().await.map_err(|error| {
         EnvironmentError::RuntimeUnavailable(format!(
             "the agent service at {url} did not answer ({}). Start it with \
-             `compute-configured-stack-agent serve --port {}`, or set {URL_ENV}.",
+             `compute-configured-stack-agent serve --port {}`, or set its address here.",
             if error.is_timeout() {
                 "timed out"
             } else {
@@ -131,23 +153,28 @@ impl Answer {
     }
 }
 
-/// Whether an agent service is reachable. Never fails: an unreachable service
-/// is the answer, with the reason and what to do about it.
-pub async fn status() -> Value {
-    let url = std::env::var(URL_ENV).unwrap_or_else(|_| DEFAULT_URL.into());
-    // Any answer below 500 means a service is listening; what it answers to
-    // this probe is its own business.
-    match call(reqwest::Method::GET, "/v1/work", None).await {
-        Ok(answer) if answer.status < 500 => json!({ "url": url, "reachable": true }),
-        Ok(answer) => {
-            json!({ "url": url, "reachable": false, "error": format!("the agent service answered {}", answer.status) })
+/// Whether an agent service is reachable, and where its address came from.
+/// Never fails: an unreachable service is the answer, with the reason and what
+/// to do about it.
+pub async fn status(registered: Option<&str>) -> Value {
+    let (url, source) = resolve(registered);
+    // `GET /health` is in the route list stack-agent's profile declares. Any
+    // answer below 500 means a service is listening.
+    match call(registered, reqwest::Method::GET, "/health", None).await {
+        Ok(answer) if answer.status < 500 => {
+            json!({ "url": url, "source": source, "reachable": true })
         }
-        Err(error) => json!({ "url": url, "reachable": false, "error": error.message() }),
+        Ok(answer) => {
+            json!({ "url": url, "source": source, "reachable": false, "error": format!("the agent service answered {}", answer.status) })
+        }
+        Err(error) => {
+            json!({ "url": url, "source": source, "reachable": false, "error": error.message() })
+        }
     }
 }
 
 /// Submit a goal. Only `goal` (and an optional `kind`) is passed on.
-pub async fn submit(request: Value) -> Result<Answer, EnvironmentError> {
+pub async fn submit(registered: Option<&str>, request: Value) -> Result<Answer, EnvironmentError> {
     let goal = request["goal"]
         .as_str()
         .map(str::trim)
@@ -158,6 +185,7 @@ pub async fn submit(request: Value) -> Result<Answer, EnvironmentError> {
         forwarded["kind"] = json!(kind);
     }
     call(
+        registered,
         reqwest::Method::POST,
         "/v1/work",
         Some(serde_json::to_vec(&forwarded)?),
@@ -176,16 +204,34 @@ fn work_path(work: &str, suffix: &str) -> Result<String, EnvironmentError> {
     Ok(format!("/v1/work/{work}{suffix}"))
 }
 
-pub async fn work(work: &str) -> Result<Answer, EnvironmentError> {
-    call(reqwest::Method::GET, &work_path(work, "")?, None).await
+pub async fn work(registered: Option<&str>, work: &str) -> Result<Answer, EnvironmentError> {
+    call(
+        registered,
+        reqwest::Method::GET,
+        &work_path(work, "")?,
+        None,
+    )
+    .await
 }
 
-pub async fn events(work: &str) -> Result<Answer, EnvironmentError> {
-    call(reqwest::Method::GET, &work_path(work, "/events")?, None).await
+pub async fn events(registered: Option<&str>, work: &str) -> Result<Answer, EnvironmentError> {
+    call(
+        registered,
+        reqwest::Method::GET,
+        &work_path(work, "/events")?,
+        None,
+    )
+    .await
 }
 
-pub async fn cancel(work: &str) -> Result<Answer, EnvironmentError> {
-    call(reqwest::Method::POST, &work_path(work, "/cancel")?, None).await
+pub async fn cancel(registered: Option<&str>, work: &str) -> Result<Answer, EnvironmentError> {
+    call(
+        registered,
+        reqwest::Method::POST,
+        &work_path(work, "/cancel")?,
+        None,
+    )
+    .await
 }
 
 #[cfg(test)]

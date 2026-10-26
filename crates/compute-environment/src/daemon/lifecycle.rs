@@ -487,6 +487,57 @@ impl Daemon {
         Ok(record)
     }
 
+    /// The address the operator registered the agent service at, if any. A
+    /// state read that fails is an error, never a quiet fall back to a default.
+    pub async fn agent_address(&self) -> Result<Option<String>, EnvironmentError> {
+        Ok(self
+            .control()
+            .get::<ServiceRecord>(&ids::service(crate::agent_service::SERVICE))
+            .await?
+            .and_then(|record| record.value.endpoint))
+    }
+
+    /// Register where the agent service listens, as the shared service
+    /// `stack-agent`, so it is durable and every controller agrees on it. An
+    /// empty address removes the registration, and the environment variable or
+    /// default applies again.
+    pub async fn set_agent_address(
+        self: &Arc<Self>,
+        url: &str,
+    ) -> Result<serde_json::Value, EnvironmentError> {
+        let url = url.trim();
+        if url.is_empty() {
+            if self.agent_address().await?.is_some() {
+                self.remove_service(crate::agent_service::SERVICE).await?;
+            }
+        } else {
+            let endpoint = crate::agent_service::validate(url)?
+                .as_str()
+                .trim_end_matches('/')
+                .to_owned();
+            let provider = self
+                .pool
+                .members()
+                .next()
+                .map(|member| member.id.clone())
+                .ok_or_else(|| {
+                    EnvironmentError::Invalid("the daemon's pool has no provider".into())
+                })?;
+            self.register_service(ServiceDefinition {
+                name: crate::agent_service::SERVICE.into(),
+                capabilities: vec![crate::agent_service::CAPABILITY.into()],
+                provider,
+                environment: None,
+                project: None,
+                workload: None,
+                endpoint: Some(endpoint),
+                description: Some("The agent service Compute's Work page talks to".into()),
+            })
+            .await?;
+        }
+        Ok(crate::agent_service::status(self.agent_address().await?.as_deref()).await)
+    }
+
     pub async fn remove_service(self: &Arc<Self>, name: &str) -> Result<(), EnvironmentError> {
         let existing = self
             .get_required::<ServiceRecord>(&ids::service(name))

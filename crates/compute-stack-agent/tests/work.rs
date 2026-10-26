@@ -375,6 +375,12 @@ async fn one_works_failures_do_not_touch_another_and_every_environment_is_releas
             "{session} was not destroyed"
         );
     }
+    // A release runs on a task the environment's owner spawns when it drops, so it can finish a
+    // moment after the work's result is returned (the panicked work's runs while it unwinds).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while provider.stats().released < 4 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     let stats = provider.stats();
     assert_eq!(
         (stats.acquired, stats.released, stats.cleanup_failed),

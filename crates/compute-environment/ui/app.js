@@ -1182,13 +1182,31 @@ function temporaryDialog() {
 
 const AGENT = { work: null, goal: '' };
 
+/// Where the agent service listens, and the way to change it. A registered
+/// address is kept by the control plane; without one the environment variable
+/// or the default applies, and the page says which.
+function agentAddress(status) {
+  const source = { registered: 'set here', environment: 'from COMPUTE_STACK_AGENT_URL', default: 'the default' }[status.source] || '';
+  const field = h('input', { id: 'agent-address', value: status.url || '', placeholder: 'http://127.0.0.1:8765', autocomplete: 'off', 'aria-label': 'Agent service address',
+    onkeydown: (event) => { if (event.key === 'Enter') setAddress(event.target.value); } });
+  return h('div', { 'data-agent-address': status.source || '' },
+    h('div', { class: 'add-row' }, field,
+      h('button', { 'data-agent-address-set': 'true', onclick: () => setAddress(field.value) }, 'Set address'),
+      status.source === 'registered' ? h('button', { 'data-agent-address-reset': 'true', onclick: () => setAddress('') }, 'Reset') : null),
+    h('div', { class: 'meta' }, `Address: ${source}. A loopback http address, where \`compute-configured-stack-agent serve\` listens.`));
+}
+
+async function setAddress(url) {
+  await act(url.trim() ? 'Agent address set' : 'Agent address reset', () => api('POST', '/agent/address', { url }));
+}
+
 async function agentPanel() {
   const status = await api('GET', '/agent').catch((error) => ({ reachable: false, error: error.message }));
   if (!status.reachable) {
-    return h('div', { class: 'panel', 'data-agent': 'unreachable' },
+    return h('div', { class: 'panel draft', 'data-agent': 'unreachable' },
       h('div', {}, state('failed', 'Agent service not reachable')),
       h('div', { class: 'meta' }, status.error || 'The agent service did not answer.'),
-      h('div', { class: 'meta' }, `Looked at ${status.url || 'the configured address'}. Set COMPUTE_STACK_AGENT_URL if it listens elsewhere.`));
+      agentAddress(status));
   }
   const goal = h('input', { id: 'agent-goal', placeholder: 'What should the agent do?', autocomplete: 'off', value: AGENT.goal, 'aria-label': 'Goal for the agent',
     oninput: (event) => { AGENT.goal = event.target.value; },
@@ -1212,6 +1230,7 @@ async function agentPanel() {
     if (active) operationTimer = setTimeout(() => { if (!dialog.open && !document.activeElement.closest('.draft')) render(); }, 2000);
   }
   return h('div', { class: 'panel draft', 'data-agent': 'ready' }, rows,
+    agentAddress(status),
     h('div', { class: 'meta' }, 'The agent runs each goal in its own isolated computer; it is not this one.'));
 }
 

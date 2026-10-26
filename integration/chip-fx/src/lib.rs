@@ -454,6 +454,11 @@ pub async fn run_work_with(
         work,
         WorkGoal::new("Run the self test and report the result"),
     );
+    // These tests script exactly the replies a case needs and assert that a rejected decision
+    // changes nothing in the host. Whether Chip answers a rejection again (up to
+    // `DEFAULT_MALFORMED_REPLY_LIMIT` in a row) is Chip's own policy, tested in stack-agent; with
+    // the limit at 0 the first rejection ends the work, so no case needs a second scripted reply.
+    spec.malformed_reply_limit = 0;
     if require_observation {
         spec = spec.with_required_observation(Arc::new(SelftestPassed));
     }

@@ -54,7 +54,7 @@ fn configured_profile(root: &std::path::Path) {
       {
         "name": "stack-agent",
         "package": "github:rkendel1/stack-agent",
-        "version": "e73e74a72b42a40ff20ceef02805c99c6ef83d9e",
+        "version": "7f2942f0638d42e5f83971d612f0e16b774d7e55",
         "executable": "stack-agent/bin/compute-stack-agent",
         "default": true,
         "capabilities": ["Agent/loop@1"],
@@ -105,7 +105,7 @@ async fn base_advertises_no_agent_runtime_and_configured_advertises_stack_agent(
     let agent = &agents_view["runtimes"][0];
     assert_eq!(agent["name"], "stack-agent");
     assert_eq!(agent["package"], "github:rkendel1/stack-agent");
-    assert_eq!(agent["version"], "e73e74a72b42a40ff20ceef02805c99c6ef83d9e");
+    assert_eq!(agent["version"], "7f2942f0638d42e5f83971d612f0e16b774d7e55");
     assert_eq!(agent["default"], true);
     // A long-running service whose capabilities run in Compute sessions.
     assert_eq!(agent["lifecycle"], "service");

@@ -786,14 +786,32 @@ async fn route(
         ("GET", ["status"]) => ok(to_value(Box::pin(daemon.status()).await)?),
 
         // The agent service the operator runs beside this controller.
-        ("GET", ["agent"]) => ok(crate::agent_service::status().await),
-        ("POST", ["agent", "work"]) => relay(crate::agent_service::submit(parse(body)?).await?),
-        ("GET", ["agent", "work", work]) => relay(crate::agent_service::work(work).await?),
+        ("GET", ["agent"]) => {
+            let address = Box::pin(daemon.agent_address()).await?;
+            ok(crate::agent_service::status(address.as_deref()).await)
+        }
+        ("POST", ["agent", "address"]) => {
+            let request: serde_json::Value = parse(body)?;
+            ok(
+                Box::pin(daemon.set_agent_address(request["url"].as_str().unwrap_or_default()))
+                    .await?,
+            )
+        }
+        ("POST", ["agent", "work"]) => {
+            let address = Box::pin(daemon.agent_address()).await?;
+            relay(crate::agent_service::submit(address.as_deref(), parse(body)?).await?)
+        }
+        ("GET", ["agent", "work", work]) => {
+            let address = Box::pin(daemon.agent_address()).await?;
+            relay(crate::agent_service::work(address.as_deref(), work).await?)
+        }
         ("GET", ["agent", "work", work, "events"]) => {
-            relay(crate::agent_service::events(work).await?)
+            let address = Box::pin(daemon.agent_address()).await?;
+            relay(crate::agent_service::events(address.as_deref(), work).await?)
         }
         ("POST", ["agent", "work", work, "cancel"]) => {
-            relay(crate::agent_service::cancel(work).await?)
+            let address = Box::pin(daemon.agent_address()).await?;
+            relay(crate::agent_service::cancel(address.as_deref(), work).await?)
         }
 
         // Operators.
