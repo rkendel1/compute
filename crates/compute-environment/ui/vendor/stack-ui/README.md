@@ -1,6 +1,6 @@
 # Vendored @stack-ui static build
 
-The shared Stack design system (`rkendel1/stack-ui`), vendored because this UI
+The design foundation (Stack UI) (`rkendel1/stack-ui`), vendored because this UI
 has no build step and ships inside the `compute` binary.
 
 - `tokens.css`, `core.css` and `stack-ui-core.js` come unmodified from
