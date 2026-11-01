@@ -15,9 +15,17 @@
   --stack-text-xl-line: 1.75rem;
   --stack-text-2xl-size: 1.5rem;
   --stack-text-2xl-line: 2rem;
+  --stack-text-3xl-size: 1.875rem;
+  --stack-text-3xl-line: 2.375rem;
+  --stack-text-4xl-size: 2.5rem;
+  --stack-text-4xl-line: 3rem;
+  --stack-text-display-size: clamp(2.25rem, 1.5rem + 3vw, 3.75rem);
+  --stack-text-display-line: 1.08;
   --stack-font-weight-regular: 400;
   --stack-font-weight-medium: 500;
   --stack-font-weight-semibold: 600;
+  --stack-font-weight-bold: 700;
+  --stack-letter-spacing-tight: -0.02em;
   --stack-space-0: 0;
   --stack-space-1: 4px;
   --stack-space-2: 8px;
@@ -28,6 +36,9 @@
   --stack-space-8: 32px;
   --stack-space-10: 40px;
   --stack-space-12: 48px;
+  --stack-space-16: 64px;
+  --stack-space-20: 80px;
+  --stack-space-24: 96px;
   --stack-size-control-sm: 32px;
   --stack-size-control-md: 36px;
   --stack-size-control-lg: 44px;
@@ -48,6 +59,8 @@
   --stack-motion-duration-fast: 120ms;
   --stack-motion-duration-base: 200ms;
   --stack-motion-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --stack-size-content-max: 1180px;
+  --stack-size-prose-max: 68ch;
   --stack-color-bg-canvas: #f6f7f9;
   --stack-color-bg-surface: #ffffff;
   --stack-color-bg-raised: #ffffff;
@@ -58,16 +71,16 @@
   --stack-color-text-muted: #4b5260;
   --stack-color-text-subtle: #5f6673;
   --stack-color-text-inverse: #ffffff;
-  --stack-color-text-link: #2a52c9;
+  --stack-color-text-link: #0a55d6;
   --stack-color-text-on-accent: #ffffff;
   --stack-color-border-default: #d9dde3;
   --stack-color-border-strong: #7c8492;
   --stack-color-border-subtle: #e8ebef;
-  --stack-focus-ring-color: #2f5bd8;
-  --stack-color-action-primary-bg: #2f5bd8;
+  --stack-focus-ring-color: #0a5ce8;
+  --stack-color-action-primary-bg: #0a5ce8;
   --stack-color-action-primary-fg: #ffffff;
-  --stack-color-action-primary-bg-hover: #2549c4;
-  --stack-color-action-primary-bg-active: #1e3da6;
+  --stack-color-action-primary-bg-hover: #084dc4;
+  --stack-color-action-primary-bg-active: #063fa3;
   --stack-color-action-secondary-bg: #ffffff;
   --stack-color-action-secondary-fg: #16181d;
   --stack-color-action-secondary-bg-hover: #eef0f3;
@@ -113,7 +126,19 @@
   --stack-color-notice-info-border: #b9cbf3;
   --stack-shadow-raised: 0 1px 2px rgba(16, 24, 40, 0.06);
   --stack-shadow-overlay: 0 12px 32px rgba(16, 24, 40, 0.18);
+  --stack-brand-ink: #0b1538;
+  --stack-brand-accent: #0a5ce8;
+  --stack-brand-mark-start: #0b1538;
+  --stack-brand-mark-end: #0a64ff;
+  --stack-product-accent: #0a5ce8;
+  --stack-product-accent-fg: #ffffff;
 }
+
+[data-stack-product="feltdb"] { --stack-product-accent: #18754a; --stack-product-accent-fg: #ffffff; }
+[data-stack-product="appport"] { --stack-product-accent: #2f6584; --stack-product-accent-fg: #ffffff; }
+[data-stack-product="appboundry"] { --stack-product-accent: #6a3fd0; --stack-product-accent-fg: #ffffff; }
+[data-stack-product="authboundry"] { --stack-product-accent: #8a4b36; --stack-product-accent-fg: #ffffff; }
+[data-stack-product="feltkit"] { --stack-product-accent: #0b7f6e; --stack-product-accent-fg: #ffffff; }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-stack-theme="light"]) {
@@ -128,16 +153,16 @@
     --stack-color-text-muted: #b3b9c4;
     --stack-color-text-subtle: #9aa2ae;
     --stack-color-text-inverse: #0f1115;
-    --stack-color-text-link: #8fb0ff;
+    --stack-color-text-link: #8ab4ff;
     --stack-color-text-on-accent: #0b1020;
     --stack-color-border-default: #2e333c;
     --stack-color-border-strong: #6b7380;
     --stack-color-border-subtle: #23272e;
-    --stack-focus-ring-color: #8fb0ff;
-    --stack-color-action-primary-bg: #7b9cff;
+    --stack-focus-ring-color: #8ab4ff;
+    --stack-color-action-primary-bg: #6ea3ff;
     --stack-color-action-primary-fg: #0b1020;
-    --stack-color-action-primary-bg-hover: #9bb4ff;
-    --stack-color-action-primary-bg-active: #b3c6ff;
+    --stack-color-action-primary-bg-hover: #8ab4ff;
+    --stack-color-action-primary-bg-active: #a7c6ff;
     --stack-color-action-secondary-bg: #1d2027;
     --stack-color-action-secondary-fg: #e8eaee;
     --stack-color-action-secondary-bg-hover: #262a32;
@@ -183,7 +208,18 @@
     --stack-color-notice-info-border: #2c3f72;
     --stack-shadow-raised: 0 1px 2px rgba(0, 0, 0, 0.4);
     --stack-shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.55);
+    --stack-brand-ink: #e6ebf7;
+    --stack-brand-accent: #8ab4ff;
+    --stack-brand-mark-start: #dbe5ff;
+    --stack-brand-mark-end: #3d86ff;
+    --stack-product-accent: #8ab4ff;
+    --stack-product-accent-fg: #0b1020;
   }
+  :root:not([data-stack-theme="light"]) [data-stack-product="feltdb"], :root:not([data-stack-theme="light"])[data-stack-product="feltdb"] { --stack-product-accent: #42e58d; --stack-product-accent-fg: #0b1020; }
+  :root:not([data-stack-theme="light"]) [data-stack-product="appport"], :root:not([data-stack-theme="light"])[data-stack-product="appport"] { --stack-product-accent: #7fb3d1; --stack-product-accent-fg: #0b1020; }
+  :root:not([data-stack-theme="light"]) [data-stack-product="appboundry"], :root:not([data-stack-theme="light"])[data-stack-product="appboundry"] { --stack-product-accent: #b49cf5; --stack-product-accent-fg: #0b1020; }
+  :root:not([data-stack-theme="light"]) [data-stack-product="authboundry"], :root:not([data-stack-theme="light"])[data-stack-product="authboundry"] { --stack-product-accent: #e09a80; --stack-product-accent-fg: #0b1020; }
+  :root:not([data-stack-theme="light"]) [data-stack-product="feltkit"], :root:not([data-stack-theme="light"])[data-stack-product="feltkit"] { --stack-product-accent: #3fd8c4; --stack-product-accent-fg: #0b1020; }
 
 }
 :root[data-stack-theme="light"] {
@@ -198,16 +234,16 @@
   --stack-color-text-muted: #4b5260;
   --stack-color-text-subtle: #5f6673;
   --stack-color-text-inverse: #ffffff;
-  --stack-color-text-link: #2a52c9;
+  --stack-color-text-link: #0a55d6;
   --stack-color-text-on-accent: #ffffff;
   --stack-color-border-default: #d9dde3;
   --stack-color-border-strong: #7c8492;
   --stack-color-border-subtle: #e8ebef;
-  --stack-focus-ring-color: #2f5bd8;
-  --stack-color-action-primary-bg: #2f5bd8;
+  --stack-focus-ring-color: #0a5ce8;
+  --stack-color-action-primary-bg: #0a5ce8;
   --stack-color-action-primary-fg: #ffffff;
-  --stack-color-action-primary-bg-hover: #2549c4;
-  --stack-color-action-primary-bg-active: #1e3da6;
+  --stack-color-action-primary-bg-hover: #084dc4;
+  --stack-color-action-primary-bg-active: #063fa3;
   --stack-color-action-secondary-bg: #ffffff;
   --stack-color-action-secondary-fg: #16181d;
   --stack-color-action-secondary-bg-hover: #eef0f3;
@@ -253,7 +289,19 @@
   --stack-color-notice-info-border: #b9cbf3;
   --stack-shadow-raised: 0 1px 2px rgba(16, 24, 40, 0.06);
   --stack-shadow-overlay: 0 12px 32px rgba(16, 24, 40, 0.18);
+  --stack-brand-ink: #0b1538;
+  --stack-brand-accent: #0a5ce8;
+  --stack-brand-mark-start: #0b1538;
+  --stack-brand-mark-end: #0a64ff;
+  --stack-product-accent: #0a5ce8;
+  --stack-product-accent-fg: #ffffff;
 }
+
+:root[data-stack-theme="light"] [data-stack-product="feltdb"], :root[data-stack-theme="light"][data-stack-product="feltdb"] { --stack-product-accent: #18754a; --stack-product-accent-fg: #ffffff; }
+:root[data-stack-theme="light"] [data-stack-product="appport"], :root[data-stack-theme="light"][data-stack-product="appport"] { --stack-product-accent: #2f6584; --stack-product-accent-fg: #ffffff; }
+:root[data-stack-theme="light"] [data-stack-product="appboundry"], :root[data-stack-theme="light"][data-stack-product="appboundry"] { --stack-product-accent: #6a3fd0; --stack-product-accent-fg: #ffffff; }
+:root[data-stack-theme="light"] [data-stack-product="authboundry"], :root[data-stack-theme="light"][data-stack-product="authboundry"] { --stack-product-accent: #8a4b36; --stack-product-accent-fg: #ffffff; }
+:root[data-stack-theme="light"] [data-stack-product="feltkit"], :root[data-stack-theme="light"][data-stack-product="feltkit"] { --stack-product-accent: #0b7f6e; --stack-product-accent-fg: #ffffff; }
 
 :root[data-stack-theme="dark"] {
   color-scheme: dark;
@@ -267,16 +315,16 @@
   --stack-color-text-muted: #b3b9c4;
   --stack-color-text-subtle: #9aa2ae;
   --stack-color-text-inverse: #0f1115;
-  --stack-color-text-link: #8fb0ff;
+  --stack-color-text-link: #8ab4ff;
   --stack-color-text-on-accent: #0b1020;
   --stack-color-border-default: #2e333c;
   --stack-color-border-strong: #6b7380;
   --stack-color-border-subtle: #23272e;
-  --stack-focus-ring-color: #8fb0ff;
-  --stack-color-action-primary-bg: #7b9cff;
+  --stack-focus-ring-color: #8ab4ff;
+  --stack-color-action-primary-bg: #6ea3ff;
   --stack-color-action-primary-fg: #0b1020;
-  --stack-color-action-primary-bg-hover: #9bb4ff;
-  --stack-color-action-primary-bg-active: #b3c6ff;
+  --stack-color-action-primary-bg-hover: #8ab4ff;
+  --stack-color-action-primary-bg-active: #a7c6ff;
   --stack-color-action-secondary-bg: #1d2027;
   --stack-color-action-secondary-fg: #e8eaee;
   --stack-color-action-secondary-bg-hover: #262a32;
@@ -322,7 +370,19 @@
   --stack-color-notice-info-border: #2c3f72;
   --stack-shadow-raised: 0 1px 2px rgba(0, 0, 0, 0.4);
   --stack-shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.55);
+  --stack-brand-ink: #e6ebf7;
+  --stack-brand-accent: #8ab4ff;
+  --stack-brand-mark-start: #dbe5ff;
+  --stack-brand-mark-end: #3d86ff;
+  --stack-product-accent: #8ab4ff;
+  --stack-product-accent-fg: #0b1020;
 }
+
+:root[data-stack-theme="dark"] [data-stack-product="feltdb"], :root[data-stack-theme="dark"][data-stack-product="feltdb"] { --stack-product-accent: #42e58d; --stack-product-accent-fg: #0b1020; }
+:root[data-stack-theme="dark"] [data-stack-product="appport"], :root[data-stack-theme="dark"][data-stack-product="appport"] { --stack-product-accent: #7fb3d1; --stack-product-accent-fg: #0b1020; }
+:root[data-stack-theme="dark"] [data-stack-product="appboundry"], :root[data-stack-theme="dark"][data-stack-product="appboundry"] { --stack-product-accent: #b49cf5; --stack-product-accent-fg: #0b1020; }
+:root[data-stack-theme="dark"] [data-stack-product="authboundry"], :root[data-stack-theme="dark"][data-stack-product="authboundry"] { --stack-product-accent: #e09a80; --stack-product-accent-fg: #0b1020; }
+:root[data-stack-theme="dark"] [data-stack-product="feltkit"], :root[data-stack-theme="dark"][data-stack-product="feltkit"] { --stack-product-accent: #3fd8c4; --stack-product-accent-fg: #0b1020; }
 
 @media (prefers-reduced-motion: reduce) {
   :root { --stack-motion-duration-fast: 0ms; --stack-motion-duration-base: 0ms; }
